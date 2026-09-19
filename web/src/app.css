@@ -1,0 +1,251 @@
+/* The approved design, as tokens.
+   Both themes carry the same five semantic slots and the same shapes, so an
+   operator who switches themes relearns nothing. Shape and glyph carry every
+   state. Colour only reinforces what a shape already says. */
+:root,
+:root[data-theme="dark"] {
+  --canvas: #0b0d10;
+  --panel: #0f1216;
+  --nav: #0d0f13;
+  --head: #14171c;
+  --line: #23272e;
+  --line-strong: #3a3f49;
+  --ink: #e6e8ea;
+  --ink-body: #c3c8cf;
+  --ink-soft: #a8aeb8;
+  --ink-muted: #9aa1ab;
+  --ink-dim: #8b929c;
+  --ink-faint: #6f7681;
+
+  --ok: #4fa87c;
+  --attn: #d59a3c;
+  --fail: #dd6f61;
+  --active: #6f9be0;
+  --unc: #ab8ee0;
+  --neutral: #8b929c;
+  --dim: #6f7681;
+
+  --danger-line: #6a4a44;
+  --danger-ink: #e6a79d;
+  --attn-line: #6a5a3a;
+  --invert-ink: #0b0d10;
+
+  --hatch: repeating-linear-gradient(135deg, rgba(139, 146, 156, 0.13) 0 6px, transparent 6px 12px);
+  --link: #7fa8e8;
+}
+:root[data-theme="light"] {
+  --canvas: #f6f6f4;
+  --panel: #ffffff;
+  --nav: #ffffff;
+  --head: #f0f0ec;
+  --line: #e2e2de;
+  --line-strong: #c9c9c4;
+  --ink: #16181b;
+  --ink-body: #2f343b;
+  --ink-soft: #454b53;
+  --ink-muted: #4c525a;
+  --ink-dim: #5d636c;
+  --ink-faint: #6b7280;
+
+  --ok: #1c7049;
+  --attn: #8a5c0d;
+  --fail: #ac3427;
+  --active: #2b5697;
+  --unc: #63459b;
+  --neutral: #5d636c;
+  --dim: #6b7280;
+
+  --danger-line: #d2a49c;
+  --danger-ink: #8a2c1f;
+  --attn-line: #ccb184;
+  --invert-ink: #ffffff;
+
+  --hatch: repeating-linear-gradient(135deg, rgba(93, 99, 108, 0.13) 0 6px, transparent 6px 12px);
+  --link: #2b5697;
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  /* The design names IBM Plex. A self-hosted installation may have no route to a
+     font CDN, so nothing here is fetched and the stack falls back to the host. */
+  font: 400 14px/1.5 "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+}
+code,
+.mono {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+a {
+  color: var(--link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 2px on both themes, per the keyboard contract in the design. */
+:focus-visible {
+  outline: 2px solid var(--active);
+  outline-offset: 1px;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  padding: 7px 12px;
+}
+input,
+select {
+  background: var(--canvas);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 13px;
+  padding: 9px 11px;
+}
+button {
+  cursor: pointer;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+}
+button[disabled] {
+  cursor: not-allowed;
+  border-style: dashed;
+  color: var(--ink-dim);
+}
+/* The one filled control on a screen. The design reserves it for the action that
+   carries the screen, and gives every other action an outline. */
+button.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--invert-ink);
+  font-weight: 500;
+  font-size: 12px;
+  padding: 9px 14px;
+}
+button.destructive {
+  background: var(--fail);
+  border-color: var(--fail);
+  color: var(--invert-ink);
+  font-weight: 500;
+  font-size: 12px;
+  padding: 9px 14px;
+}
+button.quiet {
+  border-color: var(--danger-line);
+  color: var(--danger-ink);
+}
+
+/* Shared surfaces ------------------------------------------------------- */
+
+.panel {
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.panel-head {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.panel-foot {
+  padding: 11px 16px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--ink-dim);
+  line-height: 1.5;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--line);
+}
+.row.top {
+  align-items: flex-start;
+}
+
+/* A label is the only uppercase text in the product. */
+.label {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.eyebrow {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--ink-faint);
+}
+.note {
+  font-size: 12px;
+  color: var(--ink-dim);
+  line-height: 1.5;
+}
+.dim {
+  color: var(--ink-dim);
+}
+
+/* A table is a grid whose 1px gaps show the ground through as rules. The column
+   template belongs to the screen, because only the screen knows its columns. */
+.scroll {
+  overflow-x: auto;
+}
+.grid {
+  display: grid;
+  gap: 1px;
+  background: var(--line);
+}
+.grid > .head {
+  background: var(--head);
+  padding: 8px 12px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--ink-faint);
+}
+.grid > .cell {
+  background: var(--panel);
+  padding: 10px 12px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.grid > .cell.stack {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+/* An expired source hatches one strip, never every cell. Rare keeps it legible. */
+.hatched {
+  background-image: var(--hatch);
+}
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}

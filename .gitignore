@@ -1,0 +1,25 @@
+data/
+config.yaml
+.idea/
+.DS_Store
+*.db
+*.log
+*.log.*
+*.test
+# The Go binary output at the repository root, not every dist directory.
+/dist/
+/writ
+tmp/**
+logs/**
+auth.json
+.ven/
+.env
+node_modules/
+blog/.wrangler/
+.venv/
+.stignore
+.stfolder/**
+web/node_modules/
+
+# Development credentials and local controller state.
+.dev/

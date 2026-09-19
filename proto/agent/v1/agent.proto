@@ -1,0 +1,295 @@
+syntax = "proto3";
+
+package synod.agent.v1;
+option go_package = "github.com/sirrobot01/synod/proto/agent/v1;agentv1";
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// The agent opens this stream over mTLS. Certificate identity binds its node ID.
+service AgentService {
+  rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
+}
+
+message VersionRange { uint32 minimum = 1; uint32 maximum = 2; }
+message Hello {
+  string installation_id = 1;
+  string node_id = 2;
+  string boot_id = 3;
+  string journal_generation = 4;
+  VersionRange protocol = 5;
+  repeated string capabilities = 6;
+  string runtime_version = 7;
+  uint64 last_acknowledged_sequence = 8;
+  repeated uint32 active_payload_versions = 9;
+}
+message Session {
+  uint32 protocol_version = 1;
+  string session_id = 2;
+  google.protobuf.Duration heartbeat_interval = 3;
+  google.protobuf.Duration stale_after = 4;
+  uint32 max_message_bytes = 5;
+  uint32 max_queued_commands = 6;
+  repeated string capabilities = 7;
+}
+message Heartbeat {
+  uint64 sequence = 1;
+  google.protobuf.Timestamp observed_at = 2;
+  repeated Observation observations = 3;
+}
+message Observation {
+  string resource_id = 1;
+  int64 observed_revision = 2;
+  string lifecycle = 3;
+  string reason = 4;
+  google.protobuf.Timestamp observed_at = 5;
+}
+message Epoch {
+  string installation_id = 1;
+  string node_id = 2;
+  string cluster_id = 3;
+  string recovery_generation = 4;
+  int64 execution_epoch = 5;
+}
+message PrepareEpoch { Epoch epoch = 1; }
+message ActivateEpoch { Epoch epoch = 1; }
+message Effect {
+  string command_id = 1;
+  string resource_id = 2;
+  string native_operation_id = 3;
+  bool active = 4;
+  bool outcome_unknown = 5;
+  string state = 6;
+}
+message BarrierResult {
+  Epoch epoch = 1;
+  bool admissions_closed = 2;
+  bool drained = 3;
+  repeated Effect effects = 4;
+  string failure_code = 5;
+}
+message SecretReference { string credential_id = 1; int64 version = 2; string purpose = 3; }
+message PortBinding { string host_address = 1; uint32 host_port = 2; uint32 container_port = 3; string transport = 4; }
+message EnsureVolume { string volume_id = 1; }
+message EnsureNetwork { string network_id = 1; }
+enum NetworkMode {
+  NETWORK_MODE_UNSPECIFIED = 0;
+  NETWORK_MODE_HOST = 1;
+  NETWORK_MODE_BRIDGE = 2;
+}
+message EnsureContainer {
+  string image_digest = 1;
+  string engine = 2;
+  string volume_id = 3;
+  string network_id = 4;
+  repeated PortBinding ports = 5;
+  int64 memory_bytes = 6;
+  int64 cpu_millis = 7;
+  NetworkMode network_mode = 8;
+}
+message StartContainer {}
+message StopContainer { google.protobuf.Duration grace_period = 1; }
+message RemoveContainer {}
+message InspectContainer {}
+
+// This input is immutable. It has no controller epoch or plaintext secret.
+message CommandInput {
+  string resource_id = 1;
+  uint32 payload_version = 2;
+  google.protobuf.Duration timeout = 3;
+  repeated SecretReference secrets = 4;
+  oneof payload {
+    EnsureVolume ensure_volume = 10;
+    EnsureNetwork ensure_network = 11;
+    EnsureContainer ensure_container = 12;
+    StartContainer start_container = 13;
+    StopContainer stop_container = 14;
+    RemoveContainer remove_container = 15;
+    InspectContainer inspect_container = 16;
+  }
+}
+message Command {
+  Epoch epoch = 1;
+  string operation_id = 2;
+  string step_id = 3;
+  string command_id = 4;
+  int64 desired_revision = 5;
+  uint32 plan_version = 6;
+  bytes input_hash = 7;
+  string trace_id = 8;
+  CommandInput input = 9;
+}
+// Read-only observation under current prepared authority. It never admits execution.
+message CommandInspectionRequest {
+  string request_id = 1;
+  Command command = 2;
+  repeated Effect prior_effects = 3;
+}
+message CommandInspectionResult {
+  string request_id = 1;
+  Epoch epoch = 2;
+  string command_id = 3;
+  bytes input_hash = 4;
+  repeated Effect effects = 5;
+  string failure_code = 6;
+}
+message AdmissionAck {
+  Epoch epoch = 5;
+  string command_id = 1;
+  string state = 2;
+  string error_code = 3;
+  bytes input_hash = 4;
+}
+message Progress {
+  Epoch epoch = 5;
+  string command_id = 1;
+  uint64 sequence = 2;
+  string state = 3;
+  string reason = 4;
+}
+message TerminalResult {
+  Epoch epoch = 7;
+  string command_id = 1;
+  bytes input_hash = 2;
+  uint64 sequence = 3;
+  string state = 4;
+  string failure_code = 5;
+  repeated Effect effects = 6;
+}
+message ResultAck { string command_id = 1; uint64 sequence = 2; Epoch epoch = 3; }
+message CancelCommand { string command_id = 1; Epoch epoch = 2; }
+message CancellationResult { string command_id = 1; string state = 2; repeated Effect effects = 3; Epoch epoch = 4; }
+message InventoryRequest { string cursor = 1; uint32 page_size = 2; }
+
+// Capacity is a property of a node, not of a cluster, so these carry no Epoch.
+// The controller issues the challenge and the agent answers it. Presence and
+// Hello capabilities can never substitute for a measured report.
+message CapacityRequest {
+  string probe_id = 1;
+  int64 probe_revision = 2;
+  string session_id = 3;
+  string boot_id = 4;
+  string journal_generation = 5;
+  // Advisory to the agent, which abandons a late measurement. The controller
+  // enforces the window with database time.
+  int64 expires_unix_ms = 6;
+  // The reservations the controller already knows sit on this node. A Docker
+  // label names a resource, never a reservation, so the agent cannot learn this
+  // mapping by looking at the host. It measures what it is told to measure and
+  // echoes the pair back.
+  repeated KnownReservation known = 7;
+}
+message KnownReservation {
+  string reservation_id = 1;
+  string resource_id = 2;
+}
+message ResourceVector {
+  int64 cpu_millicores = 1;
+  int64 memory_bytes = 2;
+  int64 disk_bytes = 3;
+}
+message ReservationUsage {
+  string reservation_id = 1;
+  string resource_id = 2;
+  ResourceVector used = 3;
+}
+// The installation and node are absent by design: the transport proves both from
+// the peer certificate, and a claimed value must never outrank an authenticated one.
+message CapacityReport {
+  string probe_id = 1;
+  int64 probe_revision = 2;
+  string session_id = 3;
+  string boot_id = 4;
+  string journal_generation = 5;
+  string architecture = 6;
+  string runtime_version = 7;
+  string storage_id = 8;
+  ResourceVector capacity = 9;
+  ResourceVector used = 10;
+  repeated ReservationUsage reservations = 11;
+}
+message InventoryPage {
+  repeated Observation resources = 1;
+  repeated Effect effects = 2;
+  string next_cursor = 3;
+  // Objects on the host that this node did not expect to find as they are. The
+  // agent reports them and removes nothing: specification 33 requires reporting
+  // unowned containers and unexpected changes without deleting them, and adoption
+  // of arbitrary external databases is outside v0.1.
+  //
+  // Drift is a property of the host, not of a page, so it is carried on the first
+  // page of a scan only.
+  repeated DriftItem drift = 4;
+  // True when the host holds more drift than one report carries. More than this
+  // needs an operator on the host, not a longer message.
+  bool drift_truncated = 5;
+}
+message DriftItem {
+  // container, volume, or network.
+  string kind = 1;
+  string native_id = 2;
+  string name = 3;
+  string state = 4;
+  // unowned, foreign, or mislabelled. The agent classifies from labels alone,
+  // because only the controller knows what it has a record of.
+  string class = 5;
+  // Set only when the object carries a readable Synod identity.
+  string cluster_id = 6;
+  string resource_id = 7;
+  // What disagrees, for a mislabelled object. It is a stable code, not prose.
+  string detail = 8;
+}
+message ProtocolError { string code = 1; string message = 2; }
+message AgentMessage {
+  oneof message {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    BarrierResult barrier_result = 3;
+    AdmissionAck admission_ack = 4;
+    Progress progress = 5;
+    TerminalResult terminal_result = 6;
+    CancellationResult cancellation_result = 7;
+    InventoryPage inventory = 8;
+    CommandInspectionResult command_inspection = 9;
+    CapacityReport capacity_report = 10;
+  }
+}
+message ControllerMessage {
+  oneof message {
+    Session session = 1;
+    PrepareEpoch prepare_epoch = 2;
+    ActivateEpoch activate_epoch = 3;
+    Command command = 4;
+    ResultAck result_ack = 5;
+    CancelCommand cancel = 6;
+    InventoryRequest inventory = 7;
+    ProtocolError error = 8;
+    CommandInspectionRequest command_inspection = 9;
+    CapacityRequest capacity_request = 10;
+  }
+}
+
+// The controller stores this plan before dispatch. Agents receive its commands.
+message ExecutionPlan { uint32 version = 1; repeated PlanStep steps = 2; }
+message PlanStep {
+  Command command = 1;
+  repeated string depends_on = 2;
+  uint32 max_attempts = 3;
+  CancellationBoundary cancellation_boundary = 4;
+  Postcondition postcondition = 5;
+}
+enum CancellationBoundary {
+  CANCELLATION_BOUNDARY_UNSPECIFIED = 0;
+  CANCELLATION_BOUNDARY_BEFORE_EXECUTION = 1;
+  CANCELLATION_BOUNDARY_SAFE_STOP = 2;
+}
+enum Postcondition {
+  POSTCONDITION_UNSPECIFIED = 0;
+  POSTCONDITION_VOLUME_EXISTS = 1;
+  POSTCONDITION_NETWORK_EXISTS = 2;
+  POSTCONDITION_CONTAINER_EXISTS = 3;
+  POSTCONDITION_CONTAINER_RUNNING = 4;
+  POSTCONDITION_CONTAINER_STOPPED = 5;
+  POSTCONDITION_CONTAINER_ABSENT = 6;
+  POSTCONDITION_CONTAINER_INSPECTED = 7;
+}

@@ -1,0 +1,66 @@
+import { cleanup, render, screen, within } from "@testing-library/svelte";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import Shell from "./Shell.svelte";
+
+// Screens that read the API are not under test here. The client answers nothing,
+// so each screen draws its waiting state and the shell is what is measured.
+vi.mock("./api", async () => {
+  const real = await vi.importActual<typeof import("./api")>("./api");
+  return {
+    ...real,
+    api: {
+      cluster: () => new Promise(() => {}),
+      operation: () => new Promise(() => {}),
+      tokens: () => new Promise(() => {}),
+    },
+  };
+});
+
+const session = { actor_id: "root", role: "admin", user_id: "u1" };
+
+function at(pathname: string) {
+  window.history.pushState({}, "", pathname);
+  render(Shell, { session, busy: false, onSignOut: () => {} });
+}
+
+beforeEach(() => window.history.pushState({}, "", "/"));
+afterEach(cleanup);
+
+describe("the shell", () => {
+  it("draws the screen that the address names, so a deep link works", () => {
+    at("/operations/op_7c14f2a9");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("op_7c14f2a9");
+  });
+
+  it("keeps the section marked while a screen below it is open", () => {
+    at("/databases/abc/topology");
+    // The breadcrumb names Clusters too, so the mark is read from the navigation.
+    const navigation = within(screen.getByLabelText("Screens"));
+    const databases = navigation.getByRole("link", { name: "Clusters" });
+    // The mark says which part of the product the reader is in. A cluster and its
+    // topology both belong to Clusters, so the mark must not move to the dashboard.
+    expect(databases.getAttribute("aria-current")).toBe("page");
+    expect(navigation.getByRole("link", { name: "Dashboard" }).getAttribute("aria-current")).toBe(null);
+  });
+
+  it("names every step back to the dashboard in the breadcrumb", () => {
+    at("/databases/abc/topology");
+    const trail = screen.getByLabelText("Breadcrumb");
+    expect(trail.textContent).toContain("Dashboard");
+    expect(trail.textContent).toContain("Clusters");
+    expect(trail.textContent).toContain("abc");
+  });
+
+  it("changes the address when a screen is opened, so a reload returns to it", async () => {
+    at("/");
+    (within(screen.getByLabelText("Screens")).getByRole("link", { name: "Nodes" }) as HTMLAnchorElement).click();
+    await Promise.resolve();
+    expect(window.location.pathname).toBe("/nodes");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Nodes");
+  });
+
+  it("answers an address that names no screen without drawing a screen", () => {
+    at("/nowhere");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Not found");
+  });
+});

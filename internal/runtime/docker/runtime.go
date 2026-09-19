@@ -1,0 +1,480 @@
+// Package docker executes typed actions on exactly owned Docker resources.
+package docker
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"io"
+	"net/netip"
+	"reflect"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/containerd/errdefs"
+	"github.com/google/uuid"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
+	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/runtime"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
+	"google.golang.org/protobuf/proto"
+)
+
+const labelInstallation = "io.synod.installation"
+const labelNode = "io.synod.node"
+const labelCluster = "io.synod.cluster"
+const labelResource = "io.synod.resource"
+const labelKind = "io.synod.kind"
+const labelConfig = "io.synod.configuration"
+const labelHash = "io.synod.configuration-hash"
+
+// Runtime implements the node runtime contract on the Docker Engine API.
+var _ runtime.Runtime = (*Runtime)(nil)
+
+// Options binds a runtime to one node and bounds its inspections.
+type Options struct {
+	InstallationID     uuid.UUID
+	NodeID             uuid.UUID
+	AllowBridgeFixture bool
+	InspectionTimeout  time.Duration
+}
+
+// Runtime performs owned Docker actions for one node.
+type Runtime struct {
+	api     *client.Client
+	options Options
+}
+
+// New borrows the API client. The caller owns its connection and journal lifetime.
+func New(api *client.Client, options Options) (*Runtime, error) {
+	if api == nil || options.InstallationID == uuid.Nil || options.NodeID == uuid.Nil {
+		return nil, runtime.ErrUnsupportedConfiguration
+	}
+	if options.InspectionTimeout == 0 {
+		options.InspectionTimeout = 5 * time.Second
+	}
+	if options.InspectionTimeout < time.Second || options.InspectionTimeout > time.Minute {
+		return nil, runtime.ErrUnsupportedConfiguration
+	}
+	return &Runtime{api: api, options: options}, nil
+}
+
+func (r *Runtime) validate(command *agentv1.Command) error {
+	if err := operation.ValidateCommand(command); err != nil {
+		return err
+	}
+	if command.Epoch.InstallationId != r.options.InstallationID.String() || command.Epoch.NodeId != r.options.NodeID.String() {
+		return operation.ErrStaleOwner
+	}
+	if len(command.Input.Secrets) != 0 {
+		return runtime.ErrUnsupportedConfiguration
+	}
+	return nil
+}
+
+func (r *Runtime) labels(command *agentv1.Command, kind, resourceID string) map[string]string {
+	return map[string]string{labelInstallation: r.options.InstallationID.String(), labelNode: r.options.NodeID.String(), labelCluster: command.Epoch.ClusterId, labelResource: resourceID, labelKind: kind}
+}
+
+func (r *Runtime) checkLabels(command *agentv1.Command, labels map[string]string, kind, resourceID string) error {
+	for key, want := range r.labels(command, kind, resourceID) {
+		if labels[key] != want {
+			return runtime.ErrOwnershipConflict
+		}
+	}
+	return nil
+}
+
+// Execute requires durable journal admission and Start before this call.
+// The journal owner must serialize commands for each cluster and enforce plan dependencies.
+func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command) (runtime.Result, error) {
+	if err := r.validate(command); err != nil {
+		return runtime.Result{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, command.Input.Timeout.AsDuration())
+	defer cancel()
+	id := command.Input.ResourceId
+	var mutationErr error
+	switch payload := command.Input.Payload.(type) {
+	case *agentv1.CommandInput_EnsureVolume:
+		name := "synod-volume-" + id
+		current, err := r.api.VolumeInspect(ctx, name, client.VolumeInspectOptions{})
+		if err == nil {
+			// An existing volume must be ours and must still be where it says it
+			// is, before this command treats it as the one to keep.
+			if err := checkVolumePath(current.Volume); err != nil {
+				return runtime.Result{}, err
+			}
+			if err := r.checkLabels(command, current.Volume.Labels, "volume", id); err != nil {
+				return runtime.Result{}, err
+			}
+		} else if !errdefs.IsNotFound(err) {
+			return runtime.Result{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+
+		_, mutationErr = r.api.VolumeCreate(ctx, client.VolumeCreateOptions{Name: name, Driver: "local", Labels: r.labels(command, "volume", id)})
+	case *agentv1.CommandInput_EnsureNetwork:
+		if !r.options.AllowBridgeFixture {
+			return runtime.Result{}, runtime.ErrUnsupportedConfiguration
+		}
+		name := "synod-network-" + id
+		current, err := r.api.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
+		if err == nil {
+			if err := r.checkLabels(command, current.Network.Labels, "network", id); err != nil {
+				return runtime.Result{}, err
+			}
+			if current.Network.Driver != "bridge" {
+				return runtime.Result{}, runtime.ErrConfigurationConflict
+			}
+		} else if !errdefs.IsNotFound(err) {
+			return runtime.Result{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+
+		_, mutationErr = r.api.NetworkCreate(ctx, name, client.NetworkCreateOptions{Driver: "bridge", Labels: r.labels(command, "network", id)})
+	case *agentv1.CommandInput_EnsureContainer:
+		p := payload.EnsureContainer
+		options, err := r.containerOptions(ctx, command, p, true)
+		if err != nil {
+			return runtime.Result{}, err
+		}
+		current, err := r.api.ContainerInspect(ctx, options.Name, client.ContainerInspectOptions{})
+		if err == nil {
+			if err := r.checkContainer(ctx, command, current.Container, p); err != nil {
+				return runtime.Result{}, err
+			}
+		} else if !errdefs.IsNotFound(err) {
+			return runtime.Result{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+
+		_, mutationErr = r.api.ContainerCreate(ctx, options)
+	case *agentv1.CommandInput_StartContainer, *agentv1.CommandInput_StopContainer, *agentv1.CommandInput_RemoveContainer, *agentv1.CommandInput_InspectContainer:
+		current, err := r.api.ContainerInspect(ctx, "synod-instance-"+id, client.ContainerInspectOptions{})
+		if errdefs.IsNotFound(err) {
+			if _, remove := payload.(*agentv1.CommandInput_RemoveContainer); remove {
+				return runtime.Result{Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: id, NativeOperationId: "docker-command:" + command.CommandId, State: "absent"}}}, nil
+			}
+			return runtime.Result{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+		if err != nil {
+			return runtime.Result{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+		if err := r.checkContainer(ctx, command, current.Container, nil); err != nil {
+			return runtime.Result{}, err
+		}
+		if current.Container.State == nil {
+			return runtime.Result{}, runtime.ErrOutcomeUnknown
+		}
+		switch p := payload.(type) {
+		case *agentv1.CommandInput_StartContainer:
+			_, mutationErr = r.api.ContainerUpdate(ctx, current.Container.ID, client.ContainerUpdateOptions{RestartPolicy: &container.RestartPolicy{Name: container.RestartPolicyUnlessStopped}})
+			if mutationErr == nil {
+				_, mutationErr = r.api.ContainerStart(ctx, current.Container.ID, client.ContainerStartOptions{})
+			}
+		case *agentv1.CommandInput_StopContainer:
+			// Disable restart before stopping. A daemon restart must retain stopped intent.
+			_, mutationErr = r.api.ContainerUpdate(ctx, current.Container.ID, client.ContainerUpdateOptions{RestartPolicy: &container.RestartPolicy{Name: container.RestartPolicyDisabled}})
+			if mutationErr == nil {
+				grace := int((p.StopContainer.GracePeriod.AsDuration() + time.Second - 1) / time.Second)
+				_, mutationErr = r.api.ContainerStop(ctx, current.Container.ID, client.ContainerStopOptions{Timeout: &grace})
+			}
+		case *agentv1.CommandInput_RemoveContainer:
+			if current.Container.State.Running || len(current.Container.ExecIDs) > 0 {
+				return runtime.Result{}, runtime.ErrBusy
+			}
+			_, mutationErr = r.api.ContainerRemove(ctx, current.Container.ID, client.ContainerRemoveOptions{Force: false, RemoveVolumes: false})
+		case *agentv1.CommandInput_InspectContainer:
+			return r.containerResult(command, current.Container), nil
+		}
+	default:
+		return runtime.Result{}, runtime.ErrUnsupportedConfiguration
+	}
+	// A lost reply can hide success. Inspect with a fresh bounded context.
+	inspectCtx, inspectCancel := context.WithTimeout(context.WithoutCancel(ctx), r.options.InspectionTimeout)
+	defer inspectCancel()
+	result, err := r.Recover(inspectCtx, command, nil)
+	if err != nil {
+		if runtimeErr, ok := errors.AsType[*runtime.Error](err); ok {
+			return result, &runtime.Error{Kind: runtimeErr.Kind, Cause: errors.Join(runtimeErr.Cause, mutationErr)}
+		}
+		return result, &runtime.Error{Kind: err, Cause: mutationErr}
+	}
+	return result, nil
+}
+
+func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) (runtime.Result, error) {
+	if err := r.validate(command); err != nil {
+		return runtime.Result{}, err
+	}
+	id := command.Input.ResourceId
+	result := runtime.Result{Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: id, NativeOperationId: "docker-command:" + command.CommandId, OutcomeUnknown: true, Active: true, State: "unknown"}}}
+	switch p := command.Input.Payload.(type) {
+	case *agentv1.CommandInput_EnsureVolume:
+		if err := r.verifyVolume(ctx, command, id); err != nil {
+			return result, err
+		}
+		result.Effects[0].State = "present"
+	case *agentv1.CommandInput_EnsureNetwork:
+		if !r.options.AllowBridgeFixture {
+			return result, runtime.ErrUnsupportedConfiguration
+		}
+		item, err := r.api.NetworkInspect(ctx, "synod-network-"+id, client.NetworkInspectOptions{})
+		if err != nil {
+			return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+		if err := r.checkLabels(command, item.Network.Labels, "network", id); err != nil {
+			return result, err
+		}
+		if item.Network.Driver != "bridge" {
+			return result, runtime.ErrConfigurationConflict
+		}
+		result.Effects[0].State = "present"
+	default:
+		item, err := r.api.ContainerInspect(ctx, "synod-instance-"+id, client.ContainerInspectOptions{})
+		if errdefs.IsNotFound(err) {
+			if _, remove := p.(*agentv1.CommandInput_RemoveContainer); remove {
+				result.Effects[0].State = "absent"
+				break
+			}
+		}
+		if err != nil {
+			return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+		var expected *agentv1.EnsureContainer
+		if ensure, ok := p.(*agentv1.CommandInput_EnsureContainer); ok {
+			expected = ensure.EnsureContainer
+		}
+		if err := r.checkContainer(ctx, command, item.Container, expected); err != nil {
+			return result, err
+		}
+		result = r.containerResult(command, item.Container)
+		state := item.Container.State
+		if state == nil {
+			return result, runtime.ErrOutcomeUnknown
+		}
+		matched := false
+		switch p.(type) {
+		case *agentv1.CommandInput_EnsureContainer, *agentv1.CommandInput_InspectContainer:
+			matched = true
+		case *agentv1.CommandInput_StartContainer:
+			matched = state.Running && !state.Restarting && !state.Dead && item.Container.HostConfig.RestartPolicy.Name == container.RestartPolicyUnlessStopped
+		case *agentv1.CommandInput_StopContainer:
+			matched = !state.Running && item.Container.HostConfig.RestartPolicy.Name == container.RestartPolicyDisabled
+		}
+		if !matched {
+			result.Effects[0].OutcomeUnknown = true
+			result.Effects[0].Active = true
+			return result, runtime.ErrOutcomeUnknown
+		}
+	}
+	result.Effects[0].OutcomeUnknown = false
+	result.Effects[0].Active = false
+	return result, nil
+}
+
+func (r *Runtime) containerResult(command *agentv1.Command, item container.InspectResponse) runtime.Result {
+	state := "unknown"
+	if item.State != nil {
+		state = string(item.State.Status)
+	}
+	result := runtime.Result{Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-command:" + command.CommandId, State: state, OutcomeUnknown: item.State == nil}}}
+	for _, execID := range item.ExecIDs {
+		result.Effects = append(result.Effects, &agentv1.Effect{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-exec:" + item.ID + ":" + execID, Active: true, State: "native_exec_active"})
+	}
+	return result
+}
+
+func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command, p *agentv1.EnsureContainer, allowPull bool) (client.ContainerCreateOptions, error) {
+	// Stored labels must pass the same typed checks as a new container command.
+	validation := proto.Clone(command).(*agentv1.Command)
+	validation.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: p}
+	if _, err := operation.CommandHash(validation); err != nil {
+		return client.ContainerCreateOptions{}, runtime.ErrConfigurationConflict
+	}
+	if p.NetworkMode == agentv1.NetworkMode_NETWORK_MODE_BRIDGE && !r.options.AllowBridgeFixture {
+		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
+	}
+	if p.NetworkMode != agentv1.NetworkMode_NETWORK_MODE_HOST && p.NetworkMode != agentv1.NetworkMode_NETWORK_MODE_BRIDGE {
+		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
+	}
+	if len(p.Ports) > 64 {
+		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
+	}
+	// The engine is about to read this volume, so its identity is proved first. A
+	// missing volume must never be created here by the daemon and initialized over.
+	if err := r.verifyVolume(ctx, command, p.VolumeId); err != nil {
+		return client.ContainerCreateOptions{}, err
+	}
+	volume, err := r.api.VolumeInspect(ctx, "synod-volume-"+p.VolumeId, client.VolumeInspectOptions{})
+	if err != nil {
+		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+	}
+	mode := container.NetworkMode("host")
+	if p.NetworkMode == agentv1.NetworkMode_NETWORK_MODE_BRIDGE {
+		mode = container.NetworkMode("synod-network-" + p.NetworkId)
+		net, err := r.api.NetworkInspect(ctx, string(mode), client.NetworkInspectOptions{})
+		if err != nil {
+			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+		if err := r.checkLabels(command, net.Network.Labels, "network", p.NetworkId); err != nil {
+			return client.ContainerCreateOptions{}, err
+		}
+		if net.Network.Driver != "bridge" {
+			return client.ContainerCreateOptions{}, runtime.ErrConfigurationConflict
+		}
+	}
+	image, err := r.api.ImageInspect(ctx, p.ImageDigest)
+	if errdefs.IsNotFound(err) && allowPull {
+		pull, pullErr := r.api.ImagePull(ctx, p.ImageDigest, client.ImagePullOptions{})
+		if pullErr != nil {
+			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: pullErr}
+		}
+		pullErr = pull.Wait(ctx)
+		pull.Close()
+		if pullErr != nil {
+			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: pullErr}
+		}
+		image, err = r.api.ImageInspect(ctx, p.ImageDigest)
+	}
+	if err != nil {
+		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+	}
+	target := "/data"
+	if p.Engine == "postgres" {
+		target = "/var/lib/postgresql/data"
+	}
+	if image.Config == nil {
+		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
+	}
+	for declared := range image.Config.Volumes {
+		if declared != target {
+			return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
+		}
+	}
+	encoded, err := (proto.MarshalOptions{Deterministic: true}).Marshal(p)
+	if err != nil {
+		return client.ContainerCreateOptions{}, err
+	}
+	hash := sha256.Sum256(encoded)
+	labels := r.labels(command, "container", command.Input.ResourceId)
+	labels[labelConfig] = base64.RawStdEncoding.EncodeToString(encoded)
+	labels[labelHash] = hex.EncodeToString(hash[:])
+	labels["io.synod.image-id"] = image.ID
+	memory, cpu := containerLimits(p)
+	if memory < 16<<20 || cpu < 1 || cpu > 1000000 {
+		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
+	}
+	host := &container.HostConfig{NetworkMode: mode, RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}, Resources: container.Resources{Memory: memory, NanoCPUs: cpu * 1000000, PidsLimit: new(int64(256))}, Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: volume.Volume.Name, Target: target}}, LogConfig: container.LogConfig{Type: "local", Config: map[string]string{"max-size": "1m", "max-file": "2"}}, PortBindings: network.PortMap{}}
+	// Pin the Linux namespace and path protections instead of inheriting daemon overrides.
+	host.IpcMode = "private"
+	host.CgroupnsMode = "private"
+	host.Runtime = "runc"
+	host.ShmSize = 64 << 20
+	host.MaskedPaths = []string{"/proc/acpi", "/proc/asound", "/proc/interrupts", "/proc/kcore", "/proc/keys", "/proc/latency_stats", "/proc/timer_list", "/proc/timer_stats", "/proc/sched_debug", "/proc/scsi", "/sys/firmware", "/sys/devices/virtual/powercap"}
+	host.ReadonlyPaths = []string{"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"}
+	config := &container.Config{Image: p.ImageDigest, Labels: labels, StopTimeout: new(10), ExposedPorts: network.PortSet{}, Cmd: image.Config.Cmd, Entrypoint: image.Config.Entrypoint, Env: image.Config.Env, User: image.Config.User, WorkingDir: image.Config.WorkingDir}
+	for _, binding := range p.Ports {
+		address, err := netip.ParseAddr(binding.HostAddress)
+		if err != nil || !address.IsLoopback() {
+			return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
+		}
+		port, err := network.ParsePort(strconv.Itoa(int(binding.ContainerPort)) + "/" + binding.Transport)
+		if err != nil {
+			return client.ContainerCreateOptions{}, err
+		}
+		config.ExposedPorts[port] = struct{}{}
+		host.PortBindings[port] = append(host.PortBindings[port], network.PortBinding{HostIP: address, HostPort: strconv.Itoa(int(binding.HostPort))})
+	}
+	return client.ContainerCreateOptions{Name: "synod-instance-" + command.Input.ResourceId, Config: config, HostConfig: host}, nil
+}
+
+// containerLimits applies the driver's defaults to one container request. The drift
+// scan compares a live container against these same numbers, so both callers must
+// read them from one place.
+func containerLimits(p *agentv1.EnsureContainer) (memory, cpu int64) {
+	memory, cpu = p.MemoryBytes, p.CpuMillis
+	if memory == 0 {
+		memory = 64 << 20
+	}
+	if cpu == 0 {
+		cpu = 250
+	}
+	return memory, cpu
+}
+
+func (r *Runtime) checkContainer(ctx context.Context, command *agentv1.Command, item container.InspectResponse, expected *agentv1.EnsureContainer) error {
+	if item.Config == nil || item.HostConfig == nil {
+		return runtime.ErrConfigurationConflict
+	}
+	if err := r.checkLabels(command, item.Config.Labels, "container", command.Input.ResourceId); err != nil {
+		return err
+	}
+	if strings.TrimPrefix(item.Name, "/") != "synod-instance-"+command.Input.ResourceId {
+		return runtime.ErrOwnershipConflict
+	}
+	encoded, err := base64.RawStdEncoding.DecodeString(item.Config.Labels[labelConfig])
+	if err != nil {
+		return runtime.ErrConfigurationConflict
+	}
+	hash := sha256.Sum256(encoded)
+	if item.Config.Labels[labelHash] != hex.EncodeToString(hash[:]) {
+		return runtime.ErrConfigurationConflict
+	}
+	var stored agentv1.EnsureContainer
+	if err := proto.Unmarshal(encoded, &stored); err != nil {
+		return runtime.ErrConfigurationConflict
+	}
+	if expected != nil && !proto.Equal(expected, &stored) {
+		return runtime.ErrConfigurationConflict
+	}
+	options, err := r.containerOptions(ctx, command, &stored, false)
+	if err != nil {
+		return err
+	}
+	if item.Image != options.Config.Labels["io.synod.image-id"] || !reflect.DeepEqual(item.Config.Cmd, options.Config.Cmd) || !reflect.DeepEqual(item.Config.Entrypoint, options.Config.Entrypoint) || !reflect.DeepEqual(item.Config.Env, options.Config.Env) || item.Config.User != options.Config.User || item.Config.WorkingDir != options.Config.WorkingDir || item.HostConfig.PidsLimit == nil || *item.HostConfig.PidsLimit != 256 || item.Config.Image != options.Config.Image || item.HostConfig.NetworkMode != options.HostConfig.NetworkMode || item.HostConfig.Memory != options.HostConfig.Memory || item.HostConfig.NanoCPUs != options.HostConfig.NanoCPUs || !reflect.DeepEqual(item.HostConfig.PortBindings, options.HostConfig.PortBindings) || !reflect.DeepEqual(item.HostConfig.LogConfig, options.HostConfig.LogConfig) {
+		return runtime.ErrConfigurationConflict
+	}
+	if len(item.Mounts) != 1 || item.Mounts[0].Type != mount.TypeVolume || item.Mounts[0].Name != options.HostConfig.Mounts[0].Source || item.Mounts[0].Destination != options.HostConfig.Mounts[0].Target || !item.Mounts[0].RW {
+		return runtime.ErrConfigurationConflict
+	}
+	host := item.HostConfig
+	if host.Privileged || len(host.Binds) != 0 || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || len(host.DeviceCgroupRules) != 0 ||
+		len(host.CapAdd) != 0 || len(host.CapDrop) != 0 || len(host.SecurityOpt) != 0 || len(host.GroupAdd) != 0 ||
+		host.PidMode != "" || host.UTSMode != "" || host.UsernsMode != "" || host.IpcMode != options.HostConfig.IpcMode || host.CgroupnsMode != options.HostConfig.CgroupnsMode ||
+		host.Runtime != options.HostConfig.Runtime || host.CgroupParent != "" || host.Cgroup != "" || len(host.Annotations) != 0 || host.Isolation != "" ||
+		len(host.Sysctls) != 0 || len(host.Tmpfs) != 0 || len(host.StorageOpt) != 0 || len(host.VolumesFrom) != 0 || host.ContainerIDFile != "" ||
+		host.AutoRemove || host.PublishAllPorts || host.ReadonlyRootfs || host.Umask != nil || host.ShmSize != options.HostConfig.ShmSize ||
+		!slices.Equal(host.MaskedPaths, options.HostConfig.MaskedPaths) || !slices.Equal(host.ReadonlyPaths, options.HostConfig.ReadonlyPaths) {
+		return runtime.ErrConfigurationConflict
+	}
+	return nil
+}
+
+// Logs returns bounded Docker stream bytes. The caller must authorize and redact diagnostics.
+func (r *Runtime) Logs(ctx context.Context, command *agentv1.Command, maxBytes int64) ([]byte, error) {
+	if maxBytes < 1 || maxBytes > 1<<20 {
+		return nil, runtime.ErrUnsupportedConfiguration
+	}
+	if err := r.validate(command); err != nil {
+		return nil, err
+	}
+	item, err := r.api.ContainerInspect(ctx, "synod-instance-"+command.Input.ResourceId, client.ContainerInspectOptions{})
+	if err != nil {
+		return nil, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+	}
+	if err := r.checkContainer(ctx, command, item.Container, nil); err != nil {
+		return nil, err
+	}
+	logs, err := r.api.ContainerLogs(ctx, item.Container.ID, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true, Tail: "1000"})
+	if err != nil {
+		return nil, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+	}
+	defer logs.Close()
+	return io.ReadAll(io.LimitReader(logs, maxBytes))
+}

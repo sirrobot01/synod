@@ -1,0 +1,107 @@
+CREATE TABLE clusters (
+    id uuid PRIMARY KEY,
+    installation_id uuid NOT NULL,
+    name text NOT NULL CHECK (name ~ '^[a-z][a-z0-9-]{0,62}$'),
+    engine text NOT NULL CHECK (engine IN ('postgres', 'redis')),
+    spec_version integer NOT NULL CHECK (spec_version = 1),
+    spec jsonb NOT NULL CHECK (jsonb_typeof(spec) = 'object'),
+    desired_revision bigint NOT NULL CHECK (desired_revision > 0),
+    desired_lifecycle text NOT NULL CHECK (desired_lifecycle IN ('running', 'stopped', 'deleted')),
+    observed_revision bigint NOT NULL CHECK (observed_revision >= 0),
+    observed_lifecycle text NOT NULL CHECK (observed_lifecycle IN ('provisioning', 'running', 'stopped', 'deleting', 'deleted', 'unknown')),
+    execution_epoch bigint NOT NULL CHECK (execution_epoch >= 0),
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    deleted_at timestamptz,
+    UNIQUE (installation_id, id),
+    CHECK ((spec->>'name') IS NOT DISTINCT FROM name),
+    CHECK ((spec->>'engine') IS NOT DISTINCT FROM engine),
+    CHECK ((spec->>'schema_version') IS NOT DISTINCT FROM spec_version::text)
+);
+CREATE UNIQUE INDEX clusters_active_name ON clusters (installation_id, name) WHERE deleted_at IS NULL;
+
+CREATE TABLE operations (
+    id uuid PRIMARY KEY,
+    installation_id uuid NOT NULL,
+    cluster_id uuid NOT NULL,
+    actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 256),
+    api_operation text NOT NULL CHECK (api_operation = 'clusters.create.v1'),
+    idempotency_key text NOT NULL CHECK (idempotency_key ~ '^[!-~]{1,128}$'),
+    request_hash bytea NOT NULL CHECK (octet_length(request_hash) = 32),
+    hash_version integer NOT NULL CHECK (hash_version = 1),
+    kind text NOT NULL CHECK (kind = 'cluster.create'),
+    desired_revision bigint NOT NULL CHECK (desired_revision > 0),
+    status text NOT NULL CHECK (status IN ('pending', 'running', 'waiting', 'cancelling', 'succeeded', 'failed', 'cancelled')),
+    plan_version integer NOT NULL CHECK (plan_version >= 0),
+    owner_id text,
+    execution_epoch bigint NOT NULL CHECK (execution_epoch >= 0),
+    claim_expires_at timestamptz,
+    attempts integer NOT NULL CHECK (attempts >= 0),
+    next_attempt_at timestamptz,
+    cancellation_requested_at timestamptz,
+    finished_at timestamptz,
+    failure_code text,
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    UNIQUE (installation_id, cluster_id, id),
+    FOREIGN KEY (installation_id, cluster_id) REFERENCES clusters (installation_id, id),
+    CHECK ((owner_id IS NULL) = (claim_expires_at IS NULL))
+);
+CREATE UNIQUE INDEX operations_active_cluster ON operations (installation_id, cluster_id)
+    WHERE status IN ('pending', 'running', 'waiting', 'cancelling');
+
+CREATE TABLE idempotency_results (
+    installation_id uuid NOT NULL,
+    actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 256),
+    api_operation text NOT NULL CHECK (api_operation = 'clusters.create.v1'),
+    idempotency_key text NOT NULL CHECK (idempotency_key ~ '^[!-~]{1,128}$'),
+    request_hash bytea NOT NULL CHECK (octet_length(request_hash) = 32),
+    hash_version integer NOT NULL CHECK (hash_version = 1),
+    cluster_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    desired_revision bigint NOT NULL CHECK (desired_revision > 0),
+    accepted_at timestamptz NOT NULL,
+    PRIMARY KEY (installation_id, actor_id, api_operation, idempotency_key),
+    FOREIGN KEY (installation_id, cluster_id, operation_id)
+        REFERENCES operations (installation_id, cluster_id, id) DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TABLE outbox (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_id uuid NOT NULL UNIQUE,
+    installation_id uuid NOT NULL,
+    cluster_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    kind text NOT NULL CHECK (kind = 'operation.ready'),
+    schema_version integer NOT NULL CHECK (schema_version = 1),
+    created_at timestamptz NOT NULL,
+    delivered_at timestamptz,
+    FOREIGN KEY (installation_id, cluster_id, operation_id) REFERENCES operations (installation_id, cluster_id, id),
+    UNIQUE (operation_id, kind)
+);
+CREATE INDEX outbox_pending ON outbox (installation_id, id) WHERE delivered_at IS NULL;
+
+-- A committed outbox row wakes a listening relay. The payload names the installation.
+-- NOTIFY is transactional, and a lost notification only delays a scan.
+CREATE FUNCTION outbox_notify() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_notify('synod_outbox', NEW.installation_id::text);
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER outbox_notify AFTER INSERT ON outbox
+    FOR EACH ROW EXECUTE FUNCTION outbox_notify();
+
+CREATE TABLE audit_events (
+    id uuid PRIMARY KEY,
+    installation_id uuid NOT NULL,
+    cluster_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 256),
+    request_id text NOT NULL CHECK (request_id ~ '^[!-~]{1,128}$'),
+    action text NOT NULL CHECK (action = 'cluster.create.accepted'),
+    outcome text NOT NULL CHECK (outcome = 'accepted'),
+    created_at timestamptz NOT NULL,
+    FOREIGN KEY (installation_id, cluster_id, operation_id) REFERENCES operations (installation_id, cluster_id, id),
+    UNIQUE (operation_id, action)
+);
