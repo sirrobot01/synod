@@ -173,19 +173,18 @@ const maxAllocationBytes = 65536
 
 // PlacementRecord is the committed placement of one operation.
 type PlacementRecord struct {
-	Request     placement.Request
-	Decision    placement.Decision
-	Allocations []placement.Allocation
-	RequestHash [32]byte
-	PlanHash    [32]byte
-	CommittedAt time.Time
+	Request              placement.Request
+	Decision             placement.Decision
+	Allocations          []placement.Allocation
+	RequestHash          [32]byte
+	PlanHash             [32]byte
+	CredentialIntentHash []byte
+	CommittedAt          time.Time
 }
 
-// InstallPlacementPlan commits reservations, host ports, and the immutable plan together.
-// It rechecks every selected input under a lock. It never reruns global scoring,
-// because a still valid assignment stays deterministic for its original snapshot.
-// A committed placement replays without demanding fresh capacity evidence.
-func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim, request placement.Request, decision placement.Decision, plan *agentv1.ExecutionPlan) (PlacementRecord, error) {
+// InstallPlacementPlan commits reservations, an optional sealed intent, and the immutable plan together.
+// A committed placement replays without fresh capacity evidence.
+func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim, request placement.Request, decision placement.Decision, plan *agentv1.ExecutionPlan, intent *ClusterIntent) (PlacementRecord, error) {
 	if err := request.Validate(); err != nil {
 		return PlacementRecord{}, &AdmissionError{Code: InvalidRequest, Cause: err}
 	}
@@ -195,6 +194,40 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 	encodedPlan, err := validateInstalledPlan(claim, plan)
 	if err != nil {
 		return PlacementRecord{}, err
+	}
+	var intentHash []byte
+	if intent != nil {
+		if intent.InstallationID != claim.InstallationID || intent.ClusterID != claim.ClusterID {
+			return PlacementRecord{}, ErrCredentialConflict
+		}
+		if err := intent.validate(); err != nil {
+			return PlacementRecord{}, err
+		}
+		for _, credential := range intent.Credentials {
+			if credential.MemberID != uuid.Nil && !slices.ContainsFunc(request.Resources, func(resource placement.Resource) bool {
+				return resource.ID == credential.MemberID && resource.Kind == "instance" && resource.Engine == "postgres"
+			}) {
+				return PlacementRecord{}, ErrCredentialConflict
+			}
+			referenced := false
+			for _, step := range plan.Steps {
+				if slices.ContainsFunc(step.Command.Input.Secrets, func(reference *agentv1.SecretReference) bool {
+					return reference.CredentialId == credential.CredentialID.String() && reference.Version == credential.Version && reference.Purpose == credential.Purpose
+				}) {
+					referenced = true
+					break
+				}
+			}
+			if !referenced {
+				return PlacementRecord{}, ErrCredentialConflict
+			}
+		}
+		encoded, err := json.Marshal(intent)
+		if err != nil {
+			return PlacementRecord{}, &AdmissionError{Code: InvalidRequest, Cause: err}
+		}
+		hash := sha256.Sum256(encoded)
+		intentHash = hash[:]
 	}
 	requestBytes, err := json.Marshal(request)
 	if err != nil || len(requestBytes) > maxRequestBytes {
@@ -210,7 +243,12 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 		return PlacementRecord{}, admissionError(err)
 	}
 	defer tx.Rollback(ctx)
-	_, status, _, err := lockClaim(ctx, tx, claim)
+	if intent != nil {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM clusters WHERE installation_id=$1 AND id=$2 FOR UPDATE`, claim.InstallationID, claim.ClusterID); err != nil {
+			return PlacementRecord{}, admissionError(err)
+		}
+	}
+	active, status, existing, err := lockClaim(ctx, tx, claim)
 	if err != nil {
 		return PlacementRecord{}, err
 	}
@@ -225,10 +263,21 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 		return PlacementRecord{}, err
 	}
 	if found {
-		if committed.RequestHash != requestHash || committed.PlanHash != planHash {
+		if committed.RequestHash != requestHash || committed.PlanHash != planHash || !bytes.Equal(committed.CredentialIntentHash, intentHash) {
 			return PlacementRecord{}, operation.ErrCommandConflict
 		}
+		if intent != nil {
+			if err := recordClusterIntentTx(ctx, tx, *intent, false); err != nil {
+				return PlacementRecord{}, err
+			}
+			if err := checkPlanCredentials(ctx, tx, claim, plan); err != nil {
+				return PlacementRecord{}, err
+			}
+		}
 		return committed, nil
+	}
+	if intent != nil && (active || existing != nil) {
+		return PlacementRecord{}, operation.ErrCommandConflict
 	}
 	if err := lockSelectedNodes(ctx, tx, claim.InstallationID, decision); err != nil {
 		return PlacementRecord{}, err
@@ -248,15 +297,32 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 		return PlacementRecord{}, fmt.Errorf("%w: %s", ErrPlacementConflict, err)
 	}
 	var revision int64
-	if err := tx.QueryRow(ctx, `SELECT desired_revision FROM operations WHERE id=$1`, claim.OperationID).Scan(&revision); err != nil {
+	var kind string
+	if err := tx.QueryRow(ctx, `SELECT desired_revision,kind FROM operations WHERE id=$1`, claim.OperationID).Scan(&revision, &kind); err != nil {
 		return PlacementRecord{}, admissionError(err)
 	}
 	if revision != request.DesiredRevision {
 		return PlacementRecord{}, operation.ErrCommandConflict
 	}
+	if intent != nil {
+		if err := operation.ValidatePlan(plan, operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID, DesiredRevision: revision, Kind: kind}); err != nil {
+			return PlacementRecord{}, err
+		}
+	}
 	allocations, err := reserve(ctx, tx, claim, request, decision, snapshot)
 	if err != nil {
 		return PlacementRecord{}, err
+	}
+	if err := recordMembers(ctx, tx, claim, request); err != nil {
+		return PlacementRecord{}, err
+	}
+	if intent != nil {
+		if err := recordClusterIntentTx(ctx, tx, *intent, true); err != nil {
+			return PlacementRecord{}, err
+		}
+		if err := checkPlanCredentials(ctx, tx, claim, plan); err != nil {
+			return PlacementRecord{}, err
+		}
 	}
 	if _, err := installPlanTx(ctx, tx, claim, plan, encodedPlan); err != nil {
 		return PlacementRecord{}, err
@@ -266,15 +332,15 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 		return PlacementRecord{}, err
 	}
 	var committedAt time.Time
-	if err := tx.QueryRow(ctx, `INSERT INTO operation_placements (installation_id,cluster_id,operation_id,request_hash,request_bytes,decision_bytes,plan_hash)
- VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING committed_at`,
-		claim.InstallationID, claim.ClusterID, claim.OperationID, requestHash[:], requestBytes, decisionBytes, planHash[:]).Scan(&committedAt); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO operation_placements (installation_id,cluster_id,operation_id,request_hash,request_bytes,decision_bytes,plan_hash,credential_intent_hash)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING committed_at`,
+		claim.InstallationID, claim.ClusterID, claim.OperationID, requestHash[:], requestBytes, decisionBytes, planHash[:], intentHash).Scan(&committedAt); err != nil {
 		return PlacementRecord{}, admissionError(err)
 	}
 	if err := s.commitMetadata(ctx, tx); err != nil {
 		return PlacementRecord{}, err
 	}
-	return PlacementRecord{Request: request, Decision: decision, Allocations: allocations, RequestHash: requestHash, PlanHash: planHash, CommittedAt: committedAt}, nil
+	return PlacementRecord{Request: request, Decision: decision, Allocations: allocations, RequestHash: requestHash, PlanHash: planHash, CredentialIntentHash: intentHash, CommittedAt: committedAt}, nil
 }
 
 // lockSelectedNodes locks every target row in UUID order so writers cannot interleave.
@@ -326,11 +392,12 @@ func reserve(ctx context.Context, tx pgx.Tx, claim operation.Claim, request plac
 			ID: resource.ReservationID, InstallationID: claim.InstallationID, NodeID: assignment.NodeID,
 			ClusterID: claim.ClusterID, ResourceID: resource.ID, CreatedByOperation: claim.OperationID,
 			CreatedRevision: request.DesiredRevision, OwnedResourceIDs: resource.OwnedResourceIDs,
-			Budget: budget, Ports: resource.Ports,
+			Budget: budget, Ports: assignment.Ports,
 		}
 		if prior, exists := held[resource.ID]; exists {
-			// The caller must name the reservation it is reusing.
-			if prior.ID != resource.ReservationID || prior.NodeID != assignment.NodeID || !samePorts(prior.Ports, resource.Ports) {
+			// The caller must name the reservation it is reusing. The decision carries
+			// the ports, because a request may ask for a range rather than a number.
+			if prior.ID != resource.ReservationID || prior.NodeID != assignment.NodeID || !samePorts(prior.Ports, assignment.Ports) {
 				return nil, fmt.Errorf("%w: resource %s is already reserved", ErrPlacementConflict, resource.ID)
 			}
 			// Keep the larger held budget until explicit release evidence permits a cut.
@@ -441,8 +508,8 @@ func (s *Store) ReadPlacement(ctx context.Context, installationID, operationID u
 func readPlacementTx(ctx context.Context, tx pgx.Tx, installationID, operationID uuid.UUID) (PlacementRecord, bool, error) {
 	var record PlacementRecord
 	var requestHash, planHash, requestBytes, decisionBytes []byte
-	err := tx.QueryRow(ctx, `SELECT request_hash,request_bytes,decision_bytes,plan_hash,committed_at FROM operation_placements
- WHERE installation_id=$1 AND operation_id=$2`, installationID, operationID).Scan(&requestHash, &requestBytes, &decisionBytes, &planHash, &record.CommittedAt)
+	err := tx.QueryRow(ctx, `SELECT request_hash,request_bytes,decision_bytes,plan_hash,credential_intent_hash,committed_at FROM operation_placements
+ WHERE installation_id=$1 AND operation_id=$2`, installationID, operationID).Scan(&requestHash, &requestBytes, &decisionBytes, &planHash, &record.CredentialIntentHash, &record.CommittedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PlacementRecord{}, false, nil
 	}
@@ -498,20 +565,25 @@ func (s *Store) ReleaseUnusedPlacement(ctx context.Context, installationID, oper
 	}
 	defer tx.Rollback(ctx)
 	var clusterID uuid.UUID
-	var released *time.Time
-	if err := tx.QueryRow(ctx, `SELECT cluster_id,released_at FROM resource_allocations
- WHERE installation_id=$1 AND id=$2 FOR UPDATE`, installationID, reservationID).Scan(&clusterID, &released); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT cluster_id FROM resource_allocations
+ WHERE installation_id=$1 AND id=$2`, installationID, reservationID).Scan(&clusterID); err != nil {
 		return admissionError(err)
-	}
-	if released != nil {
-		return nil
 	}
 	// Lock the cluster row before any absence check. An EXISTS that finds nothing locks
 	// nothing, so the cluster row is the only object that can serialize this check
 	// against a writer that adds an operation. Every future operation writer for an
-	// existing cluster must take this same lock.
+	// existing cluster must take this same lock. Allocation ownership is immutable;
+	// read its release state only after the cluster lock to match lifecycle completion.
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM clusters WHERE installation_id=$1 AND id=$2 FOR UPDATE`, installationID, clusterID); err != nil {
 		return admissionError(err)
+	}
+	var released *time.Time
+	if err := tx.QueryRow(ctx, `SELECT released_at FROM resource_allocations
+ WHERE installation_id=$1 AND cluster_id=$2 AND id=$3 FOR UPDATE`, installationID, clusterID, reservationID).Scan(&released); err != nil {
+		return admissionError(err)
+	}
+	if released != nil {
+		return nil
 	}
 	var unfinished, foreign, dispatched bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM operations

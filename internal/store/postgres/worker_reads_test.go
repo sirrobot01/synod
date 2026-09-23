@@ -76,12 +76,20 @@ func readsFixture(t *testing.T) (*Store, ClaimRequest, operation.Claim, *agentv1
 }
 
 // admit records one agent acknowledgement of a committed dispatch.
-func admit(t *testing.T, s *Store, node, session uuid.UUID, command *agentv1.Command, state, failure string) {
+func admit(t *testing.T, s *Store, claim operation.Claim, node, session uuid.UUID, command *agentv1.Command, state, failure string) uuid.UUID {
 	t.Helper()
-	ack := &agentv1.AdmissionAck{Epoch: proto.Clone(command.Epoch).(*agentv1.Epoch), CommandId: command.CommandId, State: state, ErrorCode: failure, InputHash: command.InputHash}
+	if err := s.RecordRecoveryCheckpoint(t.Context(), claim, sha256.Sum256([]byte("frontier")), nil); err != nil {
+		t.Fatal(err)
+	}
+	attempt := uuid.New()
+	if _, err := s.RecordDeliveryAttempt(t.Context(), claim, uuid.MustParse(command.CommandId), session, attempt, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	ack := &agentv1.AdmissionAck{DeliveryAttemptId: attempt.String(), Epoch: proto.Clone(command.Epoch).(*agentv1.Epoch), CommandId: command.CommandId, State: state, ErrorCode: failure, InputHash: command.InputHash}
 	if err := s.RecordAgentAdmission(t.Context(), uuid.MustParse(command.Epoch.InstallationId), node, session, ack); err != nil {
 		t.Fatal(err)
 	}
+	return attempt
 }
 
 // proveStep receives a succeeded receipt and retains it as a step completion.
@@ -138,16 +146,12 @@ func TestLoadExecutionStateReadsThisRun(t *testing.T) {
 	if err := s.RecordDispatch(t.Context(), claim, second); err != nil {
 		t.Fatal(err)
 	}
-	admit(t, s, node, session, first, "terminal", "")
-	admit(t, s, node, session, second, "rejected", "command_refused")
+	admit(t, s, claim, node, session, first, "terminal", "")
+	attempt := admit(t, s, claim, node, session, second, "rejected", "command_refused")
 	result := proveStep(t, s, claim, node, first)
 	// A delivery attempt requires a stored recovery frontier for this claim.
 	frontier := sha256.Sum256([]byte("frontier"))
 	if err := s.RecordRecoveryCheckpoint(t.Context(), claim, frontier, nil); err != nil {
-		t.Fatal(err)
-	}
-	attempt := uuid.New()
-	if _, err := s.RecordDeliveryAttempt(t.Context(), claim, uuid.MustParse(second.CommandId), session, attempt, time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateProgress(t.Context(), claim, ProgressUpdate{Sequence: 1, Status: operation.Running, Reason: "first step proved"}); err != nil {
@@ -189,8 +193,20 @@ func TestLoadExecutionStateKeepsHistoricalReceipts(t *testing.T) {
 	if err := s.RecordDispatch(t.Context(), claim, first); err != nil {
 		t.Fatal(err)
 	}
-	admit(t, s, node, session, first, "terminal", "")
+	admit(t, s, claim, node, session, first, "terminal", "")
 	result := proveStep(t, s, claim, node, first)
+
+	second := plan.Steps[1].Command
+	if err := s.RecordDispatch(t.Context(), claim, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordRecoveryCheckpoint(t.Context(), claim, sha256.Sum256([]byte("frontier")), nil); err != nil {
+		t.Fatal(err)
+	}
+	attempt := uuid.New()
+	if _, err := s.RecordDeliveryAttempt(t.Context(), claim, uuid.MustParse(second.CommandId), session, attempt, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := s.pool.Exec(t.Context(), `UPDATE operations SET claim_expires_at=clock_timestamp()-interval '1 second'`); err != nil {
 		t.Fatal(err)
@@ -214,8 +230,12 @@ func TestLoadExecutionStateKeepsHistoricalReceipts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pending := state.Steps[1]
+	if pending.Dispatch != nil || pending.Admission != nil || pending.Delivery == nil || pending.Delivery.ID != attempt || pending.Delivery.Count != 1 {
+		t.Fatalf("takeover lost the delivery budget or inherited authority: %+v", pending)
+	}
 	proved := state.Steps[0]
-	if proved.Dispatch != nil || proved.Admission != nil || proved.Delivery != nil {
+	if proved.Dispatch != nil || proved.Admission != nil || proved.Delivery == nil || proved.UnansweredDeliveries != 0 {
 		t.Fatalf("the new run inherited dispatch records: %+v", proved)
 	}
 	if proved.Completion == nil || proved.Completion.ReceiptEpoch.ExecutionEpoch != claim.ExecutionEpoch {
@@ -258,7 +278,7 @@ func TestLoadDispatchResolvesStableIdentity(t *testing.T) {
 	if !proto.Equal(evidence.Command, first) || evidence.Admission != nil || evidence.Result != nil {
 		t.Fatalf("dispatch %+v", evidence)
 	}
-	admit(t, s, node, session, first, "running", "")
+	admit(t, s, claim, node, session, first, "running", "")
 	result := proveStep(t, s, claim, node, first)
 	if evidence, err = s.LoadDispatch(t.Context(), claim, cursor); err != nil {
 		t.Fatal(err)
@@ -303,7 +323,7 @@ func TestLoadExecutionStateUnderConcurrentReads(t *testing.T) {
 	if err := s.RecordDispatch(t.Context(), claim, first); err != nil {
 		t.Fatal(err)
 	}
-	admit(t, s, node, session, first, "terminal", "")
+	admit(t, s, claim, node, session, first, "terminal", "")
 	proveStep(t, s, claim, node, first)
 	states := make(chan ExecutionState, 16)
 	errs := make(chan error, 16)

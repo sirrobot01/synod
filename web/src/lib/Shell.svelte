@@ -148,7 +148,7 @@
       {:else if route.screen === "databases"}
         <Databases onOpen={(id) => router.go("cluster", id)} onOpenOperation={(id) => router.go("operation", id)} />
       {:else if route.screen === "cluster"}
-        <Cluster id={route.id} onOpenTopology={(id) => router.go("topology", id)} />
+        <Cluster id={route.id} actorID={session.actor_id} onOpenTopology={(id) => router.go("topology", id)} onOpenOperation={(id) => router.go("operation", id)} />
       {:else if route.screen === "topology"}
         <Topology id={route.id} onOpenCluster={(id) => router.go("cluster", id)} />
       {:else if route.screen === "backups"}

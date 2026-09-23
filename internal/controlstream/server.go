@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"log/slog"
 	"net"
 	"slices"
 	"sync"
@@ -56,6 +57,10 @@ type Config struct {
 	// Handle must return nil only after required durable handling commits.
 	// It must honor context cancellation. Errors are never sent to the peer verbatim.
 	Handle func(context.Context, Peer, *agentv1.AgentMessage) error
+	// Logger records the refusals the peer is never told the reason for. A refused
+	// agent is otherwise invisible: it sees a fixed status and the controller keeps
+	// no account of why. slog.Default() is used when none is supplied.
+	Logger *slog.Logger
 }
 
 type session struct {
@@ -110,6 +115,9 @@ func New(config Config) (*Server, error) {
 	}
 	if config.AuthorizationTimeout == 0 {
 		config.AuthorizationTimeout = 2 * time.Second
+	}
+	if config.Logger == nil {
+		config.Logger = slog.Default()
 	}
 	if config.MaxMessageBytes < 1024 || config.MaxMessageBytes > 4<<20 || config.QueueSize < 1 || config.QueueSize > 256 || config.MaxSessions < 1 || config.MaxSessions > 4096 || config.HelloTimeout <= 0 || config.HeartbeatInterval <= 0 || config.StaleAfter <= config.HeartbeatInterval || config.RecheckInterval <= 0 || config.AuthorizationTimeout <= 0 {
 		return nil, errors.New("invalid transport limits")
@@ -195,6 +203,7 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 	}
 	identity, err := pki.PeerIdentity(info.State, s.config.InstallationID, pki.Agent)
 	if err != nil {
+		s.config.Logger.Warn("agent identity refused", "peer", remote.Addr, "error", err)
 		return status.Error(codes.Unauthenticated, "invalid agent identity")
 	}
 	leaf := info.State.PeerCertificates[0]
@@ -230,6 +239,7 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 					return
 				}
 				if err := stream.Send(message); err != nil {
+					s.config.Logger.Warn("agent stream send failed", "node_id", identity.SubjectID, "session_id", current.peer.SessionID, "error", err)
 					done <- status.Error(codes.Unavailable, "stream send failed")
 					return
 				}

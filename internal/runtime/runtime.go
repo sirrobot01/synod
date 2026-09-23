@@ -4,6 +4,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -11,6 +12,7 @@ import (
 
 var ErrOwnershipConflict = errors.New("runtime_ownership_conflict")
 var ErrConfigurationConflict = errors.New("runtime_configuration_conflict")
+var ErrStorageLost = fmt.Errorf("storage_lost: %w", ErrConfigurationConflict)
 var ErrUnsupportedConfiguration = errors.New("runtime_unsupported_configuration")
 var ErrOutcomeUnknown = errors.New("runtime_outcome_unknown")
 var ErrBusy = errors.New("runtime_busy")
@@ -27,10 +29,17 @@ func (e *Error) Error() string { return "runtime: " + e.Kind.Error() }
 func (e *Error) Unwrap() error { return e.Cause }
 
 // Is matches the stable kind, so a caller tests the kind and not the cause.
-func (e *Error) Is(target error) bool { return e.Kind == target }
+func (e *Error) Is(target error) bool { return errors.Is(e.Kind, target) }
 
 // Result is the effect list that one command produced.
 type Result struct{ Effects []*agentv1.Effect }
+
+// Secrets are the resolved credentials for one command, keyed by purpose.
+//
+// They are a function argument and never part of a command. That is structural, not a
+// convention: a driver serializes commands into labels, journals, and inventory reads,
+// and a value that is never inside a command cannot be captured by any of them.
+type Secrets map[string][]byte
 
 // Resource is one owned native object and its observed state.
 type Resource struct {
@@ -104,7 +113,9 @@ type ResourceUsage struct {
 // Runtime executes typed commands on exactly owned node resources.
 // An implementation requires durable journal admission before Execute.
 type Runtime interface {
-	Execute(ctx context.Context, command *agentv1.Command) (Result, error)
+	// Execute runs one command. Secrets carries the credentials the command's
+	// references name; it is empty for a command that needs none.
+	Execute(ctx context.Context, command *agentv1.Command, secrets Secrets) (Result, error)
 	Recover(ctx context.Context, command *agentv1.Command, prior []*agentv1.Effect) (Result, error)
 	Inventory(ctx context.Context) ([]Resource, error)
 	InspectCluster(ctx context.Context, clusterID uuid.UUID, prior []*agentv1.Effect) (ClusterInspection, error)

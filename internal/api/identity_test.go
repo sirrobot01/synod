@@ -333,6 +333,8 @@ func TestSignInProvesItsOrigin(t *testing.T) {
 // and exhausting one account must leave another account usable.
 func TestSignInBudgetIsKeyed(t *testing.T) {
 	server, _, _ := identityServer(t)
+	// Password checks can exceed the refill interval on a loaded host.
+	server.signInAttempts = newAttemptLimiter(0, 5, 4096)
 	createOperator(t, server, "victim")
 	createOperator(t, server, "other")
 	wrong := `{"username":"victim","password":"wrong password here"}`

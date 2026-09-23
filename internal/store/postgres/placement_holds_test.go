@@ -30,7 +30,7 @@ func TestReadPlacementHoldsNamesTheNodeAndResource(t *testing.T) {
 	claim := host.claimCluster(t, "db")
 	port := placement.Port{Address: "127.0.0.1", Transport: "tcp", Number: 5432}
 	request, decision, plan := host.place(t, claim, smallBudget, []placement.Port{port})
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	hold := held(t, host)
@@ -58,7 +58,7 @@ func TestReadPlacementHoldsMarksABlockedHolder(t *testing.T) {
 	host := placementFixture(t)
 	claim := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	if hold := held(t, host); hold.Blocked || hold.Status != operation.Pending {
@@ -88,7 +88,7 @@ func TestReadPlacementHoldsNamesWhatBlocksARelease(t *testing.T) {
 	host := placementFixture(t)
 	claim := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	reservation := request.Resources[0].ReservationID
@@ -115,7 +115,7 @@ func TestReadPlacementHoldsDropsAReleasedReservation(t *testing.T) {
 	host := placementFixture(t)
 	claim := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, []placement.Port{{Address: "127.0.0.1", Transport: "tcp", Number: 5432}})
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := host.store.pool.Exec(t.Context(), `UPDATE operations SET status='failed',finished_at=clock_timestamp(),claim_active=false WHERE id=$1`, claim.OperationID); err != nil {
@@ -138,7 +138,7 @@ func TestReadPlacementHoldsIsScopedToItsInstallation(t *testing.T) {
 	host := placementFixture(t)
 	claim := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	other, err := host.store.ReadPlacementHolds(t.Context(), uuid.New())
@@ -156,7 +156,7 @@ func TestReadPlacementHoldsChangesNothing(t *testing.T) {
 	host := placementFixture(t)
 	claim := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	before := host.count(t, `SELECT count(*) FROM resource_allocations WHERE released_at IS NULL`)
@@ -179,7 +179,7 @@ func TestAFailedReservationRelocatesNothing(t *testing.T) {
 	host := placementFixture(t)
 	first := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, first, smallBudget, []placement.Port{{Address: "127.0.0.1", Transport: "tcp", Number: 5432}})
-	if _, err := host.store.InstallPlacementPlan(t.Context(), first, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), first, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	before := held(t, host)

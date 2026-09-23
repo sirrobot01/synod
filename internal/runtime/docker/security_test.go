@@ -60,6 +60,10 @@ func TestRejectUnsupportedContainerSecurity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	options.Config.Env, err = secretEnvironment(options.Config.Env, ensure.Input.GetEnsureContainer(), redisFixtureSecrets)
+	if err != nil {
+		t.Fatal(err)
+	}
 	options.HostConfig.CapAdd = []string{"SYS_ADMIN"}
 	changed, err := api.ContainerCreate(t.Context(), options)
 	if err != nil {
@@ -71,7 +75,7 @@ func TestRejectUnsupportedContainerSecurity(t *testing.T) {
 		{ResourceId: ensure.Input.ResourceId, Payload: &agentv1.CommandInput_RemoveContainer{RemoveContainer: &agentv1.RemoveContainer{}}},
 	} {
 		command := runtimeCommand(t, r, clusterID, input)
-		if _, err := r.Execute(t.Context(), command); !errors.Is(err, runtime.ErrConfigurationConflict) {
+		if _, err := r.Execute(t.Context(), command, nil); !errors.Is(err, runtime.ErrConfigurationConflict) {
 			t.Fatalf("mutated unauthorized container: %v", err)
 		}
 	}

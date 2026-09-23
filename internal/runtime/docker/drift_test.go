@@ -82,7 +82,7 @@ func TestDriftLeavesAnOwnedObjectAlone(t *testing.T) {
 	command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{
 		ResourceId: id, Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: id}},
 	})
-	if _, err := r.Execute(t.Context(), command); err != nil {
+	if _, err := r.Execute(t.Context(), command, nil); err != nil {
 		t.Fatal(err)
 	}
 	absent(t, r, "synod-volume-"+id)
@@ -153,8 +153,8 @@ func TestDriftReportsAManualChangeAndNotAManualStop(t *testing.T) {
 	// A container that was started and then stopped is not drift. Its state travels
 	// in the inventory page, and nothing about it is unexpected.
 	start := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: ensure.Input.ResourceId,
-		Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}})
-	if _, err := r.Execute(t.Context(), start); err != nil {
+		Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{AllowInitialization: true}}})
+	if _, err := r.Execute(t.Context(), start, nil); err != nil {
 		t.Fatal(err)
 	}
 	absent(t, r, item.Container.ID)

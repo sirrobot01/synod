@@ -73,7 +73,7 @@ func TestCancellationBeforeAndAfterStart(t *testing.T) {
 	ctx, _ := localSession(t, f.e)
 	activateLocal(t, f.e, ctx, f.epoch)
 	queued := volumeCommand(t, f.epoch)
-	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: queued}}); err != nil {
+	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: queued}}); err != nil {
 		t.Fatal(err)
 	}
 	cancelled, err := f.e.Handle(ctx, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Cancel{Cancel: &agentv1.CancelCommand{Epoch: f.epoch, CommandId: queued.CommandId}}})
@@ -87,7 +87,7 @@ func TestCancellationBeforeAndAfterStart(t *testing.T) {
 		t.Fatal("queued cancellation had native effect", err)
 	}
 	command := volumeCommand(t, f.epoch)
-	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: command}}); err != nil {
+	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}}); err != nil {
 		t.Fatal(err)
 	}
 	task := job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]}
@@ -142,7 +142,7 @@ func TestWorkerAndClusterBounds(t *testing.T) {
 		commands = append(commands, volumeCommand(t, epoch))
 	}
 	for _, command := range commands {
-		controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: command}})
+		controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
 		ack := controller.wait(t, func(message *agentv1.AgentMessage) bool { return message.GetAdmissionAck() != nil })
 		if ack.GetAdmissionAck().State != "queued" {
 			t.Fatal(ack)
@@ -154,7 +154,7 @@ func TestWorkerAndClusterBounds(t *testing.T) {
 		t.Fatal("worker or queue bound changed", peak.Load(), cap(f.e.jobs))
 	}
 	duplicate := volumeCommand(t, commands[0].Epoch)
-	controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: duplicate}})
+	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: duplicate}})
 	ack := controller.wait(t, func(message *agentv1.AgentMessage) bool { return message.GetAdmissionAck() != nil })
 	if ack.GetAdmissionAck().ErrorCode != "agent_busy" {
 		t.Fatal("overlapping cluster command admitted", ack)
@@ -191,7 +191,7 @@ func TestCancelledQueuedJobDoesNotInspectRuntime(t *testing.T) {
 	ctx, _ := localSession(t, f.e)
 	activateLocal(t, f.e, ctx, f.epoch)
 	command := volumeCommand(t, f.epoch)
-	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: command}}); err != nil {
+	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}}); err != nil {
 		t.Fatal(err)
 	}
 	queued := job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]}
@@ -236,7 +236,7 @@ func TestHigherEpochWaitsForStartedWorker(t *testing.T) {
 	controller := startController(t, f, nil)
 	controller.activate(t, f.epoch)
 	command := volumeCommand(t, f.epoch)
-	controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: command}})
+	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
@@ -261,7 +261,7 @@ func TestHigherEpochWaitsForStartedWorker(t *testing.T) {
 		t.Fatal("barrier lost explicit Running placeholder resolution")
 	}
 	controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_ActivateEpoch{ActivateEpoch: &agentv1.ActivateEpoch{Epoch: next}}})
-	controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: command}})
+	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
 	rejected := controller.wait(t, func(message *agentv1.AgentMessage) bool {
 		return message.GetAdmissionAck() != nil && message.GetAdmissionAck().CommandId == command.CommandId
 	}).GetAdmissionAck()
@@ -269,7 +269,7 @@ func TestHigherEpochWaitsForStartedWorker(t *testing.T) {
 		t.Fatal("old epoch admitted after transfer", rejected)
 	}
 	fresh := volumeCommand(t, next)
-	controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: fresh}})
+	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: fresh}})
 	result := controller.wait(t, func(message *agentv1.AgentMessage) bool {
 		return message.GetTerminalResult() != nil && message.GetTerminalResult().CommandId == fresh.CommandId
 	}).GetTerminalResult()

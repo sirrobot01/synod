@@ -24,7 +24,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/pki"
+	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/grpc"
@@ -61,6 +63,29 @@ func TestProtectedFiles(t *testing.T) {
 	}
 	if _, err := readStartupFile(t.TempDir(), 10, true); err == nil {
 		t.Fatal("accepted directory")
+	}
+}
+
+func TestCredentialKeyringRefusesUnprotectedOrInvalidKey(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		mode os.FileMode
+		data string
+	}{
+		{"public file", 0o644, base64.StdEncoding.EncodeToString(make([]byte, 32))},
+		{"short key", 0o600, base64.StdEncoding.EncodeToString([]byte("private-short-key"))},
+		{"invalid base64", 0o600, "private-invalid-key"},
+		{"oversized file", 0o600, strings.Repeat("private-key", 500)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "wrapping-key")
+			if err := os.WriteFile(path, []byte(test.data), test.mode); err != nil {
+				t.Fatal(err)
+			}
+			if ring, err := loadKeyring(path, uuid.NewString()); err == nil || ring != nil || strings.Contains(err.Error(), test.data) {
+				t.Fatalf("invalid wrapping key was accepted or exposed: %v", err)
+			}
+		})
 	}
 }
 
@@ -146,6 +171,15 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 		}
 	}
 	installation := uuid.New()
+	wrappingKeyID := uuid.New()
+	wrappingKeyPath := filepath.Join(directory, "wrapping-key")
+	wrappingKey := make([]byte, 32)
+	if _, err := rand.Read(wrappingKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wrappingKeyPath, []byte(base64.StdEncoding.EncodeToString(wrappingKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	caCert, caKey, err := pki.CreateCA(installation, time.Now(), 7*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +228,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, []string{"--listen", "127.0.0.1:0", "--database-url", databaseURL.String(), "--installation-id", installation.String(), "--ca-cert-file", caCertPath, "--ca-key-file", caKeyPath, "--agent-listen", "127.0.0.1:0", "--agent-tls-cert-file", agentCertPath, "--agent-tls-key-file", agentKeyPath, "--agent-ca-file", caCertPath, "--admin-token-file", tokenPath, "--tls-cert-file", certPath, "--tls-key-file", keyPath}, log)
+		done <- run(ctx, []string{"--listen", "127.0.0.1:0", "--database-url", databaseURL.String(), "--installation-id", installation.String(), "--ca-cert-file", caCertPath, "--ca-key-file", caKeyPath, "--agent-listen", "127.0.0.1:0", "--agent-tls-cert-file", agentCertPath, "--agent-tls-key-file", agentKeyPath, "--agent-ca-file", caCertPath, "--admin-token-file", tokenPath, "--tls-cert-file", certPath, "--tls-key-file", keyPath, "--secret-key-file", wrappingKeyPath, "--secret-key-id", wrappingKeyID.String(), "--placement-architecture", "arm64", "--placement-runtime-version", "27.1.1", "--placement-storage-id", "fixture"}, log)
 	}()
 	var address, agentAddress string
 	deadline := time.NewTimer(15 * time.Second)
@@ -255,6 +289,44 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	var count int
 	if err := verification.QueryRow(t.Context(), "SELECT count(*) FROM clusters WHERE name = $1", "startup").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("admission missing from isolated database: count=%d error=%v", count, err)
+	}
+	var admission postgres.Admission
+	if err := json.Unmarshal(data, &admission); err != nil {
+		t.Fatal(err)
+	}
+	// Credential access uses the startup key even without an etcd-backed runner.
+	password := "startup-password-private"
+	ring, err := secret.NewKeyring(wrappingKeyID, map[uuid.UUID][]byte{wrappingKeyID: wrappingKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID := uuid.New()
+	envelope, err := ring.Seal(secret.Binding{InstallationID: installation, OwnerType: "cluster", OwnerID: admission.ClusterID, CredentialID: credentialID, Version: 1}, []byte(password))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := postgres.New(verification).RecordClusterIntent(t.Context(), postgres.ClusterIntent{InstallationID: installation, ClusterID: admission.ClusterID, Credentials: []postgres.Credential{{CredentialID: credentialID, Version: 1, Purpose: postgres.ApplicationCredential, RoleName: "synod_app", Envelope: envelope}}}); err != nil {
+		t.Fatal(err)
+	}
+	// Removing the file proves that requests use the configured keyring, not a reload.
+	if err := os.Remove(wrappingKeyPath); err != nil {
+		t.Fatal(err)
+	}
+	reveal, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://"+address+"/v1/clusters/"+admission.ClusterID.String()+"/credentials/application/reveal", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reveal.Header.Set("Authorization", "Bearer "+token)
+	reveal.Header.Set("Content-Type", "application/json")
+	revealed, err := tlsFixture.Client().Do(reveal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value cluster.RevealedCredential
+	decodeErr := json.NewDecoder(revealed.Body).Decode(&value)
+	revealed.Body.Close()
+	if revealed.StatusCode != http.StatusOK || decodeErr != nil || value.Password != password || value.Credential.CredentialID != credentialID || revealed.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("startup keyring did not serve audited reveal: status=%d decode=%v", revealed.StatusCode, decodeErr)
 	}
 	// The executable loads the protected CA and serves the complete enrollment path.
 	enrollmentToken := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
@@ -371,7 +443,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(logs), token) || strings.Contains(string(logs), dsn) {
+	if strings.Contains(string(logs), token) || strings.Contains(string(logs), dsn) || strings.Contains(string(logs), password) || strings.Contains(string(logs), base64.StdEncoding.EncodeToString(wrappingKey)) {
 		t.Fatal("startup logs exposed credentials")
 	}
 }

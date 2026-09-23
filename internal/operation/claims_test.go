@@ -80,6 +80,7 @@ func TestCommandHashAndDelayedEpoch(t *testing.T) {
 		t.Fatal("admitted old recovery generation")
 	}
 	for _, change := range []func(*agentv1.Command){
+		func(c *agentv1.Command) { c.Input.GetStartContainer().AllowInitialization = true },
 		func(c *agentv1.Command) { c.Input.Timeout = durationpb.New(2 * time.Minute) },
 		func(c *agentv1.Command) { c.Epoch.NodeId = uuid.NewString() },
 		func(c *agentv1.Command) { c.CommandId = uuid.NewString() },
@@ -122,7 +123,13 @@ func TestBarrierRetainsActiveNativeEffects(t *testing.T) {
 
 func TestContainerNetworkMode(t *testing.T) {
 	command := commandFixture()
-	config := &agentv1.EnsureContainer{ImageDigest: "redis@sha256:" + strings.Repeat("a", 64), Engine: "redis", VolumeId: uuid.NewString(), NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST}
+	config := &agentv1.EnsureContainer{
+		ImageDigest: "redis@sha256:" + strings.Repeat("a", 64), Engine: "redis", VolumeId: uuid.NewString(), NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST, MemoryBytes: 64 << 20,
+		Redis:     &agentv1.RedisContainerConfig{Port: 6379, Persistence: "none", MaxmemoryBytes: 48 << 20, EvictionPolicy: "noeviction"},
+		SecretEnv: []*agentv1.SecretEnv{{Name: "REDIS_ADMIN_PASSWORD", Purpose: "superuser"}, {Name: "REDIS_APP_PASSWORD", Purpose: "application"}, {Name: "REDIS_REPLICATION_PASSWORD", Purpose: "replication"}},
+	}
+	command.Input.Secrets = []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "application"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "replication"}}
+	config.Redis.Credentials = command.Input.Secrets
 	command.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: config}
 	if _, err := CommandHash(command); err != nil {
 		t.Fatal(err)

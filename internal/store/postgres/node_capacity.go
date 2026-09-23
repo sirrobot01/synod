@@ -227,3 +227,23 @@ func currentSession(ctx context.Context, tx pgx.Tx, installationID, nodeID, sess
 	}
 	return boot, generation, nil
 }
+
+// ReadNodePlacementPolicy answers the policy an operator approved for one node.
+func (s *Store) ReadNodePlacementPolicy(ctx context.Context, installationID, nodeID uuid.UUID) (placement.NodePolicy, error) {
+	if installationID == uuid.Nil || nodeID == uuid.Nil {
+		return placement.NodePolicy{}, &AdmissionError{Code: InvalidRequest}
+	}
+	var encoded []byte
+	if err := s.pool.QueryRow(ctx, `SELECT policy_bytes FROM node_placement_policies
+ WHERE installation_id=$1 AND node_id=$2`, installationID, nodeID).Scan(&encoded); err != nil {
+		return placement.NodePolicy{}, admissionError(err)
+	}
+	var policy placement.NodePolicy
+	if err := json.Unmarshal(encoded, &policy); err != nil {
+		return placement.NodePolicy{}, admissionError(err)
+	}
+	if policy.InstallationID != installationID || policy.NodeID != nodeID {
+		return placement.NodePolicy{}, &AdmissionError{Code: DependencyUnavailable}
+	}
+	return policy, nil
+}

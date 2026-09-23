@@ -8,15 +8,20 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/controlstream"
+	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/pki"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/grpc"
@@ -603,5 +608,197 @@ func TestExactCertificateAuthorization(t *testing.T) {
 	stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_Hello{Hello: f.hello}})
 	if _, err := stream.Recv(); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("same node with unregistered serial accepted: %v", err)
+	}
+}
+
+func TestRefusedMessageKeepsTheConnection(t *testing.T) {
+	for name, refusal := range map[string]error{
+		"stale owner":    operation.ErrStaleOwner,
+		"journal busy":   journal.ErrBusy,
+		"transport busy": controlstream.ErrBusy,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var hellos atomic.Int32
+			peers := make(chan controlstream.Peer, 4)
+			f := newFixture(t, func(_ context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
+				if message.GetHello() != nil {
+					hellos.Add(1)
+					select {
+					case peers <- peer:
+					default:
+					}
+				}
+				return nil
+			}, nil)
+			logs, err := os.CreateTemp(t.TempDir(), "transport-log")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { logs.Close() })
+			refused, accepted := make(chan struct{}), make(chan struct{})
+			var seen atomic.Int32
+			client, err := transport.New(transport.Config{
+				Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello,
+				Logger:           slog.New(slog.NewJSONHandler(logs, nil)),
+				HandshakeTimeout: time.Second, BackoffMin: 10 * time.Millisecond, BackoffMax: 30 * time.Millisecond,
+				Handle: func(_ context.Context, message *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
+					if message.GetCapacityRequest() == nil {
+						return nil, nil
+					}
+					if seen.Add(1) == 1 {
+						close(refused)
+						return nil, fmt.Errorf("private-refusal-token: %w", refusal)
+					}
+					close(accepted)
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() { defer close(done); _ = client.Run(ctx) }()
+			t.Cleanup(func() { cancel(); <-done })
+			var peer controlstream.Peer
+			select {
+			case peer = <-peers:
+			case <-time.After(4 * time.Second):
+				t.Fatal("no connection established")
+			}
+			challenge := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CapacityRequest{
+				CapacityRequest: &agentv1.CapacityRequest{
+					ProbeId: uuid.NewString(), ProbeRevision: 1, ExpiresUnixMs: time.Now().Add(time.Minute).UnixMilli(),
+					SessionId: peer.SessionID, BootId: peer.BootID, JournalGeneration: peer.JournalGeneration,
+				},
+			}}
+			if err := f.server.Send(peer.NodeID, peer.SessionID, challenge); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-refused:
+			case <-time.After(4 * time.Second):
+				t.Fatal("the first challenge never reached the agent")
+			}
+			if err := f.server.Send(peer.NodeID, peer.SessionID, challenge); err != nil {
+				t.Fatalf("the refusal closed the session: %v", err)
+			}
+			select {
+			case <-accepted:
+			case <-time.After(4 * time.Second):
+				t.Fatal("the connection did not survive a refused message")
+			}
+			if hellos.Load() != 1 {
+				t.Fatalf("hellos=%d, want one connection", hellos.Load())
+			}
+			logged, err := os.ReadFile(logs.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := "agent_busy"
+			if errors.Is(refusal, operation.ErrStaleOwner) {
+				code = "stale_owner"
+			}
+			if !strings.Contains(string(logged), `"reason":"`+code+`"`) || !strings.Contains(string(logged), "agent_message_refused") || !strings.Contains(string(logged), "CapacityRequest") || strings.Contains(string(logged), "private-refusal-token") {
+				t.Fatalf("refusal log lacks context or exposes private text: %s", logged)
+			}
+		})
+	}
+}
+
+func TestFatalMessageHandlingReconnectsAndRedacts(t *testing.T) {
+	for name, test := range map[string]struct {
+		session bool
+		failure error
+		reason  string
+	}{
+		"session refusal":             {session: true, failure: fmt.Errorf("private-failure-token: %w", operation.ErrStaleOwner), reason: "session_installation_failed"},
+		"recovery required with busy": {failure: errors.Join(journal.ErrRecoveryRequired, journal.ErrBusy, errors.New("private-failure-token")), reason: "recovery_required"},
+		"protocol fault with busy":    {failure: errors.Join(controlstream.ErrMessage, journal.ErrBusy, errors.New("private-failure-token")), reason: "invalid_controller_message"},
+		"private handler fault":       {failure: errors.New("private-failure-token"), reason: "handler_failed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			peers := make(chan controlstream.Peer, 4)
+			f := newFixture(t, func(_ context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
+				if message.GetHello() != nil {
+					select {
+					case peers <- peer:
+					default:
+					}
+				}
+				return nil
+			}, nil)
+			logs, err := os.CreateTemp(t.TempDir(), "transport-log")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { logs.Close() })
+			installed := make(chan string, 4)
+			var sessions atomic.Int32
+			client, err := transport.New(transport.Config{
+				Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello,
+				Logger:           slog.New(slog.NewJSONHandler(logs, nil)),
+				HandshakeTimeout: time.Second, BackoffMin: 10 * time.Millisecond, BackoffMax: 30 * time.Millisecond,
+				Handle: func(_ context.Context, message *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
+					if session := message.GetSession(); session != nil {
+						if sessions.Add(1) == 1 && test.session {
+							return nil, test.failure
+						}
+						select {
+						case installed <- session.SessionId:
+						default:
+						}
+					}
+					if message.GetCapacityRequest() != nil {
+						return nil, test.failure
+					}
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() { defer close(done); _ = client.Run(ctx) }()
+			t.Cleanup(func() { cancel(); <-done })
+			var first controlstream.Peer
+			select {
+			case first = <-peers:
+			case <-time.After(4 * time.Second):
+				t.Fatal("no connection established")
+			}
+			if !test.session {
+				select {
+				case <-installed:
+				case <-time.After(4 * time.Second):
+					t.Fatal("first session was not installed")
+				}
+				challenge := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CapacityRequest{
+					CapacityRequest: &agentv1.CapacityRequest{
+						ProbeId: uuid.NewString(), ProbeRevision: 1, ExpiresUnixMs: time.Now().Add(time.Minute).UnixMilli(),
+						SessionId: first.SessionID, BootId: first.BootID, JournalGeneration: first.JournalGeneration,
+					},
+				}}
+				if err := f.server.Send(first.NodeID, first.SessionID, challenge); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case next := <-installed:
+				if next == first.SessionID {
+					t.Fatal("fatal handling reused the refused session")
+				}
+			case <-time.After(4 * time.Second):
+				t.Fatal("fatal handling did not reconnect")
+			}
+			logged, err := os.ReadFile(logs.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(logged), `"reason":"`+test.reason+`"`) || !strings.Contains(string(logged), "agent_stream_ended") || strings.Contains(string(logged), "private-failure-token") || strings.Contains(string(logged), "agent_message_refused") {
+				t.Fatalf("fatal log misclassified the error or exposed private text: %s", logged)
+			}
+		})
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -40,7 +39,10 @@ func identityFlags(t *testing.T) []string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// The bound guards against a hang, and is not an assertion about speed:
+		// on a loaded host many suites drop their databases at once, and a teardown
+		// that is merely slow must not fail a test that passed.
+		ctx, cancel := context.WithTimeout(context.Background(), dropTimeout)
 		defer cancel()
 		if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
 			t.Error(err)

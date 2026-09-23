@@ -19,6 +19,7 @@ import (
 	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/agent/capacity"
 	"github.com/sirrobot01/synod/internal/agent/journal"
+	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/runtime/docker"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -27,6 +28,33 @@ import (
 )
 
 type requestTransport func(*http.Request) (*http.Response, error)
+
+func TestCommandDeliveryRequiresAndEchoesAttempt(t *testing.T) {
+	f := newFixture(t, nil)
+	ctx, _ := localSession(t, f.e)
+	activateLocal(t, f.e, ctx, f.epoch)
+	command := volumeCommand(t, f.epoch)
+	for _, id := range []string{"", "invalid", uuid.Nil.String(), strings.ToUpper(uuid.NewString())} {
+		_, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: id, Message: &agentv1.ControllerMessage_Command{Command: command}})
+		if !errors.Is(err, controlstream.ErrMessage) {
+			t.Fatalf("invalid delivery ID %q: %v", id, err)
+		}
+		if _, err := f.e.journal.Get(command.CommandId); !errors.Is(err, journal.ErrNotFound) {
+			t.Fatalf("invalid delivery entered the journal: %v", err)
+		}
+	}
+	for range 2 {
+		id := uuid.NewString()
+		reply, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: id, Message: &agentv1.ControllerMessage_Command{Command: command}})
+		if err != nil || reply.GetAdmissionAck().DeliveryAttemptId != id || reply.GetAdmissionAck().State != "queued" {
+			t.Fatalf("delivery changed duplicate admission: %v %v", reply, err)
+		}
+	}
+	stored, err := f.e.journal.Get(command.CommandId)
+	if err != nil || !proto.Equal(stored.Command, command) {
+		t.Fatalf("delivery metadata changed the journal command: %v", err)
+	}
+}
 
 func (f requestTransport) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
@@ -200,7 +228,7 @@ func TestSessionLossRequiresFreshActivationBeforeStart(t *testing.T) {
 	old, cancel := localSession(t, f.e)
 	activateLocal(t, f.e, old, f.epoch)
 	command = volumeCommand(t, f.epoch)
-	ack, err := f.e.Handle(old, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: command}})
+	ack, err := f.e.Handle(old, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
 	if err != nil || ack.GetAdmissionAck().State != "queued" {
 		t.Fatal(ack, err)
 	}
@@ -245,7 +273,7 @@ func TestUnknownNativeReplyRecoversAfterJournalReopen(t *testing.T) {
 	ctx, _ := localSession(t, f.e)
 	activateLocal(t, f.e, ctx, f.epoch)
 	command := volumeCommand(t, f.epoch)
-	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: command}}); err != nil {
+	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}}); err != nil {
 		t.Fatal(err)
 	}
 	f.e.execute(t.Context(), job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]})

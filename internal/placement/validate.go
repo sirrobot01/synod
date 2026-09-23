@@ -52,6 +52,12 @@ func (p NodePolicy) Validate() error {
 	if p.InstallationID == uuid.Nil || p.NodeID == uuid.Nil || p.Revision < 0 || (p.Architecture != "amd64" && p.Architecture != "arm64") || !validText(p.RuntimeVersion) || !validText(p.StorageID) || len(p.Engines) == 0 || len(p.Engines) > 32 || !validLabels(p.Labels) || !validLabels(p.FailureDomains) || !p.Headroom.Valid() || p.Headroom.CPUMillis == 0 || p.Headroom.MemoryBytes == 0 || p.Headroom.DiskBytes == 0 {
 		return ErrInvalid
 	}
+	if p.ClientAddress != "" {
+		address, err := netip.ParseAddr(p.ClientAddress)
+		if err != nil || !address.IsGlobalUnicast() || address.IsLoopback() || address.Zone() != "" || address.Unmap().String() != p.ClientAddress {
+			return ErrInvalid
+		}
+	}
 	seen := make(map[EngineVersion]bool)
 	for _, engine := range p.Engines {
 		if (engine.Engine != "postgres" && engine.Engine != "redis") || !validText(engine.Version) || seen[engine] {
@@ -95,8 +101,18 @@ func (r CapacityReport) Validate() error {
 
 // Validate checks the address, number, and transport of the port.
 func (p Port) Validate() error {
+	// A number of zero is a request for one from the installation's range, not a
+	// binding. Request.Validate accepts it; a committed binding never carries it.
+	if p.Number == 0 {
+		return ErrInvalid
+	}
+	return p.binding()
+}
+
+// binding checks everything about a port except its number.
+func (p Port) binding() error {
 	address, err := netip.ParseAddr(p.Address)
-	if err != nil || address.Zone() != "" || address.IsMulticast() || address.Unmap().String() != p.Address || p.Number == 0 || (p.Transport != "tcp" && p.Transport != "udp") {
+	if err != nil || address.Zone() != "" || address.IsMulticast() || address.Unmap().String() != p.Address || (p.Transport != "tcp" && p.Transport != "udp") {
 		return ErrInvalid
 	}
 	return nil
@@ -125,6 +141,9 @@ func (r Request) Validate() error {
 	if r.Version != 1 || r.InstallationID == uuid.Nil || r.ClusterID == uuid.Nil || r.OperationID == uuid.Nil || r.DesiredRevision < 1 || (r.Profile != "compact" && r.Profile != "ha") || len(r.Resources) == 0 || len(r.Resources) > MaxResources || len(r.Groups) > 64 || (r.Profile == "ha" && len(r.Groups) == 0) {
 		return ErrInvalid
 	}
+	if r.PortRange != (PortRange{}) && (r.PortRange.First == 0 || r.PortRange.First > r.PortRange.Last) {
+		return ErrInvalid
+	}
 	resources, reservations, owned := make(map[uuid.UUID]bool), make(map[uuid.UUID]bool), make(map[uuid.UUID]bool)
 	for _, resource := range r.Resources {
 		if resource.ID == uuid.Nil || resource.ReservationID == uuid.Nil || resources[resource.ID] || reservations[resource.ReservationID] || len(resource.OwnedResourceIDs) == 0 || len(resource.OwnedResourceIDs) > 32 || !slices.Contains(resource.OwnedResourceIDs, resource.ID) || len(resource.Ports) > 32 || !validLabels(resource.Labels) || (resource.Kind != "instance" && resource.Kind != "service" && resource.Kind != "backup") || (resource.Engine != "postgres" && resource.Engine != "redis") || !validText(resource.Version) || (resource.Architecture != "arm64" && resource.Architecture != "amd64") || !validText(resource.RuntimeVersion) || !validText(resource.StorageID) {
@@ -133,6 +152,11 @@ func (r Request) Validate() error {
 		resources[resource.ID], reservations[resource.ReservationID] = true, true
 		total, err := resource.Budgets.Total()
 		if err != nil || total == (Vector{}) {
+			return ErrInvalid
+		}
+		// An instance is a member of the cluster, so it names which member it is.
+		// Nothing else is a member, so nothing else carries a role.
+		if (resource.Kind == "instance") != (resource.Role == "primary" || resource.Role == "replica") {
 			return ErrInvalid
 		}
 		if resource.Kind == "instance" && (resource.Budgets.Workload.CPUMillis == 0 || resource.Budgets.Workload.MemoryBytes == 0 || resource.Budgets.Workload.DiskBytes == 0) {
@@ -145,11 +169,17 @@ func (r Request) Validate() error {
 			owned[id] = true
 		}
 		for i, port := range resource.Ports {
-			if port.Validate() != nil {
+			if port.binding() != nil {
+				return ErrInvalid
+			}
+			// A request for a chosen port needs a range to choose from.
+			if port.Number == 0 && r.PortRange.First == 0 {
 				return ErrInvalid
 			}
 			for _, previous := range resource.Ports[:i] {
-				if PortsConflict(port, previous) {
+				// Two chosen ports never collide, because placement gives them
+				// different numbers.
+				if port.Number != 0 && PortsConflict(port, previous) {
 					return ErrInvalid
 				}
 			}

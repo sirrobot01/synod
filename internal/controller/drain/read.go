@@ -17,9 +17,7 @@ import (
 var ErrNodeUnknown = errors.New("node_unknown")
 
 // Store is the durable boundary this package reads. *postgres.Store satisfies it.
-//
-// Every call is a read. Nothing here can change what the node holds, which is the
-// point: a drain report is evidence for an operator's decision, not the decision.
+// Every call is a read: a drain report is evidence for a decision, not the decision.
 type Store interface {
 	ReadPlacementSnapshot(ctx context.Context, installationID uuid.UUID) (placement.Snapshot, error)
 	ReadPlacementHolds(ctx context.Context, installationID uuid.UUID) ([]postgres.Hold, error)
@@ -27,11 +25,9 @@ type Store interface {
 	GetCluster(ctx context.Context, installationID, clusterID uuid.UUID) (cluster.Cluster, error)
 }
 
-// Read gathers what one node holds, so Decide can answer what it needs.
-//
-// Reservations and storage are read separately on purpose. A node can hold retained
-// storage for a cluster that has no reservation left on it, and that storage is
-// exactly what stops the node being declared free.
+// Read gathers what one node holds. Reservations and storage are read separately: a
+// node can hold retained storage for a cluster with no reservation left on it, and
+// that storage is what stops the node being declared free.
 func Read(ctx context.Context, store Store, installationID, nodeID uuid.UUID) (State, error) {
 	if store == nil || installationID == uuid.Nil || nodeID == uuid.Nil {
 		return State{}, ErrNodeUnknown
@@ -89,15 +85,14 @@ func Read(ctx context.Context, store Store, installationID, nodeID uuid.UUID) (S
 			return State{}, err
 		}
 		workload.Spec, workload.DesiredLifecycle = found.Spec, found.DesiredLifecycle
-		slices.SortFunc(workload.Resources, func(a, b uuid.UUID) int { return compare(a, b) })
-		slices.SortFunc(workload.Volumes, func(a, b Volume) int { return compare(a.ResourceID, b.ResourceID) })
+		slices.SortFunc(workload.Resources, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
+		slices.SortFunc(workload.Volumes, func(a, b Volume) int { return bytes.Compare(a.ResourceID[:], b.ResourceID[:]) })
 		state.Workloads = append(state.Workloads, *workload)
 	}
 	return state, nil
 }
 
-// unfinished reports an operation that has not stopped. Acting on a cluster while one
-// is running races it.
+// unfinished reports an operation that has not stopped.
 func unfinished(status operation.Status) bool {
 	switch status {
 	case operation.Pending, operation.Running, operation.Waiting, operation.Cancelling:
@@ -105,5 +100,3 @@ func unfinished(status operation.Status) bool {
 	}
 	return false
 }
-
-func compare(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) }

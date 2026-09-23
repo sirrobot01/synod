@@ -35,7 +35,27 @@
   });
 
   function key(event: KeyboardEvent) {
-    if (event.key === "Escape") onClose();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab" || !panel) return;
+    const controls = Array.from(panel.querySelectorAll<HTMLElement>(
+      'a[href], button, input, select, textarea, [tabindex]',
+    )).filter((control) => control.tabIndex >= 0 && !control.matches(":disabled, [hidden]"));
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (!first || !last) {
+      event.preventDefault();
+      panel.focus();
+    } else if (event.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement as HTMLElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement as HTMLElement))) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 </script>
 

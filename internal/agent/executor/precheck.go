@@ -31,14 +31,25 @@ func (e *Executor) precheck(command *agentv1.Command) error {
 	}
 	switch payload := command.Input.Payload.(type) {
 	case *agentv1.CommandInput_EnsureVolume:
-		// A new volume consumes the pool, so the pool must still have room.
-		return e.checkSpace(0)
+		return e.checkSpace(0, 0)
+	case *agentv1.CommandInput_ClonePostgresReplica:
+		return e.checkSpace(0, payload.ClonePostgresReplica.GetRequiredFreeBytes())
+	case *agentv1.CommandInput_StartPatroniMember:
+		p := payload.StartPatroniMember
+		if p == nil || p.Container == nil || p.Container.Postgres == nil || p.Container.Postgres.Patroni == nil {
+			return fmt.Errorf("Patroni start configuration is absent")
+		}
+		var required int64
+		if p.AllowInitialization {
+			required = p.Container.Postgres.Patroni.RequiredFreeBytes
+		}
+		return e.checkSpace(p.Container.MemoryBytes, required)
 	case *agentv1.CommandInput_EnsureContainer:
 		container := payload.EnsureContainer
 		if container == nil {
 			return nil
 		}
-		if err := e.checkSpace(container.MemoryBytes); err != nil {
+		if err := e.checkSpace(container.MemoryBytes, 0); err != nil {
 			return err
 		}
 		return checkPorts(container.Ports)
@@ -51,10 +62,12 @@ func (e *Executor) precheck(command *agentv1.Command) error {
 
 // checkSpace refuses work the host can no longer hold.
 //
-// The floor is operator-declared. With none declared the pool is only refused when it
-// has no free space at all, because inventing a headroom figure here would reject work
-// an operator never asked to reject.
-func (e *Executor) checkSpace(memoryBytes int64) error {
+// Keep the declared disk request above the operator's floor. This measurement is
+// a precondition for new work. It does not reserve space against external writes.
+func (e *Executor) checkSpace(memoryBytes, requiredFreeBytes int64) error {
+	if e.options.MinFreeBytes < 0 || requiredFreeBytes < 0 {
+		return fmt.Errorf("%w: disk request and storage floor must not be negative", capacity.ErrCapacityUnavailable)
+	}
 	if e.options.Host.StoragePath == "" {
 		// An agent with no declared pool cannot measure one. It reports that rather
 		// than passing work through an unchecked path.
@@ -62,11 +75,15 @@ func (e *Executor) checkSpace(memoryBytes int64) error {
 	}
 	space, err := e.options.Host.Free()
 	if err != nil {
-		return fmt.Errorf("%w: the host could not be measured", capacity.ErrCapacityUnavailable)
+		return fmt.Errorf("%w: the host could not be measured at %s: %w", capacity.ErrCapacityUnavailable, e.options.Host.StoragePath, err)
 	}
 	if space.DiskBytes <= e.options.MinFreeBytes {
 		return fmt.Errorf("%w: the storage pool has %d bytes free and the floor is %d",
 			capacity.ErrCapacityUnavailable, space.DiskBytes, e.options.MinFreeBytes)
+	}
+	if requiredFreeBytes > space.DiskBytes-e.options.MinFreeBytes {
+		return fmt.Errorf("%w: the command needs %d disk bytes above the floor and %d are available",
+			capacity.ErrCapacityUnavailable, requiredFreeBytes, space.DiskBytes-e.options.MinFreeBytes)
 	}
 	// An unmeasurable memory figure is not a refusal. The pool floor above is the
 	// check that always applies; this one applies when the host can answer it.

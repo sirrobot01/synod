@@ -78,7 +78,7 @@ func (s *Server) registerEnrollmentToken(w http.ResponseWriter, r *http.Request)
 	}
 	w.WriteHeader(http.StatusCreated)
 	if err := json.NewEncoder(w).Encode(result); err != nil {
-		s.logger.Warn("write enrollment token response failed", "request_id", identity.requestID)
+		s.logger.Warn("write enrollment token response failed", "request_id", identity.requestID, "error", err)
 	}
 }
 
@@ -112,7 +112,7 @@ func (s *Server) enrollAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusCreated)
 	if err := json.NewEncoder(w).Encode(result); err != nil {
-		s.logger.Warn("write enrollment response failed", "request_id", r.Context().Value(identityKey{}).(requestIdentity).requestID)
+		s.logger.Warn("write enrollment response failed", "request_id", r.Context().Value(identityKey{}).(requestIdentity).requestID, "error", err)
 	}
 }
 

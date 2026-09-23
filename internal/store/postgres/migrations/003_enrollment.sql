@@ -47,17 +47,7 @@ CREATE TABLE enrollment_tokens (
     CHECK (num_nonnulls(consumed_at,enrollment_request_id,csr_hash,certificate_id) IN (0,4))
 );
 
-ALTER TABLE audit_events ALTER COLUMN cluster_id DROP NOT NULL;
-ALTER TABLE audit_events ALTER COLUMN operation_id DROP NOT NULL;
-ALTER TABLE audit_events ADD COLUMN node_id uuid;
-ALTER TABLE audit_events ADD COLUMN node_certificate_id uuid;
-ALTER TABLE audit_events ADD COLUMN enrollment_token_id uuid;
+-- These references require the enrollment tables created by this migration.
 ALTER TABLE audit_events ADD FOREIGN KEY (installation_id,node_id) REFERENCES nodes (installation_id,id);
 ALTER TABLE audit_events ADD FOREIGN KEY (installation_id,node_id,node_certificate_id) REFERENCES node_certificates (installation_id,node_id,id);
 ALTER TABLE audit_events ADD FOREIGN KEY (installation_id,enrollment_token_id) REFERENCES enrollment_tokens (installation_id,id);
-ALTER TABLE audit_events ADD CHECK (num_nonnulls(cluster_id,node_id,enrollment_token_id)=1);
-ALTER TABLE audit_events ADD CHECK ((cluster_id IS NULL)=(operation_id IS NULL));
-ALTER TABLE audit_events DROP CONSTRAINT audit_events_action_check;
-ALTER TABLE audit_events ADD CHECK (action IN ('cluster.create.accepted','enrollment.token.registered','node.enrolled','node.certificate.revoked'));
-ALTER TABLE audit_events ADD CHECK (node_certificate_id IS NULL OR node_id IS NOT NULL);
-ALTER TABLE audit_events ADD CHECK ((action IN ('node.enrolled','node.certificate.revoked'))=(node_certificate_id IS NOT NULL));

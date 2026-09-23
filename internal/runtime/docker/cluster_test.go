@@ -19,8 +19,8 @@ import (
 func TestClusterInventoryRetainsNativeEvidence(t *testing.T) {
 	r, api, clusterID := runtimeFixture(t)
 	ensure := createFixtureContainer(t, r, clusterID, agentv1.NetworkMode_NETWORK_MODE_BRIDGE)
-	start := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: ensure.Input.ResourceId, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}})
-	if _, err := r.Execute(t.Context(), start); err != nil {
+	start := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: ensure.Input.ResourceId, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{AllowInitialization: true}}})
+	if _, err := r.Execute(t.Context(), start, nil); err != nil {
 		t.Fatal(err)
 	}
 	native, err := api.ExecCreate(t.Context(), "synod-instance-"+ensure.Input.ResourceId, client.ExecCreateOptions{Cmd: []string{"sleep", "1"}})

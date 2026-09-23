@@ -1,20 +1,16 @@
 <script lang="ts">
-  import { api, detail, type Cluster } from "../lib/api";
+  import { api, detail, Failure, type Cluster, type ClusterMember } from "../lib/api";
   import { age, ageSeconds, errorView, type APIError } from "../lib/state";
   import {
     conditionsFor,
-    conflictChanged,
-    deletePlan,
-    endpoints,
     gaps,
-    instances,
     logicals,
-    refreshedDeletePlan,
     upgradePlan,
     attention as attentionMark,
-    bad as badMark,
   } from "../lib/mock";
   import { follow, path } from "../lib/router.svelte";
+  import ClusterActions from "../lib/ClusterActions.svelte";
+  import ClusterConnection from "../lib/ClusterConnection.svelte";
   import Conditions from "../lib/ui/Conditions.svelte";
   import Dialog from "../lib/ui/Dialog.svelte";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
@@ -23,34 +19,52 @@
   import Pair from "../lib/ui/Pair.svelte";
   import Panel from "../lib/ui/Panel.svelte";
 
-  let { id, onOpenTopology }: { id: string; onOpenTopology: (id: string) => void } = $props();
+  let { id, actorID, onOpenTopology, onOpenOperation }: { id: string; actorID: string; onOpenTopology: (id: string) => void; onOpenOperation: (id: string) => void } = $props();
 
   let cluster = $state<Cluster | null>(null);
   let failure = $state<APIError | null>(null);
   let readAt = $state<Date | null>(null);
   let reading = $state(false);
+  let members = $state<ClusterMember[] | null>(null);
+  let memberFailure = $state<APIError | null>(null);
   const now = new Date();
+  let readGeneration = 0;
 
-  // The destructive flow. The API serves no plan route, so confirming here never
-  // sends a request; it demonstrates the refresh that a revision conflict forces.
-  let plan = $state<"delete" | "upgrade" | null>(null);
-  let conflicted = $state(false);
+  // Upgrade remains a labelled preview until its public API is available.
+  let plan = $state<"upgrade" | null>(null);
   let typed = $state("");
 
   async function read() {
     const wanted = id;
+    const generation = ++readGeneration;
     reading = true;
+    members = null;
+    memberFailure = null;
+    void readMembers(wanted, generation);
     try {
       const answer = await api.cluster(wanted);
-      if (wanted !== id) return;
+      if (wanted !== id || generation !== readGeneration) return;
+      if (answer.id !== wanted) throw new Failure(200, { code: "invalid_response", message: "The API returned a different cluster.", requestID: "" });
       cluster = answer;
       failure = null;
       readAt = new Date();
     } catch (error) {
-      // A failed read proves nothing about the database, so the last answer stays.
-      if (wanted === id) failure = detail(error);
+      // Keep the last answer on a transient failure. A missing resource clears it.
+      if (wanted === id && generation === readGeneration) {
+        failure = detail(error);
+        if (error instanceof Failure && error.status === 404) cluster = null;
+      }
     } finally {
-      if (wanted === id) reading = false;
+      if (wanted === id && generation === readGeneration) reading = false;
+    }
+  }
+
+  async function readMembers(target: string, generation: number) {
+    try {
+      const answer = await api.clusterMembers(target);
+      if (target === id && generation === readGeneration) members = answer;
+    } catch (error) {
+      if (target === id && generation === readGeneration) memberFailure = detail(error);
     }
   }
 
@@ -58,7 +72,8 @@
     cluster = null;
     failure = null;
     readAt = null;
-    read();
+    void read();
+    return () => { readGeneration++; };
   });
 
   // Desired state against observed state. The API carries no observation time, so
@@ -75,13 +90,11 @@
         },
   );
 
-  let shown = $derived(plan === "delete" ? (conflicted ? refreshedDeletePlan : deletePlan) : upgradePlan);
+  const shown = upgradePlan;
   let named = $derived(cluster?.spec.name ?? id);
-  let confirmable = $derived(typed.trim() === named);
 
   function close() {
     plan = null;
-    conflicted = false;
     typed = "";
   }
 </script>
@@ -105,9 +118,10 @@
       </a>
       <button type="button" onclick={read} disabled={reading}>{reading ? "Reading" : "Read again"}</button>
       <button type="button" class="quiet" onclick={() => (plan = "upgrade")}>Upgrade…</button>
-      <button type="button" class="quiet" onclick={() => (plan = "delete")}>Delete…</button>
     </div>
   </header>
+
+  <ClusterActions {id} {actorID} {cluster} {members} {onOpenOperation} onRefresh={read} />
 
   {#if failure}
     <ErrorPanel view={errorView(failure)} />
@@ -134,54 +148,32 @@
   </Panel>
 
   <div class="columns">
-    <Panel title={`Instances · ${instances.length}`}>
-      <div class="mock-strip"><Mocked gap={gaps.instances} /></div>
-      {#each instances as instance (instance.name)}
-        <div class="instance" class:hatched={instance.stale}>
-          <div class="instance-head">
-            <Mark mark={instance.mark} text={false} />
-            <span class="mono name">{instance.name}</span>
-            <span class="badge mono" style="border-color: var(--{instance.roleTone}); color: var(--{instance.roleTone})">
-              {instance.role}
-            </span>
-            <span class="mono node">{instance.node}</span>
+    <Panel title={`Stored members${members ? ` · ${members.length}` : ""}`} note="Declared roles and stored membership state">
+      {#if memberFailure}
+        <ErrorPanel view={errorView(memberFailure)} />
+      {:else if members === null}
+        <p class="member-note">Reading stored members.</p>
+      {:else if members.length === 0}
+        <p class="member-note">No stored members. This does not prove that no native process exists.</p>
+      {:else}
+        {#each members as member (member.id)}
+          <div class="instance">
+            <dl class="facts mono">
+              <dt>member_id</dt><dd>{member.id}</dd>
+              <dt>declared_role</dt><dd>{member.role}</dd>
+              <dt>stored_state</dt><dd>{member.state}</dd>
+            </dl>
           </div>
-          <dl class="facts mono">
-            <dt>observed_role</dt><dd>{instance.observedRole}</dd>
-            <dt>volume</dt><dd>{instance.volume}</dd>
-            <dt>image</dt><dd>{instance.image}</dd>
-            <dt>ports</dt><dd>{instance.ports}</dd>
-            <dt>cpu / mem</dt><dd>{instance.usage}</dd>
-          </dl>
-        </div>
-      {/each}
+        {/each}
+      {/if}
       {#snippet foot()}
-        Roles are the engine's own — Synod reports what Patroni says, it does not elect. Routers,
-        poolers, and Sentinels are service components and are listed separately.
+        These records contain no native observation time. Current role, replication link, and resource use are unavailable.
+        Active means a checked operation proved membership earlier. Residual means a failed operation left this member recorded.
       {/snippet}
     </Panel>
 
     <div class="stack">
-      <Panel title="Endpoints">
-        <div class="mock-strip"><Mocked gap={gaps.instances} /></div>
-        {#each endpoints as endpoint (endpoint.purpose)}
-          <div class="endpoint">
-            <div class="endpoint-head">
-              <Mark mark={endpoint.mark} text={false} />
-              <span class="mono purpose">{endpoint.purpose}</span>
-              <span class="chip mono">{endpoint.mode}</span>
-            </div>
-            <p class="mono address">{endpoint.address}</p>
-            <p class="mono profile">{endpoint.profile}</p>
-          </div>
-        {/each}
-        {#snippet foot()}
-          Client mode is stated because it changes application behaviour:
-          <span class="mono">single-host</span>, <span class="mono">sentinel-aware</span>, and
-          <span class="mono">cluster-aware</span> clients are not interchangeable. Credentials never
-          appear here.
-        {/snippet}
-      </Panel>
+      <ClusterConnection {id} />
 
       <Panel title="Logical databases &amp; roles">
         <div class="mock-strip"><Mocked gap={gaps.instances} /></div>
@@ -211,22 +203,6 @@
     onClose={close}
   >
     <div class="mock-strip"><Mocked gap={gaps.plans} /></div>
-
-    {#if conflicted}
-      <!-- The previous plan token was rejected, not silently approved. -->
-      <div class="conflict hatched">
-        <div class="conflict-head">
-          <Mark mark={badMark("conflict")} text={false} />
-          <span class="mono">revision_conflict · HTTP 412 · plan refreshed</span>
-        </div>
-        <p class="conflict-body">
-          The cluster changed while this dialog was open, and the effects of this plan changed with
-          it. The previous plan token was rejected, not silently approved. Read the refreshed plan
-          and confirm again.
-        </p>
-        <p class="mono conflict-changed">{conflictChanged}</p>
-      </div>
-    {/if}
 
     <section class="block">
       <span class="label">Exact target</span>
@@ -273,21 +249,21 @@
       <button
         type="button"
         class="destructive"
-        disabled={!confirmable}
-        onclick={() => (conflicted = !conflicted)}
+        disabled
+        title="Upgrade is not available yet"
       >
-        {shown.confirmLabel}
+        Upgrade unavailable
       </button>
       <button type="button" onclick={close}>Cancel</button>
       <span class="note">
-        Confirming returns 202 and an operation ID. It does not mean the action finished. The API
-        serves no plan route yet, so this button refreshes the plan rather than sending one.
+        This is an example upgrade plan. Upgrade is not available yet. This preview does not submit work.
       </span>
     </div>
   </Dialog>
 {/if}
 
 <style>
+  .member-note { padding: 12px 14px; font-size: 12px; color: var(--ink-body); }
   .screen {
     display: flex;
     flex-direction: column;
@@ -342,34 +318,9 @@
     gap: 20px;
   }
 
-  .instance,
-  .endpoint {
+  .instance {
     padding: 13px 16px;
     border-top: 1px solid var(--line);
-  }
-  .instance-head,
-  .endpoint-head {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    flex-wrap: wrap;
-  }
-  .name,
-  .purpose {
-    font-size: 12px;
-    font-weight: 500;
-  }
-  .badge {
-    font-size: 10px;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    border: 1px solid;
-    padding: 2px 7px;
-  }
-  .node {
-    margin-left: auto;
-    font-size: 11px;
-    color: var(--ink-dim);
   }
   .facts {
     display: grid;
@@ -386,24 +337,6 @@
     margin: 0;
     color: var(--ink-body);
   }
-  .address {
-    margin: 6px 0 0;
-    font-size: 11px;
-    color: var(--ink-body);
-    word-break: break-all;
-  }
-  .profile {
-    margin: 4px 0 0;
-    font-size: 10px;
-    color: var(--ink-dim);
-    line-height: 1.5;
-  }
-  .chip {
-    font-size: 10px;
-    border: 1px solid var(--line-strong);
-    color: var(--ink-muted);
-    padding: 2px 6px;
-  }
   .kind {
     width: 68px;
     flex-shrink: 0;
@@ -418,32 +351,6 @@
   .meta {
     font-size: 11px;
     color: var(--ink-dim);
-  }
-
-  .conflict {
-    border: 1px solid var(--fail);
-    padding: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 9px;
-  }
-  .conflict-head {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    font-size: 11px;
-    color: var(--fail);
-  }
-  .conflict-body {
-    margin: 0;
-    font-size: 12px;
-    color: var(--ink);
-    line-height: 1.55;
-  }
-  .conflict-changed {
-    margin: 0;
-    font-size: 10px;
-    color: var(--ink-muted);
   }
 
   .block {

@@ -53,7 +53,16 @@ func (s *Store) RecordVolumeIdentity(ctx context.Context, identity VolumeIdentit
 	if err := identity.validate(); err != nil {
 		return err
 	}
-	tag, err := s.pool.Exec(ctx, `INSERT INTO volume_identities
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return admissionError(err)
+	}
+	defer tx.Rollback(ctx)
+	// Retained identities can outlive their cluster. Lock it when it exists.
+	if _, err := tx.Exec(ctx, `SELECT id FROM clusters WHERE installation_id=$1 AND id=$2 FOR SHARE`, identity.InstallationID, identity.ClusterID); err != nil {
+		return admissionError(err)
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO volume_identities
  (installation_id,node_id,cluster_id,resource_id,engine,engine_version,data_path,capacity_request_bytes,retention)
  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
  ON CONFLICT (installation_id,resource_id) DO NOTHING`,
@@ -62,6 +71,9 @@ func (s *Store) RecordVolumeIdentity(ctx context.Context, identity VolumeIdentit
 		identity.CapacityRequestBytes, string(identity.Retention))
 	if err != nil {
 		return admissionError(err)
+	}
+	if err := s.commitMetadata(ctx, tx); err != nil {
+		return err
 	}
 	if tag.RowsAffected() == 1 {
 		return nil
@@ -144,7 +156,15 @@ func (s *Store) SetVolumeRetention(ctx context.Context, installationID, resource
 	if installationID == uuid.Nil || resourceID == uuid.Nil || !retention.valid() {
 		return &AdmissionError{Code: InvalidRequest}
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE volume_identities SET retention=$1,updated_at=clock_timestamp()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return admissionError(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT c.id FROM clusters c JOIN volume_identities v ON c.installation_id=v.installation_id AND c.id=v.cluster_id WHERE v.installation_id=$1 AND v.resource_id=$2 FOR SHARE OF c`, installationID, resourceID); err != nil {
+		return admissionError(err)
+	}
+	tag, err := tx.Exec(ctx, `UPDATE volume_identities SET retention=$1,updated_at=clock_timestamp()
  WHERE installation_id=$2 AND resource_id=$3`, string(retention), installationID, resourceID)
 	if err != nil {
 		return admissionError(err)
@@ -152,7 +172,7 @@ func (s *Store) SetVolumeRetention(ctx context.Context, installationID, resource
 	if tag.RowsAffected() != 1 {
 		return &AdmissionError{Code: NotFound}
 	}
-	return nil
+	return s.commitMetadata(ctx, tx)
 }
 
 // maxVolumeIdentities bounds one node read.

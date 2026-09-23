@@ -13,6 +13,7 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/controlstream"
+	"github.com/sirrobot01/synod/internal/engine"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
@@ -38,6 +39,10 @@ type Options struct {
 	// floor, so the pool is only refused when it has no free space at all:
 	// inventing a headroom figure here would reject work nobody asked to reject.
 	MinFreeBytes int64
+	// Probers check a live engine through the endpoint it publishes, by engine name.
+	// An engine with no prober cannot be told about, which is an unavailable probe
+	// rather than a failure.
+	Probers map[string]engine.Prober
 }
 
 type epochGate struct {
@@ -64,6 +69,9 @@ type session struct {
 	// probe is the capacity challenge this session is answering. A replaced
 	// challenge must never be answered, so the answer checks it again.
 	probe string
+	// secrets are the resolved credentials this session was sent, by purpose. They
+	// are held here and nowhere else, so they end when the session does.
+	secrets map[string]sessionSecret
 }
 
 type job struct {
@@ -90,6 +98,7 @@ type Executor struct {
 	inspectionBusy bool
 	capacityBusy   bool
 	failure        error
+	nextCompaction time.Time
 }
 
 // New builds an executor on a journal and a runtime and applies default options.
@@ -181,6 +190,17 @@ func (e *Executor) schedule(ctx context.Context, stream *transport.Client) error
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	now := time.Now()
+	if !now.Before(e.nextCompaction) {
+		count, err := e.journal.Compact(now)
+		if err != nil {
+			return err
+		}
+		e.nextCompaction = now.Add(time.Minute)
+		if count == 256 {
+			e.nextCompaction = now
+		}
 	}
 	current := e.session
 	if current != nil && current.ctx.Err() == nil {

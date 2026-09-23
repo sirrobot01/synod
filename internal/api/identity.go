@@ -187,6 +187,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	secret, err := auth.NewSessionSecret()
 	if err != nil {
+		s.logger.Error("session secret unavailable", "user_id", user.ID, "error", err)
 		s.writeError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "The session could not be created.", uuid.Nil)
 		return
 	}
@@ -325,6 +326,7 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 	}
 	minted, err := auth.NewAPIToken()
 	if err != nil {
+		s.logger.Error("API token secret unavailable", "actor_id", identity.actorID, "error", err)
 		s.writeError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "The token could not be created.", uuid.Nil)
 		return
 	}
@@ -404,6 +406,6 @@ func validUsername(value string) bool {
 
 func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, value any) {
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		s.logger.Warn("write response failed", "request_id", r.Context().Value(identityKey{}).(requestIdentity).requestID)
+		s.logger.Warn("write response failed", "request_id", r.Context().Value(identityKey{}).(requestIdentity).requestID, "error", err)
 	}
 }

@@ -5,13 +5,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -42,34 +45,47 @@ type Config struct {
 	// work that would take it to or below this is refused. Zero declares no floor,
 	// so the pool is only refused when it has no free space at all.
 	MinFreeBytes int64 `json:"min_free_bytes"`
+	// Zero selects the journal component default for each limit.
+	JournalMaxRetainedBytes      int64 `json:"journal_max_retained_bytes,omitzero"`
+	JournalMaxStoredBytes        int64 `json:"journal_max_stored_bytes,omitzero"`
+	JournalRecoveryWindowSeconds int64 `json:"journal_recovery_window_seconds,omitzero"`
 }
 
 // Load accepts one bounded, private JSON file. It does not create local state.
 func Load(path string) (Config, error) {
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return Config{}, ErrConfiguration
+		return Config{}, fmt.Errorf("%w: open %s: %w", ErrConfiguration, path, err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) || info.Size() > 64<<10 {
-		return Config{}, ErrConfiguration
+	if err != nil {
+		return Config{}, fmt.Errorf("%w: stat %s: %w", ErrConfiguration, path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) || info.Size() > 64<<10 {
+		return Config{}, fmt.Errorf("%w: %s must be a regular file of at most 64 KiB, owned by this user, with no group or other permission", ErrConfiguration, path)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, (64<<10)+1))
-	if err != nil || len(data) > 64<<10 {
-		return Config{}, ErrConfiguration
+	if err != nil {
+		return Config{}, fmt.Errorf("%w: read %s: %w", ErrConfiguration, path, err)
+	}
+	if len(data) > 64<<10 {
+		return Config{}, fmt.Errorf("%w: %s exceeds 64 KiB", ErrConfiguration, path)
 	}
 	var config Config
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&config) != nil || decoder.Decode(new(any)) != io.EOF {
-		return Config{}, ErrConfiguration
+	if err := decoder.Decode(&config); err != nil {
+		return Config{}, fmt.Errorf("%w: decode %s: %w", ErrConfiguration, path, err)
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return Config{}, fmt.Errorf("%w: %s carries content after the configuration document", ErrConfiguration, path)
 	}
 	if config.DockerSocket == "" {
 		config.DockerSocket = "/var/run/docker.sock"
 	}
-	if config.validate() != nil {
-		return Config{}, ErrConfiguration
+	if err := config.validate(); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return config, nil
 }
@@ -88,28 +104,39 @@ func (c Config) pool() string {
 }
 
 func (c Config) validate() error {
-	for _, id := range []string{c.InstallationID, c.NodeID, c.RecoveryGeneration} {
-		parsed, err := uuid.Parse(id)
-		if err != nil || parsed == uuid.Nil || parsed.String() != id {
-			return ErrConfiguration
+	if c.JournalMaxRetainedBytes < 0 || c.JournalMaxStoredBytes < 0 || c.JournalRecoveryWindowSeconds < 0 || c.JournalRecoveryWindowSeconds > math.MaxInt64/int64(time.Second) {
+		return fmt.Errorf("%w: journal budgets and recovery window must be nonnegative and within range", ErrConfiguration)
+	}
+	for _, field := range []struct{ name, value string }{
+		{"installation_id", c.InstallationID}, {"node_id", c.NodeID}, {"recovery_generation", c.RecoveryGeneration},
+	} {
+		parsed, err := uuid.Parse(field.value)
+		if err != nil {
+			return fmt.Errorf("%w: parse %s: %w", ErrConfiguration, field.name, err)
+		}
+		if parsed == uuid.Nil || parsed.String() != field.value {
+			return fmt.Errorf("%w: %s is not a canonical non-nil UUID", ErrConfiguration, field.name)
 		}
 	}
 	for _, path := range []string{c.EnrollmentDir, c.JournalDir, c.DockerSocket} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-			return ErrConfiguration
+			return fmt.Errorf("%w: %q is not a clean absolute path", ErrConfiguration, path)
 		}
 	}
 	if c.EnrollmentDir == c.JournalDir || strings.HasPrefix(c.EnrollmentDir, c.JournalDir+string(os.PathSeparator)) || strings.HasPrefix(c.JournalDir, c.EnrollmentDir+string(os.PathSeparator)) {
-		return ErrConfiguration
+		return fmt.Errorf("%w: enrollment_dir %q and journal_dir %q must not contain one another", ErrConfiguration, c.EnrollmentDir, c.JournalDir)
 	}
 	if len(c.ControllerEndpoints) < 1 || len(c.ControllerEndpoints) > 8 {
-		return ErrConfiguration
+		return fmt.Errorf("%w: controller_endpoints holds %d entries; use 1 to 8", ErrConfiguration, len(c.ControllerEndpoints))
 	}
 	for _, endpoint := range c.ControllerEndpoints {
 		host, port, err := net.SplitHostPort(endpoint)
+		if err != nil {
+			return fmt.Errorf("%w: split controller endpoint %q: %w", ErrConfiguration, endpoint, err)
+		}
 		number, numberErr := strconv.Atoi(port)
-		if err != nil || host == "" || strings.ContainsAny(host, "/\\%?#@ \t\r\n") || numberErr != nil || number < 1 || number > 65535 {
-			return ErrConfiguration
+		if host == "" || strings.ContainsAny(host, "/\\%?#@ \t\r\n") || numberErr != nil || number < 1 || number > 65535 {
+			return fmt.Errorf("%w: controller endpoint %q needs a plain host and a port of 1 to 65535", ErrConfiguration, endpoint)
 		}
 	}
 	return nil
@@ -117,8 +144,11 @@ func (c Config) validate() error {
 
 func privateDirectory(path string) error {
 	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
-		return ErrJournal
+	if err != nil {
+		return fmt.Errorf("%w: stat %s: %w", ErrJournal, path, err)
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("%w: %s must be a directory owned by this user with no group or other permission", ErrJournal, path)
 	}
 	return nil
 }

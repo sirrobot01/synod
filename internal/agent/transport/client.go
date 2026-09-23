@@ -2,9 +2,12 @@
 package transport
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/pki"
@@ -34,6 +38,9 @@ type Config struct {
 	HandshakeTimeout time.Duration
 	BackoffMin       time.Duration
 	BackoffMax       time.Duration
+	// Logger records why a connection ended. Run reconnects on its own, so a stream
+	// that fails repeatedly is otherwise invisible.
+	Logger *slog.Logger
 	// Handle returns an optional response only after required durable handling commits.
 	// Session is delivered first on each connection. Replay durable results with Send.
 	// Callbacks must honor cancellation. They must not stop database processes on disconnect.
@@ -63,7 +70,7 @@ func New(config Config) (*Client, error) {
 		return nil, errors.New("empty controller endpoint")
 	}
 	if _, err := operation.NegotiateHello(config.Hello, config.Hello.Capabilities); err != nil {
-		return nil, errors.New("invalid agent Hello")
+		return nil, fmt.Errorf("invalid agent Hello: %w", err)
 	}
 	if config.MaxMessageBytes == 0 {
 		config.MaxMessageBytes = 1 << 20
@@ -95,7 +102,7 @@ func New(config Config) (*Client, error) {
 	}
 	installation, err := uuid.Parse(config.Hello.InstallationId)
 	if err != nil {
-		return nil, errors.New("invalid installation identity")
+		return nil, fmt.Errorf("invalid installation identity %q: %w", config.Hello.InstallationId, err)
 	}
 	previous := transportTLS.VerifyConnection
 	transportTLS.VerifyConnection = func(state tls.ConnectionState) error {
@@ -111,11 +118,14 @@ func New(config Config) (*Client, error) {
 		}
 		subject, err := uuid.Parse(parts[2])
 		if err != nil {
-			return errors.New("invalid controller identity")
+			return fmt.Errorf("invalid controller identity: parse the subject in %q: %w", uri.Path, err)
 		}
 		expected, err := (pki.Identity{InstallationID: installation, Role: pki.Controller, SubjectID: subject}).URI()
-		if err != nil || uri.String() != expected.String() {
-			return errors.New("invalid controller identity")
+		if err != nil {
+			return fmt.Errorf("invalid controller identity: build the expected URI: %w", err)
+		}
+		if uri.String() != expected.String() {
+			return fmt.Errorf("invalid controller identity: the controller names %q and this agent expects %q", uri, expected)
 		}
 		if previous != nil {
 			return previous(state)
@@ -186,52 +196,83 @@ func (c *Client) Run(ctx context.Context) error {
 func (c *Client) connect(parent context.Context, endpoint string) bool {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	failure, sessionID := "client_setup_failed", ""
+	// cause is what actually went wrong at the stage named by failure. Every path
+	// out of here is a bare false, so without this the reason for a session that
+	// will not start is lost at the one place it is known.
+	var cause error
+	defer func() {
+		if parent.Err() == nil && c.config.Logger != nil {
+			c.config.Logger.Warn("agent_stream_ended", "session_id", sessionID, "reason", failure, "error", cause)
+		}
+	}()
 	deadline := time.AfterFunc(c.config.HandshakeTimeout, cancel)
 	defer deadline.Stop()
 	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(credentials.NewTLS(c.config.TLS)), grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 20 * time.Second, Timeout: 10 * time.Second}), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(c.config.MaxMessageBytes), grpc.MaxCallSendMsgSize(c.config.MaxMessageBytes)))
 	if err != nil {
+		cause = err
 		return false
 	}
 	defer conn.Close()
+	failure = "connect_failed"
 	stream, err := agentv1.NewAgentServiceClient(conn).Connect(ctx, grpc.WaitForReady(true))
 	if err != nil {
+		cause = err
 		return false
 	}
+	failure = "hello_send_failed"
 	if err := stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_Hello{Hello: c.config.Hello}}); err != nil {
+		cause = err
 		return false
 	}
+	failure = "session_receive_failed"
 	first, err := stream.Recv()
 	if err != nil {
+		cause = err
 		return false
 	}
+	failure = "controller_identity_rejected"
 	remote, ok := peer.FromContext(stream.Context())
 	if !ok {
+		cause = errors.New("the stream carries no peer")
 		return false
 	}
 	info, ok := remote.AuthInfo.(credentials.TLSInfo)
 	if !ok {
+		cause = fmt.Errorf("the peer carries %T authentication and TLS is required", remote.AuthInfo)
 		return false
 	}
 	if _, err := pki.PeerIdentity(info.State, uuid.MustParse(c.config.Hello.InstallationId), pki.Controller); err != nil {
+		cause = err
 		return false
 	}
 	expires := info.State.PeerCertificates[0].NotAfter
+	failure = "session_rejected"
 	session := first.GetSession()
 	if session == nil || session.ProtocolVersion != operation.ProtocolVersion || session.HeartbeatInterval == nil || session.HeartbeatInterval.CheckValid() != nil || session.HeartbeatInterval.AsDuration() <= 0 || session.StaleAfter == nil || session.StaleAfter.CheckValid() != nil || session.StaleAfter.AsDuration() <= session.HeartbeatInterval.AsDuration() || session.MaxMessageBytes < 1024 || session.MaxMessageBytes > uint32(c.config.MaxMessageBytes) || session.MaxQueuedCommands == 0 || session.MaxQueuedCommands > 256 {
+		cause = errors.New("the session offer is absent or outside the protocol's limits")
 		return false
 	}
 	id, err := uuid.Parse(session.SessionId)
-	if err != nil || id == uuid.Nil || id.String() != session.SessionId {
+	if err != nil {
+		cause = fmt.Errorf("parse the offered session %q: %w", session.SessionId, err)
+		return false
+	}
+	if id == uuid.Nil || id.String() != session.SessionId {
+		cause = fmt.Errorf("the offered session %q is not a canonical non-nil UUID", session.SessionId)
 		return false
 	}
 	for _, capability := range session.Capabilities {
 		if !slices.Contains(c.config.Hello.Capabilities, capability) {
+			cause = fmt.Errorf("the session requires capability %q, which this agent does not offer", capability)
 			return false
 		}
 	}
 	if !deadline.Stop() || ctx.Err() != nil {
+		cause = cmp.Or(ctx.Err(), errors.New("the handshake deadline expired"))
 		return false
 	}
+	sessionID = session.SessionId
 	active := &connection{ctx: ctx, outgoing: make(chan *agentv1.AgentMessage, min(c.config.QueueSize, int(session.MaxQueuedCommands))), maxBytes: int(session.MaxMessageBytes)}
 	c.mu.Lock()
 	c.active = active
@@ -243,7 +284,7 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 		}
 		c.mu.Unlock()
 	}()
-	done := make(chan error, 2)
+	done := make(chan string, 2)
 	// One writer owns stream.Send. Heartbeats bypass the reliable queue only when
 	// selected; queued terminal results are never dropped to make room for metrics.
 	go func() {
@@ -261,7 +302,7 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 				message = &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Heartbeat{Heartbeat: &agentv1.Heartbeat{Sequence: sequence, ObservedAt: timestamppb.Now()}}}
 			}
 			if err := stream.Send(message); err != nil {
-				done <- err
+				done <- "send_failed"
 				return
 			}
 		}
@@ -270,12 +311,37 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 		message := first
 		for {
 			if controlstream.CheckControllerMessage(message, c.config.Hello.InstallationId, c.config.Hello.NodeId) != nil {
-				done <- controlstream.ErrMessage
+				done <- "invalid_controller_message"
 				return
 			}
 			response, err := c.config.Handle(ctx, message)
+
+			// Keep ordinary admission refusals on this session. A failed session setup
+			// or a fault joined with a refusal must still close the connection.
+			refusal := ""
+			switch {
+			case errors.Is(err, operation.ErrStaleOwner):
+				refusal = "stale_owner"
+			case errors.Is(err, journal.ErrBusy), errors.Is(err, controlstream.ErrBusy):
+				refusal = "agent_busy"
+			}
+			if message.GetSession() == nil && refusal != "" && !errors.Is(err, journal.ErrRecoveryRequired) && !errors.Is(err, controlstream.ErrMessage) {
+				if c.config.Logger != nil {
+					c.config.Logger.Warn("agent_message_refused", "session_id", session.SessionId, "reason", refusal, "message", fmt.Sprintf("%T", message.Message))
+				}
+				err, response = nil, nil
+			}
 			if err != nil {
-				done <- errors.New("durable controller message handling failed")
+				reason := "handler_failed"
+				switch {
+				case errors.Is(err, journal.ErrRecoveryRequired):
+					reason = "recovery_required"
+				case errors.Is(err, controlstream.ErrMessage):
+					reason = "invalid_controller_message"
+				case message.GetSession() != nil:
+					reason = "session_installation_failed"
+				}
+				done <- reason
 				return
 			}
 			if ctx.Err() != nil {
@@ -283,17 +349,17 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 			}
 			if response != nil {
 				if err := c.send(active, response); err != nil {
-					done <- err
+					done <- "response_not_queued"
 					return
 				}
 			}
 			message, err = stream.Recv()
 			if err != nil {
-				done <- err
+				done <- "receive_failed"
 				return
 			}
 			if message.GetSession() != nil {
-				done <- controlstream.ErrMessage
+				done <- "unexpected_session"
 				return
 			}
 		}
@@ -302,8 +368,10 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 	defer expiry.Stop()
 	select {
 	case <-ctx.Done():
-	case <-done:
+		failure = "session_cancelled"
+	case failure = <-done:
 	case <-expiry.C:
+		failure = "controller_certificate_expired"
 	}
 	return true
 }

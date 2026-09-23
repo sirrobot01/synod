@@ -50,7 +50,10 @@ func testStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() {
 		pool.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// The bound guards against a hang, and is not an assertion about speed:
+		// on a loaded host many suites drop their databases at once, and a teardown
+		// that is merely slow must not fail a test that passed.
+		ctx, cancel := context.WithTimeout(context.Background(), dropTimeout)
 		defer cancel()
 		if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
 			t.Error(err)
@@ -826,4 +829,33 @@ func TestInvalidReadsAndRequest(t *testing.T) {
 	_, err = s.GetOperation(t.Context(), uuid.New(), uuid.Nil)
 	requireCode(t, err, InvalidRequest)
 	requireCounts(t, s, 0)
+}
+
+// dropTimeout bounds one test database teardown. It exists to stop a hang, not to
+// assert how fast PostgreSQL drops a database under load.
+const dropTimeout = 60 * time.Second
+
+func TestPostgresReplicationPolicyPersistsAndBindsReplay(t *testing.T) {
+	s := testStore(t)
+	request := testRequest()
+	request.Spec.PostgreSQL.ReplicationPolicy = "synchronous"
+	first, err := s.CreateCluster(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := s.CreateCluster(t.Context(), request)
+	if err != nil || !replay.Replayed || replay.OperationID != first.OperationID {
+		t.Fatalf("policy replay: %+v %v", replay, err)
+	}
+	found, err := s.GetCluster(t.Context(), request.Identity.InstallationID, first.ClusterID)
+	if err != nil || found.Spec.PostgreSQL.ReplicationPolicy != "synchronous" {
+		t.Fatalf("stored policy: %+v %v", found, err)
+	}
+	request.Spec.PostgreSQL.ReplicationPolicy = "asynchronous"
+	_, err = s.CreateCluster(t.Context(), request)
+	requireCode(t, err, IdempotencyConflict)
+	request.Spec.PostgreSQL.ReplicationPolicy = "unknown"
+	_, err = s.CreateCluster(t.Context(), request)
+	requireCode(t, err, InvalidRequest)
+	requireCounts(t, s, 1)
 }

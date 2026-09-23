@@ -107,7 +107,11 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 		if command == nil || command.Epoch == nil {
 			return nil, controlstream.ErrMessage
 		}
-		ack := &agentv1.AdmissionAck{Epoch: proto.Clone(command.Epoch).(*agentv1.Epoch), CommandId: command.CommandId, InputHash: bytes.Clone(command.InputHash), State: "rejected"}
+		attemptID, err := uuid.Parse(message.DeliveryAttemptId)
+		if err != nil || attemptID == uuid.Nil || attemptID.String() != message.DeliveryAttemptId {
+			return nil, controlstream.ErrMessage
+		}
+		ack := &agentv1.AdmissionAck{DeliveryAttemptId: message.DeliveryAttemptId, Epoch: proto.Clone(command.Epoch).(*agentv1.Epoch), CommandId: command.CommandId, InputHash: bytes.Clone(command.InputHash), State: "rejected"}
 		gate := current.gates[command.Epoch.ClusterId]
 		if gate == nil || !gate.active || !proto.Equal(gate.epoch, command.Epoch) {
 			ack.ErrorCode = "stale_owner"
@@ -150,6 +154,13 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 			state = "cancelled"
 		}
 		return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_CancellationResult{CancellationResult: &agentv1.CancellationResult{Epoch: record.Epoch, CommandId: record.CommandID, State: state, Effects: record.Effects}}}, nil
+	case *agentv1.ControllerMessage_Secret:
+		// Held in session memory and never written down. There is no reply: the
+		// command that needs it is what proves it arrived.
+		if err := e.acceptSecret(current, value.Secret); err != nil {
+			return nil, controlstream.ErrMessage
+		}
+		return nil, nil
 	case *agentv1.ControllerMessage_CapacityRequest:
 		return e.capacity(ctx, current, value.CapacityRequest)
 	case *agentv1.ControllerMessage_CommandInspection:
@@ -224,12 +235,23 @@ func (e *Executor) inventory(ctx context.Context, current *session, request *age
 
 func failureCode(err error) string {
 	switch {
+	case errors.Is(err, runtime.ErrStorageLost):
+		return "storage_lost"
 	case errors.Is(err, journal.ErrBusy), errors.Is(err, controlstream.ErrBusy):
 		return "agent_busy"
 	case errors.Is(err, operation.ErrStaleOwner):
 		return "stale_owner"
 	case errors.Is(err, operation.ErrCommandConflict):
 		return "command_conflict"
+	case errors.Is(err, ErrEngineNotReady):
+		// The reason names the probe that did not pass, and every reason is already
+		// a stable code the receipt column accepts.
+		if unready, ok := errors.AsType[*notReadyError](err); ok {
+			return unready.reason
+		}
+		return notReadyCode
+	case errors.Is(err, ErrSecretUnavailable):
+		return "secret_unavailable"
 	case errors.Is(err, journal.ErrRecoveryRequired):
 		return "recovery_required"
 	case errors.Is(err, capacity.ErrCapacityUnavailable):

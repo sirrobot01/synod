@@ -12,6 +12,8 @@ package capacity
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,10 +49,29 @@ type Config struct {
 	Wait time.Duration
 	// Now is the clock. A test replaces it; production leaves it nil.
 	Now func() time.Time
+	// Logger records the per-node failures that Refresh deliberately continues past.
+	// Skipping a node is correct; leaving no account of why it was skipped is not.
+	// slog.Default() is used when none is supplied.
+	Logger *slog.Logger
 }
 
 // Driver challenges nodes and takes placement decisions on the answers.
-type Driver struct{ config Config }
+type Driver struct {
+	config Config
+	mu     sync.Mutex
+	// The probe in flight on each node. Operations plan concurrently and each one
+	// refreshes, so without this the newest challenge replaces the one an agent is
+	// still measuring: the agent holds one probe per session, discards the answer to
+	// the superseded one, and no evidence ever commits.
+	inflight map[uuid.UUID]*challenge
+}
+
+// challenge is one probe sent to a node and not yet answered. It is bound to the
+// session it was sent on, because a reconnected agent has no memory of it.
+type challenge struct {
+	sessionID string
+	expires   time.Time
+}
 
 // New checks the driver inputs and applies the contract's own timings.
 func New(config Config) (*Driver, error) {
@@ -68,10 +89,31 @@ func New(config Config) (*Driver, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
+	if config.Logger == nil {
+		config.Logger = slog.Default()
+	}
 	if config.Margin < time.Second || config.Margin > placement.CapacityAge || config.Wait < time.Second || config.Wait > placement.CapacityAge {
 		return nil, errors.New("invalid capacity driver timings")
 	}
-	return &Driver{config: config}, nil
+	return &Driver{config: config, inflight: make(map[uuid.UUID]*challenge)}, nil
+}
+
+// claim returns ownership of a new probe, or nil for pending work or an old session.
+func (d *Driver) claim(nodeID uuid.UUID, sessionID string, now time.Time) *challenge {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	peer, ok := d.config.Transport.Session(nodeID)
+	if !ok || peer.SessionID != sessionID {
+		return nil
+	}
+	if held, exists := d.inflight[nodeID]; exists && held.sessionID == sessionID && (held.expires.IsZero() || held.expires.After(now)) {
+		return nil
+	}
+	// Keep ownership until the bounded store call and send finish. A session
+	// change can replace it, but a late completion cannot alter that replacement.
+	owned := &challenge{sessionID: sessionID}
+	d.inflight[nodeID] = owned
+	return owned
 }
 
 // Refresh challenges every node that could carry work but has no usable evidence.
@@ -95,11 +137,26 @@ func (d *Driver) Refresh(ctx context.Context, installationID uuid.UUID, snapshot
 		if !ok || peer.SessionID != node.SessionID.String() {
 			continue
 		}
-		probe, err := d.config.Store.BeginCapacityProbe(ctx, installationID, node.ID, node.SessionID)
+		owned := d.claim(node.ID, peer.SessionID, now)
+		if owned == nil {
+			// A probe this node is still measuring counts as challenged. The caller
+			// waits for that answer rather than replacing it with one that starts
+			// the measurement, and the wait, over again.
+			challenged = append(challenged, node.ID)
+			continue
+		}
+		work, cancel := context.WithTimeout(ctx, placement.ProbeWindow)
+		probe, err := d.config.Store.BeginCapacityProbe(work, installationID, node.ID, node.SessionID)
+		if err == nil {
+			err = work.Err()
+		}
+		cancel()
 		if err != nil {
+			d.release(node.ID, owned)
 			// A node with no approved policy cannot prove anything, and a node that
 			// lost its session cannot answer. Neither is a reason to stop probing
 			// the rest of the installation.
+			d.config.Logger.Warn("capacity probe not begun", "installation_id", installationID, "node_id", node.ID, "session_id", node.SessionID, "error", err)
 			continue
 		}
 		request := &agentv1.CapacityRequest{
@@ -111,11 +168,36 @@ func (d *Driver) Refresh(ctx context.Context, installationID uuid.UUID, snapshot
 		}
 		message := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CapacityRequest{CapacityRequest: request}}
 		if err := d.config.Transport.Send(node.ID, peer.SessionID, message); err != nil {
+			d.release(node.ID, owned)
+			d.config.Logger.Warn("capacity challenge not sent", "installation_id", installationID, "node_id", node.ID, "session_id", node.SessionID, "probe_id", probe.ID, "error", err)
 			continue
 		}
+		d.hold(node.ID, owned, probe.ExpiresAt)
 		challenged = append(challenged, node.ID)
 	}
 	return challenged, nil
+}
+
+// release drops a claim whose probe was never sent, so the next caller can challenge.
+func (d *Driver) release(nodeID uuid.UUID, owned *challenge) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.inflight[nodeID] == owned {
+		delete(d.inflight, nodeID)
+	}
+}
+
+// hold corrects a claim to the expiry the store gave the probe, which is when the
+// agent stops answering it.
+func (d *Driver) hold(nodeID uuid.UUID, owned *challenge, expires time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	held := d.inflight[nodeID]
+	if held != owned {
+		return
+	}
+	held.expires = expires
+	d.inflight[nodeID] = held
 }
 
 // probeable reports a node that could answer a challenge right now.

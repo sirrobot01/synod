@@ -52,8 +52,9 @@ func (c *Coordinator) Campaign(ctx context.Context, installationID, clusterID uu
 	prefix := c.prefix + "/" + installationID.String() + "/clusters/" + clusterID.String()
 	election := concurrency.NewElection(session, prefix)
 	if err := election.Campaign(ctx, ownerID); err != nil {
-		session.Close()
-		return nil, fmt.Errorf("campaign for cluster %s: %w", clusterID, err)
+		// A session that will not close leaves the lease alive, so that failure has
+		// to reach the caller beside the one that caused it.
+		return nil, errors.Join(fmt.Errorf("campaign for cluster %s: %w", clusterID, err), session.Close())
 	}
 	return &Leadership{OwnerID: ownerID, Key: election.Key(), LeaseID: int64(session.Lease()), Revision: election.Rev(), Done: session.Done(), client: c.client, session: session}, nil
 }

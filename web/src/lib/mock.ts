@@ -11,7 +11,7 @@ import type { Condition, Mark, OperationStatus, Tone } from "./state";
 
 /** The recorded gaps, so a screen cites one rather than writing a sentence. */
 export const gaps = {
-  collections: "no collection routes",
+  collections: "fleet, operation, and account lists are not connected",
   conditions: "no conditions in any response",
   steps: "no step progress on an operation",
   actions: "no cancel or retry route",
@@ -19,10 +19,10 @@ export const gaps = {
   backups: "no backup surface",
   health: "no installation health",
   observedAt: "no observation time or reason on a cluster",
-  instances: "no instance or endpoint read",
-  plans: "no destructive plan route",
+  instances: "no instance read",
+  plans: "no upgrade, scale, or restore plan route",
   topology: "no topology read",
-  credentials: "no credential metadata route",
+  credentials: "no installation-wide credential metadata route",
   versions: "no qualified engine version catalogue",
 } as const;
 

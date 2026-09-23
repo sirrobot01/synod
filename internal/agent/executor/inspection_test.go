@@ -56,7 +56,7 @@ func TestInspectionReadsFreshStateWithoutAdmission(t *testing.T) {
 	controller := startController(t, f, nil)
 	controller.activate(t, f.epoch)
 	command := volumeCommand(t, f.epoch)
-	controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: command}})
+	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
 	terminal := controller.wait(t, func(message *agentv1.AgentMessage) bool { return message.GetTerminalResult() != nil }).GetTerminalResult()
 	if terminal.State != "succeeded" {
 		t.Fatal(terminal)

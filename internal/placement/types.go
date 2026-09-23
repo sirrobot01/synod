@@ -3,8 +3,9 @@ package placement
 
 import (
 	"errors"
-	"github.com/google/uuid"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Placement failure reasons.
@@ -56,6 +57,7 @@ type NodePolicy struct {
 	Architecture   string            `json:"architecture"`
 	RuntimeVersion string            `json:"runtime_version"`
 	StorageID      string            `json:"storage_id"`
+	ClientAddress  string            `json:"client_address,omitempty"`
 	Engines        []EngineVersion   `json:"engines"`
 	Labels         map[string]string `json:"labels"`
 	FailureDomains map[string]string `json:"failure_domains"`
@@ -118,7 +120,15 @@ type Node struct {
 	Report            *CapacityReport `json:"report"`
 }
 
-// Port is one host port binding.
+// PortRange is the span of host ports an installation lets placement choose from.
+// A resource asks for one by requesting port number zero.
+type PortRange struct {
+	First uint16 `json:"first"`
+	Last  uint16 `json:"last"`
+}
+
+// Port is one host port binding. A number of zero in a request asks placement to
+// choose one from the installation's range.
 type Port struct {
 	Address   string `json:"address"`
 	Transport string `json:"transport"`
@@ -131,6 +141,7 @@ type Resource struct {
 	ReservationID    uuid.UUID         `json:"reservation_id"`
 	OwnedResourceIDs []uuid.UUID       `json:"owned_resource_ids"`
 	Kind             string            `json:"kind"`
+	Role             string            `json:"role"`
 	Engine           string            `json:"engine"`
 	Version          string            `json:"version"`
 	Architecture     string            `json:"architecture"`
@@ -157,6 +168,7 @@ type Request struct {
 	OperationID     uuid.UUID  `json:"operation_id"`
 	DesiredRevision int64      `json:"desired_revision"`
 	Profile         string     `json:"profile"`
+	PortRange       PortRange  `json:"port_range"`
 	Resources       []Resource `json:"resources"`
 	Groups          []Group    `json:"groups"`
 }
@@ -185,13 +197,16 @@ type Snapshot struct {
 	Allocations    []Allocation `json:"allocations"`
 }
 
-// Assignment places one resource on one node.
+// Assignment places one resource on one node. Ports are the concrete bindings the
+// decision chose, in the order the resource requested them, because a request may
+// name a range rather than a number.
 type Assignment struct {
 	ResourceID     uuid.UUID `json:"resource_id"`
 	ReservationID  uuid.UUID `json:"reservation_id"`
 	NodeID         uuid.UUID `json:"node_id"`
 	PolicyRevision int64     `json:"policy_revision"`
 	ProbeRevision  int64     `json:"probe_revision"`
+	Ports          []Port    `json:"ports"`
 }
 
 // Decision is the result of one placement request.

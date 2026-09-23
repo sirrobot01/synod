@@ -247,15 +247,11 @@ func TestPlanBarrierAndDelayedDispatch(t *testing.T) {
 }
 
 func TestProgressUnknownEffectsAndStaleEpoch(t *testing.T) {
-	s, r, claim := claimFixture(t)
-	plan := claimPlan(t, claim)
-	if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
-		t.Fatal(err)
-	}
-	reconcilePlan(t, s, claim, plan)
-	if err := s.ActivateClaim(t.Context(), claim); err != nil {
-		t.Fatal(err)
-	}
+	host, claim, plan := completionFixture(t)
+	s := host.store
+	r := ClaimRequest{InstallationID: claim.InstallationID, OperationID: claim.OperationID,
+		RecoveryGeneration: claim.RecoveryGeneration, TTL: time.Minute,
+		CoordinationKey: "/completion/takeover", CoordinationLease: 1, CoordinationRevision: 1}
 	update := ProgressUpdate{Sequence: 1, Status: operation.Waiting, Reason: "Inspect the uncertain result.", UnknownEffects: true}
 	if err := s.UpdateProgress(t.Context(), claim, update); err != nil {
 		t.Fatal(err)
@@ -291,6 +287,7 @@ func TestProgressUnknownEffectsAndStaleEpoch(t *testing.T) {
 	if err := s.ActivateClaim(t.Context(), takeover); err != nil {
 		t.Fatal(err)
 	}
+	completeSteps(t, s, takeover, plan)
 	if err := s.UpdateProgress(t.Context(), takeover, ProgressUpdate{Sequence: 1, Status: operation.Succeeded, Reason: "All postconditions passed."}); err != nil {
 		t.Fatal(err)
 	}
@@ -430,5 +427,118 @@ func TestChangedRecoveryGenerationInvalidatesClaim(t *testing.T) {
 	request.RecoveryGeneration = generation
 	if _, err := s.AcquireClaim(t.Context(), request); !errors.Is(err, operation.ErrStaleOwner) {
 		t.Fatalf("claim replay adopted a changed generation: %v", err)
+	}
+}
+
+func TestInstallPostgresRecoveryPlan(t *testing.T) {
+	s, _, claim := claimFixture(t)
+	plan := claimPlan(t, claim)
+	command := plan.Steps[0].Command
+	admin, application, replication := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	command.Input.Secrets = []*agentv1.SecretReference{{CredentialId: admin, Version: 1, Purpose: "superuser"}, {CredentialId: application, Version: 1, Purpose: "application"}, {CredentialId: replication, Version: 1, Purpose: "replication"}}
+	command.Input.Payload = &agentv1.CommandInput_RecoverPostgresSetup{RecoverPostgresSetup: &agentv1.RecoverPostgresSetup{Postgres: &agentv1.PostgresContainerConfig{Port: 5432, SuperuserCredentialId: admin, SuperuserCredentialVersion: 1, ApplicationCredentialId: application, ApplicationCredentialVersion: 1, ReplicationCredentialId: replication, ReplicationCredentialVersion: 1}}}
+	plan.Steps[0].Postcondition = agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED
+	hash, err := operation.CommandHash(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.InputHash = hash[:]
+	if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
+		t.Fatal(err)
+	}
+	changed := proto.Clone(plan).(*agentv1.ExecutionPlan)
+	changed.Steps[0].Command.Input.GetRecoverPostgresSetup().Postgres.Port++
+	hash, err = operation.CommandHash(changed.Steps[0].Command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed.Steps[0].Command.InputHash = hash[:]
+	if err := s.InstallPlan(t.Context(), claim, changed); !errors.Is(err, operation.ErrCommandConflict) {
+		t.Fatalf("recovery plan identity changed: %v", err)
+	}
+}
+
+func TestInstallPostgresReplicaPlan(t *testing.T) {
+	s, _, claim := claimFixture(t)
+	plan := claimPlan(t, claim)
+	prepared := plan.Steps[0]
+	prepared.Command.Input.Payload = &agentv1.CommandInput_PreparePostgresReplica{PreparePostgresReplica: &agentv1.PreparePostgresReplica{}}
+	prepared.Postcondition = agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_PREPARED
+	cloned := proto.Clone(prepared).(*agentv1.PlanStep)
+	cloned.Command.CommandId, cloned.Command.StepId = uuid.NewString(), uuid.NewString()
+	cloned.DependsOn = []string{prepared.Command.StepId}
+	cloned.Postcondition = agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_CLONED
+	admin, app, repl := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	cloned.Command.Input.Secrets = []*agentv1.SecretReference{{CredentialId: app, Version: 1, Purpose: "application"}, {CredentialId: repl, Version: 1, Purpose: "replication"}}
+	cloned.Command.Input.Payload = &agentv1.CommandInput_ClonePostgresReplica{ClonePostgresReplica: &agentv1.ClonePostgresReplica{RequiredFreeBytes: 1 << 30, Postgres: &agentv1.PostgresContainerConfig{Port: 5432, SuperuserCredentialId: admin, SuperuserCredentialVersion: 1, ApplicationCredentialId: app, ApplicationCredentialVersion: 1, ReplicationCredentialId: repl, ReplicationCredentialVersion: 1, ReplicaSource: &agentv1.PostgresReplicaSource{Address: "127.0.0.1", Port: 5432, ResourceId: uuid.NewString()}}}}
+	plan.Steps = []*agentv1.PlanStep{prepared, cloned}
+	for _, step := range plan.Steps {
+		hash, err := operation.CommandHash(step.Command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		step.Command.InputHash = hash[:]
+	}
+	if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
+		t.Fatal(err)
+	}
+	changed := proto.Clone(plan).(*agentv1.ExecutionPlan)
+	changed.Steps[1].Command.Input.GetClonePostgresReplica().Postgres.ReplicaSource.ResourceId = uuid.NewString()
+	hash, err := operation.CommandHash(changed.Steps[1].Command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed.Steps[1].Command.InputHash = hash[:]
+	if err := s.InstallPlan(t.Context(), claim, changed); !errors.Is(err, operation.ErrCommandConflict) {
+		t.Fatalf("clone source changed after admission: %v", err)
+	}
+}
+
+func TestInstallPriorPostgresCloneVerification(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "completed", true: "failed"}[failed], func(t *testing.T) {
+			s, _, claim := claimFixture(t)
+			plan := claimPlan(t, claim)
+			step := plan.Steps[0]
+			config := &agentv1.PostgresContainerConfig{Port: 5432, SuperuserCredentialId: uuid.NewString(), SuperuserCredentialVersion: 1, ApplicationCredentialId: uuid.NewString(), ApplicationCredentialVersion: 1, ReplicationCredentialId: uuid.NewString(), ReplicationCredentialVersion: 1, ReplicaSource: &agentv1.PostgresReplicaSource{Address: "127.0.0.1", Port: 5432, ResourceId: uuid.NewString()}}
+			step.Command.Input.Secrets = nil
+			step.Command.Input.Payload = &agentv1.CommandInput_VerifyPostgresReplicaClone{VerifyPostgresReplicaClone: &agentv1.VerifyPostgresReplicaClone{Postgres: config, CloneCommandId: uuid.NewString()}}
+			step.Postcondition = agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_CLONED
+			if failed {
+				step.Command.Input.Payload = &agentv1.CommandInput_VerifyPostgresReplicaFailure{VerifyPostgresReplicaFailure: &agentv1.VerifyPostgresReplicaFailure{Postgres: config, CloneCommandId: uuid.NewString()}}
+				step.Postcondition = agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED
+			}
+			hash, err := operation.CommandHash(step.Command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			step.Command.InputHash = hash[:]
+			if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
+				t.Fatal(err)
+			}
+			changed := proto.Clone(plan).(*agentv1.ExecutionPlan)
+			if failed {
+				changed.Steps[0].Command.Input.GetVerifyPostgresReplicaFailure().CloneCommandId = uuid.NewString()
+			} else {
+				changed.Steps[0].Command.Input.GetVerifyPostgresReplicaClone().CloneCommandId = uuid.NewString()
+			}
+			hash, err = operation.CommandHash(changed.Steps[0].Command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed.Steps[0].Command.InputHash = hash[:]
+			if err := s.InstallPlan(t.Context(), claim, changed); !errors.Is(err, operation.ErrCommandConflict) {
+				t.Fatalf("original clone identity changed after plan installation: %v", err)
+			}
+		})
 	}
 }

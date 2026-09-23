@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/netip"
 	"reflect"
@@ -21,6 +22,8 @@ import (
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
+	"github.com/sirrobot01/synod/internal/engine/postgres"
+	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -73,9 +76,6 @@ func (r *Runtime) validate(command *agentv1.Command) error {
 	if command.Epoch.InstallationId != r.options.InstallationID.String() || command.Epoch.NodeId != r.options.NodeID.String() {
 		return operation.ErrStaleOwner
 	}
-	if len(command.Input.Secrets) != 0 {
-		return runtime.ErrUnsupportedConfiguration
-	}
 	return nil
 }
 
@@ -94,7 +94,7 @@ func (r *Runtime) checkLabels(command *agentv1.Command, labels map[string]string
 
 // Execute requires durable journal admission and Start before this call.
 // The journal owner must serialize commands for each cluster and enforce plan dependencies.
-func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command) (runtime.Result, error) {
+func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets runtime.Secrets) (runtime.Result, error) {
 	if err := r.validate(command); err != nil {
 		return runtime.Result{}, err
 	}
@@ -103,6 +103,18 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command) (runtim
 	id := command.Input.ResourceId
 	var mutationErr error
 	switch payload := command.Input.Payload.(type) {
+	case *agentv1.CommandInput_StartPatroniMember:
+		return r.startPatroni(ctx, command)
+	case *agentv1.CommandInput_VerifyContainerAbsent:
+		return r.inspectCommand(ctx, command)
+	case *agentv1.CommandInput_RecoverPostgresSetup:
+		return r.executePostgresRecovery(ctx, command, secrets)
+	case *agentv1.CommandInput_PreparePostgresReplica:
+		return r.executePostgresPrepare(ctx, command)
+	case *agentv1.CommandInput_ClonePostgresReplica:
+		return r.executePostgresClone(ctx, command, secrets)
+	case *agentv1.CommandInput_VerifyPostgresReplicaClone, *agentv1.CommandInput_VerifyPostgresReplicaFailure:
+		return r.inspectPostgresReplica(ctx, command)
 	case *agentv1.CommandInput_EnsureVolume:
 		name := "synod-volume-" + id
 		current, err := r.api.VolumeInspect(ctx, name, client.VolumeInspectOptions{})
@@ -140,7 +152,17 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command) (runtim
 		_, mutationErr = r.api.NetworkCreate(ctx, name, client.NetworkCreateOptions{Driver: "bridge", Labels: r.labels(command, "network", id)})
 	case *agentv1.CommandInput_EnsureContainer:
 		p := payload.EnsureContainer
+		if p.Postgres != nil && p.Postgres.Patroni != nil {
+			return r.preparePatroni(ctx, command, secrets)
+		}
 		options, err := r.containerOptions(ctx, command, p, true)
+		if err != nil {
+			return runtime.Result{}, err
+		}
+		// The credentials go in here, after the payload has already been encoded
+		// into the configuration label and hashed. A value applied at this point
+		// cannot reach the label, the hash, an inventory read, or a drift report.
+		options.Config.Env, err = secretEnvironment(options.Config.Env, p, secrets)
 		if err != nil {
 			return runtime.Result{}, err
 		}
@@ -173,6 +195,19 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command) (runtim
 		}
 		switch p := payload.(type) {
 		case *agentv1.CommandInput_StartContainer:
+			if phase, err := postgresPhase(current.Container); err == nil && (phase == "replica_prepared" || phase == "replica_cloned") {
+				result := r.containerResult(command, current.Container)
+				result.Effects[0].State = phase
+				return result, runtime.ErrConfigurationConflict
+			}
+			if err := r.checkStartStorage(ctx, command, current.Container); err != nil {
+				if current.Container.State.Running || current.Container.State.Restarting || len(current.Container.ExecIDs) != 0 {
+					result := r.containerResult(command, current.Container)
+					result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
+					return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+				}
+				return runtime.Result{}, err
+			}
 			_, mutationErr = r.api.ContainerUpdate(ctx, current.Container.ID, client.ContainerUpdateOptions{RestartPolicy: &container.RestartPolicy{Name: container.RestartPolicyUnlessStopped}})
 			if mutationErr == nil {
 				_, mutationErr = r.api.ContainerStart(ctx, current.Container.ID, client.ContainerStartOptions{})
@@ -190,6 +225,9 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command) (runtim
 			}
 			_, mutationErr = r.api.ContainerRemove(ctx, current.Container.ID, client.ContainerRemoveOptions{Force: false, RemoveVolumes: false})
 		case *agentv1.CommandInput_InspectContainer:
+			if current.Container.Config.Labels[labelPatroniSource] != "" {
+				return r.Recover(ctx, command, nil)
+			}
 			return r.containerResult(command, current.Container), nil
 		}
 	default:
@@ -215,6 +253,22 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 	id := command.Input.ResourceId
 	result := runtime.Result{Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: id, NativeOperationId: "docker-command:" + command.CommandId, OutcomeUnknown: true, Active: true, State: "unknown"}}}
 	switch p := command.Input.Payload.(type) {
+	case *agentv1.CommandInput_VerifyContainerAbsent:
+		_, err := r.api.ContainerInspect(ctx, "synod-instance-"+id, client.ContainerInspectOptions{})
+		if errdefs.IsNotFound(err) {
+			result.Effects[0].State = "absent"
+			break
+		}
+		if err != nil {
+			return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+		result.Effects[0].State = "present"
+		result.Effects[0].Active, result.Effects[0].OutcomeUnknown = false, false
+		return result, runtime.ErrConfigurationConflict
+	case *agentv1.CommandInput_RecoverPostgresSetup:
+		return r.inspectPostgresRecovery(ctx, command)
+	case *agentv1.CommandInput_PreparePostgresReplica, *agentv1.CommandInput_ClonePostgresReplica, *agentv1.CommandInput_VerifyPostgresReplicaClone, *agentv1.CommandInput_VerifyPostgresReplicaFailure:
+		return r.inspectPostgresReplica(ctx, command)
 	case *agentv1.CommandInput_EnsureVolume:
 		if err := r.verifyVolume(ctx, command, id); err != nil {
 			return result, err
@@ -250,19 +304,48 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 		if ensure, ok := p.(*agentv1.CommandInput_EnsureContainer); ok {
 			expected = ensure.EnsureContainer
 		}
+		if start := command.Input.GetStartPatroniMember(); start != nil {
+			expected = start.Container
+		}
 		if err := r.checkContainer(ctx, command, item.Container, expected); err != nil {
 			return result, err
 		}
 		result = r.containerResult(command, item.Container)
+		if item.Container.Config != nil && item.Container.Config.Labels[labelPatroniSource] != "" && (command.Input.GetEnsureContainer() != nil || command.Input.GetInspectContainer() != nil || command.Input.GetStartPatroniMember() != nil) {
+			if err := r.inspectPatroniSource(ctx, item.Container); err != nil {
+				result.Effects[0].State = "patroni_configuration_unknown"
+				result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
+				return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+			}
+		}
 		state := item.Container.State
 		if state == nil {
 			return result, runtime.ErrOutcomeUnknown
+		}
+		phase, phaseErr := postgresPhase(item.Container)
+		if command.Input.GetStartContainer() != nil && phaseErr == nil && (phase == "replica_prepared" || phase == "replica_cloned") {
+			result.Effects[0].State = phase
+			return result, runtime.ErrConfigurationConflict
 		}
 		matched := false
 		switch p.(type) {
 		case *agentv1.CommandInput_EnsureContainer, *agentv1.CommandInput_InspectContainer:
 			matched = true
+		case *agentv1.CommandInput_StartPatroniMember:
+			matched = state.Running && !state.Restarting && !state.Dead && item.Container.HostConfig.RestartPolicy.Name == container.RestartPolicyUnlessStopped
 		case *agentv1.CommandInput_StartContainer:
+			// The first start can be running while initdb still creates the data files.
+			replica := len(item.Container.Config.Cmd) > 3 && item.Container.Config.Cmd[3] == "synod-postgres-replica"
+			if replica || !command.Input.GetStartContainer().AllowInitialization || !state.Running || state.Restarting || state.Dead {
+				if err := r.checkStartStorage(ctx, command, item.Container); err != nil {
+					if errors.Is(err, runtime.ErrStorageLost) && !state.Running && !state.Restarting && len(item.Container.ExecIDs) == 0 {
+						result.Effects[0].State = "storage_lost"
+						return result, err
+					}
+					result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
+					return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+				}
+			}
 			matched = state.Running && !state.Restarting && !state.Dead && item.Container.HostConfig.RestartPolicy.Name == container.RestartPolicyUnlessStopped
 		case *agentv1.CommandInput_StopContainer:
 			matched = !state.Running && item.Container.HostConfig.RestartPolicy.Name == container.RestartPolicyDisabled
@@ -271,6 +354,16 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 			result.Effects[0].OutcomeUnknown = true
 			result.Effects[0].Active = true
 			return result, runtime.ErrOutcomeUnknown
+		}
+		if phaseErr != nil {
+			result.Effects[0].State = phase
+			result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
+			return result, phaseErr
+		}
+		if (phase == "bootstrap_failed" || phase == "bootstrap_recovered" || phase == "replica_prepared" || phase == "replica_cloned") && command.Input.GetStartContainer() != nil {
+			result.Effects[0].State = phase
+			result.Effects[0].Active, result.Effects[0].OutcomeUnknown = false, false
+			return result, runtime.ErrConfigurationConflict
 		}
 	}
 	result.Effects[0].OutcomeUnknown = false
@@ -284,6 +377,10 @@ func (r *Runtime) containerResult(command *agentv1.Command, item container.Inspe
 		state = string(item.State.Status)
 	}
 	result := runtime.Result{Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-command:" + command.CommandId, State: state, OutcomeUnknown: item.State == nil}}}
+	if phase, err := postgresPhase(item); err != nil {
+		result.Effects[0].State = phase
+		result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
+	}
 	for _, execID := range item.ExecIDs {
 		result.Effects = append(result.Effects, &agentv1.Effect{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-exec:" + item.ID + ":" + execID, Active: true, State: "native_exec_active"})
 	}
@@ -294,8 +391,24 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	// Stored labels must pass the same typed checks as a new container command.
 	validation := proto.Clone(command).(*agentv1.Command)
 	validation.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: p}
+	if p.Postgres != nil {
+		validation.Input.Secrets = []*agentv1.SecretReference{
+			{CredentialId: p.Postgres.SuperuserCredentialId, Version: p.Postgres.SuperuserCredentialVersion, Purpose: "superuser"},
+			{CredentialId: p.Postgres.ApplicationCredentialId, Version: p.Postgres.ApplicationCredentialVersion, Purpose: "application"},
+			{CredentialId: p.Postgres.ReplicationCredentialId, Version: p.Postgres.ReplicationCredentialVersion, Purpose: "replication"},
+		}
+		if p.Postgres.ReplicaSource != nil {
+			validation.Input.Secrets = validation.Input.Secrets[1:]
+		}
+		if p.Postgres.Patroni != nil {
+			validation.Input.Secrets = p.Postgres.Patroni.Credentials
+		}
+	}
+	if p.Redis != nil {
+		validation.Input.Secrets = p.Redis.Credentials
+	}
 	if _, err := operation.CommandHash(validation); err != nil {
-		return client.ContainerCreateOptions{}, runtime.ErrConfigurationConflict
+		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrConfigurationConflict, Cause: err}
 	}
 	if p.NetworkMode == agentv1.NetworkMode_NETWORK_MODE_BRIDGE && !r.options.AllowBridgeFixture {
 		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
@@ -335,10 +448,9 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 		if pullErr != nil {
 			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: pullErr}
 		}
-		pullErr = pull.Wait(ctx)
-		pull.Close()
+		pullErr = errors.Join(pull.Wait(ctx), pull.Close())
 		if pullErr != nil {
-			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: pullErr}
+			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: fmt.Errorf("pull %s: %w", p.ImageDigest, pullErr)}
 		}
 		image, err = r.api.ImageInspect(ctx, p.ImageDigest)
 	}
@@ -347,7 +459,7 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	}
 	target := "/data"
 	if p.Engine == "postgres" {
-		target = "/var/lib/postgresql/data"
+		target = postgres.DataDirectory
 	}
 	if image.Config == nil {
 		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
@@ -378,7 +490,31 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	host.ShmSize = 64 << 20
 	host.MaskedPaths = []string{"/proc/acpi", "/proc/asound", "/proc/interrupts", "/proc/kcore", "/proc/keys", "/proc/latency_stats", "/proc/timer_list", "/proc/timer_stats", "/proc/sched_debug", "/proc/scsi", "/sys/firmware", "/sys/devices/virtual/powercap"}
 	host.ReadonlyPaths = []string{"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"}
-	config := &container.Config{Image: p.ImageDigest, Labels: labels, StopTimeout: new(10), ExposedPorts: network.PortSet{}, Cmd: image.Config.Cmd, Entrypoint: image.Config.Entrypoint, Env: image.Config.Env, User: image.Config.User, WorkingDir: image.Config.WorkingDir}
+	// The non-secret environment goes in here, where a verification rebuild can
+	// reproduce it. The credentials are applied by Execute, after this payload has
+	// been encoded into the configuration label.
+	plain, err := plainEnvironment(image.Config.Env, p)
+	if err != nil {
+		return client.ContainerCreateOptions{}, err
+	}
+	config := &container.Config{Image: p.ImageDigest, Labels: labels, StopTimeout: new(10), ExposedPorts: network.PortSet{}, Cmd: image.Config.Cmd, Entrypoint: image.Config.Entrypoint, Env: plain, User: image.Config.User, WorkingDir: image.Config.WorkingDir}
+	if p.Redis != nil {
+		config.Cmd = redisengine.ContainerCommand(p.Redis)
+		host.Tmpfs = map[string]string{redisengine.ConfigDirectory: "rw,noexec,nosuid,size=1m"}
+	}
+	if p.Postgres != nil {
+		config.Cmd, err = postgresCommand(p.Postgres, command.Epoch.InstallationId, command.Epoch.ClusterId, command.Input.ResourceId)
+		if err != nil {
+			return client.ContainerCreateOptions{}, runtime.ErrConfigurationConflict
+		}
+		config.Healthcheck = postgresHealthcheck(p.Postgres.ReplicaSource != nil)
+		config.StopSignal = image.Config.StopSignal
+		host.Tmpfs = map[string]string{postgres.ConfigDirectory: postgresTmpfs}
+		if p.Postgres.Patroni != nil {
+			config.Healthcheck = patroniHealthcheck()
+			host.Tmpfs = map[string]string{postgres.PatroniDirectory: patroniTmpfs}
+		}
+	}
 	for _, binding := range p.Ports {
 		address, err := netip.ParseAddr(binding.HostAddress)
 		if err != nil || !address.IsLoopback() {
@@ -420,7 +556,7 @@ func (r *Runtime) checkContainer(ctx context.Context, command *agentv1.Command, 
 	}
 	encoded, err := base64.RawStdEncoding.DecodeString(item.Config.Labels[labelConfig])
 	if err != nil {
-		return runtime.ErrConfigurationConflict
+		return &runtime.Error{Kind: runtime.ErrConfigurationConflict, Cause: err}
 	}
 	hash := sha256.Sum256(encoded)
 	if item.Config.Labels[labelHash] != hex.EncodeToString(hash[:]) {
@@ -428,27 +564,46 @@ func (r *Runtime) checkContainer(ctx context.Context, command *agentv1.Command, 
 	}
 	var stored agentv1.EnsureContainer
 	if err := proto.Unmarshal(encoded, &stored); err != nil {
-		return runtime.ErrConfigurationConflict
+		return &runtime.Error{Kind: runtime.ErrConfigurationConflict, Cause: err}
 	}
 	if expected != nil && !proto.Equal(expected, &stored) {
 		return runtime.ErrConfigurationConflict
+	}
+	if stored.Postgres != nil && stored.Postgres.Patroni != nil {
+		source, err := hex.DecodeString(item.Config.Labels[labelPatroniSource])
+		if err != nil || len(source) != sha256.Size || hex.EncodeToString(source) != item.Config.Labels[labelPatroniSource] {
+			return runtime.ErrConfigurationConflict
+		}
 	}
 	options, err := r.containerOptions(ctx, command, &stored, false)
 	if err != nil {
 		return err
 	}
-	if item.Image != options.Config.Labels["io.synod.image-id"] || !reflect.DeepEqual(item.Config.Cmd, options.Config.Cmd) || !reflect.DeepEqual(item.Config.Entrypoint, options.Config.Entrypoint) || !reflect.DeepEqual(item.Config.Env, options.Config.Env) || item.Config.User != options.Config.User || item.Config.WorkingDir != options.Config.WorkingDir || item.HostConfig.PidsLimit == nil || *item.HostConfig.PidsLimit != 256 || item.Config.Image != options.Config.Image || item.HostConfig.NetworkMode != options.HostConfig.NetworkMode || item.HostConfig.Memory != options.HostConfig.Memory || item.HostConfig.NanoCPUs != options.HostConfig.NanoCPUs || !reflect.DeepEqual(item.HostConfig.PortBindings, options.HostConfig.PortBindings) || !reflect.DeepEqual(item.HostConfig.LogConfig, options.HostConfig.LogConfig) {
+	if stored.Postgres != nil && (!reflect.DeepEqual(item.Config.Healthcheck, options.Config.Healthcheck) || item.Config.StopSignal != options.Config.StopSignal) {
 		return runtime.ErrConfigurationConflict
 	}
-	if len(item.Mounts) != 1 || item.Mounts[0].Type != mount.TypeVolume || item.Mounts[0].Name != options.HostConfig.Mounts[0].Source || item.Mounts[0].Destination != options.HostConfig.Mounts[0].Target || !item.Mounts[0].RW {
+	if item.Image != options.Config.Labels["io.synod.image-id"] || !reflect.DeepEqual(item.Config.Cmd, options.Config.Cmd) || !reflect.DeepEqual(item.Config.Entrypoint, options.Config.Entrypoint) || !sameEnvironment(item.Config.Env, options.Config.Env, &stored) || item.Config.User != options.Config.User || item.Config.WorkingDir != options.Config.WorkingDir || item.HostConfig.PidsLimit == nil || *item.HostConfig.PidsLimit != 256 || item.Config.Image != options.Config.Image || item.HostConfig.NetworkMode != options.HostConfig.NetworkMode || item.HostConfig.Memory != options.HostConfig.Memory || item.HostConfig.NanoCPUs != options.HostConfig.NanoCPUs || !reflect.DeepEqual(item.HostConfig.PortBindings, options.HostConfig.PortBindings) || !reflect.DeepEqual(item.HostConfig.LogConfig, options.HostConfig.LogConfig) {
 		return runtime.ErrConfigurationConflict
+	}
+	if len(item.Mounts) != 1 {
+		return runtime.ErrConfigurationConflict
+	}
+	for _, mounted := range item.Mounts {
+		switch mounted.Type {
+		case mount.TypeVolume:
+			if mounted.Name != options.HostConfig.Mounts[0].Source || mounted.Destination != options.HostConfig.Mounts[0].Target || !mounted.RW {
+				return runtime.ErrConfigurationConflict
+			}
+		default:
+			return runtime.ErrConfigurationConflict
+		}
 	}
 	host := item.HostConfig
 	if host.Privileged || len(host.Binds) != 0 || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || len(host.DeviceCgroupRules) != 0 ||
 		len(host.CapAdd) != 0 || len(host.CapDrop) != 0 || len(host.SecurityOpt) != 0 || len(host.GroupAdd) != 0 ||
 		host.PidMode != "" || host.UTSMode != "" || host.UsernsMode != "" || host.IpcMode != options.HostConfig.IpcMode || host.CgroupnsMode != options.HostConfig.CgroupnsMode ||
 		host.Runtime != options.HostConfig.Runtime || host.CgroupParent != "" || host.Cgroup != "" || len(host.Annotations) != 0 || host.Isolation != "" ||
-		len(host.Sysctls) != 0 || len(host.Tmpfs) != 0 || len(host.StorageOpt) != 0 || len(host.VolumesFrom) != 0 || host.ContainerIDFile != "" ||
+		len(host.Sysctls) != 0 || !reflect.DeepEqual(host.Tmpfs, options.HostConfig.Tmpfs) || len(host.StorageOpt) != 0 || len(host.VolumesFrom) != 0 || host.ContainerIDFile != "" ||
 		host.AutoRemove || host.PublishAllPorts || host.ReadonlyRootfs || host.Umask != nil || host.ShmSize != options.HostConfig.ShmSize ||
 		!slices.Equal(host.MaskedPaths, options.HostConfig.MaskedPaths) || !slices.Equal(host.ReadonlyPaths, options.HostConfig.ReadonlyPaths) {
 		return runtime.ErrConfigurationConflict

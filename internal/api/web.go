@@ -44,6 +44,7 @@ func (s *Server) serveApp(w http.ResponseWriter, r *http.Request) {
 	}
 	file, actual, err := s.openAsset(name)
 	if err != nil {
+		s.logger.Warn("open web asset failed", "path", name, "error", err)
 		s.writeError(w, r, http.StatusNotFound, "not_found", "The application is unavailable.", uuid.Nil)
 		return
 	}
@@ -51,6 +52,7 @@ func (s *Server) serveApp(w http.ResponseWriter, r *http.Request) {
 	info, err := file.Stat()
 	reader, seekable := file.(io.ReadSeeker)
 	if err != nil || !seekable {
+		s.logger.Warn("read web asset failed", "path", actual, "seekable", seekable, "error", err)
 		s.writeError(w, r, http.StatusNotFound, "not_found", "The application is unavailable.", uuid.Nil)
 		return
 	}

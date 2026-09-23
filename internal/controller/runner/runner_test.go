@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"github.com/sirrobot01/synod/internal/coordinator"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/pki"
+	"github.com/sirrobot01/synod/internal/placement"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -76,7 +78,10 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(func() {
 		pool.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// The bound guards against a hang, and is not an assertion about speed:
+		// on a loaded host many suites drop their databases at once, and a teardown
+		// that is merely slow must not fail a test that passed.
+		ctx, cancel := context.WithTimeout(context.Background(), dropTimeout)
 		defer cancel()
 		if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
 			t.Error(err)
@@ -277,10 +282,17 @@ func answer(message *agentv1.ControllerMessage) []*agentv1.AgentMessage {
 	if command == nil {
 		return nil
 	}
-	ack := &agentv1.AdmissionAck{Epoch: command.Epoch, CommandId: command.CommandId, State: "queued", InputHash: command.InputHash}
+	ack := &agentv1.AdmissionAck{DeliveryAttemptId: message.DeliveryAttemptId, Epoch: command.Epoch, CommandId: command.CommandId, State: "queued", InputHash: command.InputHash}
+	state := "present"
+	switch command.Input.Payload.(type) {
+	case *agentv1.CommandInput_StartContainer:
+		state = "running"
+	case *agentv1.CommandInput_CheckReadiness:
+		state = "ready"
+	}
 	receipt := &agentv1.TerminalResult{
 		Epoch: command.Epoch, CommandId: command.CommandId, InputHash: command.InputHash, Sequence: 1, State: "succeeded",
-		Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-command:" + command.CommandId, State: "present"}},
+		Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-command:" + command.CommandId, State: state}},
 	}
 	return []*agentv1.AgentMessage{
 		{Message: &agentv1.AgentMessage_AdmissionAck{AdmissionAck: ack}},
@@ -302,8 +314,8 @@ func (i *installation) admit(t *testing.T, name string) postgres.Admission {
 	return admission
 }
 
-// install writes a one-step plan under a short-lived claim, then releases it for the runner.
-// Plan production belongs to a later task, so this test supplies the plan directly.
+// install reserves one instance and supplies a volume, start, and readiness plan.
+// The runner must take over the expired installer claim before it can dispatch.
 func (i *installation) install(t *testing.T, admission postgres.Admission) *agentv1.ExecutionPlan {
 	t.Helper()
 	generation, err := i.store.RecoveryGeneration(t.Context(), i.id)
@@ -323,7 +335,8 @@ func (i *installation) install(t *testing.T, admission postgres.Admission) *agen
 	if err != nil {
 		t.Fatal(err)
 	}
-	resource := uuid.New()
+	resource, instance := uuid.New(), uuid.New()
+	port := uint16(15432 + i.count(t, `SELECT count(*) FROM allocation_ports WHERE node_id=$1`, i.node))
 	command := &agentv1.Command{
 		Epoch:       &agentv1.Epoch{InstallationId: i.id.String(), NodeId: i.node.String(), ClusterId: claim.ClusterID.String(), RecoveryGeneration: generation.String(), ExecutionEpoch: claim.ExecutionEpoch},
 		OperationId: admission.OperationID.String(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1,
@@ -338,6 +351,49 @@ func (i *installation) install(t *testing.T, admission postgres.Admission) *agen
 		Command: command, MaxAttempts: 3, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION,
 		Postcondition: agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS,
 	}}}
+	start := proto.Clone(command).(*agentv1.Command)
+	start.StepId, start.CommandId = uuid.NewString(), uuid.NewString()
+	start.Input.ResourceId = instance.String()
+	start.Input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}
+	ready := proto.Clone(start).(*agentv1.Command)
+	ready.StepId, ready.CommandId = uuid.NewString(), uuid.NewString()
+	ready.Input.Payload = &agentv1.CommandInput_CheckReadiness{CheckReadiness: &agentv1.CheckReadiness{Address: "127.0.0.1", Port: uint32(port), Engine: "postgres", PostgresRole: "primary", Database: "app", Role: "synod_admin"}}
+	for _, step := range []*agentv1.PlanStep{
+		{Command: start, DependsOn: []string{command.StepId}, MaxAttempts: 3, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING},
+		{Command: ready, DependsOn: []string{start.StepId}, MaxAttempts: 3, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_ENGINE_READY},
+	} {
+		hash, err := operation.CommandHash(step.Command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		step.Command.InputHash = hash[:]
+		plan.Steps = append(plan.Steps, step)
+	}
+	allocation := placement.Allocation{
+		ID: uuid.New(), InstallationID: i.id, NodeID: i.node, ClusterID: claim.ClusterID,
+		ResourceID: instance, CreatedByOperation: admission.OperationID, CreatedRevision: 1,
+		OwnedResourceIDs: []uuid.UUID{instance, resource},
+		Budget:           placement.Vector{CPUMillis: 250, MemoryBytes: 64 << 20, DiskBytes: 1 << 30},
+		Ports:            []placement.Port{{Address: "0.0.0.0", Transport: "tcp", Number: port}},
+	}
+	allocationBytes, err := json.Marshal(allocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := i.pool.Exec(t.Context(), `INSERT INTO resource_allocations(id,installation_id,node_id,cluster_id,resource_id,created_operation_id,created_revision,allocation_bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, allocation.ID, i.id, i.node, claim.ClusterID, instance, admission.OperationID, allocation.CreatedRevision, allocationBytes); err != nil {
+		t.Fatal(err)
+	}
+	for _, owned := range allocation.OwnedResourceIDs {
+		if _, err := i.pool.Exec(t.Context(), `INSERT INTO allocation_resources(installation_id,cluster_id,node_id,allocation_id,resource_id) VALUES($1,$2,$3,$4,$5)`, i.id, claim.ClusterID, i.node, allocation.ID, owned); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := i.pool.Exec(t.Context(), `INSERT INTO allocation_ports(installation_id,cluster_id,node_id,allocation_id,address,transport,port) VALUES($1,$2,$3,$4,$5,$6,$7)`, i.id, claim.ClusterID, i.node, allocation.ID, allocation.Ports[0].Address, allocation.Ports[0].Transport, port); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := i.pool.Exec(t.Context(), `INSERT INTO operation_allocation_bindings(installation_id,cluster_id,operation_id,allocation_id) VALUES($1,$2,$3,$4)`, i.id, claim.ClusterID, admission.OperationID, allocation.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := i.store.InstallPlan(t.Context(), claim, plan); err != nil {
 		t.Fatal(err)
 	}
@@ -385,24 +441,30 @@ func TestRunnerDrivesAnAdmittedOperation(t *testing.T) {
 	inst := newInstallation(t)
 	inst.connect(t, answer)
 	admission := inst.admit(t, "db")
-	inst.install(t, admission)
+	plan := inst.install(t, admission)
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan error, 1)
 	go func() { stopped <- inst.runner.Run(ctx) }()
 	inst.waitFor(t, func() bool {
 		return inst.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='succeeded'`, admission.OperationID) == 1
 	}, "the runner did not finish the operation")
-	if inst.count(t, `SELECT count(*) FROM command_dispatches WHERE operation_id=$1`, admission.OperationID) != 1 {
-		t.Fatal("the plan step was not dispatched")
+	if inst.count(t, `SELECT count(*) FROM command_dispatches WHERE operation_id=$1`, admission.OperationID) != len(plan.Steps) {
+		t.Fatal("not every plan step was dispatched")
 	}
-	if inst.count(t, `SELECT count(*) FROM operation_step_completions WHERE operation_id=$1`, admission.OperationID) != 1 {
-		t.Fatal("the receipt was not retained")
+	if inst.count(t, `SELECT count(*) FROM operation_step_completions WHERE operation_id=$1`, admission.OperationID) != len(plan.Steps) {
+		t.Fatal("not every checked receipt was retained")
 	}
 	if inst.count(t, `SELECT count(*) FROM claim_barriers WHERE operation_id=$1 AND reconciled_at IS NOT NULL`, admission.OperationID) != 1 {
 		t.Fatal("the node was not reconciled")
 	}
 	if inst.count(t, `SELECT count(*) FROM execution_claims WHERE operation_id=$1 AND owner_id='controller/1'`, admission.OperationID) != 1 {
 		t.Fatal("the runner did not claim the operation")
+	}
+	if inst.count(t, `SELECT count(*) FROM clusters WHERE id=$1 AND observed_revision=1 AND observed_lifecycle='running'`, admission.ClusterID) != 1 {
+		t.Fatal("success did not commit the proved cluster lifecycle")
+	}
+	if inst.count(t, `SELECT count(*) FROM resource_allocations WHERE cluster_id=$1 AND released_at IS NULL`, admission.ClusterID) != 1 {
+		t.Fatal("create success released the live reservation")
 	}
 	cancel()
 	select {
@@ -811,3 +873,7 @@ func TestNewRunnerChecksInputs(t *testing.T) {
 		}
 	}
 }
+
+// dropTimeout bounds one test database teardown. It exists to stop a hang, not to
+// assert how fast PostgreSQL drops a database under load.
+const dropTimeout = 60 * time.Second

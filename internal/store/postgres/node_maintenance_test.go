@@ -44,7 +44,7 @@ func TestCordonStopsNewPlacementAndMovesNothing(t *testing.T) {
 	claim := host.claimCluster(t, "db")
 	port := placement.Port{Address: "127.0.0.1", Transport: "tcp", Number: 5432}
 	request, decision, plan := host.place(t, claim, smallBudget, []placement.Port{port})
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !host.placeable(t) {
@@ -117,7 +117,7 @@ func TestRemoveNodeRequiresWorkloadAndStorageDisposition(t *testing.T) {
 	host := placementFixture(t)
 	claim := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	identity := declared(host, claim.ClusterID)

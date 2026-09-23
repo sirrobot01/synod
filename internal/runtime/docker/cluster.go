@@ -103,8 +103,19 @@ func (r *Runtime) inspectInventoryContainer(ctx context.Context, clusterID, reso
 		return effects, runtime.ErrOutcomeUnknown
 	}
 	effect.Active, effect.OutcomeUnknown, effect.State = false, false, string(item.Container.State.Status)
+	phase, phaseErr := postgresPhase(item.Container)
+	if phaseErr == nil && (phase == "bootstrap_ready" || phase == "bootstrap_failed" || phase == "bootstrap_recovered" || phase == "replica_prepared" || phase == "replica_cloned") {
+		detail, err := r.containerChanges(ctx, item.Container)
+		if err != nil || detail != "" {
+			phase, phaseErr = "bootstrap_unknown", runtime.ErrOutcomeUnknown
+		}
+	}
+	if phase != "" {
+		effect.State = phase
+		effect.Active, effect.OutcomeUnknown = phaseErr != nil, phaseErr != nil
+	}
 	for _, id := range item.Container.ExecIDs {
 		effects = append(effects, &agentv1.Effect{ResourceId: resourceID.String(), NativeOperationId: "docker-exec:" + item.Container.ID + ":" + id, Active: true, State: "native_exec_active"})
 	}
-	return effects, nil
+	return effects, phaseErr
 }

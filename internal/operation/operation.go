@@ -30,6 +30,7 @@ type Operation struct {
 	IdempotencyKey          string     `json:"-"`
 	DesiredRevision         int64      `json:"desired_revision"`
 	Kind                    string     `json:"kind"`
+	RetryOf                 *uuid.UUID `json:"retry_of,omitempty"`
 	Status                  Status     `json:"status"`
 	PlanVersion             int        `json:"plan_version"`
 	OwnerID                 *string    `json:"owner_id"`

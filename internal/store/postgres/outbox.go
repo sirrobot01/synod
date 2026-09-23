@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,12 +54,14 @@ func (l *OutboxListener) Wait(ctx context.Context) (bool, error) {
 }
 
 // Close returns the connection to the pool.
-func (l *OutboxListener) Close() {
+// A connection that will not stop listening is taken out of the pool instead,
+// because returning it would hand its subscriptions to the next borrower.
+func (l *OutboxListener) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if _, err := l.conn.Exec(ctx, "UNLISTEN *"); err != nil {
-		l.conn.Hijack().Close(ctx)
-		return
+		return errors.Join(fmt.Errorf("stop listening for installation %s: %w", l.installationID, err), l.conn.Hijack().Close(ctx))
 	}
 	l.conn.Release()
+	return nil
 }

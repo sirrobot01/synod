@@ -129,7 +129,10 @@ func testStore(t *testing.T) (*postgres.Store, *pgxpool.Pool) {
 	}
 	t.Cleanup(func() {
 		pool.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// The bound guards against a hang, and is not an assertion about speed:
+		// on a loaded host many suites drop their databases at once, and a teardown
+		// that is merely slow must not fail a test that passed.
+		ctx, cancel := context.WithTimeout(context.Background(), dropTimeout)
 		defer cancel()
 		if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
 			t.Error(err)
@@ -228,3 +231,7 @@ func TestCapacityReportRefusedAfterALostReply(t *testing.T) {
 		t.Fatal("a replaced challenge published capacity")
 	}
 }
+
+// dropTimeout bounds one test database teardown. It exists to stop a hang, not to
+// assert how fast PostgreSQL drops a database under load.
+const dropTimeout = 60 * time.Second

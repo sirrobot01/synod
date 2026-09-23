@@ -47,7 +47,10 @@ func TestRealPostgresReceiptReplaysAfterLostCommitReply(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		pool.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// The bound guards against a hang, and is not an assertion about speed:
+		// on a loaded host many suites drop their databases at once, and a teardown
+		// that is merely slow must not fail a test that passed.
+		ctx, cancel := context.WithTimeout(context.Background(), dropTimeout)
 		defer cancel()
 		if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
 			t.Error(err)
@@ -116,7 +119,7 @@ func TestRealPostgresReceiptReplaysAfterLostCommitReply(t *testing.T) {
 		return nil
 	})
 	controller.activate(t, command.Epoch)
-	controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: command}})
+	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
 	result := controller.wait(t, func(message *agentv1.AgentMessage) bool { return message.GetTerminalResult() != nil }).GetTerminalResult()
 	if committed.Load() != 2 {
 		t.Fatal("result did not replay after committed reply loss", committed.Load())
@@ -148,3 +151,7 @@ func TestRealPostgresReceiptReplaysAfterLostCommitReply(t *testing.T) {
 		}
 	}
 }
+
+// dropTimeout bounds one test database teardown. It exists to stop a hang, not to
+// assert how fast PostgreSQL drops a database under load.
+const dropTimeout = 60 * time.Second

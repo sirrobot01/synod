@@ -28,8 +28,37 @@ func planStep(t *testing.T, op operation.Operation, nodeID, resourceID string, p
 		input.Payload = &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: resourceID}}
 	case agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS:
 		input.Payload = &agentv1.CommandInput_EnsureNetwork{EnsureNetwork: &agentv1.EnsureNetwork{NetworkId: resourceID}}
-	case agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS:
-		input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{ImageDigest: testImageDigest, Engine: "postgres", VolumeId: uuid.NewString(), NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST}}
+	case agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED, agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_CLONED, agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED:
+		admin, application, replication := uuid.NewString(), uuid.NewString(), uuid.NewString()
+		input.Secrets = []*agentv1.SecretReference{
+			{CredentialId: admin, Version: 1, Purpose: "superuser"},
+			{CredentialId: application, Version: 1, Purpose: "application"},
+			{CredentialId: replication, Version: 1, Purpose: "replication"},
+		}
+		input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
+			ImageDigest: testImageDigest, Engine: "postgres", VolumeId: uuid.NewString(), NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST,
+			Postgres: &agentv1.PostgresContainerConfig{Port: 15432,
+				SuperuserCredentialId: admin, SuperuserCredentialVersion: 1,
+				ApplicationCredentialId: application, ApplicationCredentialVersion: 1, ReplicationCredentialId: replication, ReplicationCredentialVersion: 1},
+			SecretEnv: []*agentv1.SecretEnv{{Name: "POSTGRES_PASSWORD", Purpose: "superuser"}, {Name: "SYNOD_APP_VERIFIER", Purpose: "application"}, {Name: "SYNOD_REPL_VERIFIER", Purpose: "replication"}},
+		}}
+		if postcondition == agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED {
+			input.Payload = &agentv1.CommandInput_RecoverPostgresSetup{RecoverPostgresSetup: &agentv1.RecoverPostgresSetup{Postgres: input.GetEnsureContainer().Postgres}}
+		}
+		if postcondition == agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_CLONED {
+			config := input.GetEnsureContainer().Postgres
+			config.ReplicaSource = &agentv1.PostgresReplicaSource{Address: "127.0.0.1", Port: 5432, ResourceId: uuid.NewString()}
+			input.Secrets = input.Secrets[1:]
+			input.Payload = &agentv1.CommandInput_ClonePostgresReplica{ClonePostgresReplica: &agentv1.ClonePostgresReplica{RequiredFreeBytes: 1 << 30, Postgres: config}}
+		}
+		if postcondition == agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED {
+			config := input.GetEnsureContainer().Postgres
+			config.ReplicaSource = &agentv1.PostgresReplicaSource{Address: "127.0.0.1", Port: 5432, ResourceId: uuid.NewString()}
+			input.Secrets = nil
+			input.Payload = &agentv1.CommandInput_VerifyPostgresReplicaFailure{VerifyPostgresReplicaFailure: &agentv1.VerifyPostgresReplicaFailure{Postgres: config, CloneCommandId: uuid.NewString()}}
+		}
+	case agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_PREPARED:
+		input.Payload = &agentv1.CommandInput_PreparePostgresReplica{PreparePostgresReplica: &agentv1.PreparePostgresReplica{}}
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING:
 		input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED:
@@ -38,6 +67,10 @@ func planStep(t *testing.T, op operation.Operation, nodeID, resourceID string, p
 		input.Payload = &agentv1.CommandInput_RemoveContainer{RemoveContainer: &agentv1.RemoveContainer{}}
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED:
 		input.Payload = &agentv1.CommandInput_InspectContainer{InspectContainer: &agentv1.InspectContainer{}}
+	case agentv1.Postcondition_POSTCONDITION_ENGINE_READY:
+		input.Payload = &agentv1.CommandInput_CheckReadiness{CheckReadiness: &agentv1.CheckReadiness{
+			Address: "127.0.0.1", Port: 5432, Database: "app", Role: "synod_admin", Engine: "postgres", PostgresRole: "primary",
+		}}
 	default:
 		t.Fatalf("postcondition %v has no payload", postcondition)
 	}
@@ -73,14 +106,14 @@ func provisionPlan(t *testing.T, op operation.Operation) *agentv1.ExecutionPlan 
 
 func TestValidatePlanAcceptsDeclaredOrder(t *testing.T) {
 	op := testOperation()
-	if err := validatePlan(provisionPlan(t, op), op); err != nil {
+	if err := operation.ValidatePlan(provisionPlan(t, op), op); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestValidatePlanRejectsUnsupportedContent(t *testing.T) {
 	op := testOperation()
-	if err := validatePlan(nil, op); !errors.Is(err, ErrUnsupportedPlan) {
+	if err := operation.ValidatePlan(nil, op); !errors.Is(err, operation.ErrUnsupportedPlan) {
 		t.Fatal("accepted an absent plan")
 	}
 	for name, change := range map[string]func(*agentv1.ExecutionPlan){
@@ -142,7 +175,7 @@ func TestValidatePlanRejectsUnsupportedContent(t *testing.T) {
 	} {
 		plan := provisionPlan(t, op)
 		change(plan)
-		if err := validatePlan(plan, op); !errors.Is(err, ErrUnsupportedPlan) {
+		if err := operation.ValidatePlan(plan, op); !errors.Is(err, operation.ErrUnsupportedPlan) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
@@ -154,10 +187,10 @@ func TestValidatePlanBoundsStepCount(t *testing.T) {
 	for range 129 {
 		steps = append(steps, planStep(t, op, node, uuid.NewString(), agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS))
 	}
-	if err := validatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps[:128]}, op); err != nil {
+	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps[:128]}, op); err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps}, op); !errors.Is(err, ErrUnsupportedPlan) {
+	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps}, op); !errors.Is(err, operation.ErrUnsupportedPlan) {
 		t.Fatalf("accepted %d steps: %v", len(steps), err)
 	}
 }
@@ -186,10 +219,10 @@ func TestCheckResultMatchesPostconditionState(t *testing.T) {
 		{agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED, "paused", "absent"},
 	} {
 		step := planStep(t, op, node, uuid.NewString(), tt.postcondition)
-		if err := checkResult(step, succeededResult(step, tt.proved)); err != nil {
+		if err := operation.CheckStepResult(step, succeededResult(step, tt.proved)); err != nil {
 			t.Fatalf("%v rejected %q: %v", tt.postcondition, tt.proved, err)
 		}
-		if err := checkResult(step, succeededResult(step, tt.unproved)); !errors.Is(err, ErrPostconditionUnproved) {
+		if err := operation.CheckStepResult(step, succeededResult(step, tt.unproved)); !errors.Is(err, operation.ErrPostconditionUnproved) {
 			t.Fatalf("%v accepted %q: %v", tt.postcondition, tt.unproved, err)
 		}
 	}
@@ -203,7 +236,7 @@ func TestCheckResultAcceptsEarlierExecutionEpoch(t *testing.T) {
 	result := succeededResult(step, "running")
 	result.Epoch.ExecutionEpoch = 4
 	result.Epoch.RecoveryGeneration = uuid.NewString()
-	if err := checkResult(step, result); err != nil {
+	if err := operation.CheckStepResult(step, result); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -211,7 +244,7 @@ func TestCheckResultAcceptsEarlierExecutionEpoch(t *testing.T) {
 func TestCheckResultRejectsWeakEvidence(t *testing.T) {
 	op := testOperation()
 	step := planStep(t, op, uuid.NewString(), uuid.NewString(), agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING)
-	if err := checkResult(step, nil); !errors.Is(err, ErrPostconditionUnproved) {
+	if err := operation.CheckStepResult(step, nil); !errors.Is(err, operation.ErrPostconditionUnproved) {
 		t.Fatal("accepted an absent result")
 	}
 	for name, change := range map[string]func(*agentv1.TerminalResult){
@@ -242,7 +275,7 @@ func TestCheckResultRejectsWeakEvidence(t *testing.T) {
 	} {
 		result := succeededResult(step, "running")
 		change(result)
-		if err := checkResult(step, result); !errors.Is(err, ErrPostconditionUnproved) {
+		if err := operation.CheckStepResult(step, result); !errors.Is(err, operation.ErrPostconditionUnproved) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
@@ -395,7 +428,7 @@ func TestValidatePlanAcceptsEveryPostcondition(t *testing.T) {
 			steps = append(steps, planStep(t, op, node, uuid.NewString(), postcondition))
 		}
 	}
-	if err := validatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps}, op); err != nil {
+	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps}, op); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -408,27 +441,27 @@ func TestValidatePlanRequiresAStopBeforeARemoval(t *testing.T) {
 
 	// A removal that depends on the stop of its own resource is a sound teardown.
 	sound := []*agentv1.PlanStep{stop, planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT, stop.Command.StepId)}
-	if err := validatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: sound}, op); err != nil {
+	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: sound}, op); err != nil {
 		t.Fatal(err)
 	}
 
 	// A removal with no stop at all tears a running engine out from under clients.
 	alone := []*agentv1.PlanStep{planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT)}
-	if err := validatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: alone}, op); !errors.Is(err, ErrUnsupportedPlan) {
+	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: alone}, op); !errors.Is(err, operation.ErrUnsupportedPlan) {
 		t.Fatalf("err=%v, want a plan that removes without stopping refused", err)
 	}
 
 	// A stop that is merely earlier in the list is not an ordering. Only a declared
 	// dependency makes the engine stop first.
 	unordered := []*agentv1.PlanStep{stop, planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT)}
-	if err := validatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: unordered}, op); !errors.Is(err, ErrUnsupportedPlan) {
+	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: unordered}, op); !errors.Is(err, operation.ErrUnsupportedPlan) {
 		t.Fatalf("err=%v, want an undeclared ordering refused", err)
 	}
 
 	// A stop of some other resource proves nothing about this one.
 	other := planStep(t, op, node, uuid.NewString(), agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED)
 	crossed := []*agentv1.PlanStep{other, planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT, other.Command.StepId)}
-	if err := validatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: crossed}, op); !errors.Is(err, ErrUnsupportedPlan) {
+	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: crossed}, op); !errors.Is(err, operation.ErrUnsupportedPlan) {
 		t.Fatalf("err=%v, want another resource's stop refused", err)
 	}
 }
@@ -441,7 +474,39 @@ func TestValidatePlanBindsARemovalToItsBoundary(t *testing.T) {
 	removal := planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT, stop.Command.StepId)
 	removal.CancellationBoundary = agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP
 	steps := []*agentv1.PlanStep{stop, removal}
-	if err := validatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps}, op); !errors.Is(err, ErrUnsupportedPlan) {
+	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps}, op); !errors.Is(err, operation.ErrUnsupportedPlan) {
 		t.Fatalf("err=%v, want a removal with a safe-stop boundary refused", err)
+	}
+}
+
+func TestReplicaCloneRequiresPreparedDependency(t *testing.T) {
+	op, node, resource := testOperation(), uuid.NewString(), uuid.NewString()
+	prepared := planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_PREPARED)
+	cloned := planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_CLONED, prepared.Command.StepId)
+	valid := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{prepared, cloned}}
+	if err := operation.ValidatePlan(valid, op); err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(*agentv1.ExecutionPlan){
+		"missing preparation": func(p *agentv1.ExecutionPlan) { p.Steps = p.Steps[1:]; p.Steps[0].DependsOn = nil },
+		"unordered clone":     func(p *agentv1.ExecutionPlan) { p.Steps[1].DependsOn = nil },
+		"other target": func(p *agentv1.ExecutionPlan) {
+			p.Steps[1].Command.Input.ResourceId = uuid.NewString()
+			rehash(t, p.Steps[1].Command)
+		},
+		"unsafe cancel": func(p *agentv1.ExecutionPlan) {
+			p.Steps[1].CancellationBoundary = agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP
+		},
+		"running postcondition": func(p *agentv1.ExecutionPlan) {
+			p.Steps[1].Postcondition = agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := proto.Clone(valid).(*agentv1.ExecutionPlan)
+			change(p)
+			if !errors.Is(operation.ValidatePlan(p, op), operation.ErrUnsupportedPlan) {
+				t.Fatal("accepted unsafe clone plan")
+			}
+		})
 	}
 }

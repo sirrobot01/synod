@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
@@ -50,6 +51,9 @@ type Config struct {
 	RetryDelay time.Duration
 	// SessionMaxAge is the oldest presence record that can carry a dispatch.
 	SessionMaxAge time.Duration
+	// Keyring opens the sealed credentials a plan names. A controller without one
+	// can still run plans that need no credential.
+	Keyring *secret.Keyring
 }
 
 // Worker drives one claim under elected and durable ownership.
@@ -64,6 +68,41 @@ type Worker struct {
 	// the status, so it folds the answer into durable progress rather than the
 	// receive path writing a status of its own.
 	answered map[string]string
+	// activated holds the session this worker last activated its epoch on, per
+	// node. A replacement session has activated nothing, so it is activated again.
+	activated map[uuid.UUID]string
+}
+
+// activate tells one session that the epoch this worker prepared is now in force.
+//
+// An agent refuses a command whose epoch its gate has not activated, so without this
+// every dispatch is answered with stale_owner. It runs after the barrier for the node
+// is reconciled, which is what makes activation sound: the node has drained the
+// previous epoch's work and reported it.
+//
+// It is sent once per session rather than once per worker. A session that was replaced
+// holds no gate, and assuming otherwise means every command to the new session is
+// refused with nothing saying why.
+func (w *Worker) activate(nodeID uuid.UUID, sessionID string) error {
+	w.mu.Lock()
+	current := w.activated[nodeID]
+	w.mu.Unlock()
+	if current == sessionID {
+		return nil
+	}
+	message := &agentv1.ControllerMessage{
+		Message: &agentv1.ControllerMessage_ActivateEpoch{ActivateEpoch: &agentv1.ActivateEpoch{Epoch: w.epoch(nodeID)}},
+	}
+	if err := w.config.Transport.Send(nodeID, sessionID, message); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	if w.activated == nil {
+		w.activated = make(map[uuid.UUID]string)
+	}
+	w.activated[nodeID] = sessionID
+	w.mu.Unlock()
+	return nil
 }
 
 // New checks the worker inputs and binds it to one claimed operation.
@@ -122,7 +161,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			// New completions release dependent steps, so the next pass reads them.
 			// A cancelling operation cannot return to running.
 			reason := "steps_proved: " + strconv.Itoa(found.retained) + " plan steps are proved by durable receipts"
-			if err := w.progress(ctx, state.ProgressSequence+1, ongoing(state.Status), reason, false); err != nil {
+			if err := w.progress(ctx, state.ProgressSequence+1, ongoing(state.Status), reason, false, ""); err != nil {
 				return err
 			}
 			continue
@@ -135,7 +174,8 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 		pass, err := w.dispatch(ctx, state, completed)
 		if errors.Is(err, postgres.ErrAttemptsExhausted) {
-			return w.progress(ctx, state.ProgressSequence+1, operation.Failed, err.Error(), false)
+			// Reload deliveries and results, including commands sent during this pass.
+			continue
 		}
 		if err != nil {
 			return err
@@ -163,10 +203,11 @@ func finished(status operation.Status) bool {
 	return status == operation.Succeeded || status == operation.Failed || status == operation.Cancelled
 }
 
-// inFlight reports a command that this run sent and that no receipt has answered.
+// inFlight reports a current dispatch without a result or a refusal for every attempt.
 func inFlight(state postgres.ExecutionState) bool {
 	return slices.ContainsFunc(state.Steps, func(evidence postgres.StepEvidence) bool {
-		return evidence.Dispatch != nil && evidence.Result == nil
+		return evidence.Dispatch != nil && evidence.Result == nil &&
+			(evidence.Admission != nil || evidence.Rejection == nil || evidence.UnansweredDeliveries > 0)
 	})
 }
 
@@ -175,9 +216,12 @@ type verdict struct {
 	// retained counts receipts that this pass turned into step completions.
 	retained int
 	// failure names the first step that a receipt proved did not succeed.
-	failure string
+	failure     string
+	failureCode string
 	// unknown names the first receipt that left a native effect running or unresolved.
 	unknown string
+	// pending reports a dispatched command without a known refusal or terminal result.
+	pending bool
 	// stopped counts receipts that prove a step stopped at its cancellation boundary.
 	stopped int
 }
@@ -185,9 +229,16 @@ type verdict struct {
 // reconcileReceipts turns proved receipts into durable step completions.
 // It never treats a receipt as proof of a postcondition that the receipt does not show.
 func (w *Worker) reconcileReceipts(ctx context.Context, state postgres.ExecutionState) (verdict, error) {
-	var found verdict
+	found := verdict{pending: inFlight(state)}
 	for i, evidence := range state.Steps {
-		if evidence.Completion != nil || evidence.Result == nil {
+		if evidence.Completion != nil {
+			continue
+		}
+		if evidence.Result == nil {
+			if evidence.Admission == nil && evidence.Delivery != nil && evidence.Delivery.Count >= int(state.Plan.Steps[i].MaxAttempts) {
+				found.record(fmt.Sprintf("%s: step %s on node %s used its whole delivery budget%s",
+					postgres.ErrAttemptsExhausted, evidence.StepID, state.Plan.Steps[i].Command.Epoch.NodeId, refusal(evidence)), "")
+			}
 			continue
 		}
 		receipt, target := evidence.Result, "step "+evidence.StepID.String()+" on node "+state.Plan.Steps[i].Command.Epoch.NodeId
@@ -203,10 +254,10 @@ func (w *Worker) reconcileReceipts(ctx context.Context, state postgres.Execution
 			found.stopped++
 			continue
 		case receipt.State != "succeeded":
-			found.record("step_failed: " + target + " reported " + receipt.State + " " + receipt.FailureCode)
+			found.record("step_failed: "+target+" reported "+receipt.State+" "+receipt.FailureCode, receipt.FailureCode)
 			continue
-		case checkResult(state.Plan.Steps[i], receipt) != nil:
-			found.record("postcondition_unproved: " + target + " did not prove its postcondition")
+		case operation.CheckStepResult(state.Plan.Steps[i], receipt) != nil:
+			found.record("postcondition_unproved: "+target+" did not prove its postcondition", "")
 			continue
 		}
 		encoded, err := (proto.MarshalOptions{Deterministic: true}).Marshal(receipt)
@@ -221,9 +272,9 @@ func (w *Worker) reconcileReceipts(ctx context.Context, state postgres.Execution
 	return found, nil
 }
 
-func (v *verdict) record(failure string) {
+func (v *verdict) record(failure, code string) {
 	if v.failure == "" {
-		v.failure = failure
+		v.failure, v.failureCode = failure, code
 	}
 }
 
@@ -247,11 +298,24 @@ func (w *Worker) conclude(ctx context.Context, state postgres.ExecutionState, co
 		if state.Status == operation.Waiting {
 			return true, nil
 		}
-		return true, w.progress(ctx, state.ProgressSequence+1, operation.Waiting, found.unknown, true)
+		return true, w.progress(ctx, state.ProgressSequence+1, operation.Waiting, found.unknown, true, "")
 	case found.failure != "":
-		return true, w.progress(ctx, state.ProgressSequence+1, operation.Failed, found.failure, false)
+		if found.pending {
+			if state.CancellationRequestedAt != nil {
+				if err := w.requestCancellation(ctx, state); err != nil {
+					return true, err
+				}
+			}
+			if state.Status != operation.Waiting && state.Status != operation.Cancelling {
+				if err := w.progress(ctx, state.ProgressSequence+1, operation.Waiting, "failure_pending: wait for dispatched command results", true, ""); err != nil {
+					return true, err
+				}
+			}
+			return true, ErrEvidencePending
+		}
+		return true, w.progress(ctx, state.ProgressSequence+1, operation.Failed, found.failure, false, found.failureCode)
 	case len(completed) == len(state.Plan.Steps):
-		return true, w.progress(ctx, state.ProgressSequence+1, operation.Succeeded, "plan_proved: every plan step is proved by a durable receipt", false)
+		return true, w.progress(ctx, state.ProgressSequence+1, operation.Succeeded, "plan_proved: every plan step is proved by a durable receipt", false, "")
 	}
 	return false, nil
 }
@@ -277,7 +341,7 @@ func (w *Worker) cancel(ctx context.Context, state postgres.ExecutionState, foun
 			reason = "cancellation_blocked: " + blocker
 		}
 		sequence++
-		if err := w.progress(ctx, sequence, operation.Cancelling, reason, false); err != nil {
+		if err := w.progress(ctx, sequence, operation.Cancelling, reason, false, ""); err != nil {
 			return err
 		}
 	}
@@ -288,7 +352,7 @@ func (w *Worker) cancel(ctx context.Context, state postgres.ExecutionState, foun
 	if found.stopped > 0 {
 		reason = "cancelled_at_boundary: " + strconv.Itoa(found.stopped) + " steps stopped at their cancellation boundary and left no unresolved effect"
 	}
-	return w.progress(ctx, sequence+1, operation.Cancelled, reason, false)
+	return w.progress(ctx, sequence+1, operation.Cancelled, reason, false, "")
 }
 
 // requestCancellation asks the exact session that admitted each outstanding
@@ -341,6 +405,9 @@ func (w *Worker) holding(state postgres.ExecutionState) string {
 		if evidence.Dispatch == nil || evidence.Result != nil {
 			continue
 		}
+		if evidence.Admission == nil && evidence.Rejection != nil && evidence.UnansweredDeliveries == 0 {
+			continue
+		}
 		commandID := evidence.Dispatch.CommandId
 		boundary, sent := w.requested[commandID]
 		switch answer := w.answered[commandID]; {
@@ -382,11 +449,11 @@ func boundaryName(boundary agentv1.CancellationBoundary) string {
 }
 
 // progress records one status change of the claimed operation.
-func (w *Worker) progress(ctx context.Context, sequence int64, status operation.Status, reason string, unknown bool) error {
+func (w *Worker) progress(ctx context.Context, sequence int64, status operation.Status, reason string, unknown bool, code string) error {
 	if err := w.config.Authority.Verify(ctx); err != nil {
 		return err
 	}
-	return w.config.Store.UpdateProgress(ctx, w.config.Claim, postgres.ProgressUpdate{Sequence: sequence, Status: status, Reason: reason, UnknownEffects: unknown})
+	return w.config.Store.UpdateProgress(ctx, w.config.Claim, postgres.ProgressUpdate{Sequence: sequence, Status: status, Reason: reason, UnknownEffects: unknown, FailureCode: code})
 }
 
 // Handle commits agent evidence that needs claim context, then wakes the loop.
@@ -502,7 +569,7 @@ func (w *Worker) resume(ctx context.Context) (postgres.ExecutionState, map[strin
 	if err != nil {
 		return postgres.ExecutionState{}, nil, err
 	}
-	if err := validatePlan(state.Plan, w.config.Operation); err != nil {
+	if err := operation.ValidatePlan(state.Plan, w.config.Operation); err != nil {
 		return postgres.ExecutionState{}, nil, err
 	}
 	completed := make(map[string]bool, len(state.Steps))
@@ -510,7 +577,7 @@ func (w *Worker) resume(ctx context.Context) (postgres.ExecutionState, map[strin
 		if evidence.Completion == nil {
 			continue
 		}
-		if err := checkResult(state.Plan.Steps[i], evidence.Result); err != nil {
+		if err := operation.CheckStepResult(state.Plan.Steps[i], evidence.Result); err != nil {
 			return postgres.ExecutionState{}, nil, fmt.Errorf("step %s: %w", evidence.StepID, err)
 		}
 		completed[evidence.StepID.String()] = true
@@ -562,7 +629,7 @@ type dispatchPass struct {
 
 // dispatch commits a dispatch and an attempt before any command leaves the controller.
 // A full transport queue or a reserved retry defers one step. It does not end the pass.
-// An exhausted retry budget ends the call. The caller fails the operation.
+// An exhausted retry budget ends the call. The caller reloads outstanding effects.
 func (w *Worker) dispatch(ctx context.Context, state postgres.ExecutionState, completed map[string]bool) (dispatchPass, error) {
 	var pass dispatchPass
 	for i, step := range state.Plan.Steps {
@@ -598,7 +665,8 @@ func (w *Worker) dispatch(ctx context.Context, state postgres.ExecutionState, co
 			return pass, err
 		}
 		pass.committed++
-		if _, err := w.config.Store.RecordDeliveryAttempt(ctx, w.config.Claim, commandID, sessionID, uuid.New(), w.config.RetryDelay); err != nil {
+		attempt, err := w.config.Store.RecordDeliveryAttempt(ctx, w.config.Claim, commandID, sessionID, uuid.New(), w.config.RetryDelay)
+		if err != nil {
 			if errors.Is(err, postgres.ErrRetryPending) {
 				pass.retryAt = earlier(pass.retryAt, w.retryTime(evidence))
 				continue
@@ -608,7 +676,26 @@ func (w *Worker) dispatch(ctx context.Context, state postgres.ExecutionState, co
 			}
 			return pass, err
 		}
-		message := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: command}}
+		// The epoch goes first. An agent refuses a command whose epoch its gate has
+		// not activated, so a dispatch before this is answered with stale_owner.
+		if err := w.activate(nodeID, peer.SessionID); err != nil {
+			if errors.Is(err, controlstream.ErrBusy) {
+				pass.retryAt = earlier(pass.retryAt, time.Now().Add(w.config.RetryDelay))
+				continue
+			}
+			return pass, err
+		}
+		// The credentials go next. An agent that receives a command whose secret it
+		// was never sent refuses the command, so sending them in this order is what
+		// makes the command runnable rather than a race.
+		if err := w.pushSecrets(ctx, nodeID, peer.SessionID, command); err != nil {
+			if errors.Is(err, controlstream.ErrBusy) {
+				pass.retryAt = earlier(pass.retryAt, time.Now().Add(w.config.RetryDelay))
+				continue
+			}
+			return pass, err
+		}
+		message := &agentv1.ControllerMessage{DeliveryAttemptId: attempt.ID.String(), Message: &agentv1.ControllerMessage_Command{Command: command}}
 		if err := w.config.Transport.Send(nodeID, peer.SessionID, message); err != nil {
 			// The attempt is spent and the command did not leave the controller.
 			// A later attempt reuses the same command ID and input hash.

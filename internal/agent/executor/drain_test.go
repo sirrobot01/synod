@@ -10,6 +10,7 @@ import (
 	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -17,7 +18,7 @@ import (
 func runningWorkload(t *testing.T, f *fixture) (*agentv1.Command, *agentv1.Command) {
 	t.Helper()
 	volume := volumeCommand(t, f.epoch)
-	if _, err := f.e.runtime.Execute(t.Context(), volume); err != nil {
+	if _, err := f.e.runtime.Execute(t.Context(), volume, nil); err != nil {
 		t.Fatal(err)
 	}
 	networkID := uuid.NewString()
@@ -29,29 +30,37 @@ func runningWorkload(t *testing.T, f *fixture) (*agentv1.Command, *agentv1.Comma
 		t.Fatal(err)
 	}
 	network.InputHash = hash[:]
-	if _, err := f.e.runtime.Execute(t.Context(), network); err != nil {
+	if _, err := f.e.runtime.Execute(t.Context(), network, nil); err != nil {
 		t.Fatal(err)
 	}
 	ensure := volumeCommand(t, f.epoch)
-	ensure.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{ImageDigest: "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3", Engine: "redis", VolumeId: volume.Input.ResourceId, NetworkId: networkID, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE}}
+	ensure.Input.Secrets = []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "application"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "replication"}}
+	ensure.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
+		ImageDigest: "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3", Engine: "redis", VolumeId: volume.Input.ResourceId, NetworkId: networkID, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
+		Redis:     &agentv1.RedisContainerConfig{Port: 6379, Persistence: "none", MaxmemoryBytes: 48 << 20, EvictionPolicy: "noeviction"},
+		SecretEnv: []*agentv1.SecretEnv{{Name: "REDIS_ADMIN_PASSWORD", Purpose: "superuser"}, {Name: "REDIS_APP_PASSWORD", Purpose: "application"}, {Name: "REDIS_REPLICATION_PASSWORD", Purpose: "replication"}},
+	}}
+	ensure.Input.GetEnsureContainer().Redis.Credentials = ensure.Input.Secrets
 	hash, err = operation.CommandHash(ensure)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ensure.InputHash = hash[:]
-	if _, err := f.e.runtime.Execute(t.Context(), ensure); err != nil {
+	if _, err := f.e.runtime.Execute(t.Context(), ensure, runtime.Secrets{"superuser": []byte("executor-test-admin"), "application": []byte("executor-test-app"), "replication": []byte("executor-test-repl")}); err != nil {
 		t.Fatal(err)
 	}
 	start := proto.Clone(ensure).(*agentv1.Command)
 	start.CommandId = uuid.NewString()
 	start.StepId = uuid.NewString()
-	start.Input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}
+	start.Input.Secrets = nil
+	// This is the workload's first start, so it initializes, as the plan does.
+	start.Input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{AllowInitialization: true}}
 	hash, err = operation.CommandHash(start)
 	if err != nil {
 		t.Fatal(err)
 	}
 	start.InputHash = hash[:]
-	if _, err := f.e.runtime.Execute(t.Context(), start); err != nil {
+	if _, err := f.e.runtime.Execute(t.Context(), start, nil); err != nil {
 		t.Fatal(err)
 	}
 	return ensure, volume
@@ -141,7 +150,7 @@ func TestStartupRecoversAcknowledgedResidualEffects(t *testing.T) {
 	if _, err := f.e.journal.Start(command.CommandId); err != nil {
 		t.Fatal(err)
 	}
-	observation, err := f.e.runtime.Execute(t.Context(), command)
+	observation, err := f.e.runtime.Execute(t.Context(), command, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

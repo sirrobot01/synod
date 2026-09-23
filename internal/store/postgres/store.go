@@ -38,6 +38,9 @@ const (
 	NotFound              ErrorCode = "not_found"
 	DependencyUnavailable ErrorCode = "dependency_unavailable"
 	OutcomeUnknown        ErrorCode = "outcome_unknown"
+	// RevisionConflict reports an action whose expected revision is not the current
+	// one, so the caller acted on a cluster it had not seen.
+	RevisionConflict ErrorCode = "revision_conflict"
 )
 
 // AdmissionError reports a failed admission with a stable code.

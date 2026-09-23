@@ -1,14 +1,10 @@
-// Package drain decides what a node's work needs before the node can be emptied.
+// Package drain decides what a node's work needs before the node can be emptied. It
+// moves nothing, stops nothing, and deletes nothing.
 //
-// It decides and reports. It moves nothing, stops nothing, and deletes nothing.
-// Specification 33 states that drain does not imply local volumes can move, that a
-// standalone workload requiring downtime or backup recovery must be shown rather than
-// silently moved, and that a node must not be reported drained while required data or
-// an active role is unhandled. Every one of those is a reason to hand an operator a
-// decision instead of taking it for them.
-//
-// The failure this package exists to prevent is a drain that reports success while a
-// primary still serves from the node.
+// Specification 33 states that drain does not imply local volumes can move, and that a
+// node must not be reported drained while required data or an active role is
+// unhandled. The failure it prevents is a drain that reports success while a primary
+// still serves from the node.
 package drain
 
 import (
@@ -24,39 +20,26 @@ import (
 type Action string
 
 const (
-	// ActionNone means nothing this cluster holds on the node needs a decision.
 	ActionNone Action = "none"
-	// ActionRecreate places the workload elsewhere and starts it there. It is only
-	// offered when the cluster holds no durable data on this node, because a local
-	// volume does not move.
+	// ActionRecreate is only offered when the cluster holds no durable data here,
+	// because a local volume does not move.
 	ActionRecreate Action = "recreate"
-	// ActionSwitchover hands the active role to another member. It needs a member
-	// that can take it.
+	// ActionSwitchover hands the active role to another member.
 	ActionSwitchover Action = "switchover"
-	// ActionRestore accepts downtime and rebuilds the cluster elsewhere from a
-	// backup. It is what durable local data leaves as the only honest option.
+	// ActionRestore accepts downtime and rebuilds elsewhere from a backup.
 	ActionRestore Action = "restore"
 )
 
-// Reasons a cluster or a node still needs a decision. These are stable codes: an
+// Reasons a cluster or a node still needs a decision. They are stable codes: an
 // operator who reads "cannot drain" learns nothing about what to do next.
 const (
-	// ReasonLocalData reports durable data on this node. It does not move.
-	ReasonLocalData = "local_data_does_not_move"
-	// ReasonActiveRole reports that this node runs the cluster's only active member.
-	ReasonActiveRole = "active_role_on_this_node"
-	// ReasonNoStandby reports a switchover with nowhere to switch to.
-	ReasonNoStandby = "no_standby_member"
-	// ReasonNoRestoreSource reports a restore with nothing to restore from.
-	ReasonNoRestoreSource = "no_restore_source"
-	// ReasonWorkloadOnNode reports a reservation this cluster still holds here. A
-	// node holding one is not empty, whatever the cluster is doing.
-	ReasonWorkloadOnNode = "workload_on_node"
-	// ReasonOperationInFlight reports a cluster already being changed. Acting on it
-	// now races the operation that is already running.
+	ReasonLocalData         = "local_data_does_not_move"
+	ReasonActiveRole        = "active_role_on_this_node"
+	ReasonNoStandby         = "no_standby_member"
+	ReasonNoRestoreSource   = "no_restore_source"
+	ReasonWorkloadOnNode    = "workload_on_node"
 	ReasonOperationInFlight = "operation_in_flight"
-	// ReasonNotCordoned reports a node that still takes new placement.
-	ReasonNotCordoned = "node_not_cordoned"
+	ReasonNotCordoned       = "node_not_cordoned"
 )
 
 // Volume is one piece of storage this node holds for a cluster.
@@ -93,13 +76,11 @@ type Disposition struct {
 	Engine    cluster.Engine
 	Topology  string
 	Action    Action
-	// Downtime reports that carrying out Action stops the cluster serving. An
-	// operator has to be told this rather than discover it.
+	// Downtime reports that carrying out Action stops the cluster serving.
 	Downtime  bool
 	Resources []uuid.UUID
 	Volumes   []Volume
-	// Unhandled names every reason this cluster still holds the node. An empty list
-	// means the node is free of this cluster.
+	// Unhandled names every reason this cluster still holds the node.
 	Unhandled []string
 }
 
@@ -108,8 +89,7 @@ type Report struct {
 	NodeID   uuid.UUID
 	Cordoned bool
 	Clusters []Disposition
-	// Drained is true only when nothing on this node still needs a decision. It is
-	// never true while data or an active role is unhandled.
+	// Drained is never true while data or an active role is unhandled.
 	Drained bool
 	// Unhandled names node-level reasons, separate from any cluster's own.
 	Unhandled []string
@@ -119,8 +99,7 @@ type Report struct {
 func Decide(state State) Report {
 	report := Report{NodeID: state.NodeID, Cordoned: state.Cordoned}
 	if !state.Cordoned {
-		// A drain of a node the planner can still fill is a race the operator loses.
-		// Cordon comes first, and until it does the rest of the report is advice.
+		// Draining a node the planner can still fill is a race the operator loses.
 		report.Unhandled = append(report.Unhandled, ReasonNotCordoned)
 	}
 	for _, workload := range state.Workloads {
@@ -146,27 +125,20 @@ func decide(workload Workload) Disposition {
 		Topology: topology(spec), Resources: workload.Resources, Volumes: workload.Volumes,
 		Action: ActionNone,
 	}
-	// Durable data is the thing that cannot move. A Redis instance an operator asked
-	// not to persist is the one case where this node holds nothing worth carrying,
-	// so its workload can be placed elsewhere and started empty.
+	// Durable data is the thing that cannot move.
 	data := durable(spec) && holdsData(workload)
 	standalone := disposition.Topology == "standalone"
 	switch {
 	case len(workload.Resources) == 0:
-		// Storage only. Nothing runs here, so there is nothing to move; the data
-		// needs a disposition, which is the operator's to give.
+		// Storage only. The data needs a disposition, not a move.
 	case data && !standalone:
-		// The active role can move to another member. The data cannot: it stays on
-		// this node and still needs a disposition of its own afterwards.
+		// The role can move to another member. The data stays and still needs a
+		// disposition of its own.
 		disposition.Action = ActionSwitchover
 	case data:
-		// One member, and its data is here. Moving this cluster means downtime and
-		// rebuilding it somewhere else from a backup.
 		disposition.Action, disposition.Downtime = ActionRestore, true
-		// A restore needs something to restore from, and this installation keeps no
-		// backup artifacts yet. Saying so is the point: specification 33 requires
-		// showing a standalone workload that needs downtime or backup recovery
-		// rather than moving it and finding out.
+		// This installation keeps no backup artifacts yet, and specification 33
+		// requires showing that rather than moving the cluster and finding out.
 		disposition.Unhandled = append(disposition.Unhandled, ReasonNoRestoreSource)
 	default:
 		disposition.Action, disposition.Downtime = ActionRecreate, true
@@ -177,9 +149,8 @@ func decide(workload Workload) Disposition {
 	if len(workload.Resources) != 0 {
 		disposition.Unhandled = append(disposition.Unhandled, ReasonWorkloadOnNode)
 	}
-	// An active role is held by whatever is meant to be serving. A standalone
-	// cluster has one member, so the node running it holds the role outright and a
-	// switchover has nowhere to go.
+	// A standalone cluster has one member, so the node running it holds the role
+	// outright and a switchover has nowhere to go.
 	if workload.DesiredLifecycle == cluster.DesiredRunning && len(workload.Resources) != 0 {
 		disposition.Unhandled = append(disposition.Unhandled, ReasonActiveRole)
 		if standalone {

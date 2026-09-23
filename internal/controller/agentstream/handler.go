@@ -4,6 +4,7 @@ package agentstream
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/controlstream"
@@ -22,16 +23,19 @@ type Receiver struct{ Store *postgres.Store }
 // Handle commits security-bound evidence. It never grants authority or reconciles a plan.
 func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
 	if r.Store == nil || message == nil {
-		return ErrUnsupportedMessage
+		return fmt.Errorf("%w: the receiver has no store or the message is absent", ErrUnsupportedMessage)
 	}
 	sessionID, err := uuid.Parse(peer.SessionID)
-	if err != nil || sessionID == uuid.Nil {
-		return ErrUnsupportedMessage
+	if err != nil {
+		return fmt.Errorf("%w: parse the session of node %s: %w", ErrUnsupportedMessage, peer.NodeID, err)
+	}
+	if sessionID == uuid.Nil {
+		return fmt.Errorf("%w: node %s carries a nil session", ErrUnsupportedMessage, peer.NodeID)
 	}
 	switch value := message.Message.(type) {
 	case *agentv1.AgentMessage_Hello:
 		if value.Hello == nil || value.Hello.BootId != peer.BootID || value.Hello.JournalGeneration != peer.JournalGeneration {
-			return ErrUnsupportedMessage
+			return fmt.Errorf("%w: the Hello of node %s does not match the boot and journal generation of its session", ErrUnsupportedMessage, peer.NodeID)
 		}
 		return r.Store.RecordAgentSession(ctx, peer.InstallationID, peer.NodeID, sessionID, value.Hello)
 	case *agentv1.AgentMessage_Heartbeat:
@@ -47,7 +51,7 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 	case *agentv1.AgentMessage_Inventory:
 		return r.recordDrift(ctx, peer, sessionID, value.Inventory)
 	default:
-		return ErrUnsupportedMessage
+		return fmt.Errorf("%w: node %s sent %T", ErrUnsupportedMessage, peer.NodeID, message.Message)
 	}
 }
 
@@ -68,15 +72,15 @@ func capacityReport(peer controlstream.Peer, sessionID uuid.UUID, report *agentv
 	}
 	probeID, err := uuid.Parse(report.ProbeId)
 	if err != nil {
-		return found, ErrUnsupportedMessage
+		return found, fmt.Errorf("%w: parse the probe of the capacity report from node %s: %w", ErrUnsupportedMessage, peer.NodeID, err)
 	}
 	bootID, err := uuid.Parse(report.BootId)
 	if err != nil {
-		return found, ErrUnsupportedMessage
+		return found, fmt.Errorf("%w: parse the boot of the capacity report from node %s: %w", ErrUnsupportedMessage, peer.NodeID, err)
 	}
 	generation, err := uuid.Parse(report.JournalGeneration)
 	if err != nil {
-		return found, ErrUnsupportedMessage
+		return found, fmt.Errorf("%w: parse the journal generation of the capacity report from node %s: %w", ErrUnsupportedMessage, peer.NodeID, err)
 	}
 	found = placement.CapacityReport{
 		ProbeID: probeID, ProbeRevision: report.ProbeRevision,
@@ -88,11 +92,11 @@ func capacityReport(peer controlstream.Peer, sessionID uuid.UUID, report *agentv
 	for _, item := range report.Reservations {
 		reservationID, err := uuid.Parse(item.ReservationId)
 		if err != nil {
-			return placement.CapacityReport{}, ErrUnsupportedMessage
+			return placement.CapacityReport{}, fmt.Errorf("%w: parse a reservation of the capacity report from node %s: %w", ErrUnsupportedMessage, peer.NodeID, err)
 		}
 		resourceID, err := uuid.Parse(item.ResourceId)
 		if err != nil {
-			return placement.CapacityReport{}, ErrUnsupportedMessage
+			return placement.CapacityReport{}, fmt.Errorf("%w: parse the resource of reservation %s from node %s: %w", ErrUnsupportedMessage, reservationID, peer.NodeID, err)
 		}
 		found.Reservations = append(found.Reservations, placement.Usage{ReservationID: reservationID, ResourceID: resourceID, Used: vector(item.Used)})
 	}

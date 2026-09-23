@@ -17,11 +17,23 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirrobot01/synod/internal/auth"
-	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/engine"
+	postgresengine "github.com/sirrobot01/synod/internal/engine/postgres"
+	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 )
 
 // The fixture uses a separate database so API writes cannot affect other suites.
+// testCatalog serves what this installation advertises.
+func testCatalog(t *testing.T) *engine.Catalog {
+	t.Helper()
+	catalog, err := engine.NewCatalog(postgresengine.New(), redisengine.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return catalog
+}
+
 func TestHTTPSAdmission(t *testing.T) {
 	store, pool, dsn := apiTestStore(t)
 	token := strings.Repeat("secret-", 8)
@@ -32,7 +44,7 @@ func TestHTTPSAdmission(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	installation := uuid.New()
-	server, err := NewServer(store, verifier, installation, map[cluster.Engine][]string{cluster.PostgreSQL: {"17.11"}}, logger)
+	server, err := NewServer(store, verifier, installation, testCatalog(t), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +143,7 @@ func TestHTTPSAdmission(t *testing.T) {
 		{"invalid ID", "GET", "/v1/clusters/not-an-id", "", "", 400},
 		{"missing cluster", "GET", "/v1/clusters/" + uuid.NewString(), "", "", 404},
 		{"missing endpoint", "GET", "/v1/unknown", "", "", 404},
-		{"unsupported method", "DELETE", "/v1/clusters/" + first.ClusterID.String(), "", "", 405},
+		{"unsupported method", "PATCH", "/v1/clusters/" + first.ClusterID.String(), "", "", 405},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, _, data := send(test.method, test.path, test.body, test.key, token)

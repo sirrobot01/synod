@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,7 +15,7 @@ import (
 
 func TestProtectedConfiguration(t *testing.T) {
 	dir := t.TempDir()
-	config := Config{InstallationID: uuid.NewString(), NodeID: uuid.NewString(), RecoveryGeneration: uuid.NewString(), EnrollmentDir: filepath.Join(dir, "enrollment"), JournalDir: filepath.Join(dir, "journal"), ControllerEndpoints: []string{"localhost:8444"}}
+	config := Config{InstallationID: uuid.NewString(), NodeID: uuid.NewString(), RecoveryGeneration: uuid.NewString(), EnrollmentDir: filepath.Join(dir, "enrollment"), JournalDir: filepath.Join(dir, "journal"), ControllerEndpoints: []string{"localhost:8444"}, JournalMaxRetainedBytes: 512 << 20, JournalMaxStoredBytes: 2 << 30, JournalRecoveryWindowSeconds: 3600}
 	data, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
@@ -24,7 +25,7 @@ func TestProtectedConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := Load(path)
-	if err != nil || loaded.DockerSocket != "/var/run/docker.sock" {
+	if err != nil || loaded.DockerSocket != "/var/run/docker.sock" || loaded.JournalMaxRetainedBytes != config.JournalMaxRetainedBytes || loaded.JournalMaxStoredBytes != config.JournalMaxStoredBytes || loaded.JournalRecoveryWindowSeconds != config.JournalRecoveryWindowSeconds {
 		t.Fatalf("valid config: %v", err)
 	}
 	for name, content := range map[string][]byte{"oversized": bytes.Repeat([]byte("x"), (64<<10)+1), "trailing": append(bytes.Clone(data), []byte(" {}")...), "unknown": bytes.Replace(data, []byte("{"), []byte(`{"token":"private",`), 1)} {
@@ -60,7 +61,7 @@ func TestProtectedConfiguration(t *testing.T) {
 		}
 	}
 	config.DockerSocket = "/var/run/docker.sock"
-	for _, change := range []func(*Config){func(c *Config) { c.RecoveryGeneration = uuid.Nil.String() }, func(c *Config) { c.JournalDir = c.EnrollmentDir }, func(c *Config) { c.JournalDir = filepath.Join(c.EnrollmentDir, "journal") }, func(c *Config) { c.ControllerEndpoints = []string{"https://user:secret@example:123"} }, func(c *Config) { c.DockerSocket = "tcp://localhost:2375" }} {
+	for _, change := range []func(*Config){func(c *Config) { c.JournalMaxRetainedBytes = -1 }, func(c *Config) { c.JournalMaxStoredBytes = -1 }, func(c *Config) { c.JournalRecoveryWindowSeconds = -1 }, func(c *Config) { c.JournalRecoveryWindowSeconds = math.MaxInt64 }, func(c *Config) { c.RecoveryGeneration = uuid.Nil.String() }, func(c *Config) { c.JournalDir = c.EnrollmentDir }, func(c *Config) { c.JournalDir = filepath.Join(c.EnrollmentDir, "journal") }, func(c *Config) { c.ControllerEndpoints = []string{"https://user:secret@example:123"} }, func(c *Config) { c.DockerSocket = "tcp://localhost:2375" }} {
 		bad := config
 		change(&bad)
 		if bad.validate() == nil {

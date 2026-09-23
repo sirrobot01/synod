@@ -51,8 +51,8 @@ func TestRecoveryResolvesRetainedNativeExec(t *testing.T) {
 	r, api, clusterID := runtimeFixture(t)
 	ensure := createFixtureContainer(t, r, clusterID, agentv1.NetworkMode_NETWORK_MODE_BRIDGE)
 	resourceID := ensure.Input.ResourceId
-	start := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: resourceID, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}})
-	if _, err := r.Execute(t.Context(), start); err != nil {
+	start := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: resourceID, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{AllowInitialization: true}}})
+	if _, err := r.Execute(t.Context(), start, nil); err != nil {
 		t.Fatal(err)
 	}
 	command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: resourceID, Payload: &agentv1.CommandInput_InspectContainer{InspectContainer: &agentv1.InspectContainer{}}})
@@ -65,7 +65,7 @@ func TestRecoveryResolvesRetainedNativeExec(t *testing.T) {
 	if _, err := api.ExecStart(t.Context(), native.ID, client.ExecStartOptions{Detach: true}); err != nil {
 		t.Fatal(err)
 	}
-	observed, err := r.Execute(t.Context(), command)
+	observed, err := r.Execute(t.Context(), command, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

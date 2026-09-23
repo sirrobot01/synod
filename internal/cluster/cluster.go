@@ -34,8 +34,7 @@ const (
 	ObservedUnknown      ObservedLifecycle = "unknown"
 )
 
-// CreateSpec is the stable v1 hash representation. Keep its fields and tags fixed.
-// Add a versioned representation before changing admission defaults or fields.
+// CreateSpec is the versioned representation used to hash admission requests.
 type CreateSpec struct {
 	SchemaVersion int             `json:"schema_version"`
 	Name          string          `json:"name"`
@@ -44,17 +43,20 @@ type CreateSpec struct {
 	Redis         *RedisSpec      `json:"redis"`
 }
 
-// PostgreSQLSpec holds the PostgreSQL version and topology.
+// PostgreSQLSpec holds the PostgreSQL version, topology, and replication policy.
 type PostgreSQLSpec struct {
-	Version  string `json:"version"`
-	Topology string `json:"topology"`
+	Version           string `json:"version"`
+	Topology          string `json:"topology"`
+	ReplicationPolicy string `json:"replication_policy,omitempty"`
 }
 
 // RedisSpec holds the Redis version, topology, and persistence.
 type RedisSpec struct {
-	Version     string `json:"version"`
-	Topology    string `json:"topology"`
-	Persistence string `json:"persistence"`
+	Version        string `json:"version"`
+	Topology       string `json:"topology"`
+	Persistence    string `json:"persistence"`
+	MaxmemoryBytes int64  `json:"maxmemory_bytes,omitzero"`
+	EvictionPolicy string `json:"eviction_policy,omitempty"`
 }
 
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
@@ -76,6 +78,11 @@ func (s CreateSpec) Validate() error {
 		if s.PostgreSQL.Topology != "standalone" {
 			return fmt.Errorf("postgres topology must be standalone")
 		}
+		switch s.PostgreSQL.ReplicationPolicy {
+		case "", "asynchronous", "synchronous":
+		default:
+			return fmt.Errorf("postgres replication policy must be asynchronous or synchronous")
+		}
 		if len(s.PostgreSQL.Version) > 64 || !versionPattern.MatchString(s.PostgreSQL.Version) {
 			return fmt.Errorf("postgres version must have two or three numeric parts")
 		}
@@ -94,6 +101,14 @@ func (s CreateSpec) Validate() error {
 		default:
 			return fmt.Errorf("redis persistence must be none, rdb, aof, or rdb+aof")
 		}
+		if s.Redis.MaxmemoryBytes < 0 {
+			return fmt.Errorf("redis maxmemory bytes must not be negative")
+		}
+		switch s.Redis.EvictionPolicy {
+		case "", "noeviction", "allkeys-lru", "allkeys-lfu", "allkeys-random", "volatile-lru", "volatile-lfu", "volatile-random", "volatile-ttl":
+		default:
+			return fmt.Errorf("redis eviction policy is unsupported")
+		}
 	default:
 		return fmt.Errorf("engine must be postgres or redis")
 	}
@@ -107,6 +122,7 @@ type Cluster struct {
 	Spec              CreateSpec        `json:"spec"`
 	DesiredRevision   int64             `json:"desired_revision"`
 	DesiredLifecycle  DesiredLifecycle  `json:"desired_lifecycle"`
+	DesiredReplicas   int               `json:"desired_replicas"`
 	ObservedRevision  int64             `json:"observed_revision"`
 	ObservedLifecycle ObservedLifecycle `json:"observed_lifecycle"`
 	ExecutionEpoch    int64             `json:"execution_epoch"`

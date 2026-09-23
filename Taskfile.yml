@@ -20,10 +20,9 @@ vars:
   ETCD_IMAGE: quay.io/coreos/etcd@sha256:dfd3941bf6ced5fdb700f9b2d98b22b7bca7ceee13aec16224f93ff30d9a59c4
   LISTEN: 127.0.0.1:8443
 
-# SYNOD_ETCD_ENDPOINTS is deliberately absent. The controller refuses etcd endpoints
-# without an agent transport, and nothing generates the installation CA and the agent
-# certificates yet. Without etcd the controller admits requests, records desired state,
-# and starts no worker, which is what the API and the browser application need.
+# Configure the agent transport before you set SYNOD_ETCD_ENDPOINTS.
+# The local etcd fixture also requires SYNOD_ETCD_ALLOW_PLAINTEXT=true.
+# Without etcd, the controller records desired state and starts no worker.
 env:
   SYNOD_DATABASE_URL: postgres://postgres@127.0.0.1:{{.PG_PORT}}/synod?sslmode=disable
   SYNOD_ADMIN_TOKEN_FILE: .dev/admin.token
@@ -196,9 +195,10 @@ tasks:
   dev:etcd:
     desc: Start the persistent etcd node
     summary: |
-      Nothing needs this yet. The controller refuses etcd endpoints without an agent
-      transport, and no command generates the installation CA or the agent certificates.
-      Start it when that material exists, and set SYNOD_ETCD_ENDPOINTS yourself.
+      This local development node has no TLS or authentication.
+      Configure the controller agent transport before you enable workers.
+      Set SYNOD_ETCD_ENDPOINTS to 127.0.0.1:{{.ETCD_PORT}}.
+      Set SYNOD_ETCD_ALLOW_PLAINTEXT=true for this fixture.
     status:
       - test "$(docker inspect -f '{{`{{.State.Running}}`}}' {{.ETCD_CONTAINER}} 2>/dev/null)" = true
     cmds:

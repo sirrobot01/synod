@@ -16,6 +16,7 @@ import (
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/coordinator"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
@@ -42,6 +43,13 @@ type Config struct {
 	IdleBackoff time.Duration
 	// OutboxPage bounds one page of the pending outbox scan.
 	OutboxPage int
+	// Keyring opens the sealed credentials a plan names. A controller without one
+	// runs plans that need no credential and refuses the ones that do.
+	Keyring *secret.Keyring
+	// Planner produces the plan for a claimed operation that has none.
+	// *provision.Planner satisfies it. A controller without one runs only plans
+	// something else installed.
+	Planner Planner
 	// EvidenceWait bounds one worker wait for committed agent evidence.
 	EvidenceWait time.Duration
 }
@@ -256,8 +264,9 @@ func (r *Runner) consider(ctx context.Context, operationID uuid.UUID) {
 	switch {
 	case op.Status == operation.Succeeded || op.Status == operation.Failed || op.Status == operation.Cancelled:
 		return
-	case op.PlanVersion == 0:
-		// Admission leaves an operation pending until a plan exists.
+	case op.PlanVersion == 0 && r.config.Planner == nil:
+		// Admission leaves an operation pending until a plan exists, and this
+		// controller cannot produce one.
 		r.config.Logger.Debug("operation has no executable plan", "operation_id", op.ID, "cluster_id", op.ClusterID)
 		return
 	}
@@ -340,9 +349,23 @@ func (r *Runner) drive(ctx context.Context, op operation.Operation) error {
 	if err != nil {
 		return fmt.Errorf("claim operation %s: %w", op.ID, err)
 	}
+	// An operation with no plan has not been planned yet. Planning happens under the
+	// claim, so exactly one controller plans it and the reservations it takes belong
+	// to the claim that will run them.
+	if op.PlanVersion == 0 && r.config.Planner != nil {
+		if err := r.config.Planner.Plan(run, claim); err != nil {
+			return fmt.Errorf("plan operation %s: %w", op.ID, err)
+		}
+		// Re-read, because the worker runs the plan the store now holds rather than
+		// the operation this loop picked up before it existed.
+		op, err = r.config.Store.GetOperation(run, r.config.InstallationID, op.ID)
+		if err != nil {
+			return err
+		}
+	}
 	owner, err := worker.New(worker.Config{
 		Store: r.config.Store, Transport: r.config.Transport, Authority: leader, Claim: claim, Operation: op,
-		EvidenceWait: r.config.EvidenceWait,
+		EvidenceWait: r.config.EvidenceWait, Keyring: r.config.Keyring,
 	})
 	if err != nil {
 		return err
@@ -369,6 +392,7 @@ func (r *Runner) drive(ctx context.Context, op operation.Operation) error {
 	}
 	stop()
 	renewal.Wait()
+
 	return err
 }
 
@@ -429,4 +453,10 @@ func (r *Runner) renew(ctx context.Context, stop context.CancelFunc, claim opera
 			}
 		}
 	}
+}
+
+// Planner installs the durable plan for one claimed operation.
+// *provision.Planner satisfies it.
+type Planner interface {
+	Plan(ctx context.Context, claim operation.Claim) error
 }

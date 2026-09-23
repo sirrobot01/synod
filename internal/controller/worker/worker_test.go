@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"slices"
@@ -26,6 +28,7 @@ import (
 	"github.com/sirrobot01/synod/internal/coordinator"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/pki"
+	"github.com/sirrobot01/synod/internal/placement"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -89,7 +92,10 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(func() {
 		pool.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// The bound guards against a hang, and is not an assertion about speed:
+		// on a loaded host many suites drop their databases at once, and a teardown
+		// that is merely slow must not fail a test that passed.
+		ctx, cancel := context.WithTimeout(context.Background(), dropTimeout)
 		defer cancel()
 		if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
 			t.Error(err)
@@ -116,9 +122,9 @@ type harness struct {
 	controller tls.Certificate
 }
 
-// newHarness admits one cluster, installs a two-step plan, and connects one enrolled agent.
-// The second step depends on the first.
-func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.AgentMessage) *harness {
+// newHarness reserves one instance and connects one enrolled agent.
+// Its plan checks the volume, starts the instance, and proves readiness in order.
+func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.AgentMessage, editPlan ...func(*agentv1.ExecutionPlan)) *harness {
 	t.Helper()
 	pool := testPool(t)
 	store := postgres.New(pool)
@@ -147,7 +153,13 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 	}
 	volume := harnessStep(t, claim, node, agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS)
 	start := harnessStep(t, claim, node, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, volume.Command.StepId)
-	plan := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{volume, start}}
+	ready := harnessStep(t, claim, node, agentv1.Postcondition_POSTCONDITION_ENGINE_READY, start.Command.StepId)
+	ready.Command.Input.ResourceId = start.Command.Input.ResourceId
+	rehash(t, ready.Command)
+	plan := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{volume, start, ready}}
+	for _, edit := range editPlan {
+		edit(plan)
+	}
 	if err := store.InstallPlan(t.Context(), claim, plan); err != nil {
 		t.Fatal(err)
 	}
@@ -157,6 +169,32 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 	}
 	h := &harness{store: store, pool: pool, leader: testLeadership(t, installation, claim.ClusterID), claim: claim, plan: plan, node: node, received: make(chan *agentv1.ControllerMessage, 32)}
 	h.transport = h.serve(t, installation, node)
+
+	allocation := placement.Allocation{
+		ID: uuid.New(), InstallationID: installation, NodeID: node, ClusterID: claim.ClusterID,
+		ResourceID: uuid.MustParse(start.Command.Input.ResourceId), CreatedByOperation: admission.OperationID, CreatedRevision: 1,
+		OwnedResourceIDs: []uuid.UUID{uuid.MustParse(start.Command.Input.ResourceId), uuid.MustParse(volume.Command.Input.ResourceId)},
+		Budget:           placement.Vector{CPUMillis: 250, MemoryBytes: 64 << 20, DiskBytes: 1 << 30},
+		Ports:            []placement.Port{{Address: "0.0.0.0", Transport: "tcp", Number: 5432}},
+	}
+	allocationBytes, err := json.Marshal(allocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO resource_allocations(id,installation_id,node_id,cluster_id,resource_id,created_operation_id,created_revision,allocation_bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, allocation.ID, installation, node, claim.ClusterID, allocation.ResourceID, admission.OperationID, allocation.CreatedRevision, allocationBytes); err != nil {
+		t.Fatal(err)
+	}
+	for _, resource := range allocation.OwnedResourceIDs {
+		if _, err := pool.Exec(t.Context(), `INSERT INTO allocation_resources(installation_id,cluster_id,node_id,allocation_id,resource_id) VALUES($1,$2,$3,$4,$5)`, installation, claim.ClusterID, node, allocation.ID, resource); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO allocation_ports(installation_id,cluster_id,node_id,allocation_id,address,transport,port) VALUES($1,$2,$3,$4,$5,$6,$7)`, installation, claim.ClusterID, node, allocation.ID, allocation.Ports[0].Address, allocation.Ports[0].Transport, allocation.Ports[0].Number); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO operation_allocation_bindings(installation_id,cluster_id,operation_id,allocation_id) VALUES($1,$2,$3,$4)`, installation, claim.ClusterID, admission.OperationID, allocation.ID); err != nil {
+		t.Fatal(err)
+	}
 	h.worker, err = New(Config{Store: store, Transport: h.transport, Authority: h.leader, Claim: claim, Operation: op, EvidenceWait: 2 * time.Second, RetryDelay: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
@@ -348,12 +386,12 @@ func (s agentScript) answer(message *agentv1.ControllerMessage) []*agentv1.Agent
 	}
 	var answers []*agentv1.AgentMessage
 	if s.reject != "" {
-		ack := &agentv1.AdmissionAck{Epoch: command.Epoch, CommandId: command.CommandId, State: "rejected", ErrorCode: s.reject, InputHash: command.InputHash}
+		ack := &agentv1.AdmissionAck{DeliveryAttemptId: message.DeliveryAttemptId, Epoch: command.Epoch, CommandId: command.CommandId, State: "rejected", ErrorCode: s.reject, InputHash: command.InputHash}
 		return []*agentv1.AgentMessage{{Message: &agentv1.AgentMessage_AdmissionAck{AdmissionAck: ack}}}
 	}
 	recordDispatch(command)
 	if s.admit {
-		ack := &agentv1.AdmissionAck{Epoch: command.Epoch, CommandId: command.CommandId, State: "queued", InputHash: command.InputHash}
+		ack := &agentv1.AdmissionAck{DeliveryAttemptId: message.DeliveryAttemptId, Epoch: command.Epoch, CommandId: command.CommandId, State: "queued", InputHash: command.InputHash}
 		answers = append(answers, &agentv1.AgentMessage{Message: &agentv1.AgentMessage_AdmissionAck{AdmissionAck: ack}})
 	}
 	if receipt := s.terminal(command); receipt != nil {
@@ -384,15 +422,6 @@ var dispatched sync.Map
 
 func recordDispatch(command *agentv1.Command) { dispatched.Store(command.CommandId, command) }
 
-func dispatchedCommand(t *testing.T, commandID string) *agentv1.Command {
-	t.Helper()
-	found, ok := dispatched.Load(commandID)
-	if !ok {
-		t.Fatalf("no dispatch recorded for command %s", commandID)
-	}
-	return found.(*agentv1.Command)
-}
-
 // terminal builds the receipt that this script reports for one command.
 func (s agentScript) terminal(command *agentv1.Command) *agentv1.TerminalResult {
 	if s.receipt == "" {
@@ -422,6 +451,8 @@ func nativeState(command *agentv1.Command) string {
 		return "running"
 	case *agentv1.CommandInput_RemoveContainer:
 		return "absent"
+	case *agentv1.CommandInput_CheckReadiness:
+		return "ready"
 	default:
 		return "created"
 	}
@@ -581,25 +612,31 @@ func TestWorkerRunsPlanToSuccess(t *testing.T) {
 	if h.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='succeeded' AND NOT claim_active AND finished_at IS NOT NULL AND failure_code IS NULL`, h.claim.OperationID) != 1 {
 		t.Fatal("the operation did not finish")
 	}
-	if total := h.count(t, `SELECT count(*) FROM operation_step_completions WHERE operation_id=$1`, h.claim.OperationID); total != 2 {
+	if total := h.count(t, `SELECT count(*) FROM operation_step_completions WHERE operation_id=$1`, h.claim.OperationID); total != len(h.plan.Steps) {
 		t.Fatalf("completions=%d, want one for each step", total)
 	}
-	if total := h.count(t, `SELECT count(*) FROM command_dispatches WHERE operation_id=$1`, h.claim.OperationID); total != 2 {
+	if total := h.count(t, `SELECT count(*) FROM command_dispatches WHERE operation_id=$1`, h.claim.OperationID); total != len(h.plan.Steps) {
 		t.Fatalf("dispatches=%d, want one for each step", total)
 	}
 	if h.count(t, `SELECT count(*) FROM operation_progress WHERE operation_id=$1 AND state='succeeded'`, h.claim.OperationID) != 1 {
 		t.Fatal("the terminal status has no progress record")
 	}
+	if h.count(t, `SELECT count(*) FROM clusters WHERE id=$1 AND observed_revision=1 AND observed_lifecycle='running'`, h.claim.ClusterID) != 1 {
+		t.Fatal("success did not commit the proved cluster lifecycle")
+	}
+	if h.count(t, `SELECT count(*) FROM resource_allocations WHERE cluster_id=$1 AND released_at IS NULL`, h.claim.ClusterID) != 1 {
+		t.Fatal("create success released the live reservation")
+	}
 	// A dependent step must not reach the agent before its dependency is proved.
-	if sent := h.commands(); !slices.Equal(sent, []string{h.plan.Steps[0].Command.CommandId, h.plan.Steps[1].Command.CommandId}) {
+	if sent := h.commands(); !slices.Equal(sent, []string{h.plan.Steps[0].Command.CommandId, h.plan.Steps[1].Command.CommandId, h.plan.Steps[2].Command.CommandId}) {
 		t.Fatalf("command order %v", sent)
 	}
 	// A finished operation is immutable. A repeated run must change nothing.
 	if err := h.worker.Run(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if total := h.count(t, `SELECT count(*) FROM operation_progress WHERE operation_id=$1`, h.claim.OperationID); total != 3 {
-		t.Fatalf("progress rows=%d, want two running records and one terminal record", total)
+	if total := h.count(t, `SELECT count(*) FROM operation_progress WHERE operation_id=$1`, h.claim.OperationID); total != len(h.plan.Steps)+1 {
+		t.Fatalf("progress rows=%d, want one running record per step and one terminal record", total)
 	}
 }
 
@@ -624,7 +661,7 @@ func TestWorkerFailsOnFailedReceipt(t *testing.T) {
 	if err := h.worker.Run(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if h.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='failed' AND finished_at IS NOT NULL`, h.claim.OperationID) != 1 {
+	if h.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='failed' AND finished_at IS NOT NULL AND failure_code='container_start_failed'`, h.claim.OperationID) != 1 {
 		t.Fatal("a failed receipt did not fail the operation")
 	}
 	if h.count(t, `SELECT count(*) FROM command_dispatches WHERE command_id=$1`, h.plan.Steps[1].Command.CommandId) != 0 {
@@ -1277,5 +1314,143 @@ func TestWorkerAsksNoAgentForAnUnadmittedCommand(t *testing.T) {
 	}
 	if h.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='cancelling' AND finished_at IS NULL`, h.claim.OperationID) != 1 {
 		t.Fatal("the worker did not record the cancellation transition")
+	}
+}
+
+func TestWorkerCancelsAfterEveryDeliveryIsRefused(t *testing.T) {
+	h := newHarness(t, agentScript{drained: true, reject: "agent_busy"}.answer)
+	if err := h.worker.Prepare(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, sent := h.step(t); sent != 1 {
+		t.Fatalf("sent=%d, want one attempt", sent)
+	}
+	waitFor(t, func() bool {
+		return h.count(t, `SELECT count(*) FROM command_delivery_attempts WHERE rejection_bytes IS NOT NULL`) == 1
+	}, "refusal did not commit")
+	if _, err := h.pool.Exec(t.Context(), `UPDATE operations SET cancellation_requested_at=clock_timestamp() WHERE id=$1`, h.claim.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.worker.Run(t.Context()); err != nil {
+		t.Fatalf("cancellation waited for a refused command: %v", err)
+	}
+	if h.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='cancelled' AND NOT claim_active AND finished_at IS NOT NULL`, h.claim.OperationID) != 1 {
+		t.Fatal("known refusals did not finish cancellation")
+	}
+	if h.cancelled(h.plan.Steps[0].Command.CommandId) {
+		t.Fatal("a refused command received cancellation")
+	}
+	if h.count(t, `SELECT count(*) FROM command_delivery_attempts`) != 1 {
+		t.Fatal("cancellation retried forward work")
+	}
+}
+
+// dropTimeout bounds one test database teardown. It exists to stop a hang, not to
+// assert how fast PostgreSQL drops a database under load.
+const dropTimeout = 60 * time.Second
+
+func TestWorkerKeepsActiveEffectsAfterFailure(t *testing.T) {
+	for _, failureKind := range []string{"delivery_exhausted", "failed_receipt"} {
+		t.Run(failureKind, func(t *testing.T) {
+			h := newHarness(t, func(message *agentv1.ControllerMessage) []*agentv1.AgentMessage {
+				script := agentScript{drained: true, admit: true}
+				if command := message.GetCommand(); command != nil && command.Input.GetStartContainer() != nil {
+					if failureKind == "delivery_exhausted" {
+						script.admit, script.reject = false, "agent_busy"
+					} else {
+						script.receipt = "failed"
+					}
+				}
+				return script.answer(message)
+			}, func(plan *agentv1.ExecutionPlan) { plan.Steps[1].DependsOn = nil })
+			if err := h.worker.Run(t.Context()); !errors.Is(err, ErrEvidencePending) {
+				t.Fatalf("worker ended with an active sibling: %v", err)
+			}
+			if h.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='waiting' AND claim_active AND finished_at IS NULL`, h.claim.OperationID) != 1 {
+				t.Fatal("failure released the active effect")
+			}
+			// A fresh worker must reconstruct the failure from durable evidence.
+			resumed, err := New(h.worker.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := resumed.Run(t.Context()); !errors.Is(err, ErrEvidencePending) {
+				t.Fatalf("restart forgot the active effect: %v", err)
+			}
+			if total := h.count(t, `SELECT count(*) FROM command_dispatches`); total != 2 {
+				t.Fatalf("failure dispatched dependent work: %d", total)
+			}
+			h.receive(t, h.plan.Steps[0].Command, "succeeded", "", false)
+			if err := resumed.Run(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if h.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='failed' AND NOT claim_active AND finished_at IS NOT NULL`, h.claim.OperationID) != 1 {
+				t.Fatal("settled effects did not permit failure")
+			}
+		})
+	}
+}
+
+func TestWorkerWaitsAfterExhaustionWithoutAnyReply(t *testing.T) {
+	h := newHarness(t, agentScript{drained: true}.answer)
+	for range int(h.plan.Steps[0].MaxAttempts) + 1 {
+		if err := h.worker.Run(t.Context()); !errors.Is(err, ErrEvidencePending) {
+			t.Fatalf("lost replies became a known failure: %v", err)
+		}
+	}
+	if h.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='waiting' AND failure_code='outcome_unknown' AND claim_active AND finished_at IS NULL`, h.claim.OperationID) != 1 {
+		t.Fatal("lost reply released the mutation slot")
+	}
+	if total := h.count(t, `SELECT count(*) FROM command_delivery_attempts`); total != int(h.plan.Steps[0].MaxAttempts) {
+		t.Fatalf("unbounded delivery attempts: %d", total)
+	}
+}
+
+func TestWorkerDoesNotSettleUnansweredDeliveryWithAnotherRefusal(t *testing.T) {
+	for _, missing := range []int{1, 3} {
+		t.Run(fmt.Sprint(missing), func(t *testing.T) {
+			attempt := 0
+			unanswered := make(chan *agentv1.ControllerMessage, 1)
+			h := newHarness(t, func(message *agentv1.ControllerMessage) []*agentv1.AgentMessage {
+				if message.GetCommand() != nil {
+					attempt++
+					if attempt == missing {
+						unanswered <- message
+						return nil
+					}
+				}
+				return agentScript{drained: true, reject: "agent_busy"}.answer(message)
+			})
+			for range int(h.plan.Steps[0].MaxAttempts) + 1 {
+				if err := h.worker.Run(t.Context()); !errors.Is(err, ErrEvidencePending) {
+					t.Fatalf("another refusal settled unanswered attempt %d: %v", missing, err)
+				}
+			}
+			if h.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='waiting' AND claim_active AND finished_at IS NULL`, h.claim.OperationID) != 1 {
+				t.Fatal("unanswered attempt released the mutation slot")
+			}
+			resumed, err := New(h.worker.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := resumed.Run(t.Context()); !errors.Is(err, ErrEvidencePending) {
+				t.Fatalf("restart lost the unanswered attempt: %v", err)
+			}
+			peer, ok := h.transport.Session(h.node)
+			if !ok {
+				t.Fatal("agent disconnected")
+			}
+			for _, reply := range (agentScript{reject: "agent_busy"}).answer(<-unanswered) {
+				if err := resumed.Handle(t.Context(), peer, reply); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := resumed.Run(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if h.count(t, `SELECT count(*) FROM operations WHERE id=$1 AND status='failed' AND NOT claim_active AND finished_at IS NOT NULL`, h.claim.OperationID) != 1 {
+				t.Fatal("all refused attempts did not permit failure")
+			}
+		})
 	}
 }

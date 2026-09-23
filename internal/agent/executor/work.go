@@ -56,7 +56,22 @@ func (e *Executor) execute(ctx context.Context, task job) {
 			e.recordOutcome(record, runtime.Result{}, err)
 			return
 		}
-		result, err := e.runtime.Execute(ctx, record.Command)
+		// The credential is resolved from session memory immediately before the
+		// effect. A command whose secret this session was never sent is refused
+		// rather than run against an engine with no credential.
+		secrets, err := e.resolve(record.Command)
+		if err != nil {
+			e.recordOutcome(record, runtime.Result{}, err)
+			return
+		}
+		// A readiness check is an observation over the network, not a container
+		// action, so it does not go to the runtime at all.
+		if record.Command.Input.GetCheckReadiness() != nil {
+			result, err := e.readiness(ctx, record.Command, secrets)
+			e.recordOutcome(record, result, err)
+			return
+		}
+		result, err := e.runtime.Execute(ctx, record.Command, secrets)
 		e.recordOutcome(record, result, err)
 		return
 	}

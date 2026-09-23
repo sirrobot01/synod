@@ -359,3 +359,78 @@ func TestEvidenceBoundToOtherStateIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// Operations plan concurrently and each one refreshes. An agent holds one probe per
+// session, so a second challenge replaces the one it is still measuring and that
+// answer is discarded. Two pending operations were enough to starve a real node
+// indefinitely: its probe revision climbed while no report ever committed.
+func TestConcurrentRefreshesShareOneProbe(t *testing.T) {
+	n := node(t)
+	store := &fakeStore{snapshot: placement.Snapshot{Nodes: []placement.Node{n}}}
+	transport := &fakeTransport{}
+	session(transport, n)
+	d := driver(t, store, transport)
+	const planners = 8
+	challenged := make([][]uuid.UUID, planners)
+	snapshot := store.snapshot
+	var planning sync.WaitGroup
+	for i := range planners {
+		planning.Go(func() {
+			got, err := d.Refresh(t.Context(), n.InstallationID, snapshot)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			challenged[i] = got
+		})
+	}
+	planning.Wait()
+	if len(store.probes) != 1 || len(transport.sent) != 1 {
+		t.Fatalf("probes=%d sent=%d, want one probe shared by every planner", len(store.probes), len(transport.sent))
+	}
+	// Every planner must still wait for the node. A planner told it was not
+	// challenged would plan without the evidence that is on its way.
+	for i, got := range challenged {
+		if len(got) != 1 || got[0] != n.ID {
+			t.Fatalf("planner %d waits for %v, want the node whose probe is in flight", i, got)
+		}
+	}
+}
+
+// A claim is not a lock held forever. An agent that never answers must be challenged
+// again once its probe has expired, and a reconnected agent has no memory of one.
+func TestRefreshChallengesAgainAfterAProbeExpiresOrASessionChanges(t *testing.T) {
+	n := node(t)
+	store := &fakeStore{snapshot: placement.Snapshot{Nodes: []placement.Node{n}}}
+	transport := &fakeTransport{}
+	session(transport, n)
+	now := fixedNow
+	d, err := New(Config{Store: store, Transport: transport, Wait: time.Second, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		name  string
+		apply func()
+		want  int
+	}{
+		{name: "first challenge", apply: func() {}, want: 1},
+		{name: "probe still in flight", apply: func() { now = now.Add(placement.ProbeWindow / 2) }, want: 1},
+		{name: "probe expired", apply: func() { now = now.Add(placement.ProbeWindow) }, want: 2},
+		{name: "agent reconnected", apply: func() {
+			n.SessionID = uuid.New()
+			store.snapshot = placement.Snapshot{Nodes: []placement.Node{n}}
+			session(transport, n)
+		}, want: 3},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			step.apply()
+			if _, err := d.Refresh(t.Context(), n.InstallationID, store.snapshot); err != nil {
+				t.Fatal(err)
+			}
+			if len(store.probes) != step.want {
+				t.Fatalf("probes=%d, want %d", len(store.probes), step.want)
+			}
+		})
+	}
+}

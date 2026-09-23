@@ -15,7 +15,8 @@ import (
 const cursorFilter = ` AND (d.command_id,d.execution_epoch,d.recovery_generation) IN (SELECT * FROM unnest($2::uuid[],$3::bigint[],$4::uuid[]))`
 
 // LoadExecutionState returns the stored state of one claimed operation in plan order.
-// Dispatch, admission, and delivery records cover the current ownership run.
+// Dispatch and admission records cover the current ownership run.
+// Delivery records retain the command's total budget across ownership runs.
 // A completion keeps the execution epoch that proved it, and the receipt is read at that epoch.
 // The read requires current ownership. It does not extend the claim and it grants no authority.
 func (s *Store) LoadExecutionState(ctx context.Context, claim operation.Claim) (ExecutionState, error) {
@@ -337,21 +338,25 @@ func loadAdmissions(ctx context.Context, tx pgx.Tx, claim operation.Claim, ids [
 	return nil
 }
 
-// loadDeliveries returns the latest attempt of this claim, which carries the remaining budget.
+// loadDeliveries returns the latest attempt across claims, matching the enforced command budget.
 func loadDeliveries(ctx context.Context, tx pgx.Tx, claim operation.Claim, commands []uuid.UUID, steps []StepEvidence, byCommand map[uuid.UUID]int) error {
-	rows, err := tx.Query(ctx, `SELECT DISTINCT ON (command_id) command_id,attempt_id,session_id,attempt_count,created_at,next_attempt_at
- FROM command_delivery_attempts WHERE claim_id=$1 AND command_id = ANY($2) ORDER BY command_id,attempt_count DESC`, claim.ID, commands)
+	rows, err := tx.Query(ctx, `SELECT DISTINCT ON (a.command_id) a.command_id,a.attempt_id,a.session_id,a.attempt_count,a.created_at,a.next_attempt_at,
+ count(*) FILTER (WHERE a.claim_id=$3 AND a.rejection_bytes IS NULL) OVER (PARTITION BY a.command_id)
+ FROM command_delivery_attempts a JOIN command_dispatches d USING (command_id,execution_epoch,recovery_generation)
+ WHERE d.operation_id=$1 AND a.command_id = ANY($2) ORDER BY a.command_id,a.attempt_count DESC`, claim.OperationID, commands, claim.ID)
 	if err != nil {
 		return admissionError(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var attempt DeliveryAttempt
-		if err := rows.Scan(&attempt.CommandID, &attempt.ID, &attempt.SessionID, &attempt.Count, &attempt.CreatedAt, &attempt.NextAttemptAt); err != nil {
+		var unanswered int
+		if err := rows.Scan(&attempt.CommandID, &attempt.ID, &attempt.SessionID, &attempt.Count, &attempt.CreatedAt, &attempt.NextAttemptAt, &unanswered); err != nil {
 			return admissionError(err)
 		}
 		if i, ok := byCommand[attempt.CommandID]; ok {
 			steps[i].Delivery = &attempt
+			steps[i].UnansweredDeliveries = unanswered
 		}
 	}
 	if rows.Err() != nil {

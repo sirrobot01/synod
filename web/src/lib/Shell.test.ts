@@ -10,8 +10,11 @@ vi.mock("./api", async () => {
     ...real,
     api: {
       cluster: () => new Promise(() => {}),
+      clusters: () => new Promise(() => {}),
       operation: () => new Promise(() => {}),
       tokens: () => new Promise(() => {}),
+      clusterEndpoints: () => new Promise(() => {}),
+      clusterCredentials: () => new Promise(() => {}),
     },
   };
 });

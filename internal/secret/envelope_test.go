@@ -215,3 +215,27 @@ func TestRejectInvalidKeyring(t *testing.T) {
 		}
 	}
 }
+
+// A generated password must be long, unguessable, and safe to pass through a container
+// environment, an engine parser, and a terminal without escaping.
+func TestNewPasswordIsStrongAndNeedsNoEscaping(t *testing.T) {
+	seen := make(map[string]bool, 512)
+	for range 512 {
+		password, err := NewPassword()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(password) < 43 {
+			t.Fatalf("length=%d, want at least 256 bits of entropy", len(password))
+		}
+		if seen[password] {
+			t.Fatal("a generated password repeated")
+		}
+		seen[password] = true
+		for _, r := range password {
+			if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+				t.Fatalf("password contains %q, which needs escaping somewhere", r)
+			}
+		}
+	}
+}

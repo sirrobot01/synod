@@ -15,26 +15,17 @@ import (
 // Node maintenance refusals. Each names what is unhandled, because an operator who
 // reads "cannot remove node" learns nothing about what to do next.
 var (
-	// ErrNodeNotCordoned reports maintenance attempted on a node that still takes
-	// new placement. Draining a node the planner can still fill is a race the
-	// operator loses.
-	ErrNodeNotCordoned = errors.New("node_not_cordoned")
-	// ErrWorkloadOnNode reports a node that still holds live reservations.
-	ErrWorkloadOnNode = errors.New("workload_on_node")
-	// ErrStorageUndisposed reports retained storage whose disposition nobody stated.
+	ErrNodeNotCordoned   = errors.New("node_not_cordoned")
+	ErrWorkloadOnNode    = errors.New("workload_on_node")
 	ErrStorageUndisposed = errors.New("retained_storage_undisposed")
 )
 
-// SetNodeCordon stops or resumes new placement on one node.
+// SetNodeCordon stops or resumes new placement on one node. It edits the policy only,
+// so everything already placed stays where it is.
 //
-// Cordon changes nothing that is already placed. It edits the placement policy only,
-// and the planner refuses a cordoned node as a candidate; every reservation, volume,
-// and container the node already holds stays exactly where it is.
-//
-// A change bumps the policy revision, which invalidates the node's current capacity
-// probe. That is intended: an uncordoned node must be measured again before it takes
-// work. Setting the value the node already has writes nothing, so a repeated cordon
-// does not keep throwing away evidence.
+// A change bumps the policy revision, which invalidates the node's capacity probe: an
+// uncordoned node must be measured again before it takes work. Setting the value it
+// already has writes nothing, so a repeat does not keep throwing evidence away.
 func (s *Store) SetNodeCordon(ctx context.Context, installationID, nodeID uuid.UUID, cordoned bool) (int64, error) {
 	if installationID == uuid.Nil || nodeID == uuid.Nil {
 		return 0, &AdmissionError{Code: InvalidRequest}
@@ -49,8 +40,7 @@ func (s *Store) SetNodeCordon(ctx context.Context, installationID, nodeID uuid.U
 	if err := tx.QueryRow(ctx, `SELECT revision,policy_bytes FROM node_placement_policies
  WHERE installation_id=$1 AND node_id=$2 FOR UPDATE`, installationID, nodeID).Scan(&revision, &encoded); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			// A node with no policy carries no work, because the planner refuses a
-			// node without one. There is nothing to cordon.
+			// The planner refuses a node with no policy, so there is nothing to cordon.
 			return 0, &AdmissionError{Code: NotFound}
 		}
 		return 0, admissionError(err)
@@ -80,21 +70,15 @@ func (s *Store) SetNodeCordon(ctx context.Context, installationID, nodeID uuid.U
 	return policy.Revision, nil
 }
 
-// RemoveNode revokes one node once its workload and its storage are accounted for.
+// RemoveNode revokes one node once its workload and storage are accounted for, as
+// specification 33 requires. Three things must hold and each refusal names which
+// failed: the node is cordoned, it holds no live reservation, and every volume on it
+// that is not already purged is named in acknowledged.
 //
-// Specification 33 requires workload and retained-storage disposition before node
-// removal. Three things must hold, and each refusal names which one did not:
+// The acknowledgement must match exactly: a caller naming a volume the node does not
+// hold is reading a stale list, which is how storage gets signed off unexamined.
 //
-//   - the node is cordoned, so nothing new arrives while it is being removed,
-//   - it holds no live reservation, so no cluster still expects to run here,
-//   - every volume identity on it that is not already purged is named in acknowledged.
-//
-// The acknowledgement must match exactly. A caller that names a volume the node does
-// not hold is reading a stale list, and a stale list is how storage is signed off
-// without anybody looking at it.
-//
-// Nothing here deletes data. Removing a node does not purge what it holds, and the
-// volume identities stay so an operator can still find that storage afterwards.
+// Nothing here deletes data. The volume identities stay so an operator can find it.
 func (s *Store) RemoveNode(ctx context.Context, installationID, nodeID uuid.UUID, acknowledged []uuid.UUID) error {
 	if installationID == uuid.Nil || nodeID == uuid.Nil || len(acknowledged) > maxVolumeIdentities {
 		return &AdmissionError{Code: InvalidRequest}

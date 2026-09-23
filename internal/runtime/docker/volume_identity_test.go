@@ -109,7 +109,7 @@ func TestVerifyVolumeAcceptsItsOwn(t *testing.T) {
 	command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{
 		ResourceId: id, Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: id}},
 	})
-	if _, err := r.Execute(t.Context(), command); err != nil {
+	if _, err := r.Execute(t.Context(), command, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.verifyVolume(t.Context(), command, id); err != nil {
@@ -151,7 +151,7 @@ func TestRemoveVolumeRemovesOnlyWhatItProved(t *testing.T) {
 	command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{
 		ResourceId: id, Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: id}},
 	})
-	if _, err := r.Execute(t.Context(), command); err != nil {
+	if _, err := r.Execute(t.Context(), command, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Two things this purge must not reach: something with nothing to do with Synod,
@@ -226,17 +226,20 @@ func TestRemoveVolumeRefusesAVolumeStillInUse(t *testing.T) {
 	volume := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{
 		ResourceId: id, Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: id}},
 	})
-	if _, err := r.Execute(t.Context(), volume); err != nil {
+	if _, err := r.Execute(t.Context(), volume, nil); err != nil {
 		t.Fatal(err)
 	}
 	container := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{
 		ResourceId: uuid.NewString(),
+		Secrets:    []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "application"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "replication"}},
 		Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
 			ImageDigest: redisFixture, Engine: "redis", VolumeId: id,
 			NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST, MemoryBytes: 64 << 20, CpuMillis: 250,
+			Redis:     &agentv1.RedisContainerConfig{Port: 6379, Persistence: "none", MaxmemoryBytes: 48 << 20, EvictionPolicy: "noeviction"},
+			SecretEnv: []*agentv1.SecretEnv{{Name: "REDIS_ADMIN_PASSWORD", Purpose: "superuser"}, {Name: "REDIS_APP_PASSWORD", Purpose: "application"}, {Name: "REDIS_REPLICATION_PASSWORD", Purpose: "replication"}},
 		}},
 	})
-	if _, err := r.Execute(t.Context(), container); err != nil {
+	if _, err := r.Execute(t.Context(), container, redisFixtureSecrets); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.RemoveVolume(t.Context(), volume, id); !errors.Is(err, runtime.ErrBusy) {

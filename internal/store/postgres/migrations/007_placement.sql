@@ -21,6 +21,7 @@ CREATE TABLE resource_allocations (
  allocation_bytes bytea NOT NULL CHECK (octet_length(allocation_bytes) BETWEEN 1 AND 65536),
  released_at timestamptz,
  UNIQUE (installation_id,resource_id),
+ UNIQUE (installation_id,cluster_id,resource_id),
  UNIQUE (installation_id,cluster_id,node_id,id),
  UNIQUE (installation_id,cluster_id,id),
  FOREIGN KEY (installation_id,node_id) REFERENCES nodes (installation_id,id),
@@ -49,6 +50,7 @@ CREATE TABLE operation_placements (
  request_bytes bytea NOT NULL CHECK (octet_length(request_bytes) BETWEEN 1 AND 262144),
  decision_bytes bytea NOT NULL CHECK (octet_length(decision_bytes) BETWEEN 1 AND 65536),
  plan_hash bytea NOT NULL CHECK (octet_length(plan_hash)=32),
+ credential_intent_hash bytea CHECK (octet_length(credential_intent_hash)=32),
  committed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY (installation_id,operation_id),
  FOREIGN KEY (installation_id,cluster_id,operation_id) REFERENCES operations (installation_id,cluster_id,id)

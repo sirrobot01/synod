@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"syscall"
@@ -57,15 +58,21 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		command := &cobra.Command{Use: mode, Short: map[string]string{"bootstrap": "Create first enrollment state in an absent directory", "retry": "Retry saved enrollment or read its completed identity"}[mode], Args: cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, _ []string) error {
 				installation, err := uuid.Parse(installationID)
-				if err != nil || installation == uuid.Nil {
-					return enrollment.ErrConfiguration
+				if err != nil {
+					return fmt.Errorf("%w: parse --installation-id: %w", enrollment.ErrConfiguration, err)
+				}
+				if installation == uuid.Nil {
+					return fmt.Errorf("%w: --installation-id must be a nonzero UUID", enrollment.ErrConfiguration)
 				}
 				node, err := uuid.Parse(nodeID)
-				if err != nil || node == uuid.Nil || statePath == "" {
-					return enrollment.ErrConfiguration
+				if err != nil {
+					return fmt.Errorf("%w: parse --node-id: %w", enrollment.ErrConfiguration, err)
+				}
+				if node == uuid.Nil || statePath == "" {
+					return fmt.Errorf("%w: --node-id must be a nonzero UUID and --state-dir must be set", enrollment.ErrConfiguration)
 				}
 				if config.RequestTimeout <= 0 || config.RequestTimeout > time.Minute || config.Attempts < 1 || config.Attempts > 5 {
-					return enrollment.ErrConfiguration
+					return fmt.Errorf("%w: use a request timeout of up to a minute and 1 to 5 attempts", enrollment.ErrConfiguration)
 				}
 				if mode == "bootstrap" {
 					if _, err := os.Lstat(statePath); !errors.Is(err, os.ErrNotExist) {
@@ -160,30 +167,36 @@ func readTrust(path string) (*x509.CertPool, error) {
 	const limit = 1 << 20
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, enrollment.ErrConfiguration
+		return nil, fmt.Errorf("%w: open the trust file: %w", enrollment.ErrConfiguration, err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > limit {
-		return nil, enrollment.ErrConfiguration
+	if err != nil {
+		return nil, fmt.Errorf("%w: stat the trust file: %w", enrollment.ErrConfiguration, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > limit {
+		return nil, fmt.Errorf("%w: the trust file must be a regular file of at most 1 MiB that nobody else can write", enrollment.ErrConfiguration)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil || len(data) > limit {
-		return nil, enrollment.ErrConfiguration
+	if err != nil {
+		return nil, fmt.Errorf("%w: read the trust file: %w", enrollment.ErrConfiguration, err)
+	}
+	if len(data) > limit {
+		return nil, fmt.Errorf("%w: the trust file exceeds 1 MiB", enrollment.ErrConfiguration)
 	}
 	roots := x509.NewCertPool()
 	count := 0
 	for len(bytes.TrimSpace(data)) > 0 {
 		if !bytes.HasPrefix(bytes.TrimSpace(data), []byte("-----BEGIN CERTIFICATE-----")) {
-			return nil, enrollment.ErrConfiguration
+			return nil, fmt.Errorf("%w: the trust file carries content that is not a certificate block after %d certificates", enrollment.ErrConfiguration, count)
 		}
 		block, rest := pem.Decode(data)
 		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
-			return nil, enrollment.ErrConfiguration
+			return nil, fmt.Errorf("%w: trust file entry %d is not a bare CERTIFICATE block", enrollment.ErrConfiguration, count+1)
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
-			return nil, enrollment.ErrConfiguration
+			return nil, fmt.Errorf("%w: parse trust file entry %d: %w", enrollment.ErrConfiguration, count+1, err)
 		}
 		roots.AddCert(cert)
 		count++

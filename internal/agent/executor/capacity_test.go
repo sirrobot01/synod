@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,7 +33,7 @@ type measuredRuntime struct {
 	duringUsage func()
 }
 
-func (m *measuredRuntime) Execute(context.Context, *agentv1.Command) (noderuntime.Result, error) {
+func (m *measuredRuntime) Execute(context.Context, *agentv1.Command, noderuntime.Secrets) (noderuntime.Result, error) {
 	return noderuntime.Result{}, errors.New("not used")
 }
 func (m *measuredRuntime) Recover(context.Context, *agentv1.Command, []*agentv1.Effect) (noderuntime.Result, error) {
@@ -61,7 +62,25 @@ func measurable(t *testing.T) capacity.Host {
 		t.Fatal(err)
 	}
 	stat := filepath.Join(dir, "stat")
-	if err := os.WriteFile(stat, []byte("cpu  100 0 100 700 100 0 0 0\n"), 0o600); err != nil {
+	// A real kernel counter advances the whole time the host runs, so the fixture
+	// advances too. A single rewrite on a timer is only inside the sample window
+	// when the machine is idle: under load it lands before the first read or after
+	// the second, both reads see one value, and the measurement fails for a reason
+	// that has nothing to do with the test.
+	//
+	// Each step adds 1000 aggregate jiffies of which 250 are idle, so any two reads
+	// give a positive interval and an idle share inside it.
+	write := func(step int64) error {
+		line := fmt.Sprintf("cpu  %d 0 %d %d 100 0 0 0\n", 100+500*step, 100+250*step, 700+250*step)
+		// The reader is a plain ReadFile. A truncating rewrite can hand it an empty
+		// or half-written line, so the new content is renamed over the old one.
+		temporary := stat + ".next"
+		if err := os.WriteFile(temporary, []byte(line), 0o600); err != nil {
+			return err
+		}
+		return os.Rename(temporary, stat)
+	}
+	if err := write(0); err != nil {
 		t.Fatal(err)
 	}
 	stop, done := make(chan struct{}), make(chan struct{})
@@ -70,12 +89,18 @@ func measurable(t *testing.T) capacity.Host {
 	t.Cleanup(func() { close(stop); <-done })
 	go func() {
 		defer close(done)
-		select {
-		case <-stop:
-			return
-		case <-time.After(10 * time.Millisecond):
+		tick := time.NewTicker(time.Millisecond)
+		defer tick.Stop()
+		for step := int64(1); ; step++ {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+			}
+			if write(step) != nil {
+				return
+			}
 		}
-		_ = os.WriteFile(stat, []byte("cpu  600 0 350 950 100 0 0 0\n"), 0o600)
 	}()
 	return capacity.Host{ProcRoot: dir, StoragePath: t.TempDir(), Sample: 40 * time.Millisecond}
 }

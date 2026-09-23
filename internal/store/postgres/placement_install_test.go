@@ -132,7 +132,7 @@ func TestInstallPlacementPlanCommitsReservationsAndPlanTogether(t *testing.T) {
 	claim := host.claimCluster(t, "db")
 	ports := []placement.Port{{Address: "127.0.0.1", Transport: "tcp", Number: 5432}}
 	request, decision, plan := host.place(t, claim, smallBudget, ports)
-	record, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan)
+	record, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestInstallPlacementPlanCommitsReservationsAndPlanTogether(t *testing.T) {
 		}
 	}
 	// An immutable retry returns the committed placement without new reservations.
-	replay, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan)
+	replay, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestInstallPlacementPlanCommitsReservationsAndPlanTogether(t *testing.T) {
 	// A changed request for the same operation is a conflict.
 	changed := request
 	changed.Profile = "ha"
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, changed, decision, plan); err == nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, changed, decision, plan, nil); err == nil {
 		t.Fatal("a changed request was accepted")
 	}
 	// An uncertain commit resolves by the original operation identity.
@@ -185,10 +185,10 @@ func TestInstallPlacementPlanRollsBackWithThePlan(t *testing.T) {
 	request, decision, _ := host.place(t, claim, smallBudget, nil)
 	// The operation wants revision one, so a plan for revision two cannot install.
 	wrong := planFor(t, claim, host.node, request.Resources[0].ID, 2)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, wrong); err == nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, wrong, nil); err == nil {
 		t.Fatal("a plan for another revision was installed")
 	}
-	for _, table := range []string{"resource_allocations", "allocation_resources", "allocation_ports", "operation_allocation_bindings", "operation_placements"} {
+	for _, table := range []string{"resource_allocations", "allocation_resources", "allocation_ports", "operation_allocation_bindings", "operation_placements", "cluster_members"} {
 		if total := host.count(t, `SELECT count(*) FROM `+table); total != 0 {
 			t.Fatalf("%s kept %d rows after rollback", table, total)
 		}
@@ -198,7 +198,7 @@ func TestInstallPlacementPlanRollsBackWithThePlan(t *testing.T) {
 	}
 	// The same host still accepts a correct plan afterwards.
 	correct := planFor(t, claim, host.node, request.Resources[0].ID, 1)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, correct); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, correct, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -214,12 +214,12 @@ func TestConcurrentPlacementReservesCapacityOnce(t *testing.T) {
 	var racing sync.WaitGroup
 	racing.Go(func() {
 		<-start
-		_, err := host.store.InstallPlacementPlan(t.Context(), first, firstRequest, firstDecision, firstPlan)
+		_, err := host.store.InstallPlacementPlan(t.Context(), first, firstRequest, firstDecision, firstPlan, nil)
 		results <- err
 	})
 	racing.Go(func() {
 		<-start
-		_, err := host.store.InstallPlacementPlan(t.Context(), second, secondRequest, secondDecision, secondPlan)
+		_, err := host.store.InstallPlacementPlan(t.Context(), second, secondRequest, secondDecision, secondPlan, nil)
 		results <- err
 	})
 	close(start)
@@ -255,12 +255,12 @@ func TestConcurrentPlacementReservesAPortOnce(t *testing.T) {
 	var racing sync.WaitGroup
 	racing.Go(func() {
 		<-start
-		_, err := host.store.InstallPlacementPlan(t.Context(), first, firstRequest, firstDecision, firstPlan)
+		_, err := host.store.InstallPlacementPlan(t.Context(), first, firstRequest, firstDecision, firstPlan, nil)
 		results <- err
 	})
 	racing.Go(func() {
 		<-start
-		_, err := host.store.InstallPlacementPlan(t.Context(), second, secondRequest, secondDecision, secondPlan)
+		_, err := host.store.InstallPlacementPlan(t.Context(), second, secondRequest, secondDecision, secondPlan, nil)
 		results <- err
 	})
 	close(start)
@@ -291,7 +291,7 @@ func TestPlacementUnknownCommitResolvesByIdentity(t *testing.T) {
 		}
 		return io.ErrUnexpectedEOF
 	}
-	_, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan)
+	_, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil)
 	requireCode(t, err, OutcomeUnknown)
 	host.store.commitTx = nil
 	record, err := host.store.ReadPlacement(t.Context(), host.id, claim.OperationID)
@@ -299,7 +299,7 @@ func TestPlacementUnknownCommitResolvesByIdentity(t *testing.T) {
 		t.Fatalf("the uncertain commit is unreadable: %v", err)
 	}
 	// The exact retry returns the same committed placement.
-	replay, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan)
+	replay, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil)
 	if err != nil || replay.RequestHash != record.RequestHash {
 		t.Fatalf("retry after an uncertain commit: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestReleaseUnusedPlacementRequiresProof(t *testing.T) {
 	host := placementFixture(t)
 	claim := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, []placement.Port{{Address: "127.0.0.1", Transport: "tcp", Number: 5432}})
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	reservation := request.Resources[0].ReservationID
@@ -354,7 +354,7 @@ func TestReleaseUnusedPlacementRespectsDispatchHistory(t *testing.T) {
 	host := placementFixture(t)
 	claim := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	reconcilePlan(t, host.store, claim, plan)
@@ -377,7 +377,7 @@ func TestReleaseUnusedPlacementWaitsForOtherClusterWork(t *testing.T) {
 	host := placementFixture(t)
 	claim := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The operation that reserved the allocation failed, so its own binding permits release.
@@ -405,7 +405,7 @@ func TestInstallPlacementPlanStoresAGrownBudget(t *testing.T) {
 	host := placementFixture(t)
 	first := host.claimCluster(t, "db")
 	request, decision, plan := host.place(t, first, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), first, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), first, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	// A later operation on the same cluster asks for more of the same node.
@@ -425,7 +425,7 @@ func TestInstallPlacementPlanStoresAGrownBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	grownPlan := planFor(t, second, host.node, grown.Resources[0].ID, 1)
-	record, err := host.store.InstallPlacementPlan(t.Context(), second, grown, grownDecision, grownPlan)
+	record, err := host.store.InstallPlacementPlan(t.Context(), second, grown, grownDecision, grownPlan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +454,7 @@ func TestInstallPlacementPlanAcceptsReorderedPorts(t *testing.T) {
 		{Address: "127.0.0.1", Transport: "tcp", Number: 5433},
 	}
 	request, decision, plan := host.place(t, first, smallBudget, ports)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), first, request, decision, plan); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), first, request, decision, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	second := host.reclaim(t, first, "succeeded")
@@ -470,7 +470,7 @@ func TestInstallPlacementPlanAcceptsReorderedPorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := host.store.InstallPlacementPlan(t.Context(), second, reordered, reorderedDecision, planFor(t, second, host.node, reordered.Resources[0].ID, 1)); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), second, reordered, reorderedDecision, planFor(t, second, host.node, reordered.Resources[0].ID, 1), nil); err != nil {
 		t.Fatalf("a reordered port list was refused: %v", err)
 	}
 }
@@ -483,7 +483,7 @@ func TestInstallPlacementPlanRefusesATerminalOperation(t *testing.T) {
 	if _, err := host.store.pool.Exec(t.Context(), `UPDATE operations SET status='failed',finished_at=clock_timestamp(),claim_active=false WHERE id=$1`, claim.OperationID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); !errors.Is(err, operation.ErrStaleOwner) {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); !errors.Is(err, operation.ErrStaleOwner) {
 		t.Fatalf("a failed operation reserved capacity: %v", err)
 	}
 	if total := host.count(t, `SELECT count(*) FROM resource_allocations`); total != 0 {
@@ -547,4 +547,15 @@ func TestConcurrentFirstWritesSerializeOnTheNode(t *testing.T) {
 	if len(seen) != 4 {
 		t.Fatalf("issued %d distinct probe revisions, want four", len(seen))
 	}
+}
+
+// enroll adds a second node to the same installation.
+func (h *placementHost) enroll(t *testing.T) uuid.UUID {
+	t.Helper()
+	node := uuid.New()
+	if _, err := h.store.pool.Exec(t.Context(), `INSERT INTO nodes (id,installation_id,public_key_hash,enrolled_at)
+ VALUES ($1,$2,$3,clock_timestamp())`, node, h.id, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	return node
 }

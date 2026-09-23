@@ -138,7 +138,14 @@ func TestWorkerAdmissionReceiptIsMonotonic(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := uuid.MustParse(command.Epoch.NodeId)
-	ack := &agentv1.AdmissionAck{Epoch: command.Epoch, CommandId: command.CommandId, InputHash: command.InputHash, State: "running"}
+	if err := s.RecordRecoveryCheckpoint(t.Context(), claim, [32]byte{1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := s.RecordDeliveryAttempt(t.Context(), claim, uuid.MustParse(command.CommandId), sessionID, uuid.New(), time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack := &agentv1.AdmissionAck{DeliveryAttemptId: attempt.ID.String(), Epoch: command.Epoch, CommandId: command.CommandId, InputHash: command.InputHash, State: "running"}
 	s.commitTx = func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
@@ -190,5 +197,66 @@ func TestWorkerAdmissionReceiptIsMonotonic(t *testing.T) {
 	current, err := s.GetOperation(t.Context(), claim.InstallationID, claim.OperationID)
 	if err != nil || current.Status != operation.Running {
 		t.Fatal("admission changed operation", err)
+	}
+}
+
+func TestAdmissionBindsDeliveryAttempt(t *testing.T) {
+	s, _, claim, plan, node, session := readsFixture(t)
+	if err := s.RecordRecoveryCheckpoint(t.Context(), claim, [32]byte{1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var attempts []DeliveryAttempt
+	for _, step := range plan.Steps {
+		if err := s.RecordDispatch(t.Context(), claim, step.Command); err != nil {
+			t.Fatal(err)
+		}
+		attempt, err := s.RecordDeliveryAttempt(t.Context(), claim, uuid.MustParse(step.Command.CommandId), session, uuid.New(), time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attempts = append(attempts, attempt)
+	}
+	command := plan.Steps[0].Command
+	ack := &agentv1.AdmissionAck{DeliveryAttemptId: attempts[0].ID.String(), Epoch: command.Epoch, CommandId: command.CommandId, InputHash: command.InputHash, State: "rejected", ErrorCode: "agent_busy"}
+	for name, change := range map[string]func(*agentv1.AdmissionAck){
+		"missing attempt":       func(a *agentv1.AdmissionAck) { a.DeliveryAttemptId = "" },
+		"unknown attempt":       func(a *agentv1.AdmissionAck) { a.DeliveryAttemptId = uuid.NewString() },
+		"other command attempt": func(a *agentv1.AdmissionAck) { a.DeliveryAttemptId = attempts[1].ID.String() },
+		"wrong command":         func(a *agentv1.AdmissionAck) { a.CommandId = plan.Steps[1].Command.CommandId },
+		"wrong epoch":           func(a *agentv1.AdmissionAck) { a.Epoch.ExecutionEpoch++ },
+		"wrong generation":      func(a *agentv1.AdmissionAck) { a.Epoch.RecoveryGeneration = uuid.NewString() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			broken := proto.Clone(ack).(*agentv1.AdmissionAck)
+			change(broken)
+			if err := s.RecordAgentAdmission(t.Context(), claim.InstallationID, node, session, broken); err == nil {
+				t.Fatal("mismatched reply was accepted")
+			}
+		})
+	}
+	state, err := s.LoadExecutionState(t.Context(), claim)
+	if err != nil || state.Steps[0].Rejection != nil || state.Steps[0].UnansweredDeliveries != 1 {
+		t.Fatalf("invalid evidence changed the pending delivery: %+v %v", state, err)
+	}
+	if err := s.RecordAgentAdmission(t.Context(), claim.InstallationID, node, session, ack); err != nil {
+		t.Fatal(err)
+	}
+	state, err = s.LoadExecutionState(t.Context(), claim)
+	if err != nil || state.Steps[0].UnansweredDeliveries != 0 || state.Steps[1].UnansweredDeliveries != 1 {
+		t.Fatalf("refusal settled another command: %+v %v", state, err)
+	}
+	presence, err := s.GetAgentPresence(t.Context(), claim.InstallationID, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := uuid.New()
+	if err := s.RecordAgentSession(t.Context(), claim.InstallationID, node, next, presence.Hello); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordAgentAdmission(t.Context(), claim.InstallationID, node, session, ack); !errors.Is(err, ErrStaleSession) {
+		t.Fatalf("replaced session: %v", err)
+	}
+	if err := s.RecordAgentAdmission(t.Context(), claim.InstallationID, node, next, ack); !errors.Is(err, operation.ErrCommandConflict) {
+		t.Fatalf("new session used an old delivery: %v", err)
 	}
 }

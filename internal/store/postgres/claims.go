@@ -73,6 +73,13 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 		return operation.Claim{}, operation.ErrStaleOwner
 	}
 	var result operation.Claim
+	// Lock the cluster separately so the join planner cannot choose operation-first
+	// locking against admission or terminal lifecycle completion.
+	if err := tx.QueryRow(ctx, `SELECT c.id FROM clusters c JOIN operations o
+ ON o.installation_id=c.installation_id AND o.cluster_id=c.id
+ WHERE o.id=$1 AND o.installation_id=$2 FOR UPDATE OF c`, r.OperationID, r.InstallationID).Scan(&result.ClusterID); err != nil {
+		return operation.Claim{}, admissionError(err)
+	}
 	var oldClaim, oldGeneration *uuid.UUID
 	var oldOwner *string
 	var oldExpiry *time.Time
@@ -82,7 +89,7 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 	var oldLease, oldRevision *int64
 	err = tx.QueryRow(ctx, `SELECT c.id,c.execution_epoch,o.claim_id,o.owner_id,o.claim_expires_at,o.status,o.plan_bytes,o.claim_active,o.coordination_key,o.coordination_lease,o.coordination_revision,o.recovery_generation
 		FROM operations o JOIN clusters c ON c.id=o.cluster_id AND c.installation_id=o.installation_id
-		WHERE o.id=$1 AND o.installation_id=$2 FOR UPDATE OF c,o`, r.OperationID, r.InstallationID).
+		WHERE o.id=$1 AND o.installation_id=$2 FOR UPDATE OF o`, r.OperationID, r.InstallationID).
 		Scan(&result.ClusterID, &result.ExecutionEpoch, &oldClaim, &oldOwner, &oldExpiry, &status, &plan, &result.Active, &oldKey, &oldLease, &oldRevision, &oldGeneration)
 	if err != nil {
 		return operation.Claim{}, admissionError(err)
@@ -276,7 +283,7 @@ func validateInstalledPlan(claim operation.Claim, plan *agentv1.ExecutionPlan) (
 	stepIDs := make([]string, 0, len(plan.Steps))
 	commandIDs := make([]string, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
-		if step == nil || step.Command == nil || step.MaxAttempts < 1 || step.MaxAttempts > 10 || step.CancellationBoundary < agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION || step.CancellationBoundary > agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP || step.Postcondition < agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS || step.Postcondition > agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED {
+		if step == nil || step.Command == nil || step.MaxAttempts < 1 || step.MaxAttempts > 10 || step.CancellationBoundary < agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION || step.CancellationBoundary > agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP || step.Postcondition < agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS || step.Postcondition > agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED {
 			return nil, &AdmissionError{Code: InvalidRequest}
 		}
 		command := step.Command
@@ -319,15 +326,25 @@ func installPlanTx(ctx context.Context, tx pgx.Tx, claim operation.Claim, plan *
 	if err := tx.QueryRow(ctx, `SELECT desired_revision FROM operations WHERE id=$1`, claim.OperationID).Scan(&revision); err != nil {
 		return false, admissionError(err)
 	}
+	resources := make([]string, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
 		if step.Command.DesiredRevision != revision {
 			return false, operation.ErrCommandConflict
 		}
+		resources = append(resources, step.Command.Input.ResourceId)
 		if _, err := tx.Exec(ctx, `INSERT INTO claim_barriers (claim_id,installation_id,cluster_id,operation_id,node_id,execution_epoch,recovery_generation) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, claim.ID, claim.InstallationID, claim.ClusterID, claim.OperationID, step.Command.Epoch.NodeId, claim.ExecutionEpoch, claim.RecoveryGeneration); err != nil {
 			return false, admissionError(err)
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE operations SET plan_version=$1,plan_bytes=$2,updated_at=clock_timestamp() WHERE id=$3`, plan.Version, encoded, claim.OperationID); err != nil {
+		return false, admissionError(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO operation_allocation_bindings
+ (installation_id,cluster_id,operation_id,allocation_id)
+ SELECT a.installation_id,a.cluster_id,o.id,a.id FROM resource_allocations a
+ JOIN operations o ON o.installation_id=a.installation_id AND o.cluster_id=a.cluster_id
+ WHERE o.id=$1 AND o.retry_of IS NOT NULL AND a.released_at IS NULL
+ AND a.resource_id=ANY($2::uuid[]) ON CONFLICT DO NOTHING`, claim.OperationID, resources); err != nil {
 		return false, admissionError(err)
 	}
 	return true, nil
@@ -590,6 +607,7 @@ type ProgressUpdate struct {
 	Status         operation.Status
 	Reason         string
 	UnknownEffects bool
+	FailureCode    string
 }
 
 // UpdateProgress keeps unknown effects waiting and rejects a stale owner or sequence.
@@ -597,21 +615,46 @@ func (s *Store) UpdateProgress(ctx context.Context, claim operation.Claim, updat
 	if update.Sequence < 1 || update.Reason == "" || len(update.Reason) > 1024 || (update.UnknownEffects && update.Status != operation.Waiting) {
 		return &AdmissionError{Code: InvalidRequest}
 	}
+	if len(update.FailureCode) > 128 || strings.ContainsFunc(update.FailureCode, func(r rune) bool { return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') }) || (update.FailureCode != "" && update.Status != operation.Failed) {
+		return &AdmissionError{Code: InvalidRequest}
+	}
+	if update.Status == operation.Failed && update.FailureCode == "" {
+		update.FailureCode = "operation_failed"
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return admissionError(err)
 	}
 	defer tx.Rollback(ctx)
-	active, current, _, err := lockClaim(ctx, tx, claim)
+	if update.Status == operation.Succeeded || update.Status == operation.Failed || update.Status == operation.Cancelled {
+		// Admission locks the cluster before its operation. Keep that order while
+		// finalizing lifecycle metadata, after the installation generation lock.
+		var generation uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT recovery_generation FROM installation_generations WHERE installation_id=$1 FOR SHARE`, claim.InstallationID).Scan(&generation); err != nil {
+			return admissionError(err)
+		}
+		if generation != claim.RecoveryGeneration {
+			return operation.ErrStaleOwner
+		}
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM clusters WHERE installation_id=$1 AND id=$2 FOR UPDATE`, claim.InstallationID, claim.ClusterID); err != nil {
+			return admissionError(err)
+		}
+	}
+	active, current, plan, err := lockClaim(ctx, tx, claim)
 	if err != nil {
 		return err
 	}
 	var prior operation.Status
 	var reason string
 	var unknown bool
-	err = tx.QueryRow(ctx, `SELECT state,reason,unknown_effects FROM operation_progress WHERE operation_id=$1 AND execution_epoch=$2 AND sequence=$3`, claim.OperationID, claim.ExecutionEpoch, update.Sequence).Scan(&prior, &reason, &unknown)
+	var code string
+	// A failed operation is terminal, so its failure code cannot change after this row.
+	err = tx.QueryRow(ctx, `SELECT p.state,p.reason,p.unknown_effects,
+		CASE WHEN p.state='failed' THEN COALESCE(o.failure_code,'') ELSE '' END
+		FROM operation_progress p JOIN operations o ON o.id=p.operation_id
+		WHERE p.operation_id=$1 AND p.execution_epoch=$2 AND p.sequence=$3`, claim.OperationID, claim.ExecutionEpoch, update.Sequence).Scan(&prior, &reason, &unknown, &code)
 	if err == nil {
-		if prior == update.Status && reason == update.Reason && unknown == update.UnknownEffects {
+		if prior == update.Status && reason == update.Reason && unknown == update.UnknownEffects && code == update.FailureCode {
 			return nil
 		}
 		return operation.ErrCommandConflict
@@ -643,12 +686,34 @@ func (s *Store) UpdateProgress(ctx context.Context, claim operation.Claim, updat
 	if update.Sequence <= last {
 		return operation.ErrCommandConflict
 	}
+	if update.Status == operation.Succeeded {
+		if err := completeLifecycle(ctx, tx, claim, plan); err != nil {
+			return err
+		}
+		if _, _, _, err := lockClaim(ctx, tx, claim); err != nil {
+			return err
+		}
+	}
 	terminal := update.Status == operation.Succeeded || update.Status == operation.Failed || update.Status == operation.Cancelled
+	if update.Status == operation.Failed || update.Status == operation.Cancelled {
+		if err := settleReplicaRebuild(ctx, tx, claim, plan, false); err != nil {
+			return err
+		}
+		if _, _, _, err := lockClaim(ctx, tx, claim); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE cluster_members SET state='residual',updated_at=clock_timestamp()
+ WHERE installation_id=$1 AND cluster_id=$2 AND role='replica' AND state='pending' AND removed_at IS NULL
+ AND EXISTS (SELECT 1 FROM operations WHERE id=$3 AND kind IN ('cluster.scale','cluster.rebuild_replica'))`,
+			claim.InstallationID, claim.ClusterID, claim.OperationID); err != nil {
+			return admissionError(err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operation_progress (operation_id,execution_epoch,sequence,state,reason,unknown_effects) VALUES ($1,$2,$3,$4,$5,$6)`, claim.OperationID, claim.ExecutionEpoch, update.Sequence, update.Status, update.Reason, update.UnknownEffects); err != nil {
 		return admissionError(err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE operations SET status=$1,updated_at=clock_timestamp(),finished_at=CASE WHEN $2 THEN clock_timestamp() ELSE NULL END,
-		claim_active=CASE WHEN $2 THEN false ELSE claim_active END,failure_code=CASE WHEN $1='waiting' AND $3 THEN 'outcome_unknown' WHEN $1='failed' THEN 'operation_failed' ELSE NULL END WHERE id=$4`, update.Status, terminal, update.UnknownEffects, claim.OperationID); err != nil {
+		claim_active=CASE WHEN $2 THEN false ELSE claim_active END,failure_code=CASE WHEN $1='waiting' AND $3 THEN 'outcome_unknown' WHEN $1='failed' THEN $5 ELSE NULL END WHERE id=$4`, update.Status, terminal, update.UnknownEffects, claim.OperationID, update.FailureCode); err != nil {
 		return admissionError(err)
 	}
 	return s.commitMetadata(ctx, tx)

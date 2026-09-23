@@ -61,9 +61,10 @@ The credentials in `.dev/` are for one workstation. The certificate is self-sign
 the development database trusts any password. Never use them anywhere else. Git ignores
 the directory.
 
-This controller starts no worker. Worker dispatch needs the agent transport, and no
-command generates the installation CA or the agent certificates yet. `task dev:etcd`
-starts an etcd node for when that material exists.
+This development command starts no worker. Worker dispatch needs the agent transport,
+etcd, a credential wrapping key, and an approved node.
+Use `synodd bootstrap --dir DIRECTORY` to create installation material.
+Use `task dev:etcd` to start a local etcd node.
 
 Run `task dev:reset` after you change a migration. AGENTS.md requires a dropped
 development database, never a repair migration.
@@ -103,7 +104,8 @@ A test that needs a dependency skips when its variable is absent.
 
 The current controller accepts standalone PostgreSQL and Redis requests.
 It records desired state and a pending operation in PostgreSQL.
-It does not provision database containers yet.
+A configured worker provisions dedicated database containers on approved agents.
+The API-only development command leaves operations pending.
 The development version catalog contains PostgreSQL 17.11 and 18.6, and Redis 8.2.7.
 These versions are local test candidates. They are not a qualified release matrix.
 
@@ -161,7 +163,7 @@ Example request body for `POST /v1/clusters`:
 Read `GET /v1/clusters/{id}` to inspect the cluster and its revision ETag.
 Read `GET /v1/operations/{id}` to inspect its operation.
 An operation with `plan_version: 0` has no executable plan.
-The current admission milestone leaves it pending.
+An operation stays pending until a configured worker can produce and run its plan.
 
 ## Operator access
 
@@ -190,26 +192,181 @@ The controller runs an operation only when you supply etcd endpoints and the age
 Without them it admits requests and records desired state, and no worker starts.
 
 ```sh
-export SYNOD_ETCD_ENDPOINTS='127.0.0.1:2379'
+export SYNOD_ETCD_ENDPOINTS='etcd.example.com:2379'
 export SYNOD_ETCD_PREFIX='/synod'
+export SYNOD_ETCD_CA_FILE='/path/to/etcd-ca.crt'
+export SYNOD_ETCD_USERNAME='synod-controller'
+export SYNOD_ETCD_PASSWORD_FILE='/path/to/etcd-password'
 ```
 
 Use `--etcd-endpoints` and `--etcd-prefix` to override them.
 Separate several endpoints with commas.
+Use plain host and port pairs. Do not put credentials or URL schemes in an endpoint.
 Every controller in one installation must use the same prefix.
+
+Create the etcd account before controller startup. Enable etcd authentication.
+Grant the account read and write access only to `/synod/<installation-uuid>/`.
+Use your configured prefix in place of `/synod`.
+Keep this account separate from Patroni accounts.
+The controller does not create accounts or change etcd permissions.
+
+Keep the password file private to its owner.
+Use 32 to 256 visible ASCII bytes. One final LF or CRLF is permitted.
+The controller verifies the server certificate against the CA bundle and endpoint name.
+For mutual TLS, also set `SYNOD_ETCD_TLS_CERT_FILE` and `SYNOD_ETCD_TLS_KEY_FILE`.
+The client certificate must be current and permit client authentication.
+Keep its key file private to its owner.
+These settings also have matching `--etcd-*` flags and JSON fields.
+Restart the controller after you change the files or settings.
+
+A local development etcd can use explicit plaintext mode.
+Remove TLS and account settings before you select this mode.
+
+```sh
+export SYNOD_ETCD_ENDPOINTS='127.0.0.1:2379'
+export SYNOD_ETCD_ALLOW_PLAINTEXT=true
+```
+
+This mode has no transport encryption or authentication. Startup logs identify it.
+Secure mode refuses a server with authentication disabled.
 
 One controller elects itself owner of a cluster, claims that cluster's operation,
 and runs one worker for it.
 A second controller waits for the election and takes over after the claim expires.
 Shutdown stops management dispatch. It never stops native work that an agent accepted.
 
-The controller does not produce execution plans yet.
-It skips an operation until a plan exists for it.
+The controller produces standalone PostgreSQL and Redis plans when it has a credential
+wrapping key and a complete placement profile. The approved node must match that profile.
+Use `--secret-key-file`, `--secret-key-id`, and the `--placement-*` flags to configure them.
+Use `--engine-endpoint-first-port` and `--engine-endpoint-last-port` to set the reserved port range.
+
+New Redis clusters have separate admin, application, and replication credentials.
+The replication role can only run the native replication handshake commands and PING.
+The compact Redis profile supports one native replica with RDB, AOF, or combined persistence.
+It does not provide automatic failover.
+
+```sh
+synod db scale CLUSTER_ID --replicas 1 --wait
+synod db members CLUSTER_ID
+```
+
+If an add fails or is cancelled, correct its cause and run the scale command again.
+Use a new idempotency key after a terminal failure.
+The new operation reports the prior operation ID in `retry_of`.
+It keeps the existing member, volume, node, port, image, and credential versions.
+A retry after a dispatched start requires existing storage.
+A `storage_lost` result requires explicit recovery. The retry does not initialize replacement data.
+This retry applies to the current failed add. An intervening lifecycle change ends this retry path.
+
+For an uncertain response, keep the original key and expected revision.
+That request returns the original operation.
+Use `synod db scale CLUSTER_ID --replicas 0` to preview replica removal.
+Review the plan before you confirm it. Removal retains the replica volume.
+
+## Find a database cluster
+
+List one page of clusters:
+
+```sh
+synod db list --limit 50
+synod db list --limit 50 --json
+```
+
+The `cluster` command is an alias for `db`.
+Use `--cursor TOKEN` with the returned `next_cursor` to read the next page.
+Use `--include-deleted` to include completed deletion records.
+Keep the same deletion filter when you use a cursor.
+Each command reads one page. The maximum page size is 200.
+
+The list shows stored desired and observed states.
+It does not run a live database probe.
+Concurrent changes can affect later pages.
+Start a new list without a cursor to see newer clusters.
+The web **Clusters** screen uses the same public API.
+
+## Database connections
+
+Set the node's client address with `synod node approve --client-address ADDRESS`.
+Supply the other required node policy flags with that command.
+Use a canonical IPv4 or IPv6 address that clients can reach.
+Private LAN addresses are valid. Loopback and wildcard addresses are refused.
+A node with no client address can run work, but endpoint inspection reports that the address is missing.
+
+After a create operation succeeds, inspect its connection metadata:
+
+```sh
+synod endpoint get CLUSTER_ID
+synod credential list CLUSTER_ID
+```
+
+The endpoint command reports the reserved address and port.
+It also reports the stored desired and observed lifecycle state.
+It does not run a live connection probe.
+The current direct standalone profile has one node and no database TLS.
+The response reports `availability_profile: single_node` and `tls_mode: disabled`.
+Router failover and secure database endpoints remain required release work.
+
+Credential inspection returns names and versions. It returns no password.
+Use an explicit reveal when a client needs the password:
+
+```sh
+synod credential reveal CLUSTER_ID --purpose application
+```
+
+Reveal prints a JSON response with a plaintext password.
+Keep that output private. Do not copy it into logs or shared files.
+The server records the actor and credential version before it returns the secret.
+Both engines use `synod_app` for application access.
+The PostgreSQL application role owns the `app` database.
+It can create tables and manage data in that database.
+It cannot create roles, create other databases, or read server files.
+Use `--purpose superuser` for explicit administrative access.
+PostgreSQL verifies its stored setup before each start.
+It refuses to replace a missing application database after setup has completed.
+A confirmed setup failure stays failed across container restarts.
+Ordinary start does not clear that failure.
+Recovery for that state is not yet available in the CLI.
+
+Use the reported host, port, database, and username with a native database client.
+Supply its password through the client's protected input mechanism.
+Do not put the password in a command-line URL.
+
+## Cluster lifecycle
+
+Use `synod db stop CLUSTER_ID --wait` to stop a cluster.
+Use `synod db start CLUSTER_ID --wait` to start it again.
+Both commands read the current revision before admission.
+Use `--expected-revision` to supply a revision explicitly.
+
+Use `synod db delete CLUSTER_ID` to see the deletion plan.
+This preview exits without deleting the cluster.
+Review the target and retained volumes.
+Run the command again with the displayed retry flags and `--yes` to confirm.
+Deletion retains data. It releases reservations only after removal is confirmed.
+Purge is a separate action.
+
+Keep the reported idempotency key, expected revision, and plan token after an uncertain reply.
+Use the same values for the retry. An accepted delete can replay after its preview expires.
+A new deletion needs an unexpired preview.
 
 ## Web application
 
 The controller serves a browser application from its own API origin.
 Open the API address in a browser and sign in with an operator account.
+
+The Clusters screen lists actual clusters with **Refresh**, **Load more**, and **Show deleted** controls.
+The cluster screen shows declared endpoints and credential metadata.
+Select **Reveal** to make an audited request for a password.
+Select **Hide** to clear the displayed password.
+Navigation also clears it.
+
+Start, stop, and delete requests return an operation link.
+Deletion requires a server preview and the exact cluster name.
+Deletion retains data.
+The browser saves lifecycle request identities in session storage.
+After an uncertain reply, select **Retry same request**.
+Do not clear that storage before you resolve the request outcome.
+Unsupported views and upgrade previews remain marked as examples.
 
 The application is built from `web/` and committed under `internal/web/dist`.
 Building the controller therefore needs no JavaScript toolchain.

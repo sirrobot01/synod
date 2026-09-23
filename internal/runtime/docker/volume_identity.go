@@ -43,8 +43,7 @@ func (r *Runtime) verifyVolume(ctx context.Context, command *agentv1.Command, vo
 // and a purge that finds nothing to remove is already finished.
 var errVolumeAbsent = errors.New("volume absent")
 
-// inspectOwnVolume proves the native volume behind one command belongs to this
-// installation and still holds its data where it says it does.
+// inspectOwnVolume checks volume ownership, driver, options, and mount path.
 func (r *Runtime) inspectOwnVolume(ctx context.Context, command *agentv1.Command, volumeID string) error {
 	item, err := r.api.VolumeInspect(ctx, "synod-volume-"+volumeID, client.VolumeInspectOptions{})
 	if err != nil {

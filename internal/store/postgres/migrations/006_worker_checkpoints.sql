@@ -47,6 +47,7 @@ CREATE TABLE command_delivery_attempts (
     retry_delay_us bigint NOT NULL CHECK (retry_delay_us BETWEEN 1000 AND 60000000),
     created_at timestamptz NOT NULL,
     next_attempt_at timestamptz NOT NULL,
+    rejection_bytes bytea CHECK (octet_length(rejection_bytes) BETWEEN 1 AND 4096),
     UNIQUE (command_id,attempt_count),
     FOREIGN KEY (command_id,execution_epoch,recovery_generation)
         REFERENCES command_dispatches (command_id,execution_epoch,recovery_generation)

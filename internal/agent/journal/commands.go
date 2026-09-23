@@ -297,7 +297,7 @@ func (j *Journal) Acknowledge(ack *agentv1.ResultAck) error {
 	}
 	var result agentv1.TerminalResult
 	if err := proto.Unmarshal(r.Result, &result); err != nil {
-		return ErrRecoveryRequired
+		return fmt.Errorf("decode the saved result of command %s: %w: %w", r.ID, ErrRecoveryRequired, err)
 	}
 	if ack.Sequence != result.Sequence {
 		return operation.ErrCommandConflict
@@ -322,7 +322,7 @@ func (j *Journal) Compact(now time.Time) (int, error) {
 	for cluster := range maps.Values(j.state.Clusters) {
 		var barrier agentv1.BarrierResult
 		if err := proto.Unmarshal(cluster.Barrier, &barrier); err != nil {
-			return 0, ErrRecoveryRequired
+			return 0, fmt.Errorf("decode the saved barrier: %w: %w", ErrRecoveryRequired, err)
 		}
 		for _, effect := range barrier.Effects {
 			if effect.CommandId != "" && (effect.Active || effect.OutcomeUnknown) {

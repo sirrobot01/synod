@@ -133,7 +133,7 @@ func Open(path string, options Options) (*Journal, error) {
 	options.MaxCommands = cmp.Or(options.MaxCommands, 64)
 	options.MaxCommandBytes = cmp.Or(options.MaxCommandBytes, 1<<20)
 	options.MaxResultBytes = cmp.Or(options.MaxResultBytes, 1<<20)
-	options.MaxRetainedBytes = cmp.Or(options.MaxRetainedBytes, int64(64<<20))
+	options.MaxRetainedBytes = cmp.Or(options.MaxRetainedBytes, int64(256<<20))
 	options.RecoveryWindow = cmp.Or(options.RecoveryWindow, 24*time.Hour)
 	options.MaxRecords = cmp.Or(options.MaxRecords, 100000)
 	options.MaxClusters = cmp.Or(options.MaxClusters, 1024)
@@ -192,86 +192,107 @@ func (j *Journal) validate() error {
 	s := j.state
 	want := j.options.Identity
 	if (s.Version != 1 && s.Version != 2) || s.Clusters == nil || s.Commands == nil || s.Identity.InstallationID != want.InstallationID || s.Identity.NodeID != want.NodeID || s.Identity.RecoveryGeneration != want.RecoveryGeneration || (want.JournalGeneration != "" && s.Identity.JournalGeneration != want.JournalGeneration) {
-		return ErrRecoveryRequired
+		return fmt.Errorf("the journal holds version %d of %+v and this agent is %+v: %w", s.Version, s.Identity, want, ErrRecoveryRequired)
 	}
 	id, err := uuid.Parse(s.Identity.JournalGeneration)
-	if err != nil || id == uuid.Nil || id.String() != s.Identity.JournalGeneration {
-		return ErrRecoveryRequired
+	if err != nil {
+		return fmt.Errorf("parse the journal generation %q: %w: %w", s.Identity.JournalGeneration, ErrRecoveryRequired, err)
+	}
+	if id == uuid.Nil || id.String() != s.Identity.JournalGeneration {
+		return fmt.Errorf("the journal generation %q is not a canonical non-nil UUID: %w", s.Identity.JournalGeneration, ErrRecoveryRequired)
 	}
 	for clusterID, cluster := range s.Clusters {
-		if j.checkTarget(cluster.Prepared) != nil || clusterID != cluster.Prepared.ClusterId {
-			return ErrRecoveryRequired
+		if err := j.checkTarget(cluster.Prepared); err != nil {
+			return fmt.Errorf("check the prepared epoch of cluster %s: %w: %w", clusterID, ErrRecoveryRequired, err)
+		}
+		if clusterID != cluster.Prepared.ClusterId {
+			return fmt.Errorf("cluster %s is filed under the prepared epoch of cluster %s: %w", clusterID, cluster.Prepared.ClusterId, ErrRecoveryRequired)
 		}
 		if len(cluster.Barrier) != 0 {
 			var barrier agentv1.BarrierResult
-			if proto.Unmarshal(cluster.Barrier, &barrier) != nil || !proto.Equal(barrier.Epoch, cluster.Prepared) {
-				return ErrRecoveryRequired
+			if err := proto.Unmarshal(cluster.Barrier, &barrier); err != nil {
+				return fmt.Errorf("decode the barrier of cluster %s: %w: %w", clusterID, ErrRecoveryRequired, err)
 			}
-			if cluster.Active && operation.BarrierDrained(&barrier) != nil {
-				return ErrRecoveryRequired
+			if !proto.Equal(barrier.Epoch, cluster.Prepared) {
+				return fmt.Errorf("the barrier of cluster %s answers another epoch: %w", clusterID, ErrRecoveryRequired)
+			}
+			if cluster.Active {
+				if err := operation.BarrierDrained(&barrier); err != nil {
+					return fmt.Errorf("cluster %s is active behind an undrained barrier: %w: %w", clusterID, ErrRecoveryRequired, err)
+				}
 			}
 		}
 		if cluster.Active && (!cluster.Reconciled || len(cluster.Barrier) == 0) {
-			return ErrRecoveryRequired
+			return fmt.Errorf("cluster %s is active but not reconciled or carries no barrier: %w", clusterID, ErrRecoveryRequired)
 		}
 	}
 	for commandID, record := range s.Commands {
 		for _, identity := range []string{commandID, record.ResourceID} {
 			parsed, err := uuid.Parse(identity)
-			if err != nil || parsed == uuid.Nil || parsed.String() != identity {
-				return ErrRecoveryRequired
+			if err != nil {
+				return fmt.Errorf("parse %q on command %s: %w: %w", identity, commandID, ErrRecoveryRequired, err)
+			}
+			if parsed == uuid.Nil || parsed.String() != identity {
+				return fmt.Errorf("%q on command %s is not a canonical non-nil UUID: %w", identity, commandID, ErrRecoveryRequired)
 			}
 		}
-		if commandID != record.ID || len(record.Hash) != 32 || j.checkTarget(record.Epoch) != nil {
-			return ErrRecoveryRequired
+		if commandID != record.ID || len(record.Hash) != 32 {
+			return fmt.Errorf("command %s is filed under %s with a %d byte input hash: %w", record.ID, commandID, len(record.Hash), ErrRecoveryRequired)
+		}
+		if err := j.checkTarget(record.Epoch); err != nil {
+			return fmt.Errorf("check the epoch of command %s: %w: %w", commandID, ErrRecoveryRequired, err)
 		}
 		cluster, exists := s.Clusters[record.Epoch.ClusterId]
 		if !exists || record.Epoch.ExecutionEpoch > cluster.Prepared.ExecutionEpoch {
-			return ErrRecoveryRequired
+			return fmt.Errorf("command %s names execution epoch %d of cluster %s, which this journal has not prepared: %w",
+				commandID, record.Epoch.ExecutionEpoch, record.Epoch.ClusterId, ErrRecoveryRequired)
 		}
 		view, err := record.view()
 		if err != nil {
-			return err
+			return fmt.Errorf("read command %s: %w", commandID, err)
 		}
 		if record.State == Compacted {
 			if len(record.Command) != 0 || len(record.Result) != 0 || record.AcknowledgedAt.IsZero() || len(record.Effects) != 0 || record.ResultSequence == 0 {
-				return ErrRecoveryRequired
+				return fmt.Errorf("compacted command %s still carries a command, a result, or effects: %w", commandID, ErrRecoveryRequired)
 			}
 			continue
 		}
-		if operation.ValidateCommand(view.Command) != nil || view.Command.CommandId != commandID || !bytes.Equal(view.Command.InputHash, record.Hash) || !proto.Equal(view.Command.Epoch, record.Epoch) || view.Command.Input.ResourceId != record.ResourceID {
-			return ErrRecoveryRequired
+		if err := operation.ValidateCommand(view.Command); err != nil {
+			return fmt.Errorf("validate the saved command %s: %w: %w", commandID, ErrRecoveryRequired, err)
+		}
+		if view.Command.CommandId != commandID || !bytes.Equal(view.Command.InputHash, record.Hash) || !proto.Equal(view.Command.Epoch, record.Epoch) || view.Command.Input.ResourceId != record.ResourceID {
+			return fmt.Errorf("the saved command under %s does not match its record: %w", commandID, ErrRecoveryRequired)
 		}
 		if record.State != Queued && record.State != Running && record.State != Terminal {
-			return ErrRecoveryRequired
+			return fmt.Errorf("command %s is in state %q: %w", commandID, record.State, ErrRecoveryRequired)
 		}
 		if (record.State == Terminal) != (view.Result != nil) || (view.Result == nil && !record.AcknowledgedAt.IsZero()) {
-			return ErrRecoveryRequired
+			return fmt.Errorf("command %s is in state %q and its result is present=%t: %w", commandID, record.State, view.Result != nil, ErrRecoveryRequired)
 		}
 		if err := validateEffects(commandRecord{ID: record.ID, ResourceID: record.ResourceID}, record.Effects); err != nil {
-			return ErrRecoveryRequired
+			return fmt.Errorf("validate the recorded effects of command %s: %w: %w", commandID, ErrRecoveryRequired, err)
 		}
 		if record.State == Queued && len(record.Effects) != 0 {
-			return ErrRecoveryRequired
+			return fmt.Errorf("queued command %s already carries %d effects: %w", commandID, len(record.Effects), ErrRecoveryRequired)
 		}
 		if view.Result == nil && record.ResultSequence != 0 {
-			return ErrRecoveryRequired
+			return fmt.Errorf("command %s carries result sequence %d and no result: %w", commandID, record.ResultSequence, ErrRecoveryRequired)
 		}
 		if view.Result != nil {
 			if err := validateEffects(commandRecord{ID: record.ID, ResourceID: record.ResourceID}, view.Result.Effects); err != nil {
-				return ErrRecoveryRequired
+				return fmt.Errorf("validate the result effects of command %s: %w: %w", commandID, ErrRecoveryRequired, err)
 			}
 			for _, effect := range view.Result.Effects {
 				if view.Result.State == "succeeded" && (effect.Active || effect.OutcomeUnknown) {
-					return ErrRecoveryRequired
+					return fmt.Errorf("command %s succeeded with an active or unknown effect on %s: %w", commandID, effect.ResourceId, ErrRecoveryRequired)
 				}
 			}
-		}
-		if view.Result != nil && view.Result.State != "succeeded" && view.Result.State != "failed" && view.Result.State != "cancelled" {
-			return ErrRecoveryRequired
-		}
-		if view.Result != nil && (view.Result.Sequence == 0 || view.Result.Sequence != record.ResultSequence || view.Result.CommandId != commandID || !proto.Equal(view.Result.Epoch, record.Epoch) || !bytes.Equal(view.Result.InputHash, record.Hash)) {
-			return ErrRecoveryRequired
+			if view.Result.State != "succeeded" && view.Result.State != "failed" && view.Result.State != "cancelled" {
+				return fmt.Errorf("the result of command %s is in state %q: %w", commandID, view.Result.State, ErrRecoveryRequired)
+			}
+			if view.Result.Sequence == 0 || view.Result.Sequence != record.ResultSequence || view.Result.CommandId != commandID || !proto.Equal(view.Result.Epoch, record.Epoch) || !bytes.Equal(view.Result.InputHash, record.Hash) {
+				return fmt.Errorf("the saved result under %s does not match its record: %w", commandID, ErrRecoveryRequired)
+			}
 		}
 	}
 	return nil
@@ -282,8 +303,11 @@ func (j *Journal) checkTarget(epoch *agentv1.Epoch) error {
 		return operation.ErrStaleOwner
 	}
 	id, err := uuid.Parse(epoch.ClusterId)
-	if err != nil || id == uuid.Nil || id.String() != epoch.ClusterId {
-		return operation.ErrStaleOwner
+	if err != nil {
+		return fmt.Errorf("parse the cluster of the epoch (%q): %w: %w", epoch.ClusterId, operation.ErrStaleOwner, err)
+	}
+	if id == uuid.Nil || id.String() != epoch.ClusterId {
+		return fmt.Errorf("the epoch names cluster %q, which is not a canonical non-nil UUID: %w", epoch.ClusterId, operation.ErrStaleOwner)
 	}
 	return nil
 }

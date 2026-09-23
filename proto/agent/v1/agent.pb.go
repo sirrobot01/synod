@@ -124,37 +124,52 @@ func (CancellationBoundary) EnumDescriptor() ([]byte, []int) {
 type Postcondition int32
 
 const (
-	Postcondition_POSTCONDITION_UNSPECIFIED         Postcondition = 0
-	Postcondition_POSTCONDITION_VOLUME_EXISTS       Postcondition = 1
-	Postcondition_POSTCONDITION_NETWORK_EXISTS      Postcondition = 2
-	Postcondition_POSTCONDITION_CONTAINER_EXISTS    Postcondition = 3
-	Postcondition_POSTCONDITION_CONTAINER_RUNNING   Postcondition = 4
-	Postcondition_POSTCONDITION_CONTAINER_STOPPED   Postcondition = 5
-	Postcondition_POSTCONDITION_CONTAINER_ABSENT    Postcondition = 6
-	Postcondition_POSTCONDITION_CONTAINER_INSPECTED Postcondition = 7
+	Postcondition_POSTCONDITION_UNSPECIFIED               Postcondition = 0
+	Postcondition_POSTCONDITION_VOLUME_EXISTS             Postcondition = 1
+	Postcondition_POSTCONDITION_NETWORK_EXISTS            Postcondition = 2
+	Postcondition_POSTCONDITION_CONTAINER_EXISTS          Postcondition = 3
+	Postcondition_POSTCONDITION_CONTAINER_RUNNING         Postcondition = 4
+	Postcondition_POSTCONDITION_CONTAINER_STOPPED         Postcondition = 5
+	Postcondition_POSTCONDITION_CONTAINER_ABSENT          Postcondition = 6
+	Postcondition_POSTCONDITION_CONTAINER_INSPECTED       Postcondition = 7
+	Postcondition_POSTCONDITION_ENGINE_READY              Postcondition = 8
+	Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED  Postcondition = 9
+	Postcondition_POSTCONDITION_POSTGRES_REPLICA_PREPARED Postcondition = 10
+	Postcondition_POSTCONDITION_POSTGRES_REPLICA_CLONED   Postcondition = 11
+	Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED   Postcondition = 12
 )
 
 // Enum value maps for Postcondition.
 var (
 	Postcondition_name = map[int32]string{
-		0: "POSTCONDITION_UNSPECIFIED",
-		1: "POSTCONDITION_VOLUME_EXISTS",
-		2: "POSTCONDITION_NETWORK_EXISTS",
-		3: "POSTCONDITION_CONTAINER_EXISTS",
-		4: "POSTCONDITION_CONTAINER_RUNNING",
-		5: "POSTCONDITION_CONTAINER_STOPPED",
-		6: "POSTCONDITION_CONTAINER_ABSENT",
-		7: "POSTCONDITION_CONTAINER_INSPECTED",
+		0:  "POSTCONDITION_UNSPECIFIED",
+		1:  "POSTCONDITION_VOLUME_EXISTS",
+		2:  "POSTCONDITION_NETWORK_EXISTS",
+		3:  "POSTCONDITION_CONTAINER_EXISTS",
+		4:  "POSTCONDITION_CONTAINER_RUNNING",
+		5:  "POSTCONDITION_CONTAINER_STOPPED",
+		6:  "POSTCONDITION_CONTAINER_ABSENT",
+		7:  "POSTCONDITION_CONTAINER_INSPECTED",
+		8:  "POSTCONDITION_ENGINE_READY",
+		9:  "POSTCONDITION_POSTGRES_SETUP_RECOVERED",
+		10: "POSTCONDITION_POSTGRES_REPLICA_PREPARED",
+		11: "POSTCONDITION_POSTGRES_REPLICA_CLONED",
+		12: "POSTCONDITION_POSTGRES_REPLICA_FAILED",
 	}
 	Postcondition_value = map[string]int32{
-		"POSTCONDITION_UNSPECIFIED":         0,
-		"POSTCONDITION_VOLUME_EXISTS":       1,
-		"POSTCONDITION_NETWORK_EXISTS":      2,
-		"POSTCONDITION_CONTAINER_EXISTS":    3,
-		"POSTCONDITION_CONTAINER_RUNNING":   4,
-		"POSTCONDITION_CONTAINER_STOPPED":   5,
-		"POSTCONDITION_CONTAINER_ABSENT":    6,
-		"POSTCONDITION_CONTAINER_INSPECTED": 7,
+		"POSTCONDITION_UNSPECIFIED":               0,
+		"POSTCONDITION_VOLUME_EXISTS":             1,
+		"POSTCONDITION_NETWORK_EXISTS":            2,
+		"POSTCONDITION_CONTAINER_EXISTS":          3,
+		"POSTCONDITION_CONTAINER_RUNNING":         4,
+		"POSTCONDITION_CONTAINER_STOPPED":         5,
+		"POSTCONDITION_CONTAINER_ABSENT":          6,
+		"POSTCONDITION_CONTAINER_INSPECTED":       7,
+		"POSTCONDITION_ENGINE_READY":              8,
+		"POSTCONDITION_POSTGRES_SETUP_RECOVERED":  9,
+		"POSTCONDITION_POSTGRES_REPLICA_PREPARED": 10,
+		"POSTCONDITION_POSTGRES_REPLICA_CLONED":   11,
+		"POSTCONDITION_POSTGRES_REPLICA_FAILED":   12,
 	}
 )
 
@@ -897,6 +912,10 @@ func (x *BarrierResult) GetFailureCode() string {
 	return ""
 }
 
+// A command names the credential it needs. It never carries the credential.
+//
+// The plan, the stored command bytes, the input hash, and the agent journal all hold
+// this reference and nothing else, so none of them has a plaintext to leak.
 type SecretReference struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	CredentialId  string                 `protobuf:"bytes,1,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`
@@ -957,6 +976,187 @@ func (x *SecretReference) GetPurpose() string {
 	return ""
 }
 
+// One resolved credential, pushed on the control stream before the command that needs
+// it. The agent holds it in session memory and never writes it down; it dies with the
+// session, and a reconnect is sent it again before the command is dispatched again.
+type SecretMaterial struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CredentialId  string                 `protobuf:"bytes,1,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`
+	Version       int64                  `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	Purpose       string                 `protobuf:"bytes,3,opt,name=purpose,proto3" json:"purpose,omitempty"`
+	Material      []byte                 `protobuf:"bytes,4,opt,name=material,proto3" json:"material,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SecretMaterial) Reset() {
+	*x = SecretMaterial{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SecretMaterial) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SecretMaterial) ProtoMessage() {}
+
+func (x *SecretMaterial) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SecretMaterial.ProtoReflect.Descriptor instead.
+func (*SecretMaterial) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *SecretMaterial) GetCredentialId() string {
+	if x != nil {
+		return x.CredentialId
+	}
+	return ""
+}
+
+func (x *SecretMaterial) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *SecretMaterial) GetPurpose() string {
+	if x != nil {
+		return x.Purpose
+	}
+	return ""
+}
+
+func (x *SecretMaterial) GetMaterial() []byte {
+	if x != nil {
+		return x.Material
+	}
+	return nil
+}
+
+// One environment variable filled from a credential. The variable name is not secret
+// and travels in the command; the value never does.
+type SecretEnv struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Purpose       string                 `protobuf:"bytes,2,opt,name=purpose,proto3" json:"purpose,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SecretEnv) Reset() {
+	*x = SecretEnv{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SecretEnv) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SecretEnv) ProtoMessage() {}
+
+func (x *SecretEnv) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SecretEnv.ProtoReflect.Descriptor instead.
+func (*SecretEnv) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *SecretEnv) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SecretEnv) GetPurpose() string {
+	if x != nil {
+		return x.Purpose
+	}
+	return ""
+}
+
+// One environment variable whose value is not secret, such as the initial superuser
+// name or database name an engine image reads at first start. Both parts travel in the
+// command and are recorded in the container's configuration, so nothing secret may be
+// carried here; a credential uses SecretEnv, whose value never enters a command.
+type PlainEnv struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlainEnv) Reset() {
+	*x = PlainEnv{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlainEnv) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlainEnv) ProtoMessage() {}
+
+func (x *PlainEnv) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlainEnv.ProtoReflect.Descriptor instead.
+func (*PlainEnv) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *PlainEnv) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PlainEnv) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
 type PortBinding struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	HostAddress   string                 `protobuf:"bytes,1,opt,name=host_address,json=hostAddress,proto3" json:"host_address,omitempty"`
@@ -969,7 +1169,7 @@ type PortBinding struct {
 
 func (x *PortBinding) Reset() {
 	*x = PortBinding{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -981,7 +1181,7 @@ func (x *PortBinding) String() string {
 func (*PortBinding) ProtoMessage() {}
 
 func (x *PortBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -994,7 +1194,7 @@ func (x *PortBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PortBinding.ProtoReflect.Descriptor instead.
 func (*PortBinding) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *PortBinding) GetHostAddress() string {
@@ -1034,7 +1234,7 @@ type EnsureVolume struct {
 
 func (x *EnsureVolume) Reset() {
 	*x = EnsureVolume{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1046,7 +1246,7 @@ func (x *EnsureVolume) String() string {
 func (*EnsureVolume) ProtoMessage() {}
 
 func (x *EnsureVolume) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1059,7 +1259,7 @@ func (x *EnsureVolume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureVolume.ProtoReflect.Descriptor instead.
 func (*EnsureVolume) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *EnsureVolume) GetVolumeId() string {
@@ -1078,7 +1278,7 @@ type EnsureNetwork struct {
 
 func (x *EnsureNetwork) Reset() {
 	*x = EnsureNetwork{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1090,7 +1290,7 @@ func (x *EnsureNetwork) String() string {
 func (*EnsureNetwork) ProtoMessage() {}
 
 func (x *EnsureNetwork) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1103,7 +1303,7 @@ func (x *EnsureNetwork) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureNetwork.ProtoReflect.Descriptor instead.
 func (*EnsureNetwork) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *EnsureNetwork) GetNetworkId() string {
@@ -1114,22 +1314,30 @@ func (x *EnsureNetwork) GetNetworkId() string {
 }
 
 type EnsureContainer struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ImageDigest   string                 `protobuf:"bytes,1,opt,name=image_digest,json=imageDigest,proto3" json:"image_digest,omitempty"`
-	Engine        string                 `protobuf:"bytes,2,opt,name=engine,proto3" json:"engine,omitempty"`
-	VolumeId      string                 `protobuf:"bytes,3,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
-	NetworkId     string                 `protobuf:"bytes,4,opt,name=network_id,json=networkId,proto3" json:"network_id,omitempty"`
-	Ports         []*PortBinding         `protobuf:"bytes,5,rep,name=ports,proto3" json:"ports,omitempty"`
-	MemoryBytes   int64                  `protobuf:"varint,6,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
-	CpuMillis     int64                  `protobuf:"varint,7,opt,name=cpu_millis,json=cpuMillis,proto3" json:"cpu_millis,omitempty"`
-	NetworkMode   NetworkMode            `protobuf:"varint,8,opt,name=network_mode,json=networkMode,proto3,enum=synod.agent.v1.NetworkMode" json:"network_mode,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	ImageDigest string                 `protobuf:"bytes,1,opt,name=image_digest,json=imageDigest,proto3" json:"image_digest,omitempty"`
+	Engine      string                 `protobuf:"bytes,2,opt,name=engine,proto3" json:"engine,omitempty"`
+	VolumeId    string                 `protobuf:"bytes,3,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	NetworkId   string                 `protobuf:"bytes,4,opt,name=network_id,json=networkId,proto3" json:"network_id,omitempty"`
+	Ports       []*PortBinding         `protobuf:"bytes,5,rep,name=ports,proto3" json:"ports,omitempty"`
+	MemoryBytes int64                  `protobuf:"varint,6,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	CpuMillis   int64                  `protobuf:"varint,7,opt,name=cpu_millis,json=cpuMillis,proto3" json:"cpu_millis,omitempty"`
+	NetworkMode NetworkMode            `protobuf:"varint,8,opt,name=network_mode,json=networkMode,proto3,enum=synod.agent.v1.NetworkMode" json:"network_mode,omitempty"`
+	// Which environment variables the engine reads its credentials from. The plan says
+	// the name and the purpose; the agent supplies the value from session memory.
+	SecretEnv []*SecretEnv `protobuf:"bytes,9,rep,name=secret_env,json=secretEnv,proto3" json:"secret_env,omitempty"`
+	// Non-secret environment an engine image reads at first start, such as the initial
+	// superuser and database names.
+	PlainEnv      []*PlainEnv              `protobuf:"bytes,10,rep,name=plain_env,json=plainEnv,proto3" json:"plain_env,omitempty"`
+	Redis         *RedisContainerConfig    `protobuf:"bytes,11,opt,name=redis,proto3" json:"redis,omitempty"`
+	Postgres      *PostgresContainerConfig `protobuf:"bytes,12,opt,name=postgres,proto3" json:"postgres,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EnsureContainer) Reset() {
 	*x = EnsureContainer{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1141,7 +1349,7 @@ func (x *EnsureContainer) String() string {
 func (*EnsureContainer) ProtoMessage() {}
 
 func (x *EnsureContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1154,7 +1362,7 @@ func (x *EnsureContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureContainer.ProtoReflect.Descriptor instead.
 func (*EnsureContainer) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *EnsureContainer) GetImageDigest() string {
@@ -1213,15 +1421,585 @@ func (x *EnsureContainer) GetNetworkMode() NetworkMode {
 	return NetworkMode_NETWORK_MODE_UNSPECIFIED
 }
 
-type StartContainer struct {
+func (x *EnsureContainer) GetSecretEnv() []*SecretEnv {
+	if x != nil {
+		return x.SecretEnv
+	}
+	return nil
+}
+
+func (x *EnsureContainer) GetPlainEnv() []*PlainEnv {
+	if x != nil {
+		return x.PlainEnv
+	}
+	return nil
+}
+
+func (x *EnsureContainer) GetRedis() *RedisContainerConfig {
+	if x != nil {
+		return x.Redis
+	}
+	return nil
+}
+
+func (x *EnsureContainer) GetPostgres() *PostgresContainerConfig {
+	if x != nil {
+		return x.Postgres
+	}
+	return nil
+}
+
+// Fixed PostgreSQL application setup. Credential identities remain in the
+// container configuration so restart inspection never needs secret material.
+type PostgresContainerConfig struct {
+	state                        protoimpl.MessageState `protogen:"open.v1"`
+	Port                         uint32                 `protobuf:"varint,1,opt,name=port,proto3" json:"port,omitempty"`
+	ApplicationCredentialId      string                 `protobuf:"bytes,2,opt,name=application_credential_id,json=applicationCredentialId,proto3" json:"application_credential_id,omitempty"`
+	ApplicationCredentialVersion int64                  `protobuf:"varint,3,opt,name=application_credential_version,json=applicationCredentialVersion,proto3" json:"application_credential_version,omitempty"`
+	SuperuserCredentialId        string                 `protobuf:"bytes,4,opt,name=superuser_credential_id,json=superuserCredentialId,proto3" json:"superuser_credential_id,omitempty"`
+	SuperuserCredentialVersion   int64                  `protobuf:"varint,5,opt,name=superuser_credential_version,json=superuserCredentialVersion,proto3" json:"superuser_credential_version,omitempty"`
+	ReplicationCredentialId      string                 `protobuf:"bytes,6,opt,name=replication_credential_id,json=replicationCredentialId,proto3" json:"replication_credential_id,omitempty"`
+	ReplicationCredentialVersion int64                  `protobuf:"varint,7,opt,name=replication_credential_version,json=replicationCredentialVersion,proto3" json:"replication_credential_version,omitempty"`
+	// An absent source selects a primary.
+	ReplicaSource *PostgresReplicaSource `protobuf:"bytes,8,opt,name=replica_source,json=replicaSource,proto3" json:"replica_source,omitempty"`
+	// Require one cluster-named standby to flush WAL before default commits return.
+	SynchronousReplication bool                    `protobuf:"varint,9,opt,name=synchronous_replication,json=synchronousReplication,proto3" json:"synchronous_replication,omitempty"`
+	Patroni                *PatroniContainerConfig `protobuf:"bytes,10,opt,name=patroni,proto3" json:"patroni,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *PostgresContainerConfig) Reset() {
+	*x = PostgresContainerConfig{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PostgresContainerConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PostgresContainerConfig) ProtoMessage() {}
+
+func (x *PostgresContainerConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PostgresContainerConfig.ProtoReflect.Descriptor instead.
+func (*PostgresContainerConfig) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *PostgresContainerConfig) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *PostgresContainerConfig) GetApplicationCredentialId() string {
+	if x != nil {
+		return x.ApplicationCredentialId
+	}
+	return ""
+}
+
+func (x *PostgresContainerConfig) GetApplicationCredentialVersion() int64 {
+	if x != nil {
+		return x.ApplicationCredentialVersion
+	}
+	return 0
+}
+
+func (x *PostgresContainerConfig) GetSuperuserCredentialId() string {
+	if x != nil {
+		return x.SuperuserCredentialId
+	}
+	return ""
+}
+
+func (x *PostgresContainerConfig) GetSuperuserCredentialVersion() int64 {
+	if x != nil {
+		return x.SuperuserCredentialVersion
+	}
+	return 0
+}
+
+func (x *PostgresContainerConfig) GetReplicationCredentialId() string {
+	if x != nil {
+		return x.ReplicationCredentialId
+	}
+	return ""
+}
+
+func (x *PostgresContainerConfig) GetReplicationCredentialVersion() int64 {
+	if x != nil {
+		return x.ReplicationCredentialVersion
+	}
+	return 0
+}
+
+func (x *PostgresContainerConfig) GetReplicaSource() *PostgresReplicaSource {
+	if x != nil {
+		return x.ReplicaSource
+	}
+	return nil
+}
+
+func (x *PostgresContainerConfig) GetSynchronousReplication() bool {
+	if x != nil {
+		return x.SynchronousReplication
+	}
+	return false
+}
+
+func (x *PostgresContainerConfig) GetPatroni() *PatroniContainerConfig {
+	if x != nil {
+		return x.Patroni
+	}
+	return nil
+}
+
+type PatroniContainerConfig struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Address             string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	RestPort            uint32                 `protobuf:"varint,2,opt,name=rest_port,json=restPort,proto3" json:"rest_port,omitempty"`
+	DcsEndpoints        []string               `protobuf:"bytes,3,rep,name=dcs_endpoints,json=dcsEndpoints,proto3" json:"dcs_endpoints,omitempty"`
+	PeerNetworks        []string               `protobuf:"bytes,4,rep,name=peer_networks,json=peerNetworks,proto3" json:"peer_networks,omitempty"`
+	ClientNetworks      []string               `protobuf:"bytes,5,rep,name=client_networks,json=clientNetworks,proto3" json:"client_networks,omitempty"`
+	ProvisionId         string                 `protobuf:"bytes,6,opt,name=provision_id,json=provisionId,proto3" json:"provision_id,omitempty"`
+	AllowInitialization bool                   `protobuf:"varint,7,opt,name=allow_initialization,json=allowInitialization,proto3" json:"allow_initialization,omitempty"`
+	Credentials         []*SecretReference     `protobuf:"bytes,8,rep,name=credentials,proto3" json:"credentials,omitempty"`
+	RequiredFreeBytes   int64                  `protobuf:"varint,9,opt,name=required_free_bytes,json=requiredFreeBytes,proto3" json:"required_free_bytes,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *PatroniContainerConfig) Reset() {
+	*x = PatroniContainerConfig{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PatroniContainerConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PatroniContainerConfig) ProtoMessage() {}
+
+func (x *PatroniContainerConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PatroniContainerConfig.ProtoReflect.Descriptor instead.
+func (*PatroniContainerConfig) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *PatroniContainerConfig) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *PatroniContainerConfig) GetRestPort() uint32 {
+	if x != nil {
+		return x.RestPort
+	}
+	return 0
+}
+
+func (x *PatroniContainerConfig) GetDcsEndpoints() []string {
+	if x != nil {
+		return x.DcsEndpoints
+	}
+	return nil
+}
+
+func (x *PatroniContainerConfig) GetPeerNetworks() []string {
+	if x != nil {
+		return x.PeerNetworks
+	}
+	return nil
+}
+
+func (x *PatroniContainerConfig) GetClientNetworks() []string {
+	if x != nil {
+		return x.ClientNetworks
+	}
+	return nil
+}
+
+func (x *PatroniContainerConfig) GetProvisionId() string {
+	if x != nil {
+		return x.ProvisionId
+	}
+	return ""
+}
+
+func (x *PatroniContainerConfig) GetAllowInitialization() bool {
+	if x != nil {
+		return x.AllowInitialization
+	}
+	return false
+}
+
+func (x *PatroniContainerConfig) GetCredentials() []*SecretReference {
+	if x != nil {
+		return x.Credentials
+	}
+	return nil
+}
+
+func (x *PatroniContainerConfig) GetRequiredFreeBytes() int64 {
+	if x != nil {
+		return x.RequiredFreeBytes
+	}
+	return 0
+}
+
+type PostgresReplicaSource struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Address       string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	Port          uint32                 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
+	ResourceId    string                 `protobuf:"bytes,3,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
+func (x *PostgresReplicaSource) Reset() {
+	*x = PostgresReplicaSource{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PostgresReplicaSource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PostgresReplicaSource) ProtoMessage() {}
+
+func (x *PostgresReplicaSource) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PostgresReplicaSource.ProtoReflect.Descriptor instead.
+func (*PostgresReplicaSource) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *PostgresReplicaSource) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *PostgresReplicaSource) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *PostgresReplicaSource) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
+}
+
+type PostgresReplicationCheck struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Source            *PostgresReplicaSource `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	MaxReplayLagBytes int64                  `protobuf:"varint,2,opt,name=max_replay_lag_bytes,json=maxReplayLagBytes,proto3" json:"max_replay_lag_bytes,omitempty"`
+	MaxMessageAge     *durationpb.Duration   `protobuf:"bytes,3,opt,name=max_message_age,json=maxMessageAge,proto3" json:"max_message_age,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *PostgresReplicationCheck) Reset() {
+	*x = PostgresReplicationCheck{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PostgresReplicationCheck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PostgresReplicationCheck) ProtoMessage() {}
+
+func (x *PostgresReplicationCheck) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PostgresReplicationCheck.ProtoReflect.Descriptor instead.
+func (*PostgresReplicationCheck) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *PostgresReplicationCheck) GetSource() *PostgresReplicaSource {
+	if x != nil {
+		return x.Source
+	}
+	return nil
+}
+
+func (x *PostgresReplicationCheck) GetMaxReplayLagBytes() int64 {
+	if x != nil {
+		return x.MaxReplayLagBytes
+	}
+	return 0
+}
+
+func (x *PostgresReplicationCheck) GetMaxMessageAge() *durationpb.Duration {
+	if x != nil {
+		return x.MaxMessageAge
+	}
+	return nil
+}
+
+type RedisContainerConfig struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Port           uint32                 `protobuf:"varint,1,opt,name=port,proto3" json:"port,omitempty"`
+	Persistence    string                 `protobuf:"bytes,2,opt,name=persistence,proto3" json:"persistence,omitempty"`
+	MaxmemoryBytes int64                  `protobuf:"varint,3,opt,name=maxmemory_bytes,json=maxmemoryBytes,proto3" json:"maxmemory_bytes,omitempty"`
+	EvictionPolicy string                 `protobuf:"bytes,4,opt,name=eviction_policy,json=evictionPolicy,proto3" json:"eviction_policy,omitempty"`
+	// An absent upstream selects a primary. Replicas use the dedicated credential.
+	Upstream *RedisUpstream `protobuf:"bytes,5,opt,name=upstream,proto3" json:"upstream,omitempty"`
+	// Persist identities for restart validation without loading secret material.
+	Credentials   []*SecretReference `protobuf:"bytes,6,rep,name=credentials,proto3" json:"credentials,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RedisContainerConfig) Reset() {
+	*x = RedisContainerConfig{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RedisContainerConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RedisContainerConfig) ProtoMessage() {}
+
+func (x *RedisContainerConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RedisContainerConfig.ProtoReflect.Descriptor instead.
+func (*RedisContainerConfig) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *RedisContainerConfig) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *RedisContainerConfig) GetPersistence() string {
+	if x != nil {
+		return x.Persistence
+	}
+	return ""
+}
+
+func (x *RedisContainerConfig) GetMaxmemoryBytes() int64 {
+	if x != nil {
+		return x.MaxmemoryBytes
+	}
+	return 0
+}
+
+func (x *RedisContainerConfig) GetEvictionPolicy() string {
+	if x != nil {
+		return x.EvictionPolicy
+	}
+	return ""
+}
+
+func (x *RedisContainerConfig) GetUpstream() *RedisUpstream {
+	if x != nil {
+		return x.Upstream
+	}
+	return nil
+}
+
+func (x *RedisContainerConfig) GetCredentials() []*SecretReference {
+	if x != nil {
+		return x.Credentials
+	}
+	return nil
+}
+
+type RedisUpstream struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// A canonical IP literal. DNS lookup must not change the declared peer.
+	Address       string `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	Port          uint32 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RedisUpstream) Reset() {
+	*x = RedisUpstream{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RedisUpstream) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RedisUpstream) ProtoMessage() {}
+
+func (x *RedisUpstream) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RedisUpstream.ProtoReflect.Descriptor instead.
+func (*RedisUpstream) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *RedisUpstream) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *RedisUpstream) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+type RedisReplicationCheck struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// primary or replica. A replica must name its expected upstream.
+	ExpectedRole  string         `protobuf:"bytes,1,opt,name=expected_role,json=expectedRole,proto3" json:"expected_role,omitempty"`
+	Upstream      *RedisUpstream `protobuf:"bytes,2,opt,name=upstream,proto3" json:"upstream,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RedisReplicationCheck) Reset() {
+	*x = RedisReplicationCheck{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RedisReplicationCheck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RedisReplicationCheck) ProtoMessage() {}
+
+func (x *RedisReplicationCheck) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RedisReplicationCheck.ProtoReflect.Descriptor instead.
+func (*RedisReplicationCheck) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *RedisReplicationCheck) GetExpectedRole() string {
+	if x != nil {
+		return x.ExpectedRole
+	}
+	return ""
+}
+
+func (x *RedisReplicationCheck) GetUpstream() *RedisUpstream {
+	if x != nil {
+		return x.Upstream
+	}
+	return nil
+}
+
+type StartContainer struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Only a container that has never started may initialize an empty volume.
+	AllowInitialization bool `protobuf:"varint,1,opt,name=allow_initialization,json=allowInitialization,proto3" json:"allow_initialization,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
 func (x *StartContainer) Reset() {
 	*x = StartContainer{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1233,7 +2011,7 @@ func (x *StartContainer) String() string {
 func (*StartContainer) ProtoMessage() {}
 
 func (x *StartContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1246,7 +2024,304 @@ func (x *StartContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartContainer.ProtoReflect.Descriptor instead.
 func (*StartContainer) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *StartContainer) GetAllowInitialization() bool {
+	if x != nil {
+		return x.AllowInitialization
+	}
+	return false
+}
+
+// Verify or finish an existing PostgreSQL setup receipt after confirmed failure.
+type StartPatroniMember struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Container           *EnsureContainer       `protobuf:"bytes,1,opt,name=container,proto3" json:"container,omitempty"`
+	AllowInitialization bool                   `protobuf:"varint,2,opt,name=allow_initialization,json=allowInitialization,proto3" json:"allow_initialization,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *StartPatroniMember) Reset() {
+	*x = StartPatroniMember{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartPatroniMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartPatroniMember) ProtoMessage() {}
+
+func (x *StartPatroniMember) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartPatroniMember.ProtoReflect.Descriptor instead.
+func (*StartPatroniMember) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *StartPatroniMember) GetContainer() *EnsureContainer {
+	if x != nil {
+		return x.Container
+	}
+	return nil
+}
+
+func (x *StartPatroniMember) GetAllowInitialization() bool {
+	if x != nil {
+		return x.AllowInitialization
+	}
+	return false
+}
+
+type RecoverPostgresSetup struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Postgres      *PostgresContainerConfig `protobuf:"bytes,1,opt,name=postgres,proto3" json:"postgres,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecoverPostgresSetup) Reset() {
+	*x = RecoverPostgresSetup{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecoverPostgresSetup) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecoverPostgresSetup) ProtoMessage() {}
+
+func (x *RecoverPostgresSetup) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecoverPostgresSetup.ProtoReflect.Descriptor instead.
+func (*RecoverPostgresSetup) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *RecoverPostgresSetup) GetPostgres() *PostgresContainerConfig {
+	if x != nil {
+		return x.Postgres
+	}
+	return nil
+}
+
+type PreparePostgresReplica struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PreparePostgresReplica) Reset() {
+	*x = PreparePostgresReplica{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PreparePostgresReplica) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PreparePostgresReplica) ProtoMessage() {}
+
+func (x *PreparePostgresReplica) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PreparePostgresReplica.ProtoReflect.Descriptor instead.
+func (*PreparePostgresReplica) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{28}
+}
+
+type ClonePostgresReplica struct {
+	state             protoimpl.MessageState   `protogen:"open.v1"`
+	Postgres          *PostgresContainerConfig `protobuf:"bytes,1,opt,name=postgres,proto3" json:"postgres,omitempty"`
+	RequiredFreeBytes int64                    `protobuf:"varint,2,opt,name=required_free_bytes,json=requiredFreeBytes,proto3" json:"required_free_bytes,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *ClonePostgresReplica) Reset() {
+	*x = ClonePostgresReplica{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClonePostgresReplica) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClonePostgresReplica) ProtoMessage() {}
+
+func (x *ClonePostgresReplica) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClonePostgresReplica.ProtoReflect.Descriptor instead.
+func (*ClonePostgresReplica) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ClonePostgresReplica) GetPostgres() *PostgresContainerConfig {
+	if x != nil {
+		return x.Postgres
+	}
+	return nil
+}
+
+func (x *ClonePostgresReplica) GetRequiredFreeBytes() int64 {
+	if x != nil {
+		return x.RequiredFreeBytes
+	}
+	return 0
+}
+
+type VerifyPostgresReplicaClone struct {
+	state          protoimpl.MessageState   `protogen:"open.v1"`
+	Postgres       *PostgresContainerConfig `protobuf:"bytes,1,opt,name=postgres,proto3" json:"postgres,omitempty"`
+	CloneCommandId string                   `protobuf:"bytes,2,opt,name=clone_command_id,json=cloneCommandId,proto3" json:"clone_command_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *VerifyPostgresReplicaClone) Reset() {
+	*x = VerifyPostgresReplicaClone{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyPostgresReplicaClone) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyPostgresReplicaClone) ProtoMessage() {}
+
+func (x *VerifyPostgresReplicaClone) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyPostgresReplicaClone.ProtoReflect.Descriptor instead.
+func (*VerifyPostgresReplicaClone) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *VerifyPostgresReplicaClone) GetPostgres() *PostgresContainerConfig {
+	if x != nil {
+		return x.Postgres
+	}
+	return nil
+}
+
+func (x *VerifyPostgresReplicaClone) GetCloneCommandId() string {
+	if x != nil {
+		return x.CloneCommandId
+	}
+	return ""
+}
+
+// Prove durable replica failure for the original clone after native work stopped.
+type VerifyPostgresReplicaFailure struct {
+	state          protoimpl.MessageState   `protogen:"open.v1"`
+	Postgres       *PostgresContainerConfig `protobuf:"bytes,1,opt,name=postgres,proto3" json:"postgres,omitempty"`
+	CloneCommandId string                   `protobuf:"bytes,2,opt,name=clone_command_id,json=cloneCommandId,proto3" json:"clone_command_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *VerifyPostgresReplicaFailure) Reset() {
+	*x = VerifyPostgresReplicaFailure{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyPostgresReplicaFailure) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyPostgresReplicaFailure) ProtoMessage() {}
+
+func (x *VerifyPostgresReplicaFailure) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyPostgresReplicaFailure.ProtoReflect.Descriptor instead.
+func (*VerifyPostgresReplicaFailure) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *VerifyPostgresReplicaFailure) GetPostgres() *PostgresContainerConfig {
+	if x != nil {
+		return x.Postgres
+	}
+	return nil
+}
+
+func (x *VerifyPostgresReplicaFailure) GetCloneCommandId() string {
+	if x != nil {
+		return x.CloneCommandId
+	}
+	return ""
 }
 
 type StopContainer struct {
@@ -1258,7 +2333,7 @@ type StopContainer struct {
 
 func (x *StopContainer) Reset() {
 	*x = StopContainer{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1270,7 +2345,7 @@ func (x *StopContainer) String() string {
 func (*StopContainer) ProtoMessage() {}
 
 func (x *StopContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1283,7 +2358,7 @@ func (x *StopContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopContainer.ProtoReflect.Descriptor instead.
 func (*StopContainer) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{16}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *StopContainer) GetGracePeriod() *durationpb.Duration {
@@ -1301,7 +2376,7 @@ type RemoveContainer struct {
 
 func (x *RemoveContainer) Reset() {
 	*x = RemoveContainer{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1313,7 +2388,7 @@ func (x *RemoveContainer) String() string {
 func (*RemoveContainer) ProtoMessage() {}
 
 func (x *RemoveContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1326,7 +2401,7 @@ func (x *RemoveContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveContainer.ProtoReflect.Descriptor instead.
 func (*RemoveContainer) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{17}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{33}
 }
 
 type InspectContainer struct {
@@ -1337,7 +2412,7 @@ type InspectContainer struct {
 
 func (x *InspectContainer) Reset() {
 	*x = InspectContainer{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1349,7 +2424,7 @@ func (x *InspectContainer) String() string {
 func (*InspectContainer) ProtoMessage() {}
 
 func (x *InspectContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1362,7 +2437,214 @@ func (x *InspectContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InspectContainer.ProtoReflect.Descriptor instead.
 func (*InspectContainer) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{18}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{34}
+}
+
+// Read native absence without stopping or removing a container.
+type VerifyContainerAbsent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VerifyContainerAbsent) Reset() {
+	*x = VerifyContainerAbsent{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyContainerAbsent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyContainerAbsent) ProtoMessage() {}
+
+func (x *VerifyContainerAbsent) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyContainerAbsent.ProtoReflect.Descriptor instead.
+func (*VerifyContainerAbsent) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{35}
+}
+
+// Public trust for a PostgreSQL connection. No private key or client certificate.
+type PostgresTLS struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RootCaPem     []byte                 `protobuf:"bytes,1,opt,name=root_ca_pem,json=rootCaPem,proto3" json:"root_ca_pem,omitempty"`
+	ServerName    string                 `protobuf:"bytes,2,opt,name=server_name,json=serverName,proto3" json:"server_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PostgresTLS) Reset() {
+	*x = PostgresTLS{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PostgresTLS) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PostgresTLS) ProtoMessage() {}
+
+func (x *PostgresTLS) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PostgresTLS.ProtoReflect.Descriptor instead.
+func (*PostgresTLS) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *PostgresTLS) GetRootCaPem() []byte {
+	if x != nil {
+		return x.RootCaPem
+	}
+	return nil
+}
+
+func (x *PostgresTLS) GetServerName() string {
+	if x != nil {
+		return x.ServerName
+	}
+	return ""
+}
+
+// Check that the engine answers through the endpoint it publishes.
+//
+// Specification 07 requires this before a provisioning operation reports success. A
+// container that is running is not a database that is ready, and an operator told a
+// cluster is up and then unable to connect has been told something untrue.
+type CheckReadiness struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Address  string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	Port     uint32                 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
+	Database string                 `protobuf:"bytes,3,opt,name=database,proto3" json:"database,omitempty"`
+	Role     string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	// Which engine's prober answers. The plan knows it; the agent must not have to
+	// infer it from another field.
+	Engine string `protobuf:"bytes,5,opt,name=engine,proto3" json:"engine,omitempty"`
+	// This admin check proves native role and replication state. It does not mutate.
+	RedisReplication *RedisReplicationCheck `protobuf:"bytes,6,opt,name=redis_replication,json=redisReplication,proto3" json:"redis_replication,omitempty"`
+	// Required primary or replica for PostgreSQL. Separate from the SQL login role.
+	PostgresRole        string                    `protobuf:"bytes,7,opt,name=postgres_role,json=postgresRole,proto3" json:"postgres_role,omitempty"`
+	PostgresReplication *PostgresReplicationCheck `protobuf:"bytes,8,opt,name=postgres_replication,json=postgresReplication,proto3" json:"postgres_replication,omitempty"`
+	PostgresTls         *PostgresTLS              `protobuf:"bytes,9,opt,name=postgres_tls,json=postgresTls,proto3" json:"postgres_tls,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *CheckReadiness) Reset() {
+	*x = CheckReadiness{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CheckReadiness) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CheckReadiness) ProtoMessage() {}
+
+func (x *CheckReadiness) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CheckReadiness.ProtoReflect.Descriptor instead.
+func (*CheckReadiness) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *CheckReadiness) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *CheckReadiness) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *CheckReadiness) GetDatabase() string {
+	if x != nil {
+		return x.Database
+	}
+	return ""
+}
+
+func (x *CheckReadiness) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *CheckReadiness) GetEngine() string {
+	if x != nil {
+		return x.Engine
+	}
+	return ""
+}
+
+func (x *CheckReadiness) GetRedisReplication() *RedisReplicationCheck {
+	if x != nil {
+		return x.RedisReplication
+	}
+	return nil
+}
+
+func (x *CheckReadiness) GetPostgresRole() string {
+	if x != nil {
+		return x.PostgresRole
+	}
+	return ""
+}
+
+func (x *CheckReadiness) GetPostgresReplication() *PostgresReplicationCheck {
+	if x != nil {
+		return x.PostgresReplication
+	}
+	return nil
+}
+
+func (x *CheckReadiness) GetPostgresTls() *PostgresTLS {
+	if x != nil {
+		return x.PostgresTls
+	}
+	return nil
 }
 
 // This input is immutable. It has no controller epoch or plaintext secret.
@@ -1381,6 +2663,14 @@ type CommandInput struct {
 	//	*CommandInput_StopContainer
 	//	*CommandInput_RemoveContainer
 	//	*CommandInput_InspectContainer
+	//	*CommandInput_CheckReadiness
+	//	*CommandInput_RecoverPostgresSetup
+	//	*CommandInput_PreparePostgresReplica
+	//	*CommandInput_ClonePostgresReplica
+	//	*CommandInput_VerifyPostgresReplicaClone
+	//	*CommandInput_VerifyPostgresReplicaFailure
+	//	*CommandInput_VerifyContainerAbsent
+	//	*CommandInput_StartPatroniMember
 	Payload       isCommandInput_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1388,7 +2678,7 @@ type CommandInput struct {
 
 func (x *CommandInput) Reset() {
 	*x = CommandInput{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1400,7 +2690,7 @@ func (x *CommandInput) String() string {
 func (*CommandInput) ProtoMessage() {}
 
 func (x *CommandInput) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1413,7 +2703,7 @@ func (x *CommandInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandInput.ProtoReflect.Descriptor instead.
 func (*CommandInput) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *CommandInput) GetResourceId() string {
@@ -1514,6 +2804,78 @@ func (x *CommandInput) GetInspectContainer() *InspectContainer {
 	return nil
 }
 
+func (x *CommandInput) GetCheckReadiness() *CheckReadiness {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandInput_CheckReadiness); ok {
+			return x.CheckReadiness
+		}
+	}
+	return nil
+}
+
+func (x *CommandInput) GetRecoverPostgresSetup() *RecoverPostgresSetup {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandInput_RecoverPostgresSetup); ok {
+			return x.RecoverPostgresSetup
+		}
+	}
+	return nil
+}
+
+func (x *CommandInput) GetPreparePostgresReplica() *PreparePostgresReplica {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandInput_PreparePostgresReplica); ok {
+			return x.PreparePostgresReplica
+		}
+	}
+	return nil
+}
+
+func (x *CommandInput) GetClonePostgresReplica() *ClonePostgresReplica {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandInput_ClonePostgresReplica); ok {
+			return x.ClonePostgresReplica
+		}
+	}
+	return nil
+}
+
+func (x *CommandInput) GetVerifyPostgresReplicaClone() *VerifyPostgresReplicaClone {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandInput_VerifyPostgresReplicaClone); ok {
+			return x.VerifyPostgresReplicaClone
+		}
+	}
+	return nil
+}
+
+func (x *CommandInput) GetVerifyPostgresReplicaFailure() *VerifyPostgresReplicaFailure {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandInput_VerifyPostgresReplicaFailure); ok {
+			return x.VerifyPostgresReplicaFailure
+		}
+	}
+	return nil
+}
+
+func (x *CommandInput) GetVerifyContainerAbsent() *VerifyContainerAbsent {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandInput_VerifyContainerAbsent); ok {
+			return x.VerifyContainerAbsent
+		}
+	}
+	return nil
+}
+
+func (x *CommandInput) GetStartPatroniMember() *StartPatroniMember {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandInput_StartPatroniMember); ok {
+			return x.StartPatroniMember
+		}
+	}
+	return nil
+}
+
 type isCommandInput_Payload interface {
 	isCommandInput_Payload()
 }
@@ -1546,6 +2908,38 @@ type CommandInput_InspectContainer struct {
 	InspectContainer *InspectContainer `protobuf:"bytes,16,opt,name=inspect_container,json=inspectContainer,proto3,oneof"`
 }
 
+type CommandInput_CheckReadiness struct {
+	CheckReadiness *CheckReadiness `protobuf:"bytes,17,opt,name=check_readiness,json=checkReadiness,proto3,oneof"`
+}
+
+type CommandInput_RecoverPostgresSetup struct {
+	RecoverPostgresSetup *RecoverPostgresSetup `protobuf:"bytes,18,opt,name=recover_postgres_setup,json=recoverPostgresSetup,proto3,oneof"`
+}
+
+type CommandInput_PreparePostgresReplica struct {
+	PreparePostgresReplica *PreparePostgresReplica `protobuf:"bytes,19,opt,name=prepare_postgres_replica,json=preparePostgresReplica,proto3,oneof"`
+}
+
+type CommandInput_ClonePostgresReplica struct {
+	ClonePostgresReplica *ClonePostgresReplica `protobuf:"bytes,20,opt,name=clone_postgres_replica,json=clonePostgresReplica,proto3,oneof"`
+}
+
+type CommandInput_VerifyPostgresReplicaClone struct {
+	VerifyPostgresReplicaClone *VerifyPostgresReplicaClone `protobuf:"bytes,21,opt,name=verify_postgres_replica_clone,json=verifyPostgresReplicaClone,proto3,oneof"`
+}
+
+type CommandInput_VerifyPostgresReplicaFailure struct {
+	VerifyPostgresReplicaFailure *VerifyPostgresReplicaFailure `protobuf:"bytes,22,opt,name=verify_postgres_replica_failure,json=verifyPostgresReplicaFailure,proto3,oneof"`
+}
+
+type CommandInput_VerifyContainerAbsent struct {
+	VerifyContainerAbsent *VerifyContainerAbsent `protobuf:"bytes,23,opt,name=verify_container_absent,json=verifyContainerAbsent,proto3,oneof"`
+}
+
+type CommandInput_StartPatroniMember struct {
+	StartPatroniMember *StartPatroniMember `protobuf:"bytes,24,opt,name=start_patroni_member,json=startPatroniMember,proto3,oneof"`
+}
+
 func (*CommandInput_EnsureVolume) isCommandInput_Payload() {}
 
 func (*CommandInput_EnsureNetwork) isCommandInput_Payload() {}
@@ -1559,6 +2953,22 @@ func (*CommandInput_StopContainer) isCommandInput_Payload() {}
 func (*CommandInput_RemoveContainer) isCommandInput_Payload() {}
 
 func (*CommandInput_InspectContainer) isCommandInput_Payload() {}
+
+func (*CommandInput_CheckReadiness) isCommandInput_Payload() {}
+
+func (*CommandInput_RecoverPostgresSetup) isCommandInput_Payload() {}
+
+func (*CommandInput_PreparePostgresReplica) isCommandInput_Payload() {}
+
+func (*CommandInput_ClonePostgresReplica) isCommandInput_Payload() {}
+
+func (*CommandInput_VerifyPostgresReplicaClone) isCommandInput_Payload() {}
+
+func (*CommandInput_VerifyPostgresReplicaFailure) isCommandInput_Payload() {}
+
+func (*CommandInput_VerifyContainerAbsent) isCommandInput_Payload() {}
+
+func (*CommandInput_StartPatroniMember) isCommandInput_Payload() {}
 
 type Command struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -1577,7 +2987,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[20]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1589,7 +2999,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[20]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1602,7 +3012,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{20}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *Command) GetEpoch() *Epoch {
@@ -1680,7 +3090,7 @@ type CommandInspectionRequest struct {
 
 func (x *CommandInspectionRequest) Reset() {
 	*x = CommandInspectionRequest{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[21]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1692,7 +3102,7 @@ func (x *CommandInspectionRequest) String() string {
 func (*CommandInspectionRequest) ProtoMessage() {}
 
 func (x *CommandInspectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[21]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1705,7 +3115,7 @@ func (x *CommandInspectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandInspectionRequest.ProtoReflect.Descriptor instead.
 func (*CommandInspectionRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{21}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *CommandInspectionRequest) GetRequestId() string {
@@ -1743,7 +3153,7 @@ type CommandInspectionResult struct {
 
 func (x *CommandInspectionResult) Reset() {
 	*x = CommandInspectionResult{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[22]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1755,7 +3165,7 @@ func (x *CommandInspectionResult) String() string {
 func (*CommandInspectionResult) ProtoMessage() {}
 
 func (x *CommandInspectionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[22]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1768,7 +3178,7 @@ func (x *CommandInspectionResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandInspectionResult.ProtoReflect.Descriptor instead.
 func (*CommandInspectionResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{22}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *CommandInspectionResult) GetRequestId() string {
@@ -1814,19 +3224,20 @@ func (x *CommandInspectionResult) GetFailureCode() string {
 }
 
 type AdmissionAck struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Epoch         *Epoch                 `protobuf:"bytes,5,opt,name=epoch,proto3" json:"epoch,omitempty"`
-	CommandId     string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
-	State         string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
-	ErrorCode     string                 `protobuf:"bytes,3,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
-	InputHash     []byte                 `protobuf:"bytes,4,opt,name=input_hash,json=inputHash,proto3" json:"input_hash,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	DeliveryAttemptId string                 `protobuf:"bytes,6,opt,name=delivery_attempt_id,json=deliveryAttemptId,proto3" json:"delivery_attempt_id,omitempty"`
+	Epoch             *Epoch                 `protobuf:"bytes,5,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	CommandId         string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	State             string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	ErrorCode         string                 `protobuf:"bytes,3,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	InputHash         []byte                 `protobuf:"bytes,4,opt,name=input_hash,json=inputHash,proto3" json:"input_hash,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *AdmissionAck) Reset() {
 	*x = AdmissionAck{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[23]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1838,7 +3249,7 @@ func (x *AdmissionAck) String() string {
 func (*AdmissionAck) ProtoMessage() {}
 
 func (x *AdmissionAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[23]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1851,7 +3262,14 @@ func (x *AdmissionAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdmissionAck.ProtoReflect.Descriptor instead.
 func (*AdmissionAck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{23}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{42}
+}
+
+func (x *AdmissionAck) GetDeliveryAttemptId() string {
+	if x != nil {
+		return x.DeliveryAttemptId
+	}
+	return ""
 }
 
 func (x *AdmissionAck) GetEpoch() *Epoch {
@@ -1902,7 +3320,7 @@ type Progress struct {
 
 func (x *Progress) Reset() {
 	*x = Progress{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[24]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1914,7 +3332,7 @@ func (x *Progress) String() string {
 func (*Progress) ProtoMessage() {}
 
 func (x *Progress) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[24]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1927,7 +3345,7 @@ func (x *Progress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Progress.ProtoReflect.Descriptor instead.
 func (*Progress) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{24}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *Progress) GetEpoch() *Epoch {
@@ -1980,7 +3398,7 @@ type TerminalResult struct {
 
 func (x *TerminalResult) Reset() {
 	*x = TerminalResult{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[25]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1992,7 +3410,7 @@ func (x *TerminalResult) String() string {
 func (*TerminalResult) ProtoMessage() {}
 
 func (x *TerminalResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[25]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2005,7 +3423,7 @@ func (x *TerminalResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalResult.ProtoReflect.Descriptor instead.
 func (*TerminalResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{25}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *TerminalResult) GetEpoch() *Epoch {
@@ -2068,7 +3486,7 @@ type ResultAck struct {
 
 func (x *ResultAck) Reset() {
 	*x = ResultAck{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[26]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2080,7 +3498,7 @@ func (x *ResultAck) String() string {
 func (*ResultAck) ProtoMessage() {}
 
 func (x *ResultAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[26]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2093,7 +3511,7 @@ func (x *ResultAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultAck.ProtoReflect.Descriptor instead.
 func (*ResultAck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{26}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ResultAck) GetCommandId() string {
@@ -2127,7 +3545,7 @@ type CancelCommand struct {
 
 func (x *CancelCommand) Reset() {
 	*x = CancelCommand{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[27]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2139,7 +3557,7 @@ func (x *CancelCommand) String() string {
 func (*CancelCommand) ProtoMessage() {}
 
 func (x *CancelCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[27]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2152,7 +3570,7 @@ func (x *CancelCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelCommand.ProtoReflect.Descriptor instead.
 func (*CancelCommand) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{27}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *CancelCommand) GetCommandId() string {
@@ -2181,7 +3599,7 @@ type CancellationResult struct {
 
 func (x *CancellationResult) Reset() {
 	*x = CancellationResult{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[28]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2193,7 +3611,7 @@ func (x *CancellationResult) String() string {
 func (*CancellationResult) ProtoMessage() {}
 
 func (x *CancellationResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[28]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2206,7 +3624,7 @@ func (x *CancellationResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancellationResult.ProtoReflect.Descriptor instead.
 func (*CancellationResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{28}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *CancellationResult) GetCommandId() string {
@@ -2247,7 +3665,7 @@ type InventoryRequest struct {
 
 func (x *InventoryRequest) Reset() {
 	*x = InventoryRequest{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2259,7 +3677,7 @@ func (x *InventoryRequest) String() string {
 func (*InventoryRequest) ProtoMessage() {}
 
 func (x *InventoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2272,7 +3690,7 @@ func (x *InventoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InventoryRequest.ProtoReflect.Descriptor instead.
 func (*InventoryRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{29}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *InventoryRequest) GetCursor() string {
@@ -2313,7 +3731,7 @@ type CapacityRequest struct {
 
 func (x *CapacityRequest) Reset() {
 	*x = CapacityRequest{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2325,7 +3743,7 @@ func (x *CapacityRequest) String() string {
 func (*CapacityRequest) ProtoMessage() {}
 
 func (x *CapacityRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2338,7 +3756,7 @@ func (x *CapacityRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapacityRequest.ProtoReflect.Descriptor instead.
 func (*CapacityRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{30}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *CapacityRequest) GetProbeId() string {
@@ -2400,7 +3818,7 @@ type KnownReservation struct {
 
 func (x *KnownReservation) Reset() {
 	*x = KnownReservation{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2412,7 +3830,7 @@ func (x *KnownReservation) String() string {
 func (*KnownReservation) ProtoMessage() {}
 
 func (x *KnownReservation) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2425,7 +3843,7 @@ func (x *KnownReservation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KnownReservation.ProtoReflect.Descriptor instead.
 func (*KnownReservation) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{31}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *KnownReservation) GetReservationId() string {
@@ -2453,7 +3871,7 @@ type ResourceVector struct {
 
 func (x *ResourceVector) Reset() {
 	*x = ResourceVector{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2465,7 +3883,7 @@ func (x *ResourceVector) String() string {
 func (*ResourceVector) ProtoMessage() {}
 
 func (x *ResourceVector) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2478,7 +3896,7 @@ func (x *ResourceVector) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceVector.ProtoReflect.Descriptor instead.
 func (*ResourceVector) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{32}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *ResourceVector) GetCpuMillicores() int64 {
@@ -2513,7 +3931,7 @@ type ReservationUsage struct {
 
 func (x *ReservationUsage) Reset() {
 	*x = ReservationUsage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2525,7 +3943,7 @@ func (x *ReservationUsage) String() string {
 func (*ReservationUsage) ProtoMessage() {}
 
 func (x *ReservationUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2538,7 +3956,7 @@ func (x *ReservationUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReservationUsage.ProtoReflect.Descriptor instead.
 func (*ReservationUsage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{33}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ReservationUsage) GetReservationId() string {
@@ -2583,7 +4001,7 @@ type CapacityReport struct {
 
 func (x *CapacityReport) Reset() {
 	*x = CapacityReport{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2595,7 +4013,7 @@ func (x *CapacityReport) String() string {
 func (*CapacityReport) ProtoMessage() {}
 
 func (x *CapacityReport) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2608,7 +4026,7 @@ func (x *CapacityReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapacityReport.ProtoReflect.Descriptor instead.
 func (*CapacityReport) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{34}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *CapacityReport) GetProbeId() string {
@@ -2710,7 +4128,7 @@ type InventoryPage struct {
 
 func (x *InventoryPage) Reset() {
 	*x = InventoryPage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2722,7 +4140,7 @@ func (x *InventoryPage) String() string {
 func (*InventoryPage) ProtoMessage() {}
 
 func (x *InventoryPage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2735,7 +4153,7 @@ func (x *InventoryPage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InventoryPage.ProtoReflect.Descriptor instead.
 func (*InventoryPage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{35}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *InventoryPage) GetResources() []*Observation {
@@ -2794,7 +4212,7 @@ type DriftItem struct {
 
 func (x *DriftItem) Reset() {
 	*x = DriftItem{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2806,7 +4224,7 @@ func (x *DriftItem) String() string {
 func (*DriftItem) ProtoMessage() {}
 
 func (x *DriftItem) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2819,7 +4237,7 @@ func (x *DriftItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DriftItem.ProtoReflect.Descriptor instead.
 func (*DriftItem) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{36}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *DriftItem) GetKind() string {
@@ -2888,7 +4306,7 @@ type ProtocolError struct {
 
 func (x *ProtocolError) Reset() {
 	*x = ProtocolError{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[37]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2900,7 +4318,7 @@ func (x *ProtocolError) String() string {
 func (*ProtocolError) ProtoMessage() {}
 
 func (x *ProtocolError) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[37]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2913,7 +4331,7 @@ func (x *ProtocolError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtocolError.ProtoReflect.Descriptor instead.
 func (*ProtocolError) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{37}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *ProtocolError) GetCode() string {
@@ -2951,7 +4369,7 @@ type AgentMessage struct {
 
 func (x *AgentMessage) Reset() {
 	*x = AgentMessage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[38]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2963,7 +4381,7 @@ func (x *AgentMessage) String() string {
 func (*AgentMessage) ProtoMessage() {}
 
 func (x *AgentMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[38]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2976,7 +4394,7 @@ func (x *AgentMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentMessage.ProtoReflect.Descriptor instead.
 func (*AgentMessage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{38}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *AgentMessage) GetMessage() isAgentMessage_Message {
@@ -3142,6 +4560,8 @@ func (*AgentMessage_CapacityReport) isAgentMessage_Message() {}
 
 type ControllerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required for command delivery. It is not part of immutable command input.
+	DeliveryAttemptId string `protobuf:"bytes,12,opt,name=delivery_attempt_id,json=deliveryAttemptId,proto3" json:"delivery_attempt_id,omitempty"`
 	// Types that are valid to be assigned to Message:
 	//
 	//	*ControllerMessage_Session
@@ -3154,6 +4574,7 @@ type ControllerMessage struct {
 	//	*ControllerMessage_Error
 	//	*ControllerMessage_CommandInspection
 	//	*ControllerMessage_CapacityRequest
+	//	*ControllerMessage_Secret
 	Message       isControllerMessage_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3161,7 +4582,7 @@ type ControllerMessage struct {
 
 func (x *ControllerMessage) Reset() {
 	*x = ControllerMessage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[39]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3173,7 +4594,7 @@ func (x *ControllerMessage) String() string {
 func (*ControllerMessage) ProtoMessage() {}
 
 func (x *ControllerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[39]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3186,7 +4607,14 @@ func (x *ControllerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControllerMessage.ProtoReflect.Descriptor instead.
 func (*ControllerMessage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{39}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{58}
+}
+
+func (x *ControllerMessage) GetDeliveryAttemptId() string {
+	if x != nil {
+		return x.DeliveryAttemptId
+	}
+	return ""
 }
 
 func (x *ControllerMessage) GetMessage() isControllerMessage_Message {
@@ -3286,6 +4714,15 @@ func (x *ControllerMessage) GetCapacityRequest() *CapacityRequest {
 	return nil
 }
 
+func (x *ControllerMessage) GetSecret() *SecretMaterial {
+	if x != nil {
+		if x, ok := x.Message.(*ControllerMessage_Secret); ok {
+			return x.Secret
+		}
+	}
+	return nil
+}
+
 type isControllerMessage_Message interface {
 	isControllerMessage_Message()
 }
@@ -3330,6 +4767,10 @@ type ControllerMessage_CapacityRequest struct {
 	CapacityRequest *CapacityRequest `protobuf:"bytes,10,opt,name=capacity_request,json=capacityRequest,proto3,oneof"`
 }
 
+type ControllerMessage_Secret struct {
+	Secret *SecretMaterial `protobuf:"bytes,11,opt,name=secret,proto3,oneof"`
+}
+
 func (*ControllerMessage_Session) isControllerMessage_Message() {}
 
 func (*ControllerMessage_PrepareEpoch) isControllerMessage_Message() {}
@@ -3350,6 +4791,8 @@ func (*ControllerMessage_CommandInspection) isControllerMessage_Message() {}
 
 func (*ControllerMessage_CapacityRequest) isControllerMessage_Message() {}
 
+func (*ControllerMessage_Secret) isControllerMessage_Message() {}
+
 // The controller stores this plan before dispatch. Agents receive its commands.
 type ExecutionPlan struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -3361,7 +4804,7 @@ type ExecutionPlan struct {
 
 func (x *ExecutionPlan) Reset() {
 	*x = ExecutionPlan{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[40]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3373,7 +4816,7 @@ func (x *ExecutionPlan) String() string {
 func (*ExecutionPlan) ProtoMessage() {}
 
 func (x *ExecutionPlan) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[40]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3386,7 +4829,7 @@ func (x *ExecutionPlan) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutionPlan.ProtoReflect.Descriptor instead.
 func (*ExecutionPlan) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{40}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *ExecutionPlan) GetVersion() uint32 {
@@ -3416,7 +4859,7 @@ type PlanStep struct {
 
 func (x *PlanStep) Reset() {
 	*x = PlanStep{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[41]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3428,7 +4871,7 @@ func (x *PlanStep) String() string {
 func (*PlanStep) ProtoMessage() {}
 
 func (x *PlanStep) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[41]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3441,7 +4884,7 @@ func (x *PlanStep) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanStep.ProtoReflect.Descriptor instead.
 func (*PlanStep) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{41}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *PlanStep) GetCommand() *Command {
@@ -3549,7 +4992,18 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x0fSecretReference\x12#\n" +
 	"\rcredential_id\x18\x01 \x01(\tR\fcredentialId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\x03R\aversion\x12\x18\n" +
-	"\apurpose\x18\x03 \x01(\tR\apurpose\"\x92\x01\n" +
+	"\apurpose\x18\x03 \x01(\tR\apurpose\"\x85\x01\n" +
+	"\x0eSecretMaterial\x12#\n" +
+	"\rcredential_id\x18\x01 \x01(\tR\fcredentialId\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x03R\aversion\x12\x18\n" +
+	"\apurpose\x18\x03 \x01(\tR\apurpose\x12\x1a\n" +
+	"\bmaterial\x18\x04 \x01(\fR\bmaterial\"9\n" +
+	"\tSecretEnv\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\apurpose\x18\x02 \x01(\tR\apurpose\"4\n" +
+	"\bPlainEnv\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\x92\x01\n" +
 	"\vPortBinding\x12!\n" +
 	"\fhost_address\x18\x01 \x01(\tR\vhostAddress\x12\x1b\n" +
 	"\thost_port\x18\x02 \x01(\rR\bhostPort\x12%\n" +
@@ -3559,7 +5013,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\".\n" +
 	"\rEnsureNetwork\x12\x1d\n" +
 	"\n" +
-	"network_id\x18\x01 \x01(\tR\tnetworkId\"\xbd\x02\n" +
+	"network_id\x18\x01 \x01(\tR\tnetworkId\"\xaf\x04\n" +
 	"\x0fEnsureContainer\x12!\n" +
 	"\fimage_digest\x18\x01 \x01(\tR\vimageDigest\x12\x16\n" +
 	"\x06engine\x18\x02 \x01(\tR\x06engine\x12\x1b\n" +
@@ -3570,12 +5024,93 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\fmemory_bytes\x18\x06 \x01(\x03R\vmemoryBytes\x12\x1d\n" +
 	"\n" +
 	"cpu_millis\x18\a \x01(\x03R\tcpuMillis\x12>\n" +
-	"\fnetwork_mode\x18\b \x01(\x0e2\x1b.synod.agent.v1.NetworkModeR\vnetworkMode\"\x10\n" +
-	"\x0eStartContainer\"M\n" +
+	"\fnetwork_mode\x18\b \x01(\x0e2\x1b.synod.agent.v1.NetworkModeR\vnetworkMode\x128\n" +
+	"\n" +
+	"secret_env\x18\t \x03(\v2\x19.synod.agent.v1.SecretEnvR\tsecretEnv\x125\n" +
+	"\tplain_env\x18\n" +
+	" \x03(\v2\x18.synod.agent.v1.PlainEnvR\bplainEnv\x12:\n" +
+	"\x05redis\x18\v \x01(\v2$.synod.agent.v1.RedisContainerConfigR\x05redis\x12C\n" +
+	"\bpostgres\x18\f \x01(\v2'.synod.agent.v1.PostgresContainerConfigR\bpostgres\"\xf4\x04\n" +
+	"\x17PostgresContainerConfig\x12\x12\n" +
+	"\x04port\x18\x01 \x01(\rR\x04port\x12:\n" +
+	"\x19application_credential_id\x18\x02 \x01(\tR\x17applicationCredentialId\x12D\n" +
+	"\x1eapplication_credential_version\x18\x03 \x01(\x03R\x1capplicationCredentialVersion\x126\n" +
+	"\x17superuser_credential_id\x18\x04 \x01(\tR\x15superuserCredentialId\x12@\n" +
+	"\x1csuperuser_credential_version\x18\x05 \x01(\x03R\x1asuperuserCredentialVersion\x12:\n" +
+	"\x19replication_credential_id\x18\x06 \x01(\tR\x17replicationCredentialId\x12D\n" +
+	"\x1ereplication_credential_version\x18\a \x01(\x03R\x1creplicationCredentialVersion\x12L\n" +
+	"\x0ereplica_source\x18\b \x01(\v2%.synod.agent.v1.PostgresReplicaSourceR\rreplicaSource\x127\n" +
+	"\x17synchronous_replication\x18\t \x01(\bR\x16synchronousReplication\x12@\n" +
+	"\apatroni\x18\n" +
+	" \x01(\v2&.synod.agent.v1.PatroniContainerConfigR\apatroni\"\x8b\x03\n" +
+	"\x16PatroniContainerConfig\x12\x18\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x1b\n" +
+	"\trest_port\x18\x02 \x01(\rR\brestPort\x12#\n" +
+	"\rdcs_endpoints\x18\x03 \x03(\tR\fdcsEndpoints\x12#\n" +
+	"\rpeer_networks\x18\x04 \x03(\tR\fpeerNetworks\x12'\n" +
+	"\x0fclient_networks\x18\x05 \x03(\tR\x0eclientNetworks\x12!\n" +
+	"\fprovision_id\x18\x06 \x01(\tR\vprovisionId\x121\n" +
+	"\x14allow_initialization\x18\a \x01(\bR\x13allowInitialization\x12A\n" +
+	"\vcredentials\x18\b \x03(\v2\x1f.synod.agent.v1.SecretReferenceR\vcredentials\x12.\n" +
+	"\x13required_free_bytes\x18\t \x01(\x03R\x11requiredFreeBytes\"f\n" +
+	"\x15PostgresReplicaSource\x12\x18\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x12\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port\x12\x1f\n" +
+	"\vresource_id\x18\x03 \x01(\tR\n" +
+	"resourceId\"\xcd\x01\n" +
+	"\x18PostgresReplicationCheck\x12=\n" +
+	"\x06source\x18\x01 \x01(\v2%.synod.agent.v1.PostgresReplicaSourceR\x06source\x12/\n" +
+	"\x14max_replay_lag_bytes\x18\x02 \x01(\x03R\x11maxReplayLagBytes\x12A\n" +
+	"\x0fmax_message_age\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\rmaxMessageAge\"\x9c\x02\n" +
+	"\x14RedisContainerConfig\x12\x12\n" +
+	"\x04port\x18\x01 \x01(\rR\x04port\x12 \n" +
+	"\vpersistence\x18\x02 \x01(\tR\vpersistence\x12'\n" +
+	"\x0fmaxmemory_bytes\x18\x03 \x01(\x03R\x0emaxmemoryBytes\x12'\n" +
+	"\x0feviction_policy\x18\x04 \x01(\tR\x0eevictionPolicy\x129\n" +
+	"\bupstream\x18\x05 \x01(\v2\x1d.synod.agent.v1.RedisUpstreamR\bupstream\x12A\n" +
+	"\vcredentials\x18\x06 \x03(\v2\x1f.synod.agent.v1.SecretReferenceR\vcredentials\"=\n" +
+	"\rRedisUpstream\x12\x18\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x12\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port\"w\n" +
+	"\x15RedisReplicationCheck\x12#\n" +
+	"\rexpected_role\x18\x01 \x01(\tR\fexpectedRole\x129\n" +
+	"\bupstream\x18\x02 \x01(\v2\x1d.synod.agent.v1.RedisUpstreamR\bupstream\"C\n" +
+	"\x0eStartContainer\x121\n" +
+	"\x14allow_initialization\x18\x01 \x01(\bR\x13allowInitialization\"\x86\x01\n" +
+	"\x12StartPatroniMember\x12=\n" +
+	"\tcontainer\x18\x01 \x01(\v2\x1f.synod.agent.v1.EnsureContainerR\tcontainer\x121\n" +
+	"\x14allow_initialization\x18\x02 \x01(\bR\x13allowInitialization\"[\n" +
+	"\x14RecoverPostgresSetup\x12C\n" +
+	"\bpostgres\x18\x01 \x01(\v2'.synod.agent.v1.PostgresContainerConfigR\bpostgres\"\x18\n" +
+	"\x16PreparePostgresReplica\"\x8b\x01\n" +
+	"\x14ClonePostgresReplica\x12C\n" +
+	"\bpostgres\x18\x01 \x01(\v2'.synod.agent.v1.PostgresContainerConfigR\bpostgres\x12.\n" +
+	"\x13required_free_bytes\x18\x02 \x01(\x03R\x11requiredFreeBytes\"\x8b\x01\n" +
+	"\x1aVerifyPostgresReplicaClone\x12C\n" +
+	"\bpostgres\x18\x01 \x01(\v2'.synod.agent.v1.PostgresContainerConfigR\bpostgres\x12(\n" +
+	"\x10clone_command_id\x18\x02 \x01(\tR\x0ecloneCommandId\"\x8d\x01\n" +
+	"\x1cVerifyPostgresReplicaFailure\x12C\n" +
+	"\bpostgres\x18\x01 \x01(\v2'.synod.agent.v1.PostgresContainerConfigR\bpostgres\x12(\n" +
+	"\x10clone_command_id\x18\x02 \x01(\tR\x0ecloneCommandId\"M\n" +
 	"\rStopContainer\x12<\n" +
 	"\fgrace_period\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\vgracePeriod\"\x11\n" +
 	"\x0fRemoveContainer\"\x12\n" +
-	"\x10InspectContainer\"\xe0\x05\n" +
+	"\x10InspectContainer\"\x17\n" +
+	"\x15VerifyContainerAbsent\"N\n" +
+	"\vPostgresTLS\x12\x1e\n" +
+	"\vroot_ca_pem\x18\x01 \x01(\fR\trootCaPem\x12\x1f\n" +
+	"\vserver_name\x18\x02 \x01(\tR\n" +
+	"serverName\"\x9c\x03\n" +
+	"\x0eCheckReadiness\x12\x18\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x12\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port\x12\x1a\n" +
+	"\bdatabase\x18\x03 \x01(\tR\bdatabase\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role\x12\x16\n" +
+	"\x06engine\x18\x05 \x01(\tR\x06engine\x12R\n" +
+	"\x11redis_replication\x18\x06 \x01(\v2%.synod.agent.v1.RedisReplicationCheckR\x10redisReplication\x12#\n" +
+	"\rpostgres_role\x18\a \x01(\tR\fpostgresRole\x12[\n" +
+	"\x14postgres_replication\x18\b \x01(\v2(.synod.agent.v1.PostgresReplicationCheckR\x13postgresReplication\x12>\n" +
+	"\fpostgres_tls\x18\t \x01(\v2\x1b.synod.agent.v1.PostgresTLSR\vpostgresTls\"\xec\v\n" +
 	"\fCommandInput\x12\x1f\n" +
 	"\vresource_id\x18\x01 \x01(\tR\n" +
 	"resourceId\x12'\n" +
@@ -3589,7 +5124,15 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x0fstart_container\x18\r \x01(\v2\x1e.synod.agent.v1.StartContainerH\x00R\x0estartContainer\x12F\n" +
 	"\x0estop_container\x18\x0e \x01(\v2\x1d.synod.agent.v1.StopContainerH\x00R\rstopContainer\x12L\n" +
 	"\x10remove_container\x18\x0f \x01(\v2\x1f.synod.agent.v1.RemoveContainerH\x00R\x0fremoveContainer\x12O\n" +
-	"\x11inspect_container\x18\x10 \x01(\v2 .synod.agent.v1.InspectContainerH\x00R\x10inspectContainerB\t\n" +
+	"\x11inspect_container\x18\x10 \x01(\v2 .synod.agent.v1.InspectContainerH\x00R\x10inspectContainer\x12I\n" +
+	"\x0fcheck_readiness\x18\x11 \x01(\v2\x1e.synod.agent.v1.CheckReadinessH\x00R\x0echeckReadiness\x12\\\n" +
+	"\x16recover_postgres_setup\x18\x12 \x01(\v2$.synod.agent.v1.RecoverPostgresSetupH\x00R\x14recoverPostgresSetup\x12b\n" +
+	"\x18prepare_postgres_replica\x18\x13 \x01(\v2&.synod.agent.v1.PreparePostgresReplicaH\x00R\x16preparePostgresReplica\x12\\\n" +
+	"\x16clone_postgres_replica\x18\x14 \x01(\v2$.synod.agent.v1.ClonePostgresReplicaH\x00R\x14clonePostgresReplica\x12o\n" +
+	"\x1dverify_postgres_replica_clone\x18\x15 \x01(\v2*.synod.agent.v1.VerifyPostgresReplicaCloneH\x00R\x1averifyPostgresReplicaClone\x12u\n" +
+	"\x1fverify_postgres_replica_failure\x18\x16 \x01(\v2,.synod.agent.v1.VerifyPostgresReplicaFailureH\x00R\x1cverifyPostgresReplicaFailure\x12_\n" +
+	"\x17verify_container_absent\x18\x17 \x01(\v2%.synod.agent.v1.VerifyContainerAbsentH\x00R\x15verifyContainerAbsent\x12V\n" +
+	"\x14start_patroni_member\x18\x18 \x01(\v2\".synod.agent.v1.StartPatroniMemberH\x00R\x12startPatroniMemberB\t\n" +
 	"\apayload\"\xcd\x02\n" +
 	"\aCommand\x12+\n" +
 	"\x05epoch\x18\x01 \x01(\v2\x15.synod.agent.v1.EpochR\x05epoch\x12!\n" +
@@ -3617,8 +5160,9 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"input_hash\x18\x04 \x01(\fR\tinputHash\x120\n" +
 	"\aeffects\x18\x05 \x03(\v2\x16.synod.agent.v1.EffectR\aeffects\x12!\n" +
-	"\ffailure_code\x18\x06 \x01(\tR\vfailureCode\"\xae\x01\n" +
-	"\fAdmissionAck\x12+\n" +
+	"\ffailure_code\x18\x06 \x01(\tR\vfailureCode\"\xde\x01\n" +
+	"\fAdmissionAck\x12.\n" +
+	"\x13delivery_attempt_id\x18\x06 \x01(\tR\x11deliveryAttemptId\x12+\n" +
 	"\x05epoch\x18\x05 \x01(\v2\x15.synod.agent.v1.EpochR\x05epoch\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x14\n" +
@@ -3733,8 +5277,9 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x12command_inspection\x18\t \x01(\v2'.synod.agent.v1.CommandInspectionResultH\x00R\x11commandInspection\x12I\n" +
 	"\x0fcapacity_report\x18\n" +
 	" \x01(\v2\x1e.synod.agent.v1.CapacityReportH\x00R\x0ecapacityReportB\t\n" +
-	"\amessage\"\xac\x05\n" +
-	"\x11ControllerMessage\x123\n" +
+	"\amessage\"\x96\x06\n" +
+	"\x11ControllerMessage\x12.\n" +
+	"\x13delivery_attempt_id\x18\f \x01(\tR\x11deliveryAttemptId\x123\n" +
 	"\asession\x18\x01 \x01(\v2\x17.synod.agent.v1.SessionH\x00R\asession\x12C\n" +
 	"\rprepare_epoch\x18\x02 \x01(\v2\x1c.synod.agent.v1.PrepareEpochH\x00R\fprepareEpoch\x12F\n" +
 	"\x0eactivate_epoch\x18\x03 \x01(\v2\x1d.synod.agent.v1.ActivateEpochH\x00R\ractivateEpoch\x123\n" +
@@ -3746,7 +5291,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x05error\x18\b \x01(\v2\x1d.synod.agent.v1.ProtocolErrorH\x00R\x05error\x12Y\n" +
 	"\x12command_inspection\x18\t \x01(\v2(.synod.agent.v1.CommandInspectionRequestH\x00R\x11commandInspection\x12L\n" +
 	"\x10capacity_request\x18\n" +
-	" \x01(\v2\x1f.synod.agent.v1.CapacityRequestH\x00R\x0fcapacityRequestB\t\n" +
+	" \x01(\v2\x1f.synod.agent.v1.CapacityRequestH\x00R\x0fcapacityRequest\x128\n" +
+	"\x06secret\x18\v \x01(\v2\x1e.synod.agent.v1.SecretMaterialH\x00R\x06secretB\t\n" +
 	"\amessage\"Y\n" +
 	"\rExecutionPlan\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12.\n" +
@@ -3765,7 +5311,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x14CancellationBoundary\x12%\n" +
 	"!CANCELLATION_BOUNDARY_UNSPECIFIED\x10\x00\x12*\n" +
 	"&CANCELLATION_BOUNDARY_BEFORE_EXECUTION\x10\x01\x12#\n" +
-	"\x1fCANCELLATION_BOUNDARY_SAFE_STOP\x10\x02*\xaa\x02\n" +
+	"\x1fCANCELLATION_BOUNDARY_SAFE_STOP\x10\x02*\xf9\x03\n" +
 	"\rPostcondition\x12\x1d\n" +
 	"\x19POSTCONDITION_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bPOSTCONDITION_VOLUME_EXISTS\x10\x01\x12 \n" +
@@ -3774,7 +5320,13 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x1fPOSTCONDITION_CONTAINER_RUNNING\x10\x04\x12#\n" +
 	"\x1fPOSTCONDITION_CONTAINER_STOPPED\x10\x05\x12\"\n" +
 	"\x1ePOSTCONDITION_CONTAINER_ABSENT\x10\x06\x12%\n" +
-	"!POSTCONDITION_CONTAINER_INSPECTED\x10\a2^\n" +
+	"!POSTCONDITION_CONTAINER_INSPECTED\x10\a\x12\x1e\n" +
+	"\x1aPOSTCONDITION_ENGINE_READY\x10\b\x12*\n" +
+	"&POSTCONDITION_POSTGRES_SETUP_RECOVERED\x10\t\x12+\n" +
+	"'POSTCONDITION_POSTGRES_REPLICA_PREPARED\x10\n" +
+	"\x12)\n" +
+	"%POSTCONDITION_POSTGRES_REPLICA_CLONED\x10\v\x12)\n" +
+	"%POSTCONDITION_POSTGRES_REPLICA_FAILED\x10\f2^\n" +
 	"\fAgentService\x12N\n" +
 	"\aConnect\x12\x1c.synod.agent.v1.AgentMessage\x1a!.synod.agent.v1.ControllerMessage(\x010\x01B4Z2github.com/sirrobot01/synod/proto/agent/v1;agentv1b\x06proto3"
 
@@ -3791,132 +5343,180 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
+var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 61)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
-	(NetworkMode)(0),                 // 0: synod.agent.v1.NetworkMode
-	(CancellationBoundary)(0),        // 1: synod.agent.v1.CancellationBoundary
-	(Postcondition)(0),               // 2: synod.agent.v1.Postcondition
-	(*VersionRange)(nil),             // 3: synod.agent.v1.VersionRange
-	(*Hello)(nil),                    // 4: synod.agent.v1.Hello
-	(*Session)(nil),                  // 5: synod.agent.v1.Session
-	(*Heartbeat)(nil),                // 6: synod.agent.v1.Heartbeat
-	(*Observation)(nil),              // 7: synod.agent.v1.Observation
-	(*Epoch)(nil),                    // 8: synod.agent.v1.Epoch
-	(*PrepareEpoch)(nil),             // 9: synod.agent.v1.PrepareEpoch
-	(*ActivateEpoch)(nil),            // 10: synod.agent.v1.ActivateEpoch
-	(*Effect)(nil),                   // 11: synod.agent.v1.Effect
-	(*BarrierResult)(nil),            // 12: synod.agent.v1.BarrierResult
-	(*SecretReference)(nil),          // 13: synod.agent.v1.SecretReference
-	(*PortBinding)(nil),              // 14: synod.agent.v1.PortBinding
-	(*EnsureVolume)(nil),             // 15: synod.agent.v1.EnsureVolume
-	(*EnsureNetwork)(nil),            // 16: synod.agent.v1.EnsureNetwork
-	(*EnsureContainer)(nil),          // 17: synod.agent.v1.EnsureContainer
-	(*StartContainer)(nil),           // 18: synod.agent.v1.StartContainer
-	(*StopContainer)(nil),            // 19: synod.agent.v1.StopContainer
-	(*RemoveContainer)(nil),          // 20: synod.agent.v1.RemoveContainer
-	(*InspectContainer)(nil),         // 21: synod.agent.v1.InspectContainer
-	(*CommandInput)(nil),             // 22: synod.agent.v1.CommandInput
-	(*Command)(nil),                  // 23: synod.agent.v1.Command
-	(*CommandInspectionRequest)(nil), // 24: synod.agent.v1.CommandInspectionRequest
-	(*CommandInspectionResult)(nil),  // 25: synod.agent.v1.CommandInspectionResult
-	(*AdmissionAck)(nil),             // 26: synod.agent.v1.AdmissionAck
-	(*Progress)(nil),                 // 27: synod.agent.v1.Progress
-	(*TerminalResult)(nil),           // 28: synod.agent.v1.TerminalResult
-	(*ResultAck)(nil),                // 29: synod.agent.v1.ResultAck
-	(*CancelCommand)(nil),            // 30: synod.agent.v1.CancelCommand
-	(*CancellationResult)(nil),       // 31: synod.agent.v1.CancellationResult
-	(*InventoryRequest)(nil),         // 32: synod.agent.v1.InventoryRequest
-	(*CapacityRequest)(nil),          // 33: synod.agent.v1.CapacityRequest
-	(*KnownReservation)(nil),         // 34: synod.agent.v1.KnownReservation
-	(*ResourceVector)(nil),           // 35: synod.agent.v1.ResourceVector
-	(*ReservationUsage)(nil),         // 36: synod.agent.v1.ReservationUsage
-	(*CapacityReport)(nil),           // 37: synod.agent.v1.CapacityReport
-	(*InventoryPage)(nil),            // 38: synod.agent.v1.InventoryPage
-	(*DriftItem)(nil),                // 39: synod.agent.v1.DriftItem
-	(*ProtocolError)(nil),            // 40: synod.agent.v1.ProtocolError
-	(*AgentMessage)(nil),             // 41: synod.agent.v1.AgentMessage
-	(*ControllerMessage)(nil),        // 42: synod.agent.v1.ControllerMessage
-	(*ExecutionPlan)(nil),            // 43: synod.agent.v1.ExecutionPlan
-	(*PlanStep)(nil),                 // 44: synod.agent.v1.PlanStep
-	(*durationpb.Duration)(nil),      // 45: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),    // 46: google.protobuf.Timestamp
+	(NetworkMode)(0),                     // 0: synod.agent.v1.NetworkMode
+	(CancellationBoundary)(0),            // 1: synod.agent.v1.CancellationBoundary
+	(Postcondition)(0),                   // 2: synod.agent.v1.Postcondition
+	(*VersionRange)(nil),                 // 3: synod.agent.v1.VersionRange
+	(*Hello)(nil),                        // 4: synod.agent.v1.Hello
+	(*Session)(nil),                      // 5: synod.agent.v1.Session
+	(*Heartbeat)(nil),                    // 6: synod.agent.v1.Heartbeat
+	(*Observation)(nil),                  // 7: synod.agent.v1.Observation
+	(*Epoch)(nil),                        // 8: synod.agent.v1.Epoch
+	(*PrepareEpoch)(nil),                 // 9: synod.agent.v1.PrepareEpoch
+	(*ActivateEpoch)(nil),                // 10: synod.agent.v1.ActivateEpoch
+	(*Effect)(nil),                       // 11: synod.agent.v1.Effect
+	(*BarrierResult)(nil),                // 12: synod.agent.v1.BarrierResult
+	(*SecretReference)(nil),              // 13: synod.agent.v1.SecretReference
+	(*SecretMaterial)(nil),               // 14: synod.agent.v1.SecretMaterial
+	(*SecretEnv)(nil),                    // 15: synod.agent.v1.SecretEnv
+	(*PlainEnv)(nil),                     // 16: synod.agent.v1.PlainEnv
+	(*PortBinding)(nil),                  // 17: synod.agent.v1.PortBinding
+	(*EnsureVolume)(nil),                 // 18: synod.agent.v1.EnsureVolume
+	(*EnsureNetwork)(nil),                // 19: synod.agent.v1.EnsureNetwork
+	(*EnsureContainer)(nil),              // 20: synod.agent.v1.EnsureContainer
+	(*PostgresContainerConfig)(nil),      // 21: synod.agent.v1.PostgresContainerConfig
+	(*PatroniContainerConfig)(nil),       // 22: synod.agent.v1.PatroniContainerConfig
+	(*PostgresReplicaSource)(nil),        // 23: synod.agent.v1.PostgresReplicaSource
+	(*PostgresReplicationCheck)(nil),     // 24: synod.agent.v1.PostgresReplicationCheck
+	(*RedisContainerConfig)(nil),         // 25: synod.agent.v1.RedisContainerConfig
+	(*RedisUpstream)(nil),                // 26: synod.agent.v1.RedisUpstream
+	(*RedisReplicationCheck)(nil),        // 27: synod.agent.v1.RedisReplicationCheck
+	(*StartContainer)(nil),               // 28: synod.agent.v1.StartContainer
+	(*StartPatroniMember)(nil),           // 29: synod.agent.v1.StartPatroniMember
+	(*RecoverPostgresSetup)(nil),         // 30: synod.agent.v1.RecoverPostgresSetup
+	(*PreparePostgresReplica)(nil),       // 31: synod.agent.v1.PreparePostgresReplica
+	(*ClonePostgresReplica)(nil),         // 32: synod.agent.v1.ClonePostgresReplica
+	(*VerifyPostgresReplicaClone)(nil),   // 33: synod.agent.v1.VerifyPostgresReplicaClone
+	(*VerifyPostgresReplicaFailure)(nil), // 34: synod.agent.v1.VerifyPostgresReplicaFailure
+	(*StopContainer)(nil),                // 35: synod.agent.v1.StopContainer
+	(*RemoveContainer)(nil),              // 36: synod.agent.v1.RemoveContainer
+	(*InspectContainer)(nil),             // 37: synod.agent.v1.InspectContainer
+	(*VerifyContainerAbsent)(nil),        // 38: synod.agent.v1.VerifyContainerAbsent
+	(*PostgresTLS)(nil),                  // 39: synod.agent.v1.PostgresTLS
+	(*CheckReadiness)(nil),               // 40: synod.agent.v1.CheckReadiness
+	(*CommandInput)(nil),                 // 41: synod.agent.v1.CommandInput
+	(*Command)(nil),                      // 42: synod.agent.v1.Command
+	(*CommandInspectionRequest)(nil),     // 43: synod.agent.v1.CommandInspectionRequest
+	(*CommandInspectionResult)(nil),      // 44: synod.agent.v1.CommandInspectionResult
+	(*AdmissionAck)(nil),                 // 45: synod.agent.v1.AdmissionAck
+	(*Progress)(nil),                     // 46: synod.agent.v1.Progress
+	(*TerminalResult)(nil),               // 47: synod.agent.v1.TerminalResult
+	(*ResultAck)(nil),                    // 48: synod.agent.v1.ResultAck
+	(*CancelCommand)(nil),                // 49: synod.agent.v1.CancelCommand
+	(*CancellationResult)(nil),           // 50: synod.agent.v1.CancellationResult
+	(*InventoryRequest)(nil),             // 51: synod.agent.v1.InventoryRequest
+	(*CapacityRequest)(nil),              // 52: synod.agent.v1.CapacityRequest
+	(*KnownReservation)(nil),             // 53: synod.agent.v1.KnownReservation
+	(*ResourceVector)(nil),               // 54: synod.agent.v1.ResourceVector
+	(*ReservationUsage)(nil),             // 55: synod.agent.v1.ReservationUsage
+	(*CapacityReport)(nil),               // 56: synod.agent.v1.CapacityReport
+	(*InventoryPage)(nil),                // 57: synod.agent.v1.InventoryPage
+	(*DriftItem)(nil),                    // 58: synod.agent.v1.DriftItem
+	(*ProtocolError)(nil),                // 59: synod.agent.v1.ProtocolError
+	(*AgentMessage)(nil),                 // 60: synod.agent.v1.AgentMessage
+	(*ControllerMessage)(nil),            // 61: synod.agent.v1.ControllerMessage
+	(*ExecutionPlan)(nil),                // 62: synod.agent.v1.ExecutionPlan
+	(*PlanStep)(nil),                     // 63: synod.agent.v1.PlanStep
+	(*durationpb.Duration)(nil),          // 64: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),        // 65: google.protobuf.Timestamp
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
 	3,  // 0: synod.agent.v1.Hello.protocol:type_name -> synod.agent.v1.VersionRange
-	45, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
-	45, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
-	46, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	64, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
+	64, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
+	65, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
 	7,  // 4: synod.agent.v1.Heartbeat.observations:type_name -> synod.agent.v1.Observation
-	46, // 5: synod.agent.v1.Observation.observed_at:type_name -> google.protobuf.Timestamp
+	65, // 5: synod.agent.v1.Observation.observed_at:type_name -> google.protobuf.Timestamp
 	8,  // 6: synod.agent.v1.PrepareEpoch.epoch:type_name -> synod.agent.v1.Epoch
 	8,  // 7: synod.agent.v1.ActivateEpoch.epoch:type_name -> synod.agent.v1.Epoch
 	8,  // 8: synod.agent.v1.BarrierResult.epoch:type_name -> synod.agent.v1.Epoch
 	11, // 9: synod.agent.v1.BarrierResult.effects:type_name -> synod.agent.v1.Effect
-	14, // 10: synod.agent.v1.EnsureContainer.ports:type_name -> synod.agent.v1.PortBinding
+	17, // 10: synod.agent.v1.EnsureContainer.ports:type_name -> synod.agent.v1.PortBinding
 	0,  // 11: synod.agent.v1.EnsureContainer.network_mode:type_name -> synod.agent.v1.NetworkMode
-	45, // 12: synod.agent.v1.StopContainer.grace_period:type_name -> google.protobuf.Duration
-	45, // 13: synod.agent.v1.CommandInput.timeout:type_name -> google.protobuf.Duration
-	13, // 14: synod.agent.v1.CommandInput.secrets:type_name -> synod.agent.v1.SecretReference
-	15, // 15: synod.agent.v1.CommandInput.ensure_volume:type_name -> synod.agent.v1.EnsureVolume
-	16, // 16: synod.agent.v1.CommandInput.ensure_network:type_name -> synod.agent.v1.EnsureNetwork
-	17, // 17: synod.agent.v1.CommandInput.ensure_container:type_name -> synod.agent.v1.EnsureContainer
-	18, // 18: synod.agent.v1.CommandInput.start_container:type_name -> synod.agent.v1.StartContainer
-	19, // 19: synod.agent.v1.CommandInput.stop_container:type_name -> synod.agent.v1.StopContainer
-	20, // 20: synod.agent.v1.CommandInput.remove_container:type_name -> synod.agent.v1.RemoveContainer
-	21, // 21: synod.agent.v1.CommandInput.inspect_container:type_name -> synod.agent.v1.InspectContainer
-	8,  // 22: synod.agent.v1.Command.epoch:type_name -> synod.agent.v1.Epoch
-	22, // 23: synod.agent.v1.Command.input:type_name -> synod.agent.v1.CommandInput
-	23, // 24: synod.agent.v1.CommandInspectionRequest.command:type_name -> synod.agent.v1.Command
-	11, // 25: synod.agent.v1.CommandInspectionRequest.prior_effects:type_name -> synod.agent.v1.Effect
-	8,  // 26: synod.agent.v1.CommandInspectionResult.epoch:type_name -> synod.agent.v1.Epoch
-	11, // 27: synod.agent.v1.CommandInspectionResult.effects:type_name -> synod.agent.v1.Effect
-	8,  // 28: synod.agent.v1.AdmissionAck.epoch:type_name -> synod.agent.v1.Epoch
-	8,  // 29: synod.agent.v1.Progress.epoch:type_name -> synod.agent.v1.Epoch
-	8,  // 30: synod.agent.v1.TerminalResult.epoch:type_name -> synod.agent.v1.Epoch
-	11, // 31: synod.agent.v1.TerminalResult.effects:type_name -> synod.agent.v1.Effect
-	8,  // 32: synod.agent.v1.ResultAck.epoch:type_name -> synod.agent.v1.Epoch
-	8,  // 33: synod.agent.v1.CancelCommand.epoch:type_name -> synod.agent.v1.Epoch
-	11, // 34: synod.agent.v1.CancellationResult.effects:type_name -> synod.agent.v1.Effect
-	8,  // 35: synod.agent.v1.CancellationResult.epoch:type_name -> synod.agent.v1.Epoch
-	34, // 36: synod.agent.v1.CapacityRequest.known:type_name -> synod.agent.v1.KnownReservation
-	35, // 37: synod.agent.v1.ReservationUsage.used:type_name -> synod.agent.v1.ResourceVector
-	35, // 38: synod.agent.v1.CapacityReport.capacity:type_name -> synod.agent.v1.ResourceVector
-	35, // 39: synod.agent.v1.CapacityReport.used:type_name -> synod.agent.v1.ResourceVector
-	36, // 40: synod.agent.v1.CapacityReport.reservations:type_name -> synod.agent.v1.ReservationUsage
-	7,  // 41: synod.agent.v1.InventoryPage.resources:type_name -> synod.agent.v1.Observation
-	11, // 42: synod.agent.v1.InventoryPage.effects:type_name -> synod.agent.v1.Effect
-	39, // 43: synod.agent.v1.InventoryPage.drift:type_name -> synod.agent.v1.DriftItem
-	4,  // 44: synod.agent.v1.AgentMessage.hello:type_name -> synod.agent.v1.Hello
-	6,  // 45: synod.agent.v1.AgentMessage.heartbeat:type_name -> synod.agent.v1.Heartbeat
-	12, // 46: synod.agent.v1.AgentMessage.barrier_result:type_name -> synod.agent.v1.BarrierResult
-	26, // 47: synod.agent.v1.AgentMessage.admission_ack:type_name -> synod.agent.v1.AdmissionAck
-	27, // 48: synod.agent.v1.AgentMessage.progress:type_name -> synod.agent.v1.Progress
-	28, // 49: synod.agent.v1.AgentMessage.terminal_result:type_name -> synod.agent.v1.TerminalResult
-	31, // 50: synod.agent.v1.AgentMessage.cancellation_result:type_name -> synod.agent.v1.CancellationResult
-	38, // 51: synod.agent.v1.AgentMessage.inventory:type_name -> synod.agent.v1.InventoryPage
-	25, // 52: synod.agent.v1.AgentMessage.command_inspection:type_name -> synod.agent.v1.CommandInspectionResult
-	37, // 53: synod.agent.v1.AgentMessage.capacity_report:type_name -> synod.agent.v1.CapacityReport
-	5,  // 54: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
-	9,  // 55: synod.agent.v1.ControllerMessage.prepare_epoch:type_name -> synod.agent.v1.PrepareEpoch
-	10, // 56: synod.agent.v1.ControllerMessage.activate_epoch:type_name -> synod.agent.v1.ActivateEpoch
-	23, // 57: synod.agent.v1.ControllerMessage.command:type_name -> synod.agent.v1.Command
-	29, // 58: synod.agent.v1.ControllerMessage.result_ack:type_name -> synod.agent.v1.ResultAck
-	30, // 59: synod.agent.v1.ControllerMessage.cancel:type_name -> synod.agent.v1.CancelCommand
-	32, // 60: synod.agent.v1.ControllerMessage.inventory:type_name -> synod.agent.v1.InventoryRequest
-	40, // 61: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
-	24, // 62: synod.agent.v1.ControllerMessage.command_inspection:type_name -> synod.agent.v1.CommandInspectionRequest
-	33, // 63: synod.agent.v1.ControllerMessage.capacity_request:type_name -> synod.agent.v1.CapacityRequest
-	44, // 64: synod.agent.v1.ExecutionPlan.steps:type_name -> synod.agent.v1.PlanStep
-	23, // 65: synod.agent.v1.PlanStep.command:type_name -> synod.agent.v1.Command
-	1,  // 66: synod.agent.v1.PlanStep.cancellation_boundary:type_name -> synod.agent.v1.CancellationBoundary
-	2,  // 67: synod.agent.v1.PlanStep.postcondition:type_name -> synod.agent.v1.Postcondition
-	41, // 68: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
-	42, // 69: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
-	69, // [69:70] is the sub-list for method output_type
-	68, // [68:69] is the sub-list for method input_type
-	68, // [68:68] is the sub-list for extension type_name
-	68, // [68:68] is the sub-list for extension extendee
-	0,  // [0:68] is the sub-list for field type_name
+	15, // 12: synod.agent.v1.EnsureContainer.secret_env:type_name -> synod.agent.v1.SecretEnv
+	16, // 13: synod.agent.v1.EnsureContainer.plain_env:type_name -> synod.agent.v1.PlainEnv
+	25, // 14: synod.agent.v1.EnsureContainer.redis:type_name -> synod.agent.v1.RedisContainerConfig
+	21, // 15: synod.agent.v1.EnsureContainer.postgres:type_name -> synod.agent.v1.PostgresContainerConfig
+	23, // 16: synod.agent.v1.PostgresContainerConfig.replica_source:type_name -> synod.agent.v1.PostgresReplicaSource
+	22, // 17: synod.agent.v1.PostgresContainerConfig.patroni:type_name -> synod.agent.v1.PatroniContainerConfig
+	13, // 18: synod.agent.v1.PatroniContainerConfig.credentials:type_name -> synod.agent.v1.SecretReference
+	23, // 19: synod.agent.v1.PostgresReplicationCheck.source:type_name -> synod.agent.v1.PostgresReplicaSource
+	64, // 20: synod.agent.v1.PostgresReplicationCheck.max_message_age:type_name -> google.protobuf.Duration
+	26, // 21: synod.agent.v1.RedisContainerConfig.upstream:type_name -> synod.agent.v1.RedisUpstream
+	13, // 22: synod.agent.v1.RedisContainerConfig.credentials:type_name -> synod.agent.v1.SecretReference
+	26, // 23: synod.agent.v1.RedisReplicationCheck.upstream:type_name -> synod.agent.v1.RedisUpstream
+	20, // 24: synod.agent.v1.StartPatroniMember.container:type_name -> synod.agent.v1.EnsureContainer
+	21, // 25: synod.agent.v1.RecoverPostgresSetup.postgres:type_name -> synod.agent.v1.PostgresContainerConfig
+	21, // 26: synod.agent.v1.ClonePostgresReplica.postgres:type_name -> synod.agent.v1.PostgresContainerConfig
+	21, // 27: synod.agent.v1.VerifyPostgresReplicaClone.postgres:type_name -> synod.agent.v1.PostgresContainerConfig
+	21, // 28: synod.agent.v1.VerifyPostgresReplicaFailure.postgres:type_name -> synod.agent.v1.PostgresContainerConfig
+	64, // 29: synod.agent.v1.StopContainer.grace_period:type_name -> google.protobuf.Duration
+	27, // 30: synod.agent.v1.CheckReadiness.redis_replication:type_name -> synod.agent.v1.RedisReplicationCheck
+	24, // 31: synod.agent.v1.CheckReadiness.postgres_replication:type_name -> synod.agent.v1.PostgresReplicationCheck
+	39, // 32: synod.agent.v1.CheckReadiness.postgres_tls:type_name -> synod.agent.v1.PostgresTLS
+	64, // 33: synod.agent.v1.CommandInput.timeout:type_name -> google.protobuf.Duration
+	13, // 34: synod.agent.v1.CommandInput.secrets:type_name -> synod.agent.v1.SecretReference
+	18, // 35: synod.agent.v1.CommandInput.ensure_volume:type_name -> synod.agent.v1.EnsureVolume
+	19, // 36: synod.agent.v1.CommandInput.ensure_network:type_name -> synod.agent.v1.EnsureNetwork
+	20, // 37: synod.agent.v1.CommandInput.ensure_container:type_name -> synod.agent.v1.EnsureContainer
+	28, // 38: synod.agent.v1.CommandInput.start_container:type_name -> synod.agent.v1.StartContainer
+	35, // 39: synod.agent.v1.CommandInput.stop_container:type_name -> synod.agent.v1.StopContainer
+	36, // 40: synod.agent.v1.CommandInput.remove_container:type_name -> synod.agent.v1.RemoveContainer
+	37, // 41: synod.agent.v1.CommandInput.inspect_container:type_name -> synod.agent.v1.InspectContainer
+	40, // 42: synod.agent.v1.CommandInput.check_readiness:type_name -> synod.agent.v1.CheckReadiness
+	30, // 43: synod.agent.v1.CommandInput.recover_postgres_setup:type_name -> synod.agent.v1.RecoverPostgresSetup
+	31, // 44: synod.agent.v1.CommandInput.prepare_postgres_replica:type_name -> synod.agent.v1.PreparePostgresReplica
+	32, // 45: synod.agent.v1.CommandInput.clone_postgres_replica:type_name -> synod.agent.v1.ClonePostgresReplica
+	33, // 46: synod.agent.v1.CommandInput.verify_postgres_replica_clone:type_name -> synod.agent.v1.VerifyPostgresReplicaClone
+	34, // 47: synod.agent.v1.CommandInput.verify_postgres_replica_failure:type_name -> synod.agent.v1.VerifyPostgresReplicaFailure
+	38, // 48: synod.agent.v1.CommandInput.verify_container_absent:type_name -> synod.agent.v1.VerifyContainerAbsent
+	29, // 49: synod.agent.v1.CommandInput.start_patroni_member:type_name -> synod.agent.v1.StartPatroniMember
+	8,  // 50: synod.agent.v1.Command.epoch:type_name -> synod.agent.v1.Epoch
+	41, // 51: synod.agent.v1.Command.input:type_name -> synod.agent.v1.CommandInput
+	42, // 52: synod.agent.v1.CommandInspectionRequest.command:type_name -> synod.agent.v1.Command
+	11, // 53: synod.agent.v1.CommandInspectionRequest.prior_effects:type_name -> synod.agent.v1.Effect
+	8,  // 54: synod.agent.v1.CommandInspectionResult.epoch:type_name -> synod.agent.v1.Epoch
+	11, // 55: synod.agent.v1.CommandInspectionResult.effects:type_name -> synod.agent.v1.Effect
+	8,  // 56: synod.agent.v1.AdmissionAck.epoch:type_name -> synod.agent.v1.Epoch
+	8,  // 57: synod.agent.v1.Progress.epoch:type_name -> synod.agent.v1.Epoch
+	8,  // 58: synod.agent.v1.TerminalResult.epoch:type_name -> synod.agent.v1.Epoch
+	11, // 59: synod.agent.v1.TerminalResult.effects:type_name -> synod.agent.v1.Effect
+	8,  // 60: synod.agent.v1.ResultAck.epoch:type_name -> synod.agent.v1.Epoch
+	8,  // 61: synod.agent.v1.CancelCommand.epoch:type_name -> synod.agent.v1.Epoch
+	11, // 62: synod.agent.v1.CancellationResult.effects:type_name -> synod.agent.v1.Effect
+	8,  // 63: synod.agent.v1.CancellationResult.epoch:type_name -> synod.agent.v1.Epoch
+	53, // 64: synod.agent.v1.CapacityRequest.known:type_name -> synod.agent.v1.KnownReservation
+	54, // 65: synod.agent.v1.ReservationUsage.used:type_name -> synod.agent.v1.ResourceVector
+	54, // 66: synod.agent.v1.CapacityReport.capacity:type_name -> synod.agent.v1.ResourceVector
+	54, // 67: synod.agent.v1.CapacityReport.used:type_name -> synod.agent.v1.ResourceVector
+	55, // 68: synod.agent.v1.CapacityReport.reservations:type_name -> synod.agent.v1.ReservationUsage
+	7,  // 69: synod.agent.v1.InventoryPage.resources:type_name -> synod.agent.v1.Observation
+	11, // 70: synod.agent.v1.InventoryPage.effects:type_name -> synod.agent.v1.Effect
+	58, // 71: synod.agent.v1.InventoryPage.drift:type_name -> synod.agent.v1.DriftItem
+	4,  // 72: synod.agent.v1.AgentMessage.hello:type_name -> synod.agent.v1.Hello
+	6,  // 73: synod.agent.v1.AgentMessage.heartbeat:type_name -> synod.agent.v1.Heartbeat
+	12, // 74: synod.agent.v1.AgentMessage.barrier_result:type_name -> synod.agent.v1.BarrierResult
+	45, // 75: synod.agent.v1.AgentMessage.admission_ack:type_name -> synod.agent.v1.AdmissionAck
+	46, // 76: synod.agent.v1.AgentMessage.progress:type_name -> synod.agent.v1.Progress
+	47, // 77: synod.agent.v1.AgentMessage.terminal_result:type_name -> synod.agent.v1.TerminalResult
+	50, // 78: synod.agent.v1.AgentMessage.cancellation_result:type_name -> synod.agent.v1.CancellationResult
+	57, // 79: synod.agent.v1.AgentMessage.inventory:type_name -> synod.agent.v1.InventoryPage
+	44, // 80: synod.agent.v1.AgentMessage.command_inspection:type_name -> synod.agent.v1.CommandInspectionResult
+	56, // 81: synod.agent.v1.AgentMessage.capacity_report:type_name -> synod.agent.v1.CapacityReport
+	5,  // 82: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
+	9,  // 83: synod.agent.v1.ControllerMessage.prepare_epoch:type_name -> synod.agent.v1.PrepareEpoch
+	10, // 84: synod.agent.v1.ControllerMessage.activate_epoch:type_name -> synod.agent.v1.ActivateEpoch
+	42, // 85: synod.agent.v1.ControllerMessage.command:type_name -> synod.agent.v1.Command
+	48, // 86: synod.agent.v1.ControllerMessage.result_ack:type_name -> synod.agent.v1.ResultAck
+	49, // 87: synod.agent.v1.ControllerMessage.cancel:type_name -> synod.agent.v1.CancelCommand
+	51, // 88: synod.agent.v1.ControllerMessage.inventory:type_name -> synod.agent.v1.InventoryRequest
+	59, // 89: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
+	43, // 90: synod.agent.v1.ControllerMessage.command_inspection:type_name -> synod.agent.v1.CommandInspectionRequest
+	52, // 91: synod.agent.v1.ControllerMessage.capacity_request:type_name -> synod.agent.v1.CapacityRequest
+	14, // 92: synod.agent.v1.ControllerMessage.secret:type_name -> synod.agent.v1.SecretMaterial
+	63, // 93: synod.agent.v1.ExecutionPlan.steps:type_name -> synod.agent.v1.PlanStep
+	42, // 94: synod.agent.v1.PlanStep.command:type_name -> synod.agent.v1.Command
+	1,  // 95: synod.agent.v1.PlanStep.cancellation_boundary:type_name -> synod.agent.v1.CancellationBoundary
+	2,  // 96: synod.agent.v1.PlanStep.postcondition:type_name -> synod.agent.v1.Postcondition
+	60, // 97: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
+	61, // 98: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
+	98, // [98:99] is the sub-list for method output_type
+	97, // [97:98] is the sub-list for method input_type
+	97, // [97:97] is the sub-list for extension type_name
+	97, // [97:97] is the sub-list for extension extendee
+	0,  // [0:97] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -3924,7 +5524,7 @@ func file_proto_agent_v1_agent_proto_init() {
 	if File_proto_agent_v1_agent_proto != nil {
 		return
 	}
-	file_proto_agent_v1_agent_proto_msgTypes[19].OneofWrappers = []any{
+	file_proto_agent_v1_agent_proto_msgTypes[38].OneofWrappers = []any{
 		(*CommandInput_EnsureVolume)(nil),
 		(*CommandInput_EnsureNetwork)(nil),
 		(*CommandInput_EnsureContainer)(nil),
@@ -3932,8 +5532,16 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*CommandInput_StopContainer)(nil),
 		(*CommandInput_RemoveContainer)(nil),
 		(*CommandInput_InspectContainer)(nil),
+		(*CommandInput_CheckReadiness)(nil),
+		(*CommandInput_RecoverPostgresSetup)(nil),
+		(*CommandInput_PreparePostgresReplica)(nil),
+		(*CommandInput_ClonePostgresReplica)(nil),
+		(*CommandInput_VerifyPostgresReplicaClone)(nil),
+		(*CommandInput_VerifyPostgresReplicaFailure)(nil),
+		(*CommandInput_VerifyContainerAbsent)(nil),
+		(*CommandInput_StartPatroniMember)(nil),
 	}
-	file_proto_agent_v1_agent_proto_msgTypes[38].OneofWrappers = []any{
+	file_proto_agent_v1_agent_proto_msgTypes[57].OneofWrappers = []any{
 		(*AgentMessage_Hello)(nil),
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_BarrierResult)(nil),
@@ -3945,7 +5553,7 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*AgentMessage_CommandInspection)(nil),
 		(*AgentMessage_CapacityReport)(nil),
 	}
-	file_proto_agent_v1_agent_proto_msgTypes[39].OneofWrappers = []any{
+	file_proto_agent_v1_agent_proto_msgTypes[58].OneofWrappers = []any{
 		(*ControllerMessage_Session)(nil),
 		(*ControllerMessage_PrepareEpoch)(nil),
 		(*ControllerMessage_ActivateEpoch)(nil),
@@ -3956,6 +5564,7 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*ControllerMessage_Error)(nil),
 		(*ControllerMessage_CommandInspection)(nil),
 		(*ControllerMessage_CapacityRequest)(nil),
+		(*ControllerMessage_Secret)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -3963,7 +5572,7 @@ func file_proto_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_agent_proto_rawDesc), len(file_proto_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   42,
+			NumMessages:   61,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

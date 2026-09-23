@@ -1,6 +1,7 @@
 package controlstream
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
@@ -17,8 +18,11 @@ func checkEpoch(epoch *agentv1.Epoch, installationID, nodeID string) error {
 	}
 	for _, id := range []string{epoch.ClusterId, epoch.RecoveryGeneration} {
 		value, err := uuid.Parse(id)
-		if err != nil || value == uuid.Nil || value.String() != id {
-			return ErrMessage
+		if err != nil {
+			return fmt.Errorf("parse %q in the epoch: %w: %w", id, ErrMessage, err)
+		}
+		if value == uuid.Nil || value.String() != id {
+			return fmt.Errorf("%q in the epoch is not a canonical non-nil UUID: %w", id, ErrMessage)
 		}
 	}
 	return nil
@@ -73,12 +77,15 @@ func CheckAgentMessage(message *agentv1.AgentMessage, installationID, nodeID str
 			return ErrMessage
 		}
 		id, err := uuid.Parse(result.CommandId)
-		if err != nil || id == uuid.Nil || id.String() != result.CommandId {
-			return ErrMessage
+		if err != nil {
+			return fmt.Errorf("parse the command of a terminal result (%q): %w: %w", result.CommandId, ErrMessage, err)
+		}
+		if id == uuid.Nil || id.String() != result.CommandId {
+			return fmt.Errorf("the terminal result names command %q, which is not a canonical non-nil UUID: %w", result.CommandId, ErrMessage)
 		}
 		epoch = result.Epoch
 	default:
-		return ErrMessage
+		return fmt.Errorf("an agent may not send %T: %w", value, ErrMessage)
 	}
 	return checkEpoch(epoch, installationID, nodeID)
 }
@@ -104,6 +111,14 @@ func CheckControllerMessage(message *agentv1.ControllerMessage, installationID, 
 		return nil
 	case *agentv1.ControllerMessage_Inventory:
 		if value.Inventory == nil {
+			return ErrMessage
+		}
+		return nil
+	case *agentv1.ControllerMessage_Secret:
+		// A credential is delivered to a session, not to an epoch: the agent holds
+		// it in session memory and a command names it later.
+		if value.Secret == nil || value.Secret.CredentialId == "" || value.Secret.Version < 1 ||
+			value.Secret.Purpose == "" || len(value.Secret.Material) == 0 {
 			return ErrMessage
 		}
 		return nil
@@ -135,19 +150,25 @@ func CheckControllerMessage(message *agentv1.ControllerMessage, installationID, 
 	case *agentv1.ControllerMessage_CapacityRequest:
 		return CheckCapacityRequest(value.CapacityRequest)
 	default:
-		return ErrMessage
+		return fmt.Errorf("a controller may not send %T: %w", value, ErrMessage)
 	}
 	return checkEpoch(epoch, installationID, nodeID)
 }
 
 // CheckCommandInspectionRequest validates bounded read-only input, not local authority.
 func CheckCommandInspectionRequest(request *agentv1.CommandInspectionRequest, installationID, nodeID string) error {
-	if request == nil || proto.Size(request) > 1<<20 || operation.ValidateCommand(request.Command) != nil {
-		return ErrMessage
+	if request == nil || proto.Size(request) > 1<<20 {
+		return fmt.Errorf("the inspection request is absent or exceeds 1 MiB: %w", ErrMessage)
+	}
+	if err := operation.ValidateCommand(request.Command); err != nil {
+		return fmt.Errorf("validate the command of inspection request %s: %w: %w", request.RequestId, ErrMessage, err)
 	}
 	id, err := uuid.Parse(request.RequestId)
-	if err != nil || id == uuid.Nil || id.String() != request.RequestId {
-		return ErrMessage
+	if err != nil {
+		return fmt.Errorf("parse the inspection request identity (%q): %w: %w", request.RequestId, ErrMessage, err)
+	}
+	if id == uuid.Nil || id.String() != request.RequestId {
+		return fmt.Errorf("the inspection request identity %q is not a canonical non-nil UUID: %w", request.RequestId, ErrMessage)
 	}
 	if err := checkEpoch(request.Command.Epoch, installationID, nodeID); err != nil {
 		return err
@@ -162,8 +183,11 @@ func CheckCommandInspectionResult(result *agentv1.CommandInspectionResult, insta
 	}
 	for _, value := range []string{result.RequestId, result.CommandId} {
 		id, err := uuid.Parse(value)
-		if err != nil || id == uuid.Nil || id.String() != value {
-			return ErrMessage
+		if err != nil {
+			return fmt.Errorf("parse %q in the inspection result: %w: %w", value, ErrMessage, err)
+		}
+		if id == uuid.Nil || id.String() != value {
+			return fmt.Errorf("%q in the inspection result is not a canonical non-nil UUID: %w", value, ErrMessage)
 		}
 	}
 	if err := checkEpoch(result.Epoch, installationID, nodeID); err != nil {
@@ -182,8 +206,11 @@ func checkInspectionEffects(effects []*agentv1.Effect, commandID, resourceID str
 			return ErrMessage
 		}
 		id, err := uuid.Parse(effect.ResourceId)
-		if err != nil || id == uuid.Nil || id.String() != effect.ResourceId {
-			return ErrMessage
+		if err != nil {
+			return fmt.Errorf("parse the resource of an effect of command %s (%q): %w: %w", commandID, effect.ResourceId, ErrMessage, err)
+		}
+		if id == uuid.Nil || id.String() != effect.ResourceId {
+			return fmt.Errorf("an effect of command %s names resource %q, which is not a canonical non-nil UUID: %w", commandID, effect.ResourceId, ErrMessage)
 		}
 		if resourceID == "" {
 			resourceID = effect.ResourceId

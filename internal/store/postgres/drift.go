@@ -11,14 +11,13 @@ import (
 type DriftClass string
 
 const (
-	// DriftUnowned was never ours.
-	DriftUnowned DriftClass = "unowned"
-	// DriftForeign belongs to another installation or another node.
-	DriftForeign DriftClass = "foreign"
-	// DriftMislabelled was ours and has lost its identity.
+	// DriftUnowned was never ours; DriftForeign is another installation's or node's.
+	// DriftMislabelled and DriftChanged were ours: the first lost its identity, the
+	// second is no longer the object the node created.
+	DriftUnowned     DriftClass = "unowned"
+	DriftForeign     DriftClass = "foreign"
 	DriftMislabelled DriftClass = "mislabelled"
-	// DriftChanged is ours and is no longer the object the node created.
-	DriftChanged DriftClass = "changed"
+	DriftChanged     DriftClass = "changed"
 )
 
 // DriftItem is one object a node did not expect to find as it is.
@@ -28,9 +27,8 @@ type DriftItem struct {
 	Name     string
 	State    string
 	Class    DriftClass
-	// ClusterID and ResourceID are nil when the object carries no readable Synod
-	// identity. An object that was ours keeps whatever identity survived, which is
-	// what separates "we lost track of this" from "this was never ours".
+	// An object that was ours keeps whatever identity survived, which separates
+	// losing track of our own from finding somebody else's.
 	ClusterID  uuid.UUID
 	ResourceID uuid.UUID
 	Detail     string
@@ -50,13 +48,11 @@ type DriftReport struct {
 // operator on it.
 const maxDriftItems = 256
 
-// RecordNodeDrift replaces what one node last reported as drift.
+// RecordNodeDrift replaces what one node last reported. A report is a snapshot, not a
+// log: an object an operator has removed must stop being reported.
 //
-// A report is a snapshot, not a log: an object an operator has since removed must
-// stop being reported, so the node's whole set is replaced rather than merged.
-//
-// Nothing here touches desired state. Specification 33 forbids changing desired state
-// from an observation, and this writes only into the two drift tables.
+// Specification 33 forbids changing desired state from an observation, and this writes
+// only into the two drift tables.
 func (s *Store) RecordNodeDrift(ctx context.Context, report DriftReport) error {
 	if report.InstallationID == uuid.Nil || report.NodeID == uuid.Nil || report.SessionID == uuid.Nil || len(report.Items) > maxDriftItems {
 		return &AdmissionError{Code: InvalidRequest}
@@ -100,8 +96,7 @@ func (s *Store) RecordNodeDrift(ctx context.Context, report DriftReport) error {
 	return s.commitMetadata(ctx, tx)
 }
 
-// ReadNodeDrift answers what one node last reported. A node that has reported nothing
-// has an empty report, which is not an error: no drift is the ordinary case.
+// ReadNodeDrift answers what one node last reported.
 func (s *Store) ReadNodeDrift(ctx context.Context, installationID, nodeID uuid.UUID) (DriftReport, error) {
 	if installationID == uuid.Nil || nodeID == uuid.Nil {
 		return DriftReport{}, &AdmissionError{Code: InvalidRequest}
@@ -163,7 +158,7 @@ func (d DriftItem) validate() error {
 	if !boundedIdentityText(d.NativeID, 256) || len(d.Name) > 256 || len(d.State) > 64 || len(d.Detail) > 64 {
 		return &AdmissionError{Code: InvalidRequest}
 	}
-	// An object that was never ours carries no Synod identity to report.
+	// An object that was never ours carries no Synod identity.
 	if d.Class == DriftUnowned && (d.ClusterID != uuid.Nil || d.ResourceID != uuid.Nil) {
 		return &AdmissionError{Code: InvalidRequest}
 	}

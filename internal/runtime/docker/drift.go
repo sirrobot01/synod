@@ -5,25 +5,30 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"maps"
+	"reflect"
 	"slices"
 	"strings"
 
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/client"
+	"github.com/sirrobot01/synod/internal/engine/postgres"
+	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
+	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
 )
 
-// maxHostObjects bounds what one scan will look at, matching the inventory guard. A
-// host holding more objects than this is not one this driver can describe, and a
-// partial description of it would be worse than saying so.
+// maxHostObjects matches the inventory guard. A partial description of a larger host
+// would be worse than saying so.
 const maxHostObjects = 10000
 
-// Stable codes naming what disagrees about a mislabelled object. They never carry a
-// label value or a host path, because a drift report travels to an operator's screen.
+// What disagrees about a mislabelled object. These never carry a label value or a
+// host path, because a drift report reaches an operator's screen.
 const (
 	driftKind            = "kind_label_disagrees"
 	driftCluster         = "cluster_label_unreadable"
@@ -41,18 +46,15 @@ const (
 	driftRestartPolicy    = "restart_policy_changed"
 	driftResources        = "resource_limits_changed"
 	driftPorts            = "port_bindings_changed"
+	driftEngineConfig     = "engine_configuration_changed"
 )
 
 // Drift reports objects on the host that this node did not expect to find as they are.
+// Specification 33 requires reporting them without deleting them, so every call here is
+// a list or an inspect.
 //
-// Specification 33 requires reporting unowned containers and unexpected changes
-// without deleting them, and keeps adoption of arbitrary external databases outside
-// v0.1. This reads and classifies. Every call it makes is a list; there is no removal,
-// no relabelling, and no write of any kind, so the report cannot act on what it finds.
-//
-// Classification comes from labels alone. The driver cannot know what the controller
-// has a record of, so it never decides that something was lost track of; it says only
-// whether an object carries this node's labels, somebody else's, or none.
+// Classification comes from labels alone: the driver cannot know what the controller
+// has a record of.
 func (r *Runtime) Drift(ctx context.Context) ([]runtime.Drift, error) {
 	// No label filter. The whole point is to see what Inventory cannot.
 	containers, err := r.api.ContainerList(ctx, client.ContainerListOptions{All: true})
@@ -118,10 +120,9 @@ func (r *Runtime) Drift(ctx context.Context) ([]runtime.Drift, error) {
 		drift.NativeID, drift.State = item.ID, "present"
 		found = append(found, drift)
 	}
-	// The whole scan comes back; what a report carries is the agent's bound, not the
-	// driver's. The order puts what an operator needs most first, so a truncated
-	// report keeps the objects that were ours, and it is total, so two scans of an
-	// unchanged host report the same thing in the same order.
+	// The whole scan comes back; bounding a report is the agent's job. The order is
+	// total and puts what was ours first, so a truncated report keeps those and two
+	// scans of an unchanged host agree.
 	slices.SortFunc(found, func(a, b runtime.Drift) int {
 		if rank := driftRank(a.Class) - driftRank(b.Class); rank != 0 {
 			return rank
@@ -145,26 +146,21 @@ func driftRank(class runtime.DriftClass) int {
 	return 3
 }
 
-// classify decides what one native object is to this node. It returns false for an
-// object this node owns cleanly, because that is inventory and not drift.
+// classify returns false for an object this node owns cleanly, which is inventory.
 func (r *Runtime) classify(labels map[string]string, kind, name, prefix string) (runtime.Drift, bool) {
 	drift := runtime.Drift{Kind: kind, Name: name}
 	installation, node := labels[labelInstallation], labels[labelNode]
 	switch {
 	case installation == "" && node == "":
-		// Nothing here says Synod. It was never ours, and it is reported so that an
-		// operator can see it, not so that anything can act on it.
 		drift.Class = runtime.DriftUnowned
 		return drift, true
 	case installation != r.options.InstallationID.String() || node != r.options.NodeID.String():
-		// Another installation's, or another node's. Reused hosts and restored
-		// backups both produce these, and neither is ours to touch.
+		// Reused hosts and restored backups both produce these.
 		drift.Class = runtime.DriftForeign
 		return drift, true
 	}
-	// From here the object carries this node's own labels. It was ours, so its
-	// identity is recovered from whichever source is still intact rather than the
-	// whole object being written off as foreign.
+	// The object carries this node's labels, so its identity is recovered from
+	// whichever source is still intact rather than written off as foreign.
 	drift.Class = runtime.DriftMislabelled
 	if clusterID, err := uuid.Parse(labels[labelCluster]); err == nil && clusterID != uuid.Nil {
 		drift.ClusterID = clusterID
@@ -196,8 +192,7 @@ func (r *Runtime) classify(labels map[string]string, kind, name, prefix string) 
 	return drift, drift.Detail != ""
 }
 
-// readIdentity parses one resource identity in its canonical form. A value that does
-// not round-trip is not an identity, whatever it parses to.
+// readIdentity parses one identity. A value that does not round-trip is not one.
 func readIdentity(value string) (uuid.UUID, bool) {
 	parsed, err := uuid.Parse(value)
 	if err != nil || parsed == uuid.Nil || parsed.String() != value {
@@ -206,15 +201,11 @@ func readIdentity(value string) (uuid.UUID, bool) {
 	return parsed, true
 }
 
-// changedContainer reports an owned container that is no longer the container this
-// node created. It returns an empty code for one that is unchanged.
+// changedContainer reports an owned container that is no longer the one this node
+// created, or an empty code for one that is unchanged. It never corrects.
 //
-// It reports and never corrects. Specification 33 requires reporting an unexpected
-// change without deleting or silently fixing it, and forbids changing desired state
-// from an observation, so nothing here writes anything.
-//
-// A stopped container is not a change. Stopping is an ordinary thing to observe, the
-// state travels in the inventory page, and desired state is not the agent's to move.
+// A stopped container is not a change: stopping is ordinary, and the state travels in
+// the inventory page.
 func (r *Runtime) changedContainer(ctx context.Context, id string) (string, error) {
 	found, err := r.api.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
 	if err != nil {
@@ -224,12 +215,15 @@ func (r *Runtime) changedContainer(ctx context.Context, id string) (string, erro
 		}
 		return "", &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
 	}
-	item := found.Container
+	return r.containerChanges(ctx, found.Container)
+}
+
+// containerChanges lets phase inspection validate the same native snapshot.
+func (r *Runtime) containerChanges(ctx context.Context, item container.InspectResponse) (string, error) {
 	if item.Config == nil || item.HostConfig == nil {
 		return driftConfigUnreadable, nil
 	}
-	// The container carries the configuration it was created with, and its hash. A
-	// configuration that no longer hashes to its own label has been edited.
+	// A configuration that no longer hashes to its own label has been edited.
 	encoded, err := base64.RawStdEncoding.DecodeString(item.Config.Labels[labelConfig])
 	if err != nil {
 		return driftConfigUnreadable, nil
@@ -242,22 +236,86 @@ func (r *Runtime) changedContainer(ctx context.Context, id string) (string, erro
 	if proto.Unmarshal(encoded, &stored) != nil {
 		return driftConfigUnreadable, nil
 	}
+	if stored.Engine == "postgres" && stored.Postgres == nil {
+		return driftEngineConfig, nil
+	}
+	if stored.Engine == "redis" || stored.Redis != nil {
+		if stored.Redis == nil || operation.ValidateRedisContainer(&stored, stored.Redis.Credentials) != nil {
+			return driftEngineConfig, nil
+		}
+	}
 	memory, cpu := containerLimits(&stored)
 	host := item.HostConfig
 	switch {
 	case host.Privileged || len(host.Binds) != 0 || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 ||
 		len(host.CapAdd) != 0 || len(host.SecurityOpt) != 0 || host.AutoRemove || host.PublishAllPorts || host.ReadonlyRootfs:
-		// Each of these grants the container more of the host than this node ever
-		// gave it.
+		// Each grants the container more of the host than this node gave it.
 		return driftHostConfig, nil
 	case host.RestartPolicy.Name != container.RestartPolicyDisabled && host.RestartPolicy.Name != container.RestartPolicyUnlessStopped:
-		// This node uses exactly two policies: disabled while stopped, and
-		// unless-stopped while running. Anything else undoes a stopped intent.
+		// This node uses disabled while stopped and unless-stopped while running.
+		// Anything else undoes a stopped intent.
 		return driftRestartPolicy, nil
 	case host.Memory != memory || host.NanoCPUs != cpu*1000000:
 		return driftResources, nil
 	case len(host.PortBindings) != len(stored.Ports):
 		return driftPorts, nil
+	}
+	if stored.Redis != nil || stored.Postgres != nil {
+		image, err := r.api.ImageInspect(ctx, stored.ImageDigest)
+		if err != nil {
+			return "", &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+		if image.Config == nil {
+			return driftEngineConfig, nil
+		}
+		var expectedCommand []string
+		target := "/data"
+		tmpfs := map[string]string{redisengine.ConfigDirectory: "rw,noexec,nosuid,size=1m"}
+		if stored.Postgres != nil {
+			expectedCommand, err = postgresCommand(stored.Postgres, item.Config.Labels[labelInstallation], item.Config.Labels[labelCluster], item.Config.Labels[labelResource])
+			if err != nil {
+				return driftEngineConfig, nil
+			}
+			target = postgres.DataDirectory
+			tmpfs = map[string]string{postgres.ConfigDirectory: postgresTmpfs}
+			health := postgresHealthcheck(stored.Postgres.ReplicaSource != nil)
+			if stored.Postgres.Patroni != nil {
+				if _, err := postgres.PatroniMemberSettings(&stored, item.Config.Labels[labelInstallation], item.Config.Labels[labelCluster], item.Config.Labels[labelResource]); err != nil {
+					return driftEngineConfig, nil
+				}
+				tmpfs = map[string]string{postgres.PatroniDirectory: patroniTmpfs}
+				health = patroniHealthcheck()
+				if err := r.inspectPatroniSource(ctx, item); err != nil {
+					return driftEngineConfig, nil
+				}
+			}
+			if !reflect.DeepEqual(item.Config.Healthcheck, health) || item.Config.StopSignal != image.Config.StopSignal {
+				return driftEngineConfig, nil
+			}
+		} else {
+			expectedCommand = redisengine.ContainerCommand(stored.Redis)
+		}
+		if item.Image != image.ID ||
+			!slices.Equal(item.Config.Cmd, expectedCommand) ||
+			!slices.Equal(item.Config.Entrypoint, image.Config.Entrypoint) ||
+			!maps.Equal(host.Tmpfs, tmpfs) || len(item.Mounts) != 1 {
+			return driftEngineConfig, nil
+		}
+		environment, err := plainEnvironment(image.Config.Env, &stored)
+		if err != nil || !sameEnvironment(item.Config.Env, environment, &stored) ||
+			item.Config.User != image.Config.User || item.Config.WorkingDir != image.Config.WorkingDir {
+			return driftEngineConfig, nil
+		}
+		for _, mounted := range item.Mounts {
+			switch mounted.Type {
+			case mount.TypeVolume:
+				if mounted.Name != "synod-volume-"+stored.VolumeId || mounted.Destination != target || !mounted.RW {
+					return driftEngineConfig, nil
+				}
+			default:
+				return driftEngineConfig, nil
+			}
+		}
 	}
 	return "", nil
 }

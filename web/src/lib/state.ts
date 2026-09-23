@@ -330,7 +330,7 @@ const errorMarks: Record<string, Mark> = {
 
 /** A plain-language consequence for each stable code. The code itself is never replaced. */
 const consequences: Record<string, string> = {
-  operation_conflict: "Another operation is mutating this cluster. Synod runs one mutating operation for each cluster.",
+  operation_conflict: "Active work or a storage change conflicts with this request. Inspect the cluster and its operations before a new request.",
   outcome_unknown: "The result is uncertain. Retry with the same request identity and the same body.",
   idempotency_conflict: "That idempotency key belongs to a different request body.",
   name_conflict: "That cluster name is already in use.",

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/google/uuid"
 	"math"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 func fixture() (Request, Snapshot) {
 	now := time.Now().UTC()
 	installation := uuid.New()
-	resource := Resource{ID: uuid.New(), ReservationID: uuid.New(), Kind: "instance", Engine: "postgres", Version: "17.11", Architecture: "arm64", RuntimeVersion: "docker-29.1.3", StorageID: "local-data", Budgets: Budgets{Workload: new(Vector{1000, 1000, 1000}), Supporting: new(Vector{100, 100, 100}), Backup: new(Vector{0, 0, 100})}}
+	resource := Resource{ID: uuid.New(), ReservationID: uuid.New(), Kind: "instance", Role: "primary", Engine: "postgres", Version: "17.11", Architecture: "arm64", RuntimeVersion: "docker-29.1.3", StorageID: "local-data", Budgets: Budgets{Workload: new(Vector{1000, 1000, 1000}), Supporting: new(Vector{100, 100, 100}), Backup: new(Vector{0, 0, 100})}}
 	resource.OwnedResourceIDs = []uuid.UUID{resource.ID}
 	request := Request{Version: 1, InstallationID: installation, ClusterID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1, Profile: "compact", Resources: []Resource{resource}}
 	snapshot := Snapshot{InstallationID: installation, ObservedAt: now}
@@ -36,7 +37,7 @@ func TestDeterministicPlacementAndHardFilters(t *testing.T) {
 	}
 	slices.Reverse(snapshot.Nodes)
 	again, err := Plan(request, snapshot)
-	if err != nil || again.Assignments[0] != decision.Assignments[0] {
+	if err != nil || !reflect.DeepEqual(again.Assignments[0], decision.Assignments[0]) {
 		t.Fatal("input order changed placement")
 	}
 	if err := CheckDecision(request, snapshot, decision); err != nil {
@@ -208,5 +209,165 @@ func TestPortsAndInvalidBudgets(t *testing.T) {
 	}
 	if compareRatio(math.MaxUint64-1, math.MaxUint64, math.MaxUint64-2, math.MaxUint64) <= 0 {
 		t.Fatal("ratio overflow")
+	}
+}
+
+// This profile publishes on the host's own network, so a port is a host resource. Every
+// cluster asking for the same number means one cluster per node: the second is refused
+// while the node has room for it. Placement knows what each node holds, so it chooses.
+func TestPlanChoosesAFreePortForEachResource(t *testing.T) {
+	request, snapshot := fixture()
+	snapshot.Nodes = snapshot.Nodes[:1]
+	node := snapshot.Nodes[0].ID
+	request.PortRange = PortRange{First: 5432, Last: 5434}
+	request.Resources[0].NodeAffinity = node
+	request.Resources[0].Ports = []Port{{Address: "0.0.0.0", Transport: "tcp"}}
+	second := request.Resources[0]
+	second.ID, second.ReservationID = uuid.New(), uuid.New()
+	second.OwnedResourceIDs = []uuid.UUID{second.ID}
+	request.Resources = append(request.Resources, second)
+
+	decision, err := Plan(request, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := make(map[uint16]bool)
+	for _, assignment := range decision.Assignments {
+		if assignment.NodeID != node || len(assignment.Ports) != 1 {
+			t.Fatalf("assignment=%+v, want one port on the one node", assignment)
+		}
+		port := assignment.Ports[0]
+		if port.Number < request.PortRange.First || port.Number > request.PortRange.Last {
+			t.Fatalf("port=%d, want one inside %+v", port.Number, request.PortRange)
+		}
+		if bound[port.Number] {
+			t.Fatalf("port %d was bound twice on one node", port.Number)
+		}
+		bound[port.Number] = true
+	}
+	if err := CheckDecision(request, snapshot, decision); err != nil {
+		t.Fatalf("the decision it made was refused: %v", err)
+	}
+
+	// A port already held on the node is not offered again, and a range with nothing
+	// free refuses rather than double-binding.
+	t.Run("held ports are skipped", func(t *testing.T) {
+		request, snapshot := fixture()
+		snapshot.Nodes = snapshot.Nodes[:1]
+		node := snapshot.Nodes[0].ID
+		request.PortRange = PortRange{First: 5432, Last: 5433}
+		request.Resources[0].Ports = []Port{{Address: "0.0.0.0", Transport: "tcp"}}
+		snapshot.Allocations = []Allocation{{
+			ID: uuid.New(), InstallationID: request.InstallationID, NodeID: node,
+			ClusterID: uuid.New(), ResourceID: uuid.New(), Budget: Vector{1, 1, 1},
+			Ports: []Port{{Address: "0.0.0.0", Transport: "tcp", Number: 5432}},
+		}}
+		decision, err := Plan(request, snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := decision.Assignments[0].Ports[0].Number; got != 5433 {
+			t.Fatalf("port=%d, want the lowest free one, 5433", got)
+		}
+		snapshot.Allocations[0].Ports[0].Number = 5433
+		snapshot.Allocations = append(snapshot.Allocations, Allocation{
+			ID: uuid.New(), InstallationID: request.InstallationID, NodeID: node,
+			ClusterID: uuid.New(), ResourceID: uuid.New(), Budget: Vector{1, 1, 1},
+			Ports: []Port{{Address: "0.0.0.0", Transport: "tcp", Number: 5432}},
+		})
+		if _, err := Plan(request, snapshot); !errors.Is(err, ErrUnsatisfied) {
+			t.Fatalf("err=%v, want a refusal when the range has nothing free", err)
+		}
+	})
+
+	// A retry must land on the port the reservation already holds. Choosing again
+	// would move an engine that is already listening.
+	t.Run("a retry keeps its port", func(t *testing.T) {
+		request, snapshot := fixture()
+		snapshot.Nodes = snapshot.Nodes[:1]
+		node := snapshot.Nodes[0].ID
+		request.PortRange = PortRange{First: 5432, Last: 5500}
+		request.Resources[0].Ports = []Port{{Address: "0.0.0.0", Transport: "tcp"}}
+		snapshot.Allocations = []Allocation{{
+			ID: request.Resources[0].ReservationID, InstallationID: request.InstallationID, NodeID: node,
+			ClusterID: request.ClusterID, ResourceID: request.Resources[0].ID, Budget: Vector{1, 1, 1},
+			OwnedResourceIDs: request.Resources[0].OwnedResourceIDs,
+			Ports:            []Port{{Address: "0.0.0.0", Transport: "tcp", Number: 5479}},
+		}}
+		decision, err := Plan(request, snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := decision.Assignments[0].Ports[0].Number; got != 5479 {
+			t.Fatalf("port=%d, want the port the reservation holds, 5479", got)
+		}
+	})
+}
+
+func TestAutomaticPortPreservesFixedBindings(t *testing.T) {
+	for _, fixedFirst := range []bool{false, true} {
+		request, snapshot := fixture()
+		request.PortRange = PortRange{First: 5432, Last: 5433}
+		request.Resources[0].Ports = []Port{
+			{Address: "0.0.0.0", Transport: "tcp"},
+			{Address: "0.0.0.0", Transport: "tcp", Number: 5432},
+		}
+		if fixedFirst {
+			slices.Reverse(request.Resources[0].Ports)
+		}
+		decision, err := Plan(request, snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckDecision(request, snapshot, decision); err != nil {
+			t.Fatal(err)
+		}
+		ports := decision.Assignments[0].Ports
+		if len(ports) != 2 || PortsConflict(ports[0], ports[1]) {
+			t.Fatalf("conflicting bindings: %+v", ports)
+		}
+		held := slices.Clone(ports)
+		slices.SortFunc(held, func(a, b Port) int { return int(a.Number) - int(b.Number) })
+		snapshot.Allocations = []Allocation{{
+			ID: request.Resources[0].ReservationID, InstallationID: request.InstallationID,
+			NodeID: decision.Assignments[0].NodeID, ClusterID: request.ClusterID,
+			ResourceID: request.Resources[0].ID, Budget: Vector{1, 1, 1},
+			OwnedResourceIDs: request.Resources[0].OwnedResourceIDs, Ports: held,
+		}}
+		replayed, err := Plan(request, snapshot)
+		if err != nil || !slices.Equal(replayed.Assignments[0].Ports, ports) {
+			t.Fatalf("did not reuse held ports: %+v, %v", replayed, err)
+		}
+		snapshot.Allocations = nil
+		decision.Assignments[0].Ports[0].Number = 5432
+		decision.Assignments[0].Ports[1].Number = 5432
+		if err := CheckDecision(request, snapshot, decision); err == nil {
+			t.Fatal("accepted conflicting ports in a decision")
+		}
+	}
+}
+
+// An instance is a member of the cluster, so it must name which member it is. Nothing
+// else is a member, so nothing else may carry a role.
+func TestInstanceMustDeclareItsMemberRole(t *testing.T) {
+	for name, role := range map[string]string{"missing": "", "unknown": "arbiter", "wrong case": "Primary"} {
+		t.Run(name, func(t *testing.T) {
+			request, snapshot := fixture()
+			request.Resources[0].Role = role
+			if _, err := Plan(request, snapshot); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("role %q accepted: %v", role, err)
+			}
+		})
+	}
+	request, snapshot := fixture()
+	request.Resources[0].Role = "replica"
+	if _, err := Plan(request, snapshot); err != nil {
+		t.Fatalf("a replica was refused: %v", err)
+	}
+	// A backup reservation is not a member, so a role on one is a malformed request.
+	request, snapshot = fixture()
+	request.Resources[0].Kind, request.Resources[0].Role = "backup", "primary"
+	if _, err := Plan(request, snapshot); !errors.Is(err, ErrInvalid) {
+		t.Fatal("a role on a backup reservation was accepted")
 	}
 }

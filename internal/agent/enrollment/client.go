@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -33,14 +34,17 @@ func (s *State) Submit(ctx context.Context, config Config) (Credentials, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failed || s.closed {
-		return Credentials{}, ErrState
+		return Credentials{}, fmt.Errorf("%w: this handle is closed or poisoned by an earlier failed write", ErrState)
 	}
 	if s.state.Response != nil {
 		return s.credentials()
 	}
 	origin, err := url.Parse(config.Endpoint)
-	if err != nil || origin.Scheme != "https" || origin.Hostname() == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
-		return Credentials{}, ErrConfiguration
+	if err != nil {
+		return Credentials{}, fmt.Errorf("%w: parse the enrollment endpoint: %w", ErrConfiguration, err)
+	}
+	if origin.Scheme != "https" || origin.Hostname() == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
+		return Credentials{}, fmt.Errorf("%w: the enrollment endpoint must be an HTTPS origin without credentials, a path, a query, or a fragment", ErrConfiguration)
 	}
 	if config.RequestTimeout == 0 {
 		config.RequestTimeout = 10 * time.Second
@@ -49,21 +53,22 @@ func (s *State) Submit(ctx context.Context, config Config) (Credentials, error) 
 		config.Attempts = 3
 	}
 	if config.RequestTimeout <= 0 || config.RequestTimeout > time.Minute || config.Attempts < 1 || config.Attempts > 5 {
-		return Credentials{}, ErrConfiguration
+		return Credentials{}, fmt.Errorf("%w: use a request timeout of up to a minute and 1 to 5 attempts", ErrConfiguration)
 	}
 	file, err := os.OpenFile(config.TokenFile, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return Credentials{}, ErrConfiguration
+		return Credentials{}, fmt.Errorf("%w: open the enrollment token file: %w", ErrConfiguration, err)
 	}
 	data, readErr := readPrivate(file, 45)
 	file.Close()
 	if readErr != nil {
-		return Credentials{}, ErrConfiguration
+		return Credentials{}, fmt.Errorf("%w: read the enrollment token file: %w", ErrConfiguration, readErr)
 	}
 	token := strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
 	decoded, err := base64.RawURLEncoding.DecodeString(token)
+	// The token itself never appears here. Its shape is the fault to report.
 	if err != nil || len(decoded) != 32 || len(token) != 43 || base64.RawURLEncoding.EncodeToString(decoded) != token {
-		return Credentials{}, ErrConfiguration
+		return Credentials{}, fmt.Errorf("%w: the enrollment token must be 43 characters of raw URL base64 over 32 bytes", ErrConfiguration)
 	}
 	hash := sha256.Sum256([]byte(token))
 	if len(s.state.TokenHash) == 0 {
@@ -73,7 +78,7 @@ func (s *State) Submit(ctx context.Context, config Config) (Credentials, error) 
 			return Credentials{}, err
 		}
 	} else if !bytes.Equal(s.state.TokenHash, hash[:]) {
-		return Credentials{}, ErrConflict
+		return Credentials{}, fmt.Errorf("%w: this state was started with a different enrollment token; keep the saved request", ErrConflict)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: config.RootCAs}
@@ -92,7 +97,7 @@ func (s *State) Submit(ctx context.Context, config Config) (Credentials, error) 
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(origin.String(), "/")+"/v1/enrollments", bytes.NewReader(s.state.Body))
 		if err != nil {
-			return Credentials{}, ErrConfiguration
+			return Credentials{}, fmt.Errorf("%w: build the enrollment request: %w", ErrConfiguration, err)
 		}
 		request.Header.Set("Authorization", "Bearer "+token)
 		request.Header.Set("Content-Type", "application/json")
@@ -112,12 +117,12 @@ func (s *State) Submit(ctx context.Context, config Config) (Credentials, error) 
 			continue
 		}
 		if len(data) > 128<<10 {
-			return Credentials{}, ErrCertificate
+			return Credentials{}, fmt.Errorf("%w: the enrollment response exceeds 128 KiB", ErrCertificate)
 		}
 		if response.StatusCode == http.StatusCreated {
 			var enrolled Response
 			if err := json.Unmarshal(data, &enrolled); err != nil {
-				return Credentials{}, ErrCertificate
+				return Credentials{}, fmt.Errorf("%w: decode the enrollment response: %w", ErrCertificate, err)
 			}
 			if err := s.validateCertificate(&enrolled); err != nil {
 				return Credentials{}, err
@@ -131,16 +136,16 @@ func (s *State) Submit(ctx context.Context, config Config) (Credentials, error) 
 		}
 		switch response.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
-			return Credentials{}, ErrUnauthorized
+			return Credentials{}, fmt.Errorf("%w: the controller answered %d", ErrUnauthorized, response.StatusCode)
 		case http.StatusConflict:
-			return Credentials{}, ErrConflict
+			return Credentials{}, fmt.Errorf("%w: the controller answered %d", ErrConflict, response.StatusCode)
 		case http.StatusTooManyRequests:
 			failure = ErrUnavailable
 			delay = time.Second
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			failure = ErrUnavailable
 		default:
-			return Credentials{}, ErrUnavailable
+			return Credentials{}, fmt.Errorf("%w: the controller answered %d", ErrUnavailable, response.StatusCode)
 		}
 	}
 	return Credentials{}, failure

@@ -52,3 +52,13 @@ func TestCreateSpecV1Representation(t *testing.T) {
 		t.Fatalf("v1 hash representation changed: %s", body)
 	}
 }
+
+func TestPostgresReplicationPolicyValidation(t *testing.T) {
+	for _, policy := range []string{"", "asynchronous", "synchronous", "automatic", "sync", "SYNCHRONOUS"} {
+		spec := CreateSpec{SchemaVersion: 1, Name: "db", Engine: PostgreSQL, PostgreSQL: &PostgreSQLSpec{Version: "17.11", Topology: "standalone", ReplicationPolicy: policy}}
+		valid := policy == "" || policy == "asynchronous" || policy == "synchronous"
+		if err := spec.Validate(); (err == nil) != valid {
+			t.Fatalf("policy %q: %v", policy, err)
+		}
+	}
+}

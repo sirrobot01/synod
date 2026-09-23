@@ -90,7 +90,7 @@ func (s *Store) RecordAgentAdmission(ctx context.Context, installationID, nodeID
 	if epoch.InstallationId != installationID.String() || epoch.NodeId != nodeID.String() || epoch.ExecutionEpoch < 1 {
 		return operation.ErrStaleOwner
 	}
-	for _, id := range []string{ack.CommandId, epoch.ClusterId, epoch.RecoveryGeneration} {
+	for _, id := range []string{ack.CommandId, ack.DeliveryAttemptId, epoch.ClusterId, epoch.RecoveryGeneration} {
 		parsed, err := uuid.Parse(id)
 		if err != nil || parsed == uuid.Nil || parsed.String() != id {
 			return &AdmissionError{Code: InvalidRequest}
@@ -145,7 +145,19 @@ func (s *Store) RecordAgentAdmission(ctx context.Context, installationID, nodeID
 	if command.CommandId != ack.CommandId || !proto.Equal(command.Epoch, epoch) || !bytes.Equal(command.InputHash, ack.InputHash) {
 		return operation.ErrCommandConflict
 	}
+	var matches bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM command_delivery_attempts
+ WHERE attempt_id=$1 AND command_id=$2 AND execution_epoch=$3 AND recovery_generation=$4 AND session_id=$5)`,
+		ack.DeliveryAttemptId, ack.CommandId, epoch.ExecutionEpoch, epoch.RecoveryGeneration, sessionID).Scan(&matches); err != nil {
+		return admissionError(err)
+	}
+	if !matches {
+		return operation.ErrCommandConflict
+	}
 	if rank == 0 {
+		if _, err := tx.Exec(ctx, `UPDATE command_delivery_attempts SET rejection_bytes=$2 WHERE attempt_id=$1`, ack.DeliveryAttemptId, encoded); err != nil {
+			return admissionError(err)
+		}
 		_, err = tx.Exec(ctx, `INSERT INTO command_admissions (command_id,execution_epoch,recovery_generation,rejection_bytes,rejection_session_id)
  VALUES ($1,$2,$3,$4,$5) ON CONFLICT (command_id,execution_epoch,recovery_generation)
  DO UPDATE SET rejection_bytes=EXCLUDED.rejection_bytes,rejection_session_id=EXCLUDED.rejection_session_id,updated_at=clock_timestamp()`, ack.CommandId, epoch.ExecutionEpoch, epoch.RecoveryGeneration, encoded, sessionID)
@@ -263,6 +275,9 @@ type StepEvidence struct {
 	Result             *agentv1.TerminalResult
 	Completion         *StepCompletion
 	Delivery           *DeliveryAttempt
+	// UnansweredDeliveries counts current-run attempts without a recorded refusal.
+	// Accepted commands still require a terminal result, regardless of this count.
+	UnansweredDeliveries int
 }
 
 // RecoveryCheckpoint is the stored frontier that a worker resumes from.
@@ -350,6 +365,9 @@ func (s *Store) RecordStepCompletion(ctx context.Context, claim operation.Claim,
 	}
 	if sha256.Sum256(receiptBytes) != receiptHash || !proto.Equal(receipt.Epoch, receiptEpoch) || receipt.State != "succeeded" || receipt.FailureCode != "" || slices.ContainsFunc(receipt.Effects, func(effect *agentv1.Effect) bool { return effect == nil || effect.Active || effect.OutcomeUnknown }) {
 		return operation.ErrCommandConflict
+	}
+	if err := operation.CheckStepResult(step, &receipt); err != nil {
+		return err
 	}
 	for _, dependency := range step.DependsOn {
 		var completed bool

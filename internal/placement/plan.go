@@ -20,6 +20,7 @@ type planner struct {
 type candidate struct {
 	node                   int
 	load                   Vector
+	ports                  []Port
 	numerator, denominator uint64
 }
 
@@ -187,32 +188,9 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 			return candidate{}, false
 		}
 	}
-	for _, port := range resource.Ports {
-		for _, allocation := range p.snapshot.Allocations {
-			if allocation.Released || allocation.NodeID != node.ID {
-				continue
-			}
-			for _, held := range allocation.Ports {
-				if PortsConflict(port, held) && (allocation.ResourceID != resource.ID || port != held) {
-					return candidate{}, false
-				}
-			}
-		}
-		for id, assignment := range p.assigned {
-			if assignment.NodeID != node.ID {
-				continue
-			}
-			for _, other := range p.request.Resources {
-				if other.ID != id {
-					continue
-				}
-				for _, held := range other.Ports {
-					if PortsConflict(port, held) {
-						return candidate{}, false
-					}
-				}
-			}
-		}
+	chosen, ok := p.ports(resource, index)
+	if !ok {
+		return candidate{}, false
 	}
 	for _, group := range p.request.Groups {
 		if !slices.Contains(group.Members, resource.ID) {
@@ -254,13 +232,106 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 	if err != nil || load.CPUMillis > report.Capacity.CPUMillis || load.MemoryBytes > report.Capacity.MemoryBytes || load.DiskBytes > report.Capacity.DiskBytes {
 		return candidate{}, false
 	}
-	result := candidate{node: index, load: load, numerator: uint64(load.CPUMillis), denominator: uint64(report.Capacity.CPUMillis)}
+	result := candidate{node: index, load: load, ports: chosen, numerator: uint64(load.CPUMillis), denominator: uint64(report.Capacity.CPUMillis)}
 	for _, ratio := range [][2]int64{{load.MemoryBytes, report.Capacity.MemoryBytes}, {load.DiskBytes, report.Capacity.DiskBytes}} {
 		if compareRatio(uint64(ratio[0]), uint64(ratio[1]), result.numerator, result.denominator) > 0 {
 			result.numerator, result.denominator = uint64(ratio[0]), uint64(ratio[1])
 		}
 	}
 	return result, true
+}
+
+// ports resolves what one resource will bind on a node. A requested number of zero is
+// a request for one from the installation's range, so the choice is made here, where
+// every binding already held on the node is known. It reports false when a requested
+// binding is taken and when the range has nothing left.
+func (p *planner) ports(resource Resource, index int) ([]Port, bool) {
+	// A retry reuses the ports its reservation already holds, matched to the bindings
+	// the request asks for. Choosing again would move an engine that is already
+	// listening, and the request states its ports in whatever order it likes.
+	if prior, exists := p.existing[resource.ID]; exists {
+		if len(prior.Ports) != len(resource.Ports) {
+			return nil, false
+		}
+		chosen := make([]Port, 0, len(resource.Ports))
+		matched := make([]bool, len(prior.Ports))
+		for _, asked := range resource.Ports {
+			found := -1
+			for i, port := range prior.Ports {
+				if asked.Number == 0 && slices.ContainsFunc(resource.Ports, func(fixed Port) bool {
+					return fixed.Number != 0 && PortsConflict(port, fixed)
+				}) {
+					continue
+				}
+				if !matched[i] && port.Address == asked.Address && port.Transport == asked.Transport && (asked.Number == 0 || asked.Number == port.Number) {
+					found = i
+					break
+				}
+			}
+			if found < 0 {
+				return nil, false
+			}
+			matched[found] = true
+			chosen = append(chosen, prior.Ports[found])
+		}
+		for _, port := range chosen {
+			if p.held(resource, index, port) {
+				return nil, false
+			}
+		}
+		return chosen, true
+	}
+	chosen := make([]Port, 0, len(resource.Ports))
+	for _, port := range resource.Ports {
+		if port.Number == 0 {
+			// The lowest free number wins, so the same inputs always choose the same
+			// port. Counting in int keeps the last port in the range from wrapping.
+			for try := int(p.request.PortRange.First); try <= int(p.request.PortRange.Last); try++ {
+				attempt := port
+				attempt.Number = uint16(try)
+				if p.held(resource, index, attempt) || slices.ContainsFunc(chosen, func(taken Port) bool { return PortsConflict(attempt, taken) }) ||
+					slices.ContainsFunc(resource.Ports, func(asked Port) bool { return asked.Number != 0 && PortsConflict(attempt, asked) }) {
+					continue
+				}
+				port.Number = attempt.Number
+				break
+			}
+			if port.Number == 0 {
+				return nil, false
+			}
+		} else if p.held(resource, index, port) || slices.ContainsFunc(chosen, func(taken Port) bool { return PortsConflict(port, taken) }) {
+			return nil, false
+		}
+		chosen = append(chosen, port)
+	}
+	return chosen, true
+}
+
+// held reports one binding already taken on a node by anything but this resource's own
+// identical one.
+func (p *planner) held(resource Resource, index int, port Port) bool {
+	node := p.snapshot.Nodes[index]
+	for _, allocation := range p.snapshot.Allocations {
+		if allocation.Released || allocation.NodeID != node.ID {
+			continue
+		}
+		for _, taken := range allocation.Ports {
+			if PortsConflict(port, taken) && (allocation.ResourceID != resource.ID || port != taken) {
+				return true
+			}
+		}
+	}
+	for id, assignment := range p.assigned {
+		if assignment.NodeID != node.ID || id == resource.ID {
+			continue
+		}
+		for _, taken := range assignment.Ports {
+			if PortsConflict(port, taken) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Compare exact utilization fractions without float rounding or integer overflow.
@@ -312,7 +383,7 @@ func Plan(request Request, snapshot Snapshot) (Decision, error) {
 			node := snapshot.Nodes[option.node]
 			before := p.loads[option.node]
 			p.loads[option.node] = option.load
-			p.assigned[next.ID] = Assignment{ResourceID: next.ID, ReservationID: next.ReservationID, NodeID: node.ID, PolicyRevision: node.Policy.Revision, ProbeRevision: node.Probe.Revision}
+			p.assigned[next.ID] = Assignment{ResourceID: next.ID, ReservationID: next.ReservationID, NodeID: node.ID, PolicyRevision: node.Policy.Revision, ProbeRevision: node.Probe.Revision, Ports: option.ports}
 			found, err := search()
 			if err != nil || found {
 				return found, err
@@ -360,8 +431,29 @@ func CheckDecision(request Request, snapshot Snapshot, decision Decision) error 
 		if !exists || assignment.ReservationID != resource.ReservationID {
 			return ErrChanged
 		}
+		// The decision names the ports it chose. Checking them against the request
+		// keeps a decision from binding a port the request never asked for.
+		if len(assignment.Ports) != len(resource.Ports) {
+			return ErrChanged
+		}
+		for i, asked := range resource.Ports {
+			bound := assignment.Ports[i]
+			if asked.Address != bound.Address || asked.Transport != bound.Transport || bound.Validate() != nil {
+				return ErrChanged
+			}
+			if asked.Number == 0 && (bound.Number < request.PortRange.First || bound.Number > request.PortRange.Last) {
+				return ErrChanged
+			}
+			if asked.Number != 0 && asked.Number != bound.Number {
+				return ErrChanged
+			}
+		}
+		// Ask whether the very bindings the decision named are still free, rather
+		// than choosing again: a second choice could land elsewhere and then reject
+		// a decision that is still sound.
+		resource.Ports = assignment.Ports
 		value, ok := p.viable(resource, nodeIndex)
-		if !ok {
+		if !ok || !slices.Equal(value.ports, assignment.Ports) {
 			return ErrChanged
 		}
 		node := snapshot.Nodes[nodeIndex]

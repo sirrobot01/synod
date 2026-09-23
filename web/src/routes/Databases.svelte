@@ -1,24 +1,58 @@
 <script lang="ts">
-  import { api, detail, type Admission } from "../lib/api";
-  import { age, errorView, freshness, desiredMark, observedMark, verdict, verdictView, type APIError } from "../lib/state";
-  import { clusters, gaps, topologyOptions } from "../lib/mock";
+  import { onMount } from "svelte";
+  import { api, detail, type Admission, type Cluster } from "../lib/api";
+  import { errorView, type APIError } from "../lib/state";
+  import { gaps, topologyOptions } from "../lib/mock";
   import { follow, path } from "../lib/router.svelte";
-  import Conditions from "../lib/ui/Conditions.svelte";
   import Dialog from "../lib/ui/Dialog.svelte";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
-  import Mocked from "../lib/ui/Mocked.svelte";
   import Panel from "../lib/ui/Panel.svelte";
 
   let { onOpen, onOpenOperation }: { onOpen: (id: string) => void; onOpenOperation: (id: string) => void } = $props();
 
-  const now = new Date();
-  const fleet = clusters(now);
+  let fleet = $state<Cluster[]>([]);
+  let nextCursor = $state("");
+  let includeDeleted = $state(false);
+  let reading = $state(false);
+  let listFailure = $state<APIError | null>(null);
+  let generation = 0;
+
+  async function readClusters(reset = false) {
+    if (reset) {
+      generation++;
+      fleet = [];
+      nextCursor = "";
+    } else if (reading) return;
+    const current = generation;
+    const cursor = nextCursor;
+    const deleted = includeDeleted;
+    reading = true;
+    listFailure = null;
+    try {
+      const page = await api.clusters(cursor, deleted);
+      if (current !== generation) return;
+      const merged = new Map(fleet.map((cluster) => [cluster.id, cluster]));
+      for (const cluster of page.items) merged.set(cluster.id, cluster);
+      fleet = [...merged.values()];
+      nextCursor = page.next_cursor;
+    } catch (error) {
+      if (current === generation) listFailure = detail(error);
+    } finally {
+      if (current === generation) reading = false;
+    }
+  }
+
+  onMount(() => {
+    void readClusters(true);
+    return () => { generation++; };
+  });
 
   let creating = $state(false);
   let lookup = $state("");
   let name = $state("");
   let engine = $state<"postgres" | "redis">("postgres");
   let version = $state("17.11");
+  let replicationPolicy = $state<"asynchronous" | "synchronous">("asynchronous");
   let persistence = $state<"none" | "rdb" | "aof" | "rdb+aof">("rdb");
   let busy = $state(false);
   let failure = $state<APIError | null>(null);
@@ -68,7 +102,7 @@
     failure = null;
     const spec =
       engine === "postgres"
-        ? { schema_version: 1, name: name.trim(), engine, postgresql: { version: version.trim(), topology: admitted }, redis: null }
+        ? { schema_version: 1, name: name.trim(), engine, postgresql: { version: version.trim(), topology: admitted, replication_policy: replicationPolicy }, redis: null }
         : { schema_version: 1, name: name.trim(), engine, postgresql: null, redis: { version: version.trim(), topology: admitted, persistence } };
     try {
       admission = await api.createCluster(spec, key);
@@ -97,66 +131,63 @@
   <Panel title="Open a cluster" note="this reads the API">
     <form class="lookup" onsubmit={open}>
       <label for="cluster-id" class="label">Cluster ID</label>
-      <input id="cluster-id" bind:value={lookup} placeholder="cl_31d0aa47" />
+      <input id="cluster-id" bind:value={lookup} placeholder="Cluster UUID" />
       <button type="submit">Open</button>
     </form>
   </Panel>
 
-  <Mocked gap={gaps.collections} />
-
-  <Panel title="All clusters">
-    <div class="scroll">
-      <div class="grid clusters">
-        <div class="head">Cluster</div>
-        <div class="head">Desired / observed</div>
-        <div class="head">Topology</div>
-        <div class="head">Size</div>
-        <div class="head">Conditions</div>
-        <div class="head">Updated</div>
-        {#each fleet as cluster (cluster.id)}
-          {@const value = {
-            desired: cluster.desired,
-            desiredRevision: cluster.desiredRevision,
-            observed: cluster.observed,
-            observedRevision: cluster.observedRevision,
-            observedAt: new Date(now.getTime() - cluster.observedAgeSeconds * 1000).toISOString(),
-            ...(cluster.owningOperation ? { owningOperation: cluster.owningOperation } : {}),
-          }}
-          {@const result = verdict(value, now)}
-          {@const view = verdictView(result)}
-          {@const expired = freshness(cluster.observedAgeSeconds) === "expired"}
-          {@const seen = observedMark(expired ? "unknown" : cluster.observed)}
-          <div class="cell stack">
-            <a
-              class="mono name"
-              href={path("cluster", cluster.id)}
-              onclick={(event) => follow(event, () => onOpen(cluster.id))}>{cluster.name}</a
-            >
-            <span class="mono id">{cluster.id}</span>
-          </div>
-          <div
-            class="cell stack pair"
-            class:ruled={result !== "converged"}
-            class:dashed={view.dashed}
-            style="--rule: var(--{view.tone})"
-          >
-            <span class="mono desired">
-              {desiredMark(cluster.desired).glyph} {cluster.desired} · rev {cluster.desiredRevision}
-            </span>
-            <span class="mono observed">{seen.glyph} {seen.label} · {age(cluster.observedAgeSeconds)}</span>
-          </div>
-          <div class="cell">{cluster.topology}</div>
-          <div class="cell">{cluster.size}</div>
-          <div class="cell"><Conditions reported={cluster.conditions} {now} compact /></div>
-          <div class="cell updated">{age(cluster.observedAgeSeconds)}</div>
-        {/each}
+  <Panel title="All clusters" note={`${fleet.length} loaded`}>
+    {#snippet actions()}
+      <label class="filter"><input type="checkbox" bind:checked={includeDeleted} onchange={() => readClusters(true)} /> Show deleted</label>
+      <button type="button" onclick={() => readClusters(true)}>Refresh</button>
+    {/snippet}
+    {#if reading}<p class="list-message" role="status">Loading clusters…</p>{/if}
+    {#if listFailure}
+      <div class="list-message">
+        <ErrorPanel view={{ ...errorView(listFailure), consequence: listFailure.message }} />
+        <button type="button" onclick={() => readClusters()}>Retry list read</button>
       </div>
-    </div>
+    {:else if !reading && fleet.length === 0}
+      <p class="list-message">No clusters found{includeDeleted ? "." : " with completed deletions excluded."}</p>
+    {/if}
+    {#if fleet.length > 0}
+      <div class="scroll">
+        <div class="grid clusters">
+          <div class="head">Cluster</div>
+          <div class="head">Desired / stored observation</div>
+          <div class="head">Configured engine</div>
+          <div class="head">Configured topology</div>
+          <div class="head">Native observation</div>
+          <div class="head">Row updated</div>
+          {#each fleet as cluster (cluster.id)}
+            {@const configured = cluster.spec.engine === "postgres" ? cluster.spec.postgresql : cluster.spec.redis}
+            <div class="cell stack">
+              <a class="mono name" href={path("cluster", cluster.id)}
+                onclick={(event) => follow(event, () => onOpen(cluster.id))}>{cluster.spec.name}</a>
+              <span class="mono id">{cluster.id}</span>
+              {#if cluster.deleted_at}<span class="note">Deleted record</span>{/if}
+            </div>
+            <div class="cell stack">
+              <span class="mono desired">Desired: {cluster.desired_lifecycle} · rev {cluster.desired_revision}</span>
+              <span class="mono observed">Stored: {cluster.observed_lifecycle} · rev {cluster.observed_revision}</span>
+            </div>
+            <div class="cell stack">
+              <span>{cluster.spec.engine === "postgres" ? "PostgreSQL" : "Redis"} {configured.version}</span>
+              {#if cluster.spec.engine === "redis"}<span class="note">Persistence: {cluster.spec.redis.persistence}</span>{:else}<span class="note">Replication: {cluster.spec.postgresql.replication_policy || "asynchronous"}</span>{/if}
+            </div>
+            <div class="cell">{configured.topology}</div>
+            <div class="cell note">Health and observation time unavailable</div>
+            <div class="cell updated"><time datetime={cluster.updated_at}>{cluster.updated_at}</time></div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+    {#if nextCursor !== "" && !listFailure}
+      <div class="list-message"><button type="button" disabled={reading} onclick={() => readClusters()}>Load more</button></div>
+    {/if}
     {#snippet foot()}
-      The condition strip uses fixed positions — Ready, Reachable, Replicated, BackupCurrent,
-      EndpointReady — so the third mark is always replication whether it is true, false, or
-      unknown. Hovering names it; the cluster screen states reason, observation time, and revision
-      in text.
+      These are stored lifecycle states, not current database health. Row update time is not an observation time.
+      The loaded count covers these pages only. Changes can affect later pages. Refresh to see newer clusters.
     {/snippet}
   </Panel>
 </div>
@@ -172,10 +203,10 @@
       {@const accepted = admission}
       <!-- Acceptance is its own state. It makes no claim about any database. -->
       <div class="accepted" role="status">
-        <p class="headline mono">202 accepted — not created yet</p>
+        <p class="headline mono">202 accepted — inspect the operation</p>
         <p class="body">
           The request is durably recorded.{accepted.replayed ? " It replayed an earlier request." : ""}
-          No container, volume, or database exists yet. Nothing about
+          Acceptance does not prove that provisioning is complete. Nothing about
           <span class="mono">{name.trim()}</span> is claimed until its operation reports.
         </p>
         <div class="facts mono">
@@ -248,6 +279,23 @@
               offer from, so this stays a field. Gap: <span class="mono">{gaps.versions}</span>.
             </span>
           </div>
+          {#if engine === "postgres"}
+            <div class="field">
+              <label for="replication-policy" class="label">Replication policy</label>
+              <select id="replication-policy" bind:value={replicationPolicy} onchange={edited}>
+                <option value="asynchronous">Asynchronous</option>
+                <option value="synchronous">Synchronous (one replica)</option>
+              </select>
+              <span class="hint">
+                {#if replicationPolicy === "synchronous"}
+                  Commits wait for one replica. This cluster starts without replicas; add one before writing.
+                  This policy currently requires PostgreSQL 17.11.
+                {:else}
+                  Commits do not wait for replicas. Recent writes can be lost if the primary is lost.
+                {/if}
+              </span>
+            </div>
+          {/if}
           {#if engine === "redis"}
             <div class="field">
               <label for="persistence" class="label">Persistence</label>
@@ -354,12 +402,19 @@
     font-size: 10px;
     color: var(--ink-faint);
   }
-  .pair.ruled {
-    border-left: 2px solid var(--rule);
-    padding-left: 10px;
+  .list-message {
+    margin: 0;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
   }
-  .pair.ruled.dashed {
-    border-left-style: dashed;
+  .filter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
   }
   .desired {
     color: var(--ink-muted);

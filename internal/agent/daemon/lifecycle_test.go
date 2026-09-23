@@ -57,7 +57,7 @@ func TestExecutableLifecycleWithDocker(t *testing.T) {
 	if err := os.Chmod(parent, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	config := daemon.Config{InstallationID: uuid.NewString(), NodeID: uuid.NewString(), RecoveryGeneration: uuid.NewString(), EnrollmentDir: filepath.Join(parent, "enrollment"), JournalDir: filepath.Join(parent, "journal"), DockerSocket: strings.TrimPrefix(host, "unix://")}
+	config := daemon.Config{InstallationID: uuid.NewString(), NodeID: uuid.NewString(), RecoveryGeneration: uuid.NewString(), EnrollmentDir: filepath.Join(parent, "enrollment"), JournalDir: filepath.Join(parent, "journal"), DockerSocket: strings.TrimPrefix(host, "unix://"), JournalMaxRetainedBytes: 128 << 20, JournalMaxStoredBytes: 512 << 20, JournalRecoveryWindowSeconds: 3600}
 	assigned := enrollment.Identity{InstallationID: uuid.MustParse(config.InstallationID), NodeID: uuid.MustParse(config.NodeID)}
 	caPEM, caKey, err := pki.CreateCA(assigned.InstallationID, time.Now(), 7*24*time.Hour)
 	if err != nil {
@@ -378,7 +378,7 @@ func TestExecutableLifecycleWithDocker(t *testing.T) {
 				t.Fatal(err)
 			}
 			work.InputHash = hash[:]
-			if err := server.Send(assigned.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Command{Command: work}}); err != nil {
+			if err := server.Send(assigned.NodeID, peer.SessionID, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: work}}); err != nil {
 				t.Fatal(err)
 			}
 			select {

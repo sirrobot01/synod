@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"encoding/base64"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirrobot01/synod/internal/api"
@@ -24,15 +26,20 @@ import (
 	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/config"
 	"github.com/sirrobot01/synod/internal/controller/agentstream"
+	"github.com/sirrobot01/synod/internal/controller/capacity"
+	"github.com/sirrobot01/synod/internal/controller/provision"
 	"github.com/sirrobot01/synod/internal/controller/runner"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/coordinator"
+	"github.com/sirrobot01/synod/internal/engine"
+	postgresengine "github.com/sirrobot01/synod/internal/engine/postgres"
+	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
 	"github.com/sirrobot01/synod/internal/pki"
+	"github.com/sirrobot01/synod/internal/placement"
+	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	"github.com/sirrobot01/synod/internal/web"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap"
 )
 
 // ownerID identifies this controller process in claims and elections.
@@ -54,6 +61,12 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, output io.Writer) error {
+	// Bootstrap writes material and exits. It is a subcommand rather than a flag
+	// because it starts nothing, and mixing it with the serving flags invites
+	// running it against a live controller.
+	if len(args) > 0 && args[0] == "bootstrap" {
+		return bootstrap(args[1:], output)
+	}
 	settings, err := config.LoadController(args, output)
 	if errors.Is(err, flag.ErrHelp) {
 		return nil
@@ -63,59 +76,60 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(settings.LogLevel)); err != nil {
-		return errors.New("invalid log level")
+		return fmt.Errorf("invalid log level %q: %w", settings.LogLevel, err)
 	}
 	logger := slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{Level: level}))
 	// Read through an open descriptor so checks apply to the bytes we use.
 	token, err := readStartupFile(settings.AdminTokenFile, 258, true)
 	if err != nil {
-		return errors.New("read protected administrator token file failed")
+		return fmt.Errorf("read the protected administrator token file: %w", err)
 	}
+	// The token itself is never named here; only that its shape was refused.
 	admin, err := auth.NewAdminToken(strings.TrimSuffix(strings.TrimSuffix(string(token), "\n"), "\r"), settings.ActorID)
 	if err != nil {
-		return errors.New("administrator token file is invalid")
+		return fmt.Errorf("the administrator token file is invalid: %w", err)
 	}
 	key, err := readStartupFile(settings.TLSKeyFile, 1<<20, true)
 	if err != nil {
-		return errors.New("read protected TLS key file failed")
+		return fmt.Errorf("read the protected TLS key file: %w", err)
 	}
 	cert, err := readStartupFile(settings.TLSCertFile, 1<<20, false)
 	if err != nil {
-		return errors.New("read TLS certificate file failed")
+		return fmt.Errorf("read the TLS certificate file: %w", err)
 	}
 	certificate, err := tls.X509KeyPair(cert, key)
 	if err != nil {
-		return errors.New("load API TLS certificate and key failed")
+		return fmt.Errorf("load the API TLS certificate and key: %w", err)
 	}
 	var authority *pki.CA
 	if settings.CACertFile != "" {
 		caCertificate, err := readStartupFile(settings.CACertFile, 64<<10, false)
 		if err != nil {
-			return errors.New("read enrollment CA certificate failed")
+			return fmt.Errorf("read the enrollment CA certificate: %w", err)
 		}
 		caKey, err := readStartupFile(settings.CAKeyFile, 64<<10, true)
 		if err != nil {
-			return errors.New("read protected enrollment CA key failed")
+			return fmt.Errorf("read the protected enrollment CA key: %w", err)
 		}
 		authority, err = pki.LoadCA(uuid.MustParse(settings.InstallationID), caCertificate, caKey)
 		clear(caKey)
 		if err != nil {
-			return errors.New("load enrollment CA failed")
+			return fmt.Errorf("load the enrollment CA: %w", err)
 		}
 	}
 	var agentTLS *tls.Config
 	if settings.AgentListen != "" {
 		agentCert, err := readStartupFile(settings.AgentTLSCertFile, 64<<10, false)
 		if err != nil {
-			return errors.New("read agent-transport controller certificate failed")
+			return fmt.Errorf("read the agent-transport controller certificate: %w", err)
 		}
 		agentKey, err := readStartupFile(settings.AgentTLSKeyFile, 64<<10, true)
 		if err != nil {
-			return errors.New("read protected agent-transport controller key failed")
+			return fmt.Errorf("read the protected agent-transport controller key: %w", err)
 		}
 		agentTrust, err := readStartupFile(settings.AgentCAFile, 1<<20, false)
 		if err != nil {
-			return errors.New("read agent-transport installation trust failed")
+			return fmt.Errorf("read the agent-transport installation trust: %w", err)
 		}
 		agentTLS, err = agentstream.TLSConfig(uuid.MustParse(settings.InstallationID), agentCert, agentKey, agentTrust)
 		clear(agentKey)
@@ -123,38 +137,58 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return err
 		}
 	}
+	var ring *secret.Keyring
+	if settings.SecretKeyFile != "" {
+		ring, err = loadKeyring(settings.SecretKeyFile, settings.SecretKeyID)
+		if err != nil {
+			return err
+		}
+	}
 	startup, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	// pgxpool.New repeats the DSN in its error and the DSN carries the database
+	// password, so this one reports the failure without its cause.
 	pool, err := pgxpool.New(startup, settings.DatabaseURL)
 	if err != nil {
 		return errors.New("configure metadata connection failed")
 	}
 	defer pool.Close()
 	if err := pool.Ping(startup); err != nil {
-		return errors.New("connect to metadata PostgreSQL failed")
+		return fmt.Errorf("connect to metadata PostgreSQL: %w", err)
 	}
 	store := postgres.New(pool)
 	if err := store.Migrate(startup); err != nil {
-		return errors.New("migrate metadata PostgreSQL failed")
+		return fmt.Errorf("migrate metadata PostgreSQL: %w", err)
 	}
-	handler, err := api.NewServer(store, admin, uuid.MustParse(settings.InstallationID), map[cluster.Engine][]string{
-		cluster.PostgreSQL: {"17.11", "18.6"}, cluster.Redis: {"8.2.7"},
-	}, logger)
+	// What this installation serves. Each engine advertises its own combinations, so
+	// a version list is no longer enough to say yes to a cluster.
+	catalog, err := engine.NewCatalog(postgresengine.New(), redisengine.New())
+	if err != nil {
+		return err
+	}
+	handler, err := api.NewServer(store, admin, uuid.MustParse(settings.InstallationID), catalog, logger)
 	if err != nil {
 		return err
 	}
 	handler.EnrollmentAuthority = authority
 	handler.PublicOrigin = settings.PublicOrigin
+	handler.SecretKeyring = ring
 	assets, err := web.Assets()
 	if err != nil {
-		return errors.New("load the web application failed")
+		return fmt.Errorf("load the web application: %w", err)
 	}
 	handler.SetAssets(assets)
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", settings.Listen)
 	if err != nil {
-		return errors.New("listen for API requests failed")
+		return fmt.Errorf("listen for API requests on %s: %w", settings.Listen, err)
 	}
-	defer listener.Close()
+	// ServeTLS closes the listener when it returns, so this only closes one that
+	// never began serving. net.ErrClosed is the ordinary path and says nothing.
+	defer func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Error("close the API listener", "error", err)
+		}
+	}()
 	server := &http.Server{
 		Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
@@ -168,7 +202,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		// The runner needs the transport and the transport needs the runner's routing,
 		// so the handler reads the pointer that the runner build fills in below.
 		handle := (agentstream.Receiver{Store: store}).Handle
-		agentServer, err = controlstream.New(controlstream.Config{InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Authorize: store.CheckAgentCertificate, Capabilities: []string{"runtime.docker", controlstream.CommandInspectionCapability},
+		agentServer, err = controlstream.New(controlstream.Config{InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Authorize: store.CheckAgentCertificate, Capabilities: []string{"runtime.docker", controlstream.CommandInspectionCapability}, Logger: logger,
 			Handle: func(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
 				if operations != nil {
 					return operations.Handle(ctx, peer, message)
@@ -181,27 +215,65 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		defer agentServer.Stop()
 		agentListener, err = (&net.ListenConfig{}).Listen(ctx, "tcp", settings.AgentListen)
 		if err != nil {
-			return errors.New("listen for agent transport failed")
+			return fmt.Errorf("listen for agent transport on %s: %w", settings.AgentListen, err)
 		}
-		defer agentListener.Close()
+		defer func() {
+			if err := agentListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Error("close the agent transport listener", "error", err)
+			}
+		}()
 		if settings.EtcdEndpoints != "" {
-			endpoints := strings.Split(settings.EtcdEndpoints, ",")
-			for index, endpoint := range endpoints {
-				endpoints[index] = strings.TrimSpace(endpoint)
+			if settings.EtcdAllowPlaintext {
+				logger.Warn("coordination uses explicit plaintext development mode")
 			}
-			etcd, err := clientv3.New(clientv3.Config{Endpoints: endpoints, DialTimeout: 5 * time.Second, Context: ctx, Logger: zap.NewNop()})
+			etcd, err := connectEtcd(ctx, settings)
 			if err != nil {
-				return errors.New("connect to etcd failed")
+				return err
 			}
-			defer etcd.Close()
+			// A client that will not close can leave an election lease alive, which
+			// keeps this process's ownership past its own exit.
+			defer func() {
+				if err := etcd.Close(); err != nil {
+					logger.Error("close the etcd client", "error", err)
+				}
+			}()
 			elector, err := coordinator.New(etcd, settings.EtcdPrefix)
 			if err != nil {
 				return err
 			}
-			operations, err = runner.New(runner.Config{
+			// Provisioning needs a wrapping key, because a plan names a credential
+			// and the controller has to open it to deliver one. Without a key the
+			// runner still runs plans that need none, so a controller can admit and
+			// observe without being able to create.
+			runnerConfig := runner.Config{
 				Store: store, Transport: agentServer, Coordinator: elector,
 				InstallationID: uuid.MustParse(settings.InstallationID), OwnerID: ownerID(), Logger: logger,
-			})
+			}
+			if ring != nil {
+				driver, err := capacity.New(capacity.Config{Store: store, Transport: agentServer, Logger: logger})
+				if err != nil {
+					return err
+				}
+				planner, err := provision.New(provision.Config{
+					Store: store, Decider: driver, Catalog: catalog, Keyring: ring,
+					Profile: provision.Profile{
+						Architecture:   settings.PlacementArchitecture,
+						RuntimeVersion: settings.PlacementRuntimeVersion,
+						StorageID:      settings.PlacementStorageID,
+					},
+					Images: pinnedImages,
+					Budget: provisionBudget,
+					EndpointPorts: placement.PortRange{
+						First: uint16(settings.EngineEndpointFirstPort),
+						Last:  uint16(settings.EngineEndpointLastPort),
+					},
+				})
+				if err != nil {
+					return err
+				}
+				runnerConfig.Keyring, runnerConfig.Planner = ring, planner
+			}
+			operations, err = runner.New(runnerConfig)
 			if err != nil {
 				return err
 			}
@@ -248,13 +320,15 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	defer stopShutdown()
 	shutdownErr := server.Shutdown(shutdown)
 	if shutdownErr != nil {
-		_ = server.Close()
+		// Close is the forced stop after a graceful one ran out of time. Its own
+		// failure is separate evidence and belongs beside the timeout.
+		shutdownErr = errors.Join(shutdownErr, server.Close())
 	}
 	for range serving {
 		<-stopped
 	}
 	if shutdownErr != nil {
-		return errors.New("API shutdown exceeded its deadline")
+		return fmt.Errorf("API shutdown exceeded its deadline: %w", shutdownErr)
 	}
 	if failed {
 		return errors.New("controller management listener stopped unexpectedly")
@@ -284,4 +358,56 @@ func readStartupFile(path string, maximum int64, private bool) ([]byte, error) {
 		return nil, errors.New("protected file exceeds its size limit")
 	}
 	return data, nil
+}
+
+// Pin engine images. Refuse combinations without a digest.
+// The Redis index contains both listed architectures. Runtime qualification is
+// tracked separately in the support matrix.
+var pinnedImages = []provision.Image{
+	{Engine: cluster.PostgreSQL, Version: "17.11", Architecture: "arm64",
+		Digest: "postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0"},
+	{Engine: cluster.PostgreSQL, Version: "17.11", Architecture: "amd64",
+		Digest: "postgres@sha256:f4c66b820c6f974249089d3d16d86a3698eae11e8746eb6644b2271031e91232"},
+	{Engine: cluster.Redis, Version: "8.2.7", Architecture: "arm64",
+		Digest: "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3"},
+	{Engine: cluster.Redis, Version: "8.2.7", Architecture: "amd64",
+		Digest: "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3"},
+}
+
+// What one instance reserves. The host port it publishes is configuration, because a
+// fleet cannot be described by a constant.
+var provisionBudget = placement.Vector{CPUMillis: 1000, MemoryBytes: 1 << 30, DiskBytes: 8 << 30}
+
+// loadKeyring reads the active credential wrapping key.
+//
+// The file holds base64 so it stays text-editable and unambiguous about length. A key
+// of the wrong size is refused rather than padded, because a short key is a weak one
+// that looks like a strong one.
+func loadKeyring(path, id string) (*secret.Keyring, error) {
+	active, err := uuid.Parse(id)
+	if err != nil {
+		return nil, fmt.Errorf("parse secret_key_id: %w", err)
+	}
+	if active == uuid.Nil {
+		return nil, errors.New("secret_key_id must be a nonzero UUID")
+	}
+	encoded, err := readStartupFile(path, 4096, true)
+	if err != nil {
+		return nil, fmt.Errorf("read the credential wrapping key: %w", err)
+	}
+	defer clear(encoded)
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
+	defer clear(key)
+	// A base64 fault names an offset, never the bytes, so the cause is safe to carry.
+	if err != nil {
+		return nil, fmt.Errorf("the credential wrapping key must be the base64 of 32 bytes: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, errors.New("the credential wrapping key must be the base64 of 32 bytes")
+	}
+	ring, err := secret.NewKeyring(active, map[uuid.UUID][]byte{active: key})
+	if err != nil {
+		return nil, fmt.Errorf("build the credential keyring: %w", err)
+	}
+	return ring, nil
 }

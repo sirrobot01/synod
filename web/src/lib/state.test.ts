@@ -155,7 +155,7 @@ describe("errors", () => {
   it("keeps the stable code verbatim and carries the request identity", () => {
     const view = errorView({ code: "operation_conflict", message: "The request is invalid.", requestID: "req_4b19c0e2", operationID: "op_7c14f2a9" });
     expect(view.code).toBe("operation_conflict");
-    expect(view.consequence).toContain("one mutating operation");
+    expect(view.consequence).toContain("Active work or a storage change");
     expect(view.requestID).toBe("req_4b19c0e2");
     expect(view.operationID).toBe("op_7c14f2a9");
   });

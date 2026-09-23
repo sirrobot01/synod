@@ -1,6 +1,7 @@
 package capacity
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -54,7 +55,7 @@ func TestMeasureReadsCapacityAndUse(t *testing.T) {
 	root := procfs(t, meminfo,
 		"cpu  100 0 100 700 100 0 0 0 0 0\n",
 		"cpu  600 0 350 950 100 0 0 0 0 0\n")
-	found, err := Host{ProcRoot: root, StoragePath: "/pool", Sample: 60 * time.Millisecond}.Measure(t.Context())
+	found, err := (&Host{ProcRoot: root, StoragePath: "/pool", Sample: 60 * time.Millisecond}).Measure(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func TestMeasureCountsIowaitAsIdle(t *testing.T) {
 	root := procfs(t, meminfo,
 		"cpu  100 0 100 700 100 0 0 0 0 0\n",
 		"cpu  100 0 100 700 1100 0 0 0 0 0\n")
-	found, err := Host{ProcRoot: root, StoragePath: "/pool", Sample: 60 * time.Millisecond}.Measure(t.Context())
+	found, err := (&Host{ProcRoot: root, StoragePath: "/pool", Sample: 60 * time.Millisecond}).Measure(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,7 @@ func TestMeasureRefusesAnUnmeasurableHost(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := procfs(t, procs[0], procs[1], procs[2])
-			if _, err := (Host{ProcRoot: root, StoragePath: "/pool", Sample: 40 * time.Millisecond}).Measure(t.Context()); err == nil {
+			if _, err := (&Host{ProcRoot: root, StoragePath: "/pool", Sample: 40 * time.Millisecond}).Measure(t.Context()); err == nil {
 				t.Fatal("an unmeasurable host reported a measurement")
 			}
 		})
@@ -116,7 +117,7 @@ func TestMeasureRefusesAnUnmeasurableHost(t *testing.T) {
 
 func TestMeasureRefusesAHostWithoutProcfs(t *testing.T) {
 	fakeDisk(t, 900<<30, 0, nil)
-	_, err := Host{ProcRoot: filepath.Join(t.TempDir(), "absent"), StoragePath: "/pool"}.Measure(t.Context())
+	_, err := (&Host{ProcRoot: filepath.Join(t.TempDir(), "absent"), StoragePath: "/pool"}).Measure(t.Context())
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("err=%v, want ErrUnsupported", err)
 	}
@@ -126,7 +127,7 @@ func TestMeasureRefusesAHostWithoutProcfs(t *testing.T) {
 func TestMeasureRefusesAnEmptyPool(t *testing.T) {
 	fakeDisk(t, 0, 0, nil)
 	root := procfs(t, meminfo, "cpu  1 0 1 1 1\n", "cpu  9 0 9 9 9\n")
-	if _, err := (Host{ProcRoot: root, StoragePath: "/pool", Sample: 40 * time.Millisecond}).Measure(t.Context()); !errors.Is(err, ErrMeasure) {
+	if _, err := (&Host{ProcRoot: root, StoragePath: "/pool", Sample: 40 * time.Millisecond}).Measure(t.Context()); !errors.Is(err, ErrMeasure) {
 		t.Fatalf("err=%v, want ErrMeasure", err)
 	}
 }
@@ -135,7 +136,7 @@ func TestMeasureRefusesAnEmptyPool(t *testing.T) {
 func TestMeasureKeepsUseInsideCapacity(t *testing.T) {
 	fakeDisk(t, 100, 900, nil)
 	root := procfs(t, meminfo, "cpu  1 0 1 1 1\n", "cpu  9 0 9 9 9\n")
-	found, err := Host{ProcRoot: root, StoragePath: "/pool", Sample: 40 * time.Millisecond}.Measure(t.Context())
+	found, err := (&Host{ProcRoot: root, StoragePath: "/pool", Sample: 40 * time.Millisecond}).Measure(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +160,7 @@ func TestDiskUsageMeasuresARealFilesystem(t *testing.T) {
 // would stop work for a dimension that may not even be declared.
 func TestFreeMeasuresThePoolWithoutProcfs(t *testing.T) {
 	fakeDisk(t, 900<<30, 340<<30, nil)
-	space, err := Host{ProcRoot: filepath.Join(t.TempDir(), "absent"), StoragePath: "/pool"}.Free()
+	space, err := (&Host{ProcRoot: filepath.Join(t.TempDir(), "absent"), StoragePath: "/pool"}).Free()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +176,7 @@ func TestFreeMeasuresThePoolWithoutProcfs(t *testing.T) {
 func TestFreeReportsMemoryWhenTheHostCanAnswer(t *testing.T) {
 	fakeDisk(t, 100<<30, 0, nil)
 	root := procfs(t, meminfo, "cpu  1 0 1 1 1\n", "cpu  9 0 9 9 9\n")
-	space, err := Host{ProcRoot: root, StoragePath: "/pool"}.Free()
+	space, err := (&Host{ProcRoot: root, StoragePath: "/pool"}).Free()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,10 +188,46 @@ func TestFreeReportsMemoryWhenTheHostCanAnswer(t *testing.T) {
 // Without a pool there is no answer at all.
 func TestFreeRefusesWithoutAPool(t *testing.T) {
 	fakeDisk(t, 0, 0, ErrUnsupported)
-	if _, err := (Host{ProcRoot: t.TempDir(), StoragePath: "/pool"}).Free(); err == nil {
+	if _, err := (&Host{ProcRoot: t.TempDir(), StoragePath: "/pool"}).Free(); err == nil {
 		t.Fatal("an unmeasurable pool reported free space")
 	}
-	if _, err := (Host{ProcRoot: t.TempDir()}).Free(); err == nil {
+	if _, err := (&Host{ProcRoot: t.TempDir()}).Free(); err == nil {
 		t.Fatal("a host with no declared pool reported free space")
+	}
+}
+
+// A probe every ten seconds that samples a fresh 200ms burst reads a host's CPU
+// from one arbitrary instant, and placement treats that number as a hard limit.
+// Every measurement after the first covers the whole interval since the one before.
+func TestMeasureRatesCPUOverTheWholeIntervalBetweenMeasurements(t *testing.T) {
+	fakeDisk(t, 900<<30, 340<<30, nil)
+	root := procfs(t, meminfo,
+		"cpu  100 0 100 700 100 0 0 0 0 0\n",
+		"cpu  600 0 350 950 100 0 0 0 0 0\n")
+	host := &Host{ProcRoot: root, StoragePath: "/pool", Sample: 60 * time.Millisecond}
+	if _, err := host.Measure(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "stat"), []byte("cpu  600 0 350 1950 100 0 0 0 0 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A new sample cannot finish before this deadline. An interval reading can.
+	host.Sample = time.Hour
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	found, err := host.Measure(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.Used.CPUMillis != 0 {
+		t.Fatalf("cpu used=%d, want 0 over an idle interval", found.Used.CPUMillis)
+	}
+	cancel()
+	priorTotal, priorIdle := host.lastTotal, host.lastIdle
+	if _, err := host.Measure(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled measurement returned %v", err)
+	}
+	if host.lastTotal != priorTotal || host.lastIdle != priorIdle {
+		t.Fatal("cancelled measurement advanced the CPU baseline")
 	}
 }

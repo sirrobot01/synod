@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 
@@ -31,7 +32,7 @@ func (j *Journal) CloseAdmission(epoch *agentv1.Epoch) error {
 	if len(cluster.Barrier) != 0 {
 		var report agentv1.BarrierResult
 		if err := proto.Unmarshal(cluster.Barrier, &report); err != nil {
-			return ErrRecoveryRequired
+			return fmt.Errorf("decode the saved barrier of cluster %s: %w: %w", epoch.ClusterId, ErrRecoveryRequired, err)
 		}
 		report.AdmissionsClosed, report.Drained = true, false
 		encoded, err := proto.Marshal(&report)

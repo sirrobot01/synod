@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +15,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
 	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/engine"
 	"github.com/sirrobot01/synod/internal/pki"
+	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	"golang.org/x/time/rate"
 )
@@ -41,10 +42,13 @@ type identityKey struct{}
 type Server struct {
 	// EnrollmentAuthority must be configured before serving requests. Nil disables new issuance.
 	EnrollmentAuthority *pki.CA
-	requestLimit        *rate.Limiter
-	enrollmentLimit     *rate.Limiter
-	signInLimit         *rate.Limiter
-	signInAttempts      *attemptLimiter
+	// SecretKeyring must be configured before serving. Nil disables credential reveal.
+	SecretKeyring         *secret.Keyring
+	requestLimit          *rate.Limiter
+	enrollmentLimit       *rate.Limiter
+	credentialRevealLimit *rate.Limiter
+	signInLimit           *rate.Limiter
+	signInAttempts        *attemptLimiter
 	// assets is the built browser application. A nil value serves the API alone.
 	assets fs.FS
 	// PublicOrigin is the browser origin of this API. Set it before serving requests.
@@ -53,20 +57,19 @@ type Server struct {
 	store          *postgres.Store
 	admin          *auth.AdminToken
 	installationID uuid.UUID
-	versions       map[cluster.Engine][]string
-	logger         *slog.Logger
-	router         chi.Router
+	// catalog is what this installation serves. A nil catalog serves nothing, which
+	// is what a replay must still survive.
+	catalog *engine.Catalog
+	logger  *slog.Logger
+	router  chi.Router
 }
 
 // NewServer builds the API server and registers its routes.
-func NewServer(store *postgres.Store, admin *auth.AdminToken, installationID uuid.UUID, versions map[cluster.Engine][]string, logger *slog.Logger) (*Server, error) {
+func NewServer(store *postgres.Store, admin *auth.AdminToken, installationID uuid.UUID, catalog *engine.Catalog, logger *slog.Logger) (*Server, error) {
 	if store == nil || admin == nil || installationID == uuid.Nil || logger == nil {
 		return nil, errors.New("API requires a Store, administrator verifier, installation ID, and logger")
 	}
-	server := &Server{requestLimit: rate.NewLimiter(100, 200), enrollmentLimit: rate.NewLimiter(10, 20), signInLimit: rate.NewLimiter(1, 10), signInAttempts: newAttemptLimiter(rate.Every(2*time.Second), 5, 4096), store: store, admin: admin, installationID: installationID, logger: logger, versions: make(map[cluster.Engine][]string)}
-	for engine, values := range versions {
-		server.versions[engine] = slices.Clone(values)
-	}
+	server := &Server{requestLimit: rate.NewLimiter(100, 200), enrollmentLimit: rate.NewLimiter(10, 20), credentialRevealLimit: rate.NewLimiter(1, 5), signInLimit: rate.NewLimiter(1, 10), signInAttempts: newAttemptLimiter(rate.Every(2*time.Second), 5, 4096), store: store, admin: admin, installationID: installationID, logger: logger, catalog: catalog}
 	router := chi.NewRouter()
 	router.Use(server.begin)
 	router.NotFound(func(w http.ResponseWriter, r *http.Request) {
@@ -112,13 +115,27 @@ func NewServer(store *postgres.Store, admin *auth.AdminToken, installationID uui
 			signed.Group(func(admin chi.Router) {
 				admin.Use(server.requireAdmin)
 				admin.Post("/clusters", server.createCluster)
+				admin.Get("/clusters", server.listClusters)
+				admin.Head("/clusters", server.listClusters)
 				admin.Get("/clusters/{id}", server.getCluster)
+				admin.Get("/clusters/{id}/endpoints", server.getClusterEndpoints)
+				admin.Get("/clusters/{id}/members", server.getClusterMembers)
+				admin.Get("/clusters/{id}/credentials", server.getClusterCredentials)
+				admin.With(server.limitCredentialReveal).Post("/clusters/{id}/credentials/{purpose}/reveal", server.revealClusterCredential)
+				admin.Post("/clusters/{id}/actions/stop", server.clusterAction(postgres.StopClusterAPIOperation))
+				admin.Post("/clusters/{id}/actions/start", server.clusterAction(postgres.StartClusterAPIOperation))
+				admin.Post("/clusters/{id}/actions/recover-setup", server.clusterAction(postgres.RecoverSetupAPIOperation))
+				admin.Post("/clusters/{id}/actions/rebuild-replica", server.clusterAction(postgres.RebuildReplicaAPIOperation))
+				admin.Post("/clusters/{id}/actions/scale", server.clusterAction(postgres.ScaleClusterAPIOperation))
+				admin.Delete("/clusters/{id}", server.clusterAction(postgres.DeleteClusterAPIOperation))
+				admin.Post("/clusters/{id}/action-plans", server.planClusterAction)
 				admin.Get("/operations/{id}", server.getOperation)
 				// net/http discards a HEAD body, so one handler serves both methods.
 				admin.Head("/clusters/{id}", server.getCluster)
 				admin.Head("/operations/{id}", server.getOperation)
 				admin.Post("/enrollment-tokens", server.registerEnrollmentToken)
 				admin.Post("/nodes/{id}/certificates/{certificate_id}/actions/revoke", server.revokeAgentCertificate)
+				admin.Put("/nodes/{id}/placement-policy", server.putNodePlacementPolicy)
 				admin.Post("/users", server.createUser)
 				admin.Post("/users/{id}/actions/disable", server.disableUser)
 				admin.Post("/tokens", server.createToken)
@@ -139,18 +156,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.router.Se
 // It runs before routing, so a rejected request still carries the standard headers.
 func (s *Server) begin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
 		r = r.WithContext(ctx)
 		requestID, err := uuid.NewRandom()
 		if err != nil {
+			s.logger.Error("request identity unavailable", "method", r.Method, "path", r.URL.Path, "error", err)
 			http.Error(w, "request identity unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("X-Request-ID", requestID.String())
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
 		r = r.WithContext(context.WithValue(r.Context(), identityKey{}, requestIdentity{requestID: requestID.String()}))
 		if !s.requestLimit.Allow() {
 			w.Header().Set("Retry-After", "1")
@@ -201,15 +219,14 @@ func (s *Server) createCluster(w http.ResponseWriter, r *http.Request) {
 			s.storeError(w, r, err)
 			return
 		}
-		var version string
-		switch spec.Engine {
-		case cluster.PostgreSQL:
-			version = spec.PostgreSQL.Version
-		case cluster.Redis:
-			version = spec.Redis.Version
+		// Capability comes from engine, version, topology, and persistence together,
+		// so the refusal happens here rather than when a host is touched.
+		if s.catalog == nil {
+			s.writeError(w, r, http.StatusUnprocessableEntity, "unsupported_spec", "This server serves no engines.", uuid.Nil)
+			return
 		}
-		if !slices.Contains(s.versions[spec.Engine], version) {
-			s.writeError(w, r, http.StatusUnprocessableEntity, "unsupported_spec", "The requested engine version is not supported by this server.", uuid.Nil)
+		if _, err := s.catalog.Resolve(spec); err != nil {
+			s.writeError(w, r, http.StatusUnprocessableEntity, "unsupported_spec", "The requested engine, version, topology, and persistence are not supported by this server.", uuid.Nil)
 			return
 		}
 		admission, err = s.store.CreateCluster(r.Context(), request)
@@ -221,7 +238,7 @@ func (s *Server) createCluster(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Location", "/v1/operations/"+admission.OperationID.String())
 	w.WriteHeader(http.StatusAccepted)
 	if err := json.NewEncoder(w).Encode(admission); err != nil {
-		s.logger.Warn("write admission response failed", "request_id", identity.requestID)
+		s.logger.Warn("write admission response failed", "request_id", identity.requestID, "error", err)
 	}
 	s.logger.Info("cluster admission accepted", "request_id", identity.requestID, "actor_id", identity.actorID, "cluster_id", admission.ClusterID, "operation_id", admission.OperationID, "replayed", admission.Replayed)
 }
@@ -239,7 +256,7 @@ func (s *Server) getCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("ETag", `"`+strconv.FormatInt(value.DesiredRevision, 10)+`"`)
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		s.logger.Warn("write cluster response failed", "cluster_id", id)
+		s.logger.Warn("write cluster response failed", "cluster_id", id, "error", err)
 	}
 }
 
@@ -255,7 +272,7 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		s.logger.Warn("write operation response failed", "operation_id", id)
+		s.logger.Warn("write operation response failed", "operation_id", id, "error", err)
 	}
 }
 
@@ -277,7 +294,9 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 		case postgres.NameConflict:
 			status, message = http.StatusConflict, "The cluster name is already in use."
 		case postgres.OperationConflict:
-			status, message = http.StatusConflict, "An operation is already active for this cluster."
+			status, message = http.StatusConflict, "Active work or changed storage state prevents this action. Review the cluster before retrying."
+		case postgres.RevisionConflict:
+			status, message = http.StatusPreconditionFailed, "The resource revision does not match this request."
 		case postgres.NotFound:
 			status, message = http.StatusNotFound, "The resource was not found."
 		case postgres.OutcomeUnknown:
@@ -286,6 +305,9 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 		s.writeError(w, r, status, string(failure.Code), message, failure.OperationID)
 		return
 	}
+	// The response carries no detail, so this log is the only place the cause of a
+	// 500 survives.
+	s.logger.Error("store request failed", "request_id", r.Context().Value(identityKey{}).(requestIdentity).requestID, "method", r.Method, "path", r.URL.Path, "error", err)
 	s.writeError(w, r, http.StatusInternalServerError, "internal_error", "The request could not be completed.", uuid.Nil)
 }
 
@@ -299,7 +321,7 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, 
 	}{code, message, identity.requestID, operationID}
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Warn("write error response failed", "request_id", identity.requestID)
+		s.logger.Warn("write error response failed", "request_id", identity.requestID, "error", err)
 	}
 	s.logger.Info("API request rejected", "request_id", identity.requestID, "code", code, "status", status)
 }

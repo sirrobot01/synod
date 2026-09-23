@@ -39,7 +39,7 @@ func placementRequest(installation, clusterID, operationID uuid.UUID, policy pla
 		DesiredRevision: 1, Profile: "compact",
 		Resources: []placement.Resource{{
 			ID: resource, ReservationID: uuid.New(), OwnedResourceIDs: []uuid.UUID{resource},
-			Kind: "instance", Engine: "postgres", Version: "17.11",
+			Kind: "instance", Role: "primary", Engine: "postgres", Version: "17.11",
 			Architecture: policy.Architecture, RuntimeVersion: policy.RuntimeVersion, StorageID: policy.StorageID,
 			Labels: map[string]string{"zone": "a"},
 			Budgets: placement.Budgets{
