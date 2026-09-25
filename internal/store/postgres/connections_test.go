@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -94,8 +95,8 @@ func TestInspectClusterEndpointsUsesLiveReservedListener(t *testing.T) {
 		t.Fatalf("stopped Redis inspection=%+v: %v", found, err)
 	}
 	if _, err := host.store.pool.Exec(t.Context(), `INSERT INTO allocation_ports
- (installation_id,cluster_id,node_id,allocation_id,address,transport,port)
- SELECT installation_id,cluster_id,node_id,allocation_id,address,transport,16433 FROM allocation_ports WHERE cluster_id=$1`, claim.ClusterID); err != nil {
+ (installation_id,cluster_id,node_id,allocation_id,address,transport,port,name)
+ SELECT installation_id,cluster_id,node_id,allocation_id,address,transport,16433,name FROM allocation_ports WHERE cluster_id=$1`, claim.ClusterID); err != nil {
 		t.Fatal(err)
 	}
 	found, err = host.store.InspectClusterEndpoints(t.Context(), host.id, claim.ClusterID)
@@ -466,8 +467,8 @@ func TestInspectClusterEndpointsNamesThePrimaryOfAReplicatedCluster(t *testing.T
 		t.Fatal(err)
 	}
 	if _, err := host.store.pool.Exec(t.Context(), `INSERT INTO allocation_ports
- (installation_id,cluster_id,node_id,allocation_id,address,transport,port)
- VALUES ($1,$2,$3,$4,'0.0.0.0','tcp',16533)`, host.id, claim.ClusterID, host.node, replicaAllocation); err != nil {
+ (installation_id,cluster_id,node_id,allocation_id,address,transport,port,name)
+ VALUES ($1,$2,$3,$4,'0.0.0.0','tcp',16533,'')`, host.id, claim.ClusterID, host.node, replicaAllocation); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := host.store.pool.Exec(t.Context(), `INSERT INTO cluster_members
@@ -495,5 +496,109 @@ func TestInspectClusterEndpointsNamesThePrimaryOfAReplicatedCluster(t *testing.T
 	orphaned, err := host.store.InspectClusterEndpoints(t.Context(), host.id, claim.ClusterID)
 	if err != nil || len(orphaned.Endpoints) != 0 || orphaned.UnavailableReason != "ambiguous_allocation" {
 		t.Fatalf("inspection without a primary=%+v: %v", orphaned, err)
+	}
+}
+
+// A Patroni cluster has no Synod-declared primary. It reports every member and one
+// multi-host writer URL, and it is unavailable until all three members hold a named port.
+func TestInspectClusterEndpointsReportsPatroniMembers(t *testing.T) {
+	host := placementFixture(t)
+	claim := host.claimCluster(t, "patroni")
+	policy := host.policy
+	policy.ClientAddress = "192.0.2.40"
+	encoded, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.store.pool.Exec(t.Context(), `UPDATE node_placement_policies SET policy_bytes=$1 WHERE installation_id=$2`, encoded, host.id); err != nil {
+		t.Fatal(err)
+	}
+	request, decision, plan := host.place(t, claim, smallBudget, []placement.Port{{Address: "0.0.0.0", Transport: "tcp", Number: 16540}})
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	first := request.Resources[0].ID
+	for _, statement := range []string{
+		`UPDATE clusters SET spec=jsonb_set(jsonb_set(spec,'{postgresql,topology}','"patroni"'),'{postgresql,failure_domain}','"host"') WHERE installation_id=$1 AND id=$2`,
+		`UPDATE cluster_members SET role='patroni' WHERE installation_id=$1 AND cluster_id=$2`,
+		`UPDATE allocation_ports SET name='database' WHERE installation_id=$1 AND cluster_id=$2`,
+	} {
+		if _, err := host.store.pool.Exec(t.Context(), statement, host.id, claim.ClusterID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	incomplete, err := host.store.InspectClusterEndpoints(t.Context(), host.id, claim.ClusterID)
+	if err != nil || len(incomplete.Endpoints) != 0 || incomplete.UnavailableReason != "members_incomplete" || incomplete.WriterURL != "" {
+		t.Fatalf("one of three members=%+v: %v", incomplete, err)
+	}
+	addMember := func(port int, name string) uuid.UUID {
+		t.Helper()
+		resource, allocation := uuid.New(), uuid.New()
+		if _, err := host.store.pool.Exec(t.Context(), `INSERT INTO resource_allocations
+ (id,installation_id,node_id,cluster_id,resource_id,created_operation_id,created_revision,allocation_bytes)
+ SELECT $1,installation_id,node_id,cluster_id,$2,created_operation_id,created_revision,allocation_bytes
+ FROM resource_allocations WHERE installation_id=$3 AND cluster_id=$4 AND resource_id=$5`,
+			allocation, resource, host.id, claim.ClusterID, first); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := host.store.pool.Exec(t.Context(), `INSERT INTO allocation_ports
+ (installation_id,cluster_id,node_id,allocation_id,address,transport,port,name)
+ VALUES ($1,$2,$3,$4,'0.0.0.0','tcp',$5,$6)`, host.id, claim.ClusterID, host.node, allocation, port, name); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := host.store.pool.Exec(t.Context(), `INSERT INTO cluster_members
+ (installation_id,cluster_id,member_id,role,resource_id,state,created_operation_id,created_revision)
+ VALUES ($1,$2,$3,'patroni',$4,'active',$5,1)`, host.id, claim.ClusterID, uuid.New(), resource, claim.OperationID); err != nil {
+			t.Fatal(err)
+		}
+		return resource
+	}
+	addMember(16541, "database")
+	third := addMember(16542, "rest")
+	unnamed, err := host.store.InspectClusterEndpoints(t.Context(), host.id, claim.ClusterID)
+	if err != nil || len(unnamed.Endpoints) != 0 || unnamed.UnavailableReason != "not_allocated" {
+		t.Fatalf("member without a database port=%+v: %v", unnamed, err)
+	}
+	if _, err := host.store.pool.Exec(t.Context(), `UPDATE allocation_ports SET name='database'
+ WHERE installation_id=$1 AND port=16542`, host.id); err != nil {
+		t.Fatal(err)
+	}
+	complete, err := host.store.InspectClusterEndpoints(t.Context(), host.id, claim.ClusterID)
+	if err != nil || complete.UnavailableReason != "" || len(complete.Endpoints) != 3 {
+		t.Fatalf("three members=%+v: %v", complete, err)
+	}
+	ports := map[uint16]bool{}
+	for _, endpoint := range complete.Endpoints {
+		if endpoint.Host != "192.0.2.40" || endpoint.AvailabilityProfile != "patroni_direct" || endpoint.TLSMode != "verify-full" || endpoint.ClientMode != "direct" || endpoint.Database != "app" {
+			t.Fatalf("patroni endpoint=%+v", endpoint)
+		}
+		ports[endpoint.Port] = true
+		if !strings.Contains(complete.WriterURL, "192.0.2.40:"+strconv.Itoa(int(endpoint.Port))) {
+			t.Fatalf("writer URL %q omits member port %d", complete.WriterURL, endpoint.Port)
+		}
+	}
+	if len(ports) != 3 || !strings.HasPrefix(complete.WriterURL, "postgresql://") || !strings.HasSuffix(complete.WriterURL, "/app?target_session_attrs=read-write&sslmode=verify-full") || strings.Contains(complete.WriterURL, "@") {
+		t.Fatalf("writer URL=%q", complete.WriterURL)
+	}
+	// A host-network member binds the node address itself, so an IPv4 wildcard reservation
+	// serves an IPv6 node too.
+	policy.ClientAddress = "2001:db8::40"
+	if encoded, err = json.Marshal(policy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.store.pool.Exec(t.Context(), `UPDATE node_placement_policies SET policy_bytes=$1 WHERE installation_id=$2`, encoded, host.id); err != nil {
+		t.Fatal(err)
+	}
+	six, err := host.store.InspectClusterEndpoints(t.Context(), host.id, claim.ClusterID)
+	if err != nil || six.UnavailableReason != "" || len(six.Endpoints) != 3 || six.Endpoints[0].Host != "2001:db8::40" || !strings.Contains(six.WriterURL, "[2001:db8::40]:") {
+		t.Fatalf("IPv6 members=%+v: %v", six, err)
+	}
+	if _, err := host.store.pool.Exec(t.Context(), `UPDATE cluster_members SET removed_at=clock_timestamp()
+ WHERE installation_id=$1 AND resource_id=$2`, host.id, third); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := host.store.InspectClusterEndpoints(t.Context(), host.id, claim.ClusterID)
+	if err != nil || len(removed.Endpoints) != 0 || removed.UnavailableReason != "members_incomplete" {
+		t.Fatalf("after member removal=%+v: %v", removed, err)
 	}
 }

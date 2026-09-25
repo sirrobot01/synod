@@ -43,7 +43,9 @@ type Server struct {
 	// EnrollmentAuthority must be configured before serving requests. Nil disables new issuance.
 	EnrollmentAuthority *pki.CA
 	// SecretKeyring must be configured before serving. Nil disables credential reveal.
-	SecretKeyring         *secret.Keyring
+	SecretKeyring *secret.Keyring
+	// PatroniCA is the public native Patroni CA certificate. Patroni endpoints return it.
+	PatroniCA             []byte
 	requestLimit          *rate.Limiter
 	enrollmentLimit       *rate.Limiter
 	credentialRevealLimit *rate.Limiter
@@ -115,6 +117,7 @@ func NewServer(store *postgres.Store, admin *auth.AdminToken, installationID uui
 			signed.Group(func(admin chi.Router) {
 				admin.Use(server.requireAdmin)
 				admin.Post("/clusters", server.createCluster)
+				admin.Get("/installation", server.getInstallation)
 				admin.Get("/clusters", server.listClusters)
 				admin.Head("/clusters", server.listClusters)
 				admin.Get("/clusters/{id}", server.getCluster)
@@ -126,6 +129,9 @@ func NewServer(store *postgres.Store, admin *auth.AdminToken, installationID uui
 				admin.Post("/clusters/{id}/actions/start", server.clusterAction(postgres.StartClusterAPIOperation))
 				admin.Post("/clusters/{id}/actions/recover-setup", server.clusterAction(postgres.RecoverSetupAPIOperation))
 				admin.Post("/clusters/{id}/actions/rebuild-replica", server.clusterAction(postgres.RebuildReplicaAPIOperation))
+				admin.Post("/clusters/{id}/actions/rebuild-member", server.clusterAction(postgres.RebuildMemberAPIOperation))
+				admin.Post("/clusters/{id}/actions/renew-certificates", server.clusterAction(postgres.RenewCertificatesAPIOperation))
+				admin.Post("/clusters/{id}/actions/switchover", server.clusterAction(postgres.SwitchoverAPIOperation))
 				admin.Post("/clusters/{id}/actions/scale", server.clusterAction(postgres.ScaleClusterAPIOperation))
 				admin.Delete("/clusters/{id}", server.clusterAction(postgres.DeleteClusterAPIOperation))
 				admin.Post("/clusters/{id}/action-plans", server.planClusterAction)
@@ -227,6 +233,11 @@ func (s *Server) createCluster(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := s.catalog.Resolve(spec); err != nil {
 			s.writeError(w, r, http.StatusUnprocessableEntity, "unsupported_spec", "The requested engine, version, topology, and persistence are not supported by this server.", uuid.Nil)
+			return
+		}
+		// Patroni needs the DCS admin account and the native CA. The CA loads only when both exist.
+		if spec.PostgreSQL != nil && spec.PostgreSQL.Topology == "patroni" && len(s.PatroniCA) == 0 {
+			s.writeError(w, r, http.StatusUnprocessableEntity, "unsupported_spec", "Patroni HA is not configured on this installation.", uuid.Nil)
 			return
 		}
 		admission, err = s.store.CreateCluster(r.Context(), request)

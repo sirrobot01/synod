@@ -62,6 +62,7 @@ func TestConnectionInspectionAndAuditedReveal(t *testing.T) {
 			t.Fatal(err)
 		}
 		handler.SecretKeyring, handler.credentialRevealLimit = keys, limit
+		handler.PatroniCA = []byte("public-native-ca")
 		https := httptest.NewTLSServer(handler)
 		t.Cleanup(https.Close)
 		return https
@@ -98,7 +99,7 @@ func TestConnectionInspectionAndAuditedReveal(t *testing.T) {
 	revealPath := path + "/credentials/superuser/reveal"
 	status, _, data := send(https, "GET", path+"/endpoints", "", true)
 	var endpoints cluster.EndpointInspection
-	if status != http.StatusOK || json.Unmarshal(data, &endpoints) != nil || endpoints.ClusterID != admitted.ClusterID || endpoints.UnavailableReason != "not_allocated" || endpoints.Endpoints == nil || endpoints.Engine != cluster.PostgreSQL || endpoints.DesiredRevision != 1 {
+	if status != http.StatusOK || json.Unmarshal(data, &endpoints) != nil || endpoints.ClusterID != admitted.ClusterID || endpoints.UnavailableReason != "not_allocated" || endpoints.Endpoints == nil || endpoints.Engine != cluster.PostgreSQL || endpoints.DesiredRevision != 1 || endpoints.WriterURL != "" || endpoints.CACertificatePEM != "" {
 		t.Fatalf("endpoints: %d %s", status, data)
 	}
 	status, _, data = send(https, "GET", path+"/credentials", "", true)

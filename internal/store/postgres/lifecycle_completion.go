@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"maps"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -36,6 +37,12 @@ func completeLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim, pl
 	if op.Kind == "cluster.rebuild_replica" {
 		return settleReplicaRebuild(ctx, tx, claim, planBytes, true)
 	}
+	if op.Kind == "cluster.rebuild_member" {
+		return settleMemberRebuild(ctx, tx, claim, planBytes, true)
+	}
+	if op.Kind == "cluster.renew_certificates" {
+		return settleRenewal(ctx, tx, claim, planBytes, true)
+	}
 	var plan agentv1.ExecutionPlan
 	if proto.Unmarshal(planBytes, &plan) != nil {
 		return &AdmissionError{Code: DependencyUnavailable}
@@ -46,8 +53,25 @@ func completeLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim, pl
 	if int(plan.Version) != op.PlanVersion {
 		return operation.ErrCommandConflict
 	}
-	if err := checkPlanCompletions(ctx, tx, op, &plan); err != nil {
+	elected, primaries, err := checkPlanCompletions(ctx, tx, op, &plan)
+	if err != nil {
 		return err
+	}
+	// Patroni elects its primary. A start that proves no writer, or two, is not running.
+	if elected > 0 && primaries != 1 {
+		return operation.ErrPostconditionUnproved
+	}
+	// A switchover changes no membership. Its receipts prove the named member writes and the
+	// others replicate, so every step's proof is the whole answer.
+	if op.Kind == "cluster.switchover" {
+		if deleted || desiredRevision != op.DesiredRevision || desiredLifecycle != "running" {
+			return operation.ErrCommandConflict
+		}
+		if _, err := tx.Exec(ctx, `UPDATE clusters SET observed_revision=$1,observed_lifecycle='running',updated_at=clock_timestamp() WHERE installation_id=$2 AND id=$3`,
+			op.DesiredRevision, claim.InstallationID, claim.ClusterID); err != nil {
+			return admissionError(err)
+		}
+		return nil
 	}
 	var target string
 	var postcondition agentv1.Postcondition
@@ -162,6 +186,12 @@ func completeLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim, pl
  WHERE installation_id=$1 AND cluster_id=$2 AND retention<>'purged'`, claim.InstallationID, claim.ClusterID, claim.OperationID); err != nil {
 			return admissionError(err)
 		}
+		if _, err := tx.Exec(ctx, `INSERT INTO patroni_dcs_cleanups (installation_id,cluster_id,requested_by_operation,requested_at)
+ SELECT installation_id,id,$3,clock_timestamp() FROM clusters
+ WHERE installation_id=$1 AND id=$2 AND spec->'postgresql'->>'topology'='patroni'
+ ON CONFLICT DO NOTHING`, claim.InstallationID, claim.ClusterID, claim.OperationID); err != nil {
+			return admissionError(err)
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO cluster_tombstone_nodes (installation_id,cluster_id,node_id,acknowledged_at)
  SELECT DISTINCT installation_id,cluster_id,node_id,transaction_timestamp() FROM resource_allocations
  WHERE installation_id=$1 AND cluster_id=$2 AND released_at IS NULL`, claim.InstallationID, claim.ClusterID); err != nil {
@@ -207,7 +237,9 @@ func completeLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim, pl
 	return nil
 }
 
-func checkPlanCompletions(ctx context.Context, tx pgx.Tx, op operation.Operation, plan *agentv1.ExecutionPlan) error {
+// checkPlanCompletions verifies every step's stored receipt. It also counts role-any
+// readiness steps and how many of them observed a primary.
+func checkPlanCompletions(ctx context.Context, tx pgx.Tx, op operation.Operation, plan *agentv1.ExecutionPlan) (elected, primaries int, err error) {
 	for _, step := range plan.Steps {
 		command := step.Command
 		var savedHash, dispatchBytes, receiptBytes []byte
@@ -222,27 +254,33 @@ func checkPlanCompletions(ctx context.Context, tx pgx.Tx, op operation.Operation
 			op.ID, command.StepId, command.CommandId, op.InstallationID, op.ClusterID, command.Epoch.NodeId, command.InputHash).
 			Scan(&savedHash, &dispatchBytes, &receiptBytes, &epoch, &generation)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return operation.ErrBarrierPending
+			return 0, 0, operation.ErrBarrierPending
 		}
 		if err != nil {
-			return admissionError(err)
+			return 0, 0, admissionError(err)
 		}
 		var dispatch agentv1.Command
 		var receipt agentv1.TerminalResult
 		if proto.Unmarshal(dispatchBytes, &dispatch) != nil || proto.Unmarshal(receiptBytes, &receipt) != nil {
-			return &AdmissionError{Code: DependencyUnavailable}
+			return 0, 0, &AdmissionError{Code: DependencyUnavailable}
 		}
 		hash := sha256.Sum256(receiptBytes)
 		if operation.ValidateCommand(&dispatch) != nil || dispatch.CommandId != command.CommandId || dispatch.StepId != command.StepId ||
 			!bytes.Equal(dispatch.InputHash, command.InputHash) || dispatch.Epoch.ExecutionEpoch != epoch || dispatch.Epoch.RecoveryGeneration != generation.String() ||
 			!proto.Equal(receipt.Epoch, dispatch.Epoch) || !bytes.Equal(savedHash, hash[:]) {
-			return operation.ErrCommandConflict
+			return 0, 0, operation.ErrCommandConflict
 		}
 		if err := operation.CheckStepResult(step, &receipt); err != nil {
-			return err
+			return 0, 0, err
+		}
+		if command.Input.GetCheckReadiness().GetPostgresRole() == "any" {
+			elected++
+			if slices.ContainsFunc(receipt.Effects, func(effect *agentv1.Effect) bool { return effect.State == "ready_primary" }) {
+				primaries++
+			}
 		}
 	}
-	return nil
+	return elected, primaries, nil
 }
 
 // names reports whether the plan acts on one node's resource. A scale proves only the

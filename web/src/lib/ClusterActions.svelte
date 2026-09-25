@@ -394,5 +394,4 @@
   ul { padding-left: 20px; font-size: 11px; overflow-wrap: anywhere; }
   label { font-size: 12px; color: var(--ink-body); }
   input { width: 100%; box-sizing: border-box; }
-  .destructive { background: var(--fail); color: var(--invert-ink); border-color: var(--fail); font-weight: 600; }
 </style>

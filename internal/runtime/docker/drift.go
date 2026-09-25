@@ -236,8 +236,13 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 	if proto.Unmarshal(encoded, &stored) != nil {
 		return driftConfigUnreadable, nil
 	}
-	if stored.Engine == "postgres" && stored.Postgres == nil {
+	if stored.Engine == "postgres" && stored.Postgres == nil && stored.Route == nil {
 		return driftEngineConfig, nil
+	}
+	if stored.Route != nil {
+		if _, _, _, err := postgres.RouteSettings(stored.Route); err != nil || stored.Postgres != nil || stored.Redis != nil || stored.VolumeId != "" {
+			return driftEngineConfig, nil
+		}
 	}
 	if stored.Engine == "redis" || stored.Redis != nil {
 		if stored.Redis == nil || operation.ValidateRedisContainer(&stored, stored.Redis.Credentials) != nil {
@@ -260,7 +265,7 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 	case len(host.PortBindings) != len(stored.Ports):
 		return driftPorts, nil
 	}
-	if stored.Redis != nil || stored.Postgres != nil {
+	if stored.Redis != nil || stored.Postgres != nil || stored.Route != nil {
 		image, err := r.api.ImageInspect(ctx, stored.ImageDigest)
 		if err != nil {
 			return "", &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
@@ -292,13 +297,22 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 			if !reflect.DeepEqual(item.Config.Healthcheck, health) || item.Config.StopSignal != image.Config.StopSignal {
 				return driftEngineConfig, nil
 			}
+		} else if stored.Route != nil {
+			expectedCommand, tmpfs = routeShape(stored.Route)
+			if err := r.inspectSource(ctx, item, routeSource(stored.Route)); err != nil || item.Config.StopSignal != image.Config.StopSignal {
+				return driftEngineConfig, nil
+			}
 		} else {
 			expectedCommand = redisengine.ContainerCommand(stored.Redis)
+		}
+		mounts := 1
+		if stored.Route != nil {
+			mounts = 0
 		}
 		if item.Image != image.ID ||
 			!slices.Equal(item.Config.Cmd, expectedCommand) ||
 			!slices.Equal(item.Config.Entrypoint, image.Config.Entrypoint) ||
-			!maps.Equal(host.Tmpfs, tmpfs) || len(item.Mounts) != 1 {
+			!maps.Equal(host.Tmpfs, tmpfs) || len(item.Mounts) != mounts {
 			return driftEngineConfig, nil
 		}
 		environment, err := plainEnvironment(image.Config.Env, &stored)

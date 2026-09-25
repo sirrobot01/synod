@@ -124,6 +124,34 @@ message EnsureContainer {
   repeated PlainEnv plain_env = 10;
   RedisContainerConfig redis = 11;
   PostgresContainerConfig postgres = 12;
+  // A pooler or router beside a Patroni member. It has no volume and uses host networking.
+  PostgresRouteConfig route = 13;
+}
+message PostgresRouteConfig {
+  // Exactly one of pooler or router.
+  PostgresPoolerConfig pooler = 1;
+  PostgresRouterConfig router = 2;
+  // A pooler needs application and patroni_member_tls. A router needs patroni_member_tls.
+  repeated SecretReference credentials = 3;
+}
+message PostgresPoolerConfig {
+  string address = 1;
+  uint32 port = 2;
+  uint32 database_port = 3;
+  // The member's Patroni REST port. The pooler restarts PgBouncer when the member changes role.
+  uint32 rest_port = 4;
+}
+message PostgresRouterConfig {
+  string address = 1;
+  uint32 writer_port = 2;
+  uint32 reader_port = 3;
+  int64 max_lag_bytes = 4;
+  repeated PostgresRouteBackend backends = 5;
+}
+message PostgresRouteBackend {
+  string address = 1;
+  uint32 pooler_port = 2;
+  uint32 rest_port = 3;
 }
 // Fixed PostgreSQL application setup. Credential identities remain in the
 // container configuration so restart inspection never needs secret material.
@@ -190,6 +218,23 @@ message StartContainer {
 message StartPatroniMember {
   EnsureContainer container = 1;
   bool allow_initialization = 2;
+}
+// Read a stopped Patroni member's failed storage attempt without changing it.
+message VerifyPatroniStartFailure { EnsureContainer container = 1; }
+// Read that a Patroni member is not serving, without changing it.
+message VerifyPatroniMemberNotServing { EnsureContainer container = 1; }
+// Read that a stopped Patroni member's storage cannot restart, without changing it.
+message VerifyPatroniMemberFailed { EnsureContainer container = 1; }
+// Make the command's member the Patroni leader through the REST API of that member.
+message SwitchoverPatroni {
+  string address = 1;
+  uint32 rest_port = 2;
+}
+// Replace a stopped Patroni member container with one that holds renewed certificate files.
+// The member keeps its volume, identity, provision, and storage records.
+message RecreatePatroniMember {
+  EnsureContainer previous = 1;
+  EnsureContainer next = 2;
 }
 message RecoverPostgresSetup { PostgresContainerConfig postgres = 1; }
 message PreparePostgresReplica {}
@@ -261,6 +306,11 @@ message CommandInput {
     VerifyPostgresReplicaFailure verify_postgres_replica_failure = 22;
     VerifyContainerAbsent verify_container_absent = 23;
     StartPatroniMember start_patroni_member = 24;
+    VerifyPatroniStartFailure verify_patroni_start_failure = 25;
+    VerifyPatroniMemberNotServing verify_patroni_member_not_serving = 26;
+    VerifyPatroniMemberFailed verify_patroni_member_failed = 27;
+    RecreatePatroniMember recreate_patroni_member = 28;
+    SwitchoverPatroni switchover_patroni = 29;
   }
 }
 message Command {
@@ -456,4 +506,9 @@ enum Postcondition {
   POSTCONDITION_POSTGRES_REPLICA_PREPARED = 10;
   POSTCONDITION_POSTGRES_REPLICA_CLONED = 11;
   POSTCONDITION_POSTGRES_REPLICA_FAILED = 12;
+  POSTCONDITION_PATRONI_START_FAILED = 13;
+  POSTCONDITION_PATRONI_MEMBER_NOT_SERVING = 14;
+  POSTCONDITION_PATRONI_MEMBER_FAILED = 15;
+  POSTCONDITION_PATRONI_MEMBER_RECREATED = 16;
+  POSTCONDITION_PATRONI_LEADER = 17;
 }

@@ -357,6 +357,83 @@ func TestPostgresBootstrapRefusesStorageLossOnContainerRestart(t *testing.T) {
 	}
 }
 
+// A member refuses a volume that holds a different complete database. The bootstrap receipt
+// in the database binds it to its installation, cluster, member, and credentials, and every
+// start checks that receipt before the engine serves. The member's own data, moved the same
+// way, still starts, so the refusal comes from the receipt and not from the copy.
+func TestPostgresBootstrapRefusesSwappedDatabase(t *testing.T) {
+	for _, source := range []string{"own data", "another cluster", "foreign database"} {
+		t.Run(source, func(t *testing.T) {
+			f := bootstrapContainer(t, "")
+			f.adminSQL(t, `CREATE TABLE swap_marker(value int); INSERT INTO swap_marker VALUES (175)`)
+			image := strings.TrimSpace(f.docker(t, "inspect", "--format", "{{.Config.Image}}", f.name))
+			var donor, donorVolume string
+			switch source {
+			case "own data":
+				donorVolume = "synod-swap-copy-" + uuid.NewString()
+				f.docker(t, "volume", "create", "--label", "io.synod.fixture=postgres-bootstrap", donorVolume)
+				t.Cleanup(func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					exec.CommandContext(ctx, "docker", "--host", f.host, "volume", "rm", "--force", donorVolume).Run()
+				})
+				f.docker(t, "stop", "--time", "10", f.name)
+				f.docker(t, "run", "--rm", "--volumes-from", f.name, "--volume", donorVolume+":/donor", "--entrypoint", "/bin/bash", image,
+					"-ec", `cp -a /var/lib/postgresql/data/. /donor/`)
+			case "another cluster":
+				other := bootstrapContainer(t, "")
+				other.docker(t, "stop", "--time", "10", other.name)
+				donor = other.name
+			default:
+				// A plain PostgreSQL cluster with its own superuser and no Synod receipt.
+				donor = "synod-swap-donor-" + uuid.NewString()
+				f.docker(t, "run", "--detach", "--name", donor, "--label", "io.synod.fixture=postgres-bootstrap", "--env", "POSTGRES_PASSWORD=foreign-fixture-password", image)
+				t.Cleanup(func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					exec.CommandContext(ctx, "docker", "--host", f.host, "rm", "--force", "--volumes", donor).Run()
+				})
+				deadline := time.Now().Add(60 * time.Second)
+				for {
+					command := exec.CommandContext(t.Context(), "docker", "--host", f.host, "exec", donor, "pg_isready", "-h", "127.0.0.1", "-t", "1")
+					if command.Run() == nil {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("foreign donor did not become ready")
+					}
+					time.Sleep(500 * time.Millisecond)
+				}
+				f.docker(t, "stop", "--time", "10", donor)
+			}
+			if donorVolume == "" {
+				donorVolume = strings.TrimSpace(f.docker(t, "inspect", "--format", `{{range .Mounts}}{{if eq .Destination "`+DataDirectory+`"}}{{.Name}}{{end}}{{end}}`, donor))
+			}
+			if donorVolume == "" {
+				t.Fatal("donor has no data volume")
+			}
+			f.docker(t, "stop", "--time", "10", f.name)
+			// Replace the member's data with the donor's complete data directory.
+			f.docker(t, "run", "--rm", "--volumes-from", f.name, "--volume", donorVolume+":/donor:ro", "--entrypoint", "/bin/bash", image,
+				"-ec", `find /var/lib/postgresql/data -mindepth 1 -delete && cp -a /donor/. /var/lib/postgresql/data/`)
+			f.docker(t, "start", f.name)
+			if source == "own data" {
+				f.waitPhase(t, "ready")
+				if value := strings.TrimSpace(f.adminSQL(t, `SELECT value FROM swap_marker`)); value != "175" {
+					t.Fatalf("own data after the move: %q", value)
+				}
+				return
+			}
+			f.waitPhase(t, "failed")
+			// The refused start served nothing and changed nothing in the swapped data.
+			marker := f.docker(t, "run", "--rm", "--volumes-from", f.name, "--entrypoint", "/bin/bash", image, "-ec", `test -s /var/lib/postgresql/data/PG_VERSION && echo present`)
+			if strings.TrimSpace(marker) != "present" {
+				t.Fatal("the refused start changed the swapped data directory")
+			}
+		})
+	}
+}
+
 func TestPostgresBootstrapTerminalFailureStaysFailedAcrossRestart(t *testing.T) {
 	startup := strings.Replace(postgresStartup, "sql_pid=''\ntemporary=0", `
 if [ ! -e /var/lib/synod-postgres/test-once ]; then

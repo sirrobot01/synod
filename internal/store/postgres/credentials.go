@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -39,6 +40,8 @@ type Credential struct {
 	Purpose      string
 	RoleName     string
 	Envelope     secret.Envelope
+	// ExpiresAt is the certificate expiry of TLS material. Other purposes have none.
+	ExpiresAt time.Time
 }
 
 // Database is one logical database this installation intends the cluster to hold.
@@ -110,12 +113,12 @@ func recordClusterIntentTx(ctx context.Context, tx pgx.Tx, intent ClusterIntent,
 	for _, credential := range intent.Credentials {
 		if write {
 			if _, err := tx.Exec(ctx, `INSERT INTO cluster_credentials
- (installation_id,cluster_id,credential_id,version,purpose,role_name,key_id,format_version,sealed,member_id)
- VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10::uuid,'00000000-0000-0000-0000-000000000000'))
+ (installation_id,cluster_id,credential_id,version,purpose,role_name,key_id,format_version,sealed,member_id,expires_at)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10::uuid,'00000000-0000-0000-0000-000000000000'),$11)
  ON CONFLICT (installation_id,credential_id,version) DO NOTHING`,
 				intent.InstallationID, intent.ClusterID, credential.CredentialID, credential.Version,
 				credential.Purpose, credential.RoleName, credential.Envelope.KeyID,
-				credential.Envelope.FormatVersion, credential.Envelope.Sealed, credential.MemberID); err != nil {
+				credential.Envelope.FormatVersion, credential.Envelope.Sealed, credential.MemberID, expiry(credential.ExpiresAt)); err != nil {
 				return admissionError(err)
 			}
 		}
@@ -123,10 +126,11 @@ func recordClusterIntentTx(ctx context.Context, tx pgx.Tx, intent ClusterIntent,
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cluster_credentials
  WHERE installation_id=$1 AND credential_id=$2 AND version=$3 AND cluster_id=$4 AND purpose=$5 AND role_name=$6
  AND key_id=$7 AND format_version=$8 AND sealed=$9
- AND member_id IS NOT DISTINCT FROM NULLIF($10::uuid,'00000000-0000-0000-0000-000000000000'))`,
+ AND member_id IS NOT DISTINCT FROM NULLIF($10::uuid,'00000000-0000-0000-0000-000000000000')
+ AND expires_at IS NOT DISTINCT FROM $11)`,
 			intent.InstallationID, credential.CredentialID, credential.Version, intent.ClusterID,
 			credential.Purpose, credential.RoleName, credential.Envelope.KeyID,
-			credential.Envelope.FormatVersion, credential.Envelope.Sealed, credential.MemberID).Scan(&same); err != nil {
+			credential.Envelope.FormatVersion, credential.Envelope.Sealed, credential.MemberID, expiry(credential.ExpiresAt)).Scan(&same); err != nil {
 			return admissionError(err)
 		}
 		if !same {
@@ -134,6 +138,15 @@ func recordClusterIntentTx(ctx context.Context, tx pgx.Tx, intent ClusterIntent,
 		}
 	}
 	return nil
+}
+
+// expiry stores a zero time as NULL.
+func expiry(at time.Time) *time.Time {
+	if at.IsZero() {
+		return nil
+	}
+	at = at.UTC().Truncate(time.Microsecond)
+	return &at
 }
 
 // ErrCredentialConflict reports a second record that disagrees with the first.
@@ -246,7 +259,8 @@ func (c ClusterIntent) validate() error {
 		case PatroniMemberTLSCredential, PatroniDCSTLSCredential:
 			validRole = credential.RoleName == ""
 		}
-		if !validRole || (credential.Purpose == PatroniMemberTLSCredential) != (credential.MemberID != uuid.Nil) {
+		tls := credential.Purpose == PatroniMemberTLSCredential || credential.Purpose == PatroniDCSTLSCredential
+		if !validRole || (credential.Purpose == PatroniMemberTLSCredential) != (credential.MemberID != uuid.Nil) || tls == credential.ExpiresAt.IsZero() {
 			return &AdmissionError{Code: InvalidRequest}
 		}
 		key := scope{credential.Purpose, credential.MemberID}

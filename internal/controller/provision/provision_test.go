@@ -33,9 +33,8 @@ const (
 	nodeStorage      = "pool-a"
 )
 
-// readyNode gives one node a session, an approved policy, and answered capacity, so
-// the planner runs against a node placement will actually accept.
-func readyNode(t *testing.T, store *postgres.Store, installation, node uuid.UUID) {
+// readyNodeWith approves one node after customize changes its policy, then answers its capacity probe.
+func readyNodeWith(t *testing.T, store *postgres.Store, installation, node uuid.UUID, customize func(*placement.NodePolicy)) {
 	t.Helper()
 	session := uuid.New()
 	hello := &agentv1.Hello{
@@ -55,6 +54,9 @@ func readyNode(t *testing.T, store *postgres.Store, installation, node uuid.UUID
 		Engines:       []placement.EngineVersion{{Engine: "postgres", Version: "17.11"}, {Engine: "postgres", Version: "18.6"}, {Engine: "redis", Version: "8.2.7"}},
 		Headroom:      placement.Vector{CPUMillis: 500, MemoryBytes: 1 << 28, DiskBytes: 1 << 30},
 	}
+	if customize != nil {
+		customize(&policy)
+	}
 	revision, err := store.PutNodePlacementPolicy(t.Context(), policy, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +69,8 @@ func readyNode(t *testing.T, store *postgres.Store, installation, node uuid.UUID
 	report := placement.CapacityReport{
 		ProbeID: probe.ID, ProbeRevision: probe.Revision, InstallationID: installation, NodeID: node,
 		SessionID: probe.SessionID, BootID: probe.BootID, JournalGeneration: probe.JournalGeneration,
-		Architecture: nodeArchitecture, RuntimeVersion: nodeRuntime, StorageID: nodeStorage,
+		// The agent reports the architecture it runs on, which is the one its policy declares.
+		Architecture: policy.Architecture, RuntimeVersion: nodeRuntime, StorageID: nodeStorage,
 		Capacity: placement.Vector{CPUMillis: 8000, MemoryBytes: 1 << 34, DiskBytes: 1 << 40},
 		Used:     placement.Vector{CPUMillis: 500, MemoryBytes: 1 << 30, DiskBytes: 1 << 35},
 	}
@@ -158,13 +161,19 @@ type fixture struct {
 
 func newFixture(t *testing.T, spec cluster.CreateSpec) *fixture {
 	t.Helper()
+	return newFixtureWith(t, spec, nil)
+}
+
+// newFixtureWith lets customize change the first node's policy before approval.
+func newFixtureWith(t *testing.T, spec cluster.CreateSpec, customize func(*placement.NodePolicy)) *fixture {
+	t.Helper()
 	store, pool := realStore(t)
 	installation, node := uuid.New(), uuid.New()
 	if _, err := pool.Exec(t.Context(), `INSERT INTO nodes (id,installation_id,public_key_hash,enrolled_at)
  VALUES ($1,$2,$3,clock_timestamp())`, node, installation, make([]byte, 32)); err != nil {
 		t.Fatal(err)
 	}
-	readyNode(t, store, installation, node)
+	readyNodeWith(t, store, installation, node, customize)
 	admission, err := store.CreateCluster(t.Context(), postgres.CreateClusterRequest{
 		Identity: postgres.RequestIdentity{
 			InstallationID: installation, ActorID: "actor-1",
@@ -199,7 +208,7 @@ func newFixture(t *testing.T, spec cluster.CreateSpec) *fixture {
 	decider := &localDecider{store: store}
 	planner, err := New(Config{
 		Store: store, Decider: decider, Catalog: catalog, Keyring: ring,
-		Profile:       Profile{Architecture: nodeArchitecture, RuntimeVersion: nodeRuntime, StorageID: nodeStorage},
+		Profile:       Profile{Architectures: []string{nodeArchitecture}, RuntimeVersion: nodeRuntime, StorageID: nodeStorage},
 		Images:        []Image{{Engine: cluster.PostgreSQL, Version: "17.11", Architecture: "amd64", Digest: testDigest}, {Engine: cluster.Redis, Version: "8.2.7", Architecture: "amd64", Digest: "redis@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}},
 		Budget:        placement.Vector{CPUMillis: 1000, MemoryBytes: 1 << 30, DiskBytes: 1 << 32},
 		EndpointPorts: placement.PortRange{First: endpointPort, Last: endpointPort + 9},

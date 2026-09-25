@@ -169,6 +169,24 @@ func (c *Client) PlanReplicaRebuild(ctx context.Context, id uuid.UUID) (cluster.
 	return c.planReplicaAction(ctx, id, "rebuild_replica")
 }
 
+// PlanMemberRebuild reviews replacement of one named Patroni member while retaining its data.
+func (c *Client) PlanMemberRebuild(ctx context.Context, id, member uuid.UUID) (cluster.ActionPlan, error) {
+	var value cluster.ActionPlan
+	if id == uuid.Nil || member == uuid.Nil {
+		return value, &Error{Code: "invalid_request", Message: "Name a cluster and a member."}
+	}
+	err := c.request(ctx, http.MethodPost, "/v1/clusters/"+id.String()+"/action-plans", struct {
+		Action   string    `json:"action"`
+		MemberID uuid.UUID `json:"member_id"`
+	}{Action: "rebuild_member", MemberID: member}, "", http.StatusOK, &value)
+	if err == nil && (value.ClusterID != id || value.PlanToken == uuid.Nil || value.MemberID != member || value.ResourceID == uuid.Nil ||
+		value.ClusterName == "" || value.ExpectedRevision < 1 || value.Action != "rebuild_member" || value.DataDisposition != "retain" ||
+		len(value.RetainedVolumes) != 1 || value.RetainedVolumes[0] == uuid.Nil || value.Downtime == "" || value.ExpiresAt.IsZero()) {
+		err = &Error{Code: "invalid_response", Message: "The API returned an invalid member rebuild plan. No action request was sent."}
+	}
+	return value, err
+}
+
 func (c *Client) planReplicaAction(ctx context.Context, id uuid.UUID, action string) (cluster.ActionPlan, error) {
 	var value cluster.ActionPlan
 	if id == uuid.Nil {
@@ -190,15 +208,16 @@ func (c *Client) planReplicaAction(ctx context.Context, id uuid.UUID, action str
 // Act submits a lifecycle action with a fixed revision, retry key, and required confirmation.
 func (c *Client) Act(ctx context.Context, id uuid.UUID, action string, expected int64, key string, confirmation *cluster.ActionConfirmation) (Admission, error) {
 	var value Admission
-	if id == uuid.Nil || (action != "stop" && action != "start" && action != "delete" && action != "recover-setup" && action != "rebuild-replica") || expected < 1 {
-		return value, &Error{Code: "invalid_request", Message: "Name a cluster, a positive expected revision, and one of stop, start, delete, recover-setup, or rebuild-replica."}
+	reviewed := action == "delete" || action == "recover-setup" || action == "rebuild-replica" || action == "rebuild-member"
+	if id == uuid.Nil || (action != "stop" && action != "start" && action != "renew-certificates" && !reviewed) || expected < 1 {
+		return value, &Error{Code: "invalid_request", Message: "Name a cluster, a positive expected revision, and one of stop, start, renew-certificates, delete, recover-setup, rebuild-replica, or rebuild-member."}
 	}
 	if len(key) < 1 || len(key) > 128 || strings.ContainsFunc(key, func(r rune) bool { return r < '!' || r > '~' }) {
 		return value, &Error{Code: "invalid_request", Message: "Use an idempotency key with 1 to 128 visible ASCII bytes."}
 	}
 	method, path := http.MethodPost, "/v1/clusters/"+id.String()+"/actions/"+action
 	var body any = struct{}{}
-	if action == "delete" || action == "recover-setup" || action == "rebuild-replica" {
+	if reviewed {
 		if confirmation == nil || confirmation.PlanToken == uuid.Nil || !confirmation.Confirm || confirmation.DataDisposition != "retain" {
 			return value, &Error{Code: "invalid_request", Message: "Confirm a reviewed plan with data_disposition set to retain."}
 		}
@@ -207,10 +226,31 @@ func (c *Client) Act(ctx context.Context, id uuid.UUID, action string, expected 
 			method, path = http.MethodDelete, "/v1/clusters/"+id.String()
 		}
 	} else if confirmation != nil {
-		return value, &Error{Code: "invalid_request", Message: "Use a plan confirmation only for delete, recover-setup, or rebuild-replica."}
+		return value, &Error{Code: "invalid_request", Message: "Use a plan confirmation only for delete, recover-setup, rebuild-replica, or rebuild-member."}
 	}
 	match := strconv.Quote(strconv.FormatInt(expected, 10))
 	err := c.requestWith(ctx, method, path, body, key, match, http.StatusAccepted, &value)
+	if err == nil && (value.ClusterID != id || value.OperationID == uuid.Nil) {
+		err = &Error{Code: "invalid_response", Message: "The API returned an invalid admission response. Retry with the same key."}
+	}
+	return value, err
+}
+
+// Switchover asks for the named Patroni member to become the leader, with a fixed revision
+// and retry key.
+func (c *Client) Switchover(ctx context.Context, id, member uuid.UUID, expected int64, key string) (Admission, error) {
+	var value Admission
+	if id == uuid.Nil || member == uuid.Nil || expected < 1 {
+		return value, &Error{Code: "invalid_request", Message: "Name a cluster, a member, and a positive expected revision."}
+	}
+	if len(key) < 1 || len(key) > 128 || strings.ContainsFunc(key, func(r rune) bool { return r < '!' || r > '~' }) {
+		return value, &Error{Code: "invalid_request", Message: "Use an idempotency key with 1 to 128 visible ASCII bytes."}
+	}
+	body := struct {
+		MemberID uuid.UUID `json:"member_id"`
+	}{member}
+	match := strconv.Quote(strconv.FormatInt(expected, 10))
+	err := c.requestWith(ctx, http.MethodPost, "/v1/clusters/"+id.String()+"/actions/switchover", body, key, match, http.StatusAccepted, &value)
 	if err == nil && (value.ClusterID != id || value.OperationID == uuid.Nil) {
 		err = &Error{Code: "invalid_response", Message: "The API returned an invalid admission response. Retry with the same key."}
 	}

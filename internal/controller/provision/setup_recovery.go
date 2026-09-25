@@ -37,7 +37,7 @@ func (p *Planner) recoverSetupSteps(ctx context.Context, claim operation.Claim, 
 	if err != nil {
 		return nil, err
 	}
-	stops, err := p.stopSteps(claim, op, members)
+	stops, err := p.stopSteps(claim, op, members, false)
 	if err != nil {
 		return nil, err
 	}

@@ -245,14 +245,21 @@ func RenderPatroni(settings PatroniSettings, secrets PatroniSecrets) ([]byte, er
 	config.PostgreSQL.CreateReplicaMethods = []string{"synod_guard"}
 	config.PostgreSQL.SynodGuard.Command = "/usr/bin/python3 " + PatroniDirectory + "/guard.py clone"
 	config.PostgreSQL.SynodGuard.KeepData = true
-	config.PostgreSQL.Listen = net.JoinHostPort(address, strconv.Itoa(int(settings.DatabasePort)))
-	config.PostgreSQL.ConnectAddress = config.PostgreSQL.Listen
+	// The agent proves readiness on loopback with TLS for the member IP. Patroni accepts
+	// several listen addresses followed by one port. Patroni 4.1.5 switches its own local
+	// connection to localhost when the list holds 127.0.0.1, and that fails verify-full
+	// against the member certificate. ReadinessLoopback never returns 127.0.0.1, and it keeps the member IP first.
+	loopback := ReadinessLoopback(settings.Address)
+	port := strconv.Itoa(int(settings.DatabasePort))
+	config.PostgreSQL.Listen = address + "," + net.JoinHostPort(loopback.Addr().String(), port)
+	config.PostgreSQL.ConnectAddress = net.JoinHostPort(address, port)
 	config.PostgreSQL.DataDir, config.PostgreSQL.BinDir, config.PostgreSQL.PGPass = PatroniDataDirectory, "/usr/local/bin", PatroniDirectory+"/pgpass"
 	config.PostgreSQL.Authentication.Superuser = patroniLogin{Username: "synod_admin", Password: secrets.Superuser, SSLMode: "verify-full", SSLRootCert: config.RESTAPI.CAFile}
 	config.PostgreSQL.Authentication.Replication = patroniLogin{Username: "synod_repl", Password: secrets.Replication, SSLMode: "verify-full", SSLRootCert: config.RESTAPI.CAFile}
 	config.PostgreSQL.Authentication.Rewind = patroniLogin{Username: "synod_rewind", Password: secrets.Rewind, SSLMode: "verify-full", SSLRootCert: config.RESTAPI.CAFile}
 	config.PostgreSQL.Parameters = patroniParameters{SSL: "on", SSLCertFile: config.RESTAPI.CertFile, SSLKeyFile: config.RESTAPI.KeyFile, SSLMinProtocolVersion: "TLSv1.2", PasswordEncryption: "scram-sha-256", WALLevel: "replica", HotStandby: "on", WALLogHints: "on", MaxWALSenders: 10, MaxReplicationSlots: 10, MaxSlotWALKeepSize: "1GB", WALKeepSize: "256MB", MaxConnections: 64, SharedBuffers: "32MB"}
-	config.PostgreSQL.PGHBA = []string{"local all synod_admin trust", "local all all reject", "hostnossl all all 0.0.0.0/0 reject", "hostnossl all all ::/0 reject", "hostnossl replication all 0.0.0.0/0 reject", "hostnossl replication all ::/0 reject"}
+	config.PostgreSQL.PGHBA = []string{"local all synod_admin trust", "local all all reject", "hostnossl all all 0.0.0.0/0 reject", "hostnossl all all ::/0 reject", "hostnossl replication all 0.0.0.0/0 reject", "hostnossl replication all ::/0 reject",
+		"hostssl all synod_admin,synod_app " + loopbackSources(settings.Address).String() + " scram-sha-256"}
 	for _, network := range settings.PeerNetworks {
 		config.PostgreSQL.PGHBA = append(config.PostgreSQL.PGHBA, "hostssl replication synod_repl "+network.String()+" scram-sha-256", "hostssl all synod_admin,synod_rewind "+network.String()+" scram-sha-256")
 	}
@@ -328,4 +335,30 @@ func ValidatePatroniSettings(settings PatroniSettings) error {
 		}
 	}
 	return nil
+}
+
+// ReadinessLoopback returns the loopback prefix where a Patroni member also listens for agent readiness.
+//
+// An IPv4 member a.b.c.d uses 127.b.c.d, so members on one host with different addresses do not
+// share a loopback listener. 127.0.0.1 and the loopback broadcast address are never used, so those
+// two cases use 127.0.0.2. IPv6 has only ::1, so two IPv6 members on one host need different ports.
+func ReadinessLoopback(member netip.Addr) netip.Prefix {
+	if member.Is6() {
+		return netip.MustParsePrefix("::1/128")
+	}
+	octets := member.As4()
+	loopback := netip.AddrFrom4([4]byte{127, octets[1], octets[2], octets[3]})
+	if loopback == netip.MustParseAddr("127.0.0.1") || loopback == netip.MustParseAddr("127.255.255.255") {
+		loopback = netip.MustParseAddr("127.0.0.2")
+	}
+	return netip.PrefixFrom(loopback, 32)
+}
+
+// loopbackSources is where a local readiness connection comes from. Linux sends from
+// 127.0.0.1 to any 127.0.0.0/8 destination, and only local processes use that range.
+func loopbackSources(member netip.Addr) netip.Prefix {
+	if member.Is6() {
+		return netip.MustParsePrefix("::1/128")
+	}
+	return netip.MustParsePrefix("127.0.0.0/8")
 }

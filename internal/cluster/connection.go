@@ -12,6 +12,14 @@ type EndpointInspection struct {
 	ObservedLifecycle ObservedLifecycle `json:"observed_lifecycle"`
 	Endpoints         []Endpoint        `json:"endpoints"`
 	UnavailableReason string            `json:"unavailable_reason,omitempty"`
+	// WriterURL connects to the writer of a Patroni cluster. Direct, it names every member and
+	// libpq finds the one that accepts writes. Routed, it names every router writer route, or
+	// the load balancer writer address.
+	WriterURL string `json:"writer_url,omitempty"`
+	// ReaderURL connects to a replica of a routed Patroni cluster through the reader routes.
+	ReaderURL string `json:"reader_url,omitempty"`
+	// CACertificatePEM is the public CA that clients use to verify a TLS endpoint.
+	CACertificatePEM string `json:"ca_certificate_pem,omitempty"`
 }
 
 // Endpoint contains connection metadata without credentials.
@@ -25,6 +33,8 @@ type Endpoint struct {
 	ClientMode          string    `json:"client_mode"`
 	AvailabilityProfile string    `json:"availability_profile"`
 	TLSMode             string    `json:"tls_mode"`
+	// Role is writer or reader for a routed endpoint.
+	Role string `json:"role,omitempty"`
 }
 
 type CredentialInspection struct {

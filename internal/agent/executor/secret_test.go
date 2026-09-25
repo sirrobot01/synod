@@ -177,3 +177,22 @@ func TestReadinessFailureNamesTheProbeThatFailed(t *testing.T) {
 		})
 	}
 }
+
+// A role-any readiness check reports the role it observed, and the state still fits a receipt.
+func TestReadinessReportsTheObservedRoleForAnyRole(t *testing.T) {
+	healthy := engine.Probe{State: engine.ProbePassed}
+	for _, role := range []string{"primary", "replica"} {
+		command := &agentv1.Command{
+			CommandId: uuid.NewString(),
+			Input: &agentv1.CommandInput{ResourceId: uuid.NewString(), Payload: &agentv1.CommandInput_CheckReadiness{
+				CheckReadiness: &agentv1.CheckReadiness{Engine: "postgres", PostgresRole: "any"}}},
+		}
+		result, err := readinessResult(command, engine.Observation{
+			Postgres:  &engine.PostgresObservation{Role: role},
+			Reachable: healthy, ProcessLive: healthy, Ready: healthy, Endpoint: healthy, ObservedAt: time.Now(),
+		})
+		if err != nil || len(result.Effects) != 1 || result.Effects[0].State != "ready_"+role {
+			t.Fatalf("role %s: %+v %v", role, result, err)
+		}
+	}
+}

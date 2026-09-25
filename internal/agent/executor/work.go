@@ -71,6 +71,11 @@ func (e *Executor) execute(ctx context.Context, task job) {
 			e.recordOutcome(record, result, err)
 			return
 		}
+		if record.Command.Input.GetSwitchoverPatroni() != nil {
+			result, err := e.switchover(ctx, record.Command, secrets)
+			e.recordOutcome(record, result, err)
+			return
+		}
 		result, err := e.runtime.Execute(ctx, record.Command, secrets)
 		e.recordOutcome(record, result, err)
 		return
@@ -79,6 +84,10 @@ func (e *Executor) execute(ctx context.Context, task job) {
 }
 
 func (e *Executor) recoverRecord(ctx context.Context, record journal.Record) {
+	if record.Command.Input.GetSwitchoverPatroni() != nil {
+		e.recordOutcome(record, runtime.Result{}, errSwitchoverInterrupted)
+		return
+	}
 	read, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.options.InspectionTimeout)
 	defer cancel()
 	result, err := e.runtime.Recover(read, record.Command, record.Effects)

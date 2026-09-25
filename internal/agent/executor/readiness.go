@@ -91,6 +91,10 @@ func readinessResult(command *agentv1.Command, observed engine.Observation) (run
 		NativeOperationId: "readiness:" + command.CommandId,
 		State:             readyState,
 	}}}
+	// Role any reports the observed role, so completion can prove exactly one writer.
+	if command.Input.GetCheckReadiness().GetPostgresRole() == "any" && observed.Postgres != nil {
+		result.Effects[0].State = readyState + "_" + observed.Postgres.Role
+	}
 	if observed.Healthy() {
 		return result, nil
 	}

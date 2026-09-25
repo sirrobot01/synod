@@ -3,7 +3,9 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -35,6 +37,8 @@ func (s *Store) InspectClusterEndpoints(ctx context.Context, installationID, clu
 	switch {
 	case found.Engine == cluster.PostgreSQL && spec.PostgreSQL != nil && spec.PostgreSQL.Topology == "standalone":
 		database = "app"
+	case found.Engine == cluster.PostgreSQL && spec.PostgreSQL != nil && spec.PostgreSQL.Topology == "patroni":
+		return inspectPatroniEndpoints(ctx, tx, installationID, found)
 	case found.Engine == cluster.Redis && spec.Redis != nil && spec.Redis.Topology == "standalone":
 		database = "0"
 	default:
@@ -109,38 +113,152 @@ func (s *Store) InspectClusterEndpoints(ctx context.Context, installationID, clu
 		found.UnavailableReason = "ambiguous_allocation"
 		return found, nil
 	}
-	var policy placement.NodePolicy
-	if len(allocated.Policy) > 0 {
-		if err := json.Unmarshal(allocated.Policy, &policy); err != nil {
-			return cluster.EndpointInspection{}, admissionError(err)
-		}
-	}
-	if policy.ClientAddress == "" {
-		found.UnavailableReason = "client_address_required"
-		return found, nil
-	}
-	if err := policy.Validate(); err != nil {
-		return cluster.EndpointInspection{}, admissionError(err)
-	}
-	if policy.InstallationID != installationID || policy.NodeID != allocated.Node {
-		return cluster.EndpointInspection{}, &AdmissionError{Code: DependencyUnavailable}
-	}
-	clientAddress, err := netip.ParseAddr(policy.ClientAddress)
+	address, reason, err := clientAddress(allocated.Policy, installationID, allocated.Node, listeners[0].Address, false)
 	if err != nil {
-		return cluster.EndpointInspection{}, admissionError(err)
+		return cluster.EndpointInspection{}, err
 	}
-	bindAddress, err := netip.ParseAddr(listeners[0].Address)
-	if err != nil {
-		return cluster.EndpointInspection{}, admissionError(err)
-	}
-	if bindAddress != clientAddress && (!bindAddress.IsUnspecified() || bindAddress.Is4() != clientAddress.Is4()) {
-		found.UnavailableReason = "address_not_bound"
+	if reason != "" {
+		found.UnavailableReason = reason
 		return found, nil
 	}
 	found.Endpoints = append(found.Endpoints, cluster.Endpoint{
-		ID: allocated.Resource, NodeID: allocated.Node, Host: clientAddress.String(), Port: listeners[0].Port,
+		ID: allocated.Resource, NodeID: allocated.Node, Host: address.String(), Port: listeners[0].Port,
 		Transport: "tcp", Database: database, ClientMode: "direct", AvailabilityProfile: "single_node", TLSMode: "disabled",
 	})
+	return found, nil
+}
+
+// clientAddress answers where clients reach a node, or why a reserved binding has no such address.
+//
+// A published port bound to a wildcard serves one address family, so the family must match the
+// client address. A host-network member binds the node's client address itself, and its wildcard
+// reservation only holds the port number, so any wildcard serves it.
+func clientAddress(policyBytes []byte, installationID, nodeID uuid.UUID, bind string, hostNetwork bool) (netip.Addr, string, error) {
+	var policy placement.NodePolicy
+	if len(policyBytes) > 0 {
+		if err := json.Unmarshal(policyBytes, &policy); err != nil {
+			return netip.Addr{}, "", admissionError(err)
+		}
+	}
+	if policy.ClientAddress == "" {
+		return netip.Addr{}, "client_address_required", nil
+	}
+	if err := policy.Validate(); err != nil {
+		return netip.Addr{}, "", admissionError(err)
+	}
+	if policy.InstallationID != installationID || policy.NodeID != nodeID {
+		return netip.Addr{}, "", &AdmissionError{Code: DependencyUnavailable}
+	}
+	client, err := netip.ParseAddr(policy.ClientAddress)
+	if err != nil {
+		return netip.Addr{}, "", admissionError(err)
+	}
+	bound, err := netip.ParseAddr(bind)
+	if err != nil {
+		return netip.Addr{}, "", admissionError(err)
+	}
+	if bound != client && (!bound.IsUnspecified() || (!hostNetwork && bound.Is4() != client.Is4())) {
+		return netip.Addr{}, "address_not_bound", nil
+	}
+	return client, "", nil
+}
+
+// inspectPatroniEndpoints reports every live Patroni member. A cluster without route ports
+// gets one multi-host writer URL: Patroni elects the primary, so libpq finds the member that
+// accepts writes. A routed cluster lists each node's writer and reader routes, with URLs over
+// every router, or over the load balancer that the cluster declares.
+func inspectPatroniEndpoints(ctx context.Context, tx pgx.Tx, installationID uuid.UUID, found cluster.EndpointInspection) (cluster.EndpointInspection, error) {
+	rows, err := tx.Query(ctx, `SELECT a.resource_id,a.node_id,p.policy_bytes,
+ (SELECT host(o.address) FROM allocation_ports o WHERE o.installation_id=a.installation_id AND o.allocation_id=a.id
+ AND o.released_at IS NULL AND o.transport='tcp' AND o.name='database'),
+ (SELECT o.port FROM allocation_ports o WHERE o.installation_id=a.installation_id AND o.allocation_id=a.id
+ AND o.released_at IS NULL AND o.transport='tcp' AND o.name='database'),
+ (SELECT o.port FROM allocation_ports o WHERE o.installation_id=a.installation_id AND o.allocation_id=a.id
+ AND o.released_at IS NULL AND o.transport='tcp' AND o.name='writer'),
+ (SELECT o.port FROM allocation_ports o WHERE o.installation_id=a.installation_id AND o.allocation_id=a.id
+ AND o.released_at IS NULL AND o.transport='tcp' AND o.name='reader')
+ FROM cluster_members m
+ JOIN resource_allocations a ON a.installation_id=m.installation_id AND a.cluster_id=m.cluster_id
+ AND a.resource_id=m.resource_id AND a.released_at IS NULL
+ LEFT JOIN node_placement_policies p ON p.installation_id=a.installation_id AND p.node_id=a.node_id
+ WHERE m.installation_id=$1 AND m.cluster_id=$2 AND m.role='patroni' AND m.removed_at IS NULL
+ ORDER BY m.member_id LIMIT 4`, installationID, found.ClusterID)
+	if err != nil {
+		return cluster.EndpointInspection{}, admissionError(err)
+	}
+	type member struct {
+		Resource uuid.UUID
+		Node     uuid.UUID
+		Policy   []byte
+		Address  *string
+		Port     *int32
+		Writer   *int32
+		Reader   *int32
+	}
+	members, err := pgx.CollectRows(rows, pgx.RowToStructByPos[member])
+	if err != nil {
+		return cluster.EndpointInspection{}, admissionError(err)
+	}
+	if len(members) != 3 {
+		found.UnavailableReason = "members_incomplete"
+		return found, nil
+	}
+	var balancer *cluster.PostgresEndpoint
+	if err := tx.QueryRow(ctx, `SELECT spec->'postgresql'->'endpoint' FROM clusters WHERE installation_id=$1 AND id=$2`, installationID, found.ClusterID).Scan(&balancer); err != nil {
+		return cluster.EndpointInspection{}, admissionError(err)
+	}
+	routed := true
+	for _, m := range members {
+		routed = routed && m.Writer != nil && m.Reader != nil
+	}
+	var hosts, writers, readers []string
+	for _, m := range members {
+		if m.Address == nil || m.Port == nil {
+			found.UnavailableReason = "not_allocated"
+			found.Endpoints = []cluster.Endpoint{}
+			return found, nil
+		}
+		address, reason, err := clientAddress(m.Policy, installationID, m.Node, *m.Address, true)
+		if err != nil {
+			return cluster.EndpointInspection{}, err
+		}
+		if reason != "" {
+			found.UnavailableReason = reason
+			found.Endpoints = []cluster.Endpoint{}
+			return found, nil
+		}
+		if !routed {
+			port := uint16(*m.Port)
+			found.Endpoints = append(found.Endpoints, cluster.Endpoint{
+				ID: m.Resource, NodeID: m.Node, Host: address.String(), Port: port, Transport: "tcp", Database: "app",
+				ClientMode: "direct", AvailabilityProfile: "patroni_direct", TLSMode: "verify-full",
+			})
+			hosts = append(hosts, net.JoinHostPort(address.String(), strconv.Itoa(int(port))))
+			continue
+		}
+		for _, route := range []struct {
+			role string
+			port uint16
+		}{{"writer", uint16(*m.Writer)}, {"reader", uint16(*m.Reader)}} {
+			found.Endpoints = append(found.Endpoints, cluster.Endpoint{
+				ID: m.Resource, NodeID: m.Node, Host: address.String(), Port: route.port, Transport: "tcp", Database: "app",
+				ClientMode: "routed", AvailabilityProfile: "patroni_routed", TLSMode: "verify-full", Role: route.role,
+			})
+		}
+		writers = append(writers, net.JoinHostPort(address.String(), strconv.Itoa(int(*m.Writer))))
+		readers = append(readers, net.JoinHostPort(address.String(), strconv.Itoa(int(*m.Reader))))
+	}
+	if !routed {
+		found.WriterURL = "postgresql://" + strings.Join(hosts, ",") + "/app?target_session_attrs=read-write&sslmode=verify-full"
+		return found, nil
+	}
+	if balancer != nil {
+		found.WriterURL = "postgresql://" + net.JoinHostPort(balancer.Address, strconv.Itoa(int(balancer.WriterPort))) + "/app?sslmode=verify-full"
+		found.ReaderURL = "postgresql://" + net.JoinHostPort(balancer.Address, strconv.Itoa(int(balancer.ReaderPort))) + "/app?sslmode=verify-full"
+		return found, nil
+	}
+	found.WriterURL = "postgresql://" + strings.Join(writers, ",") + "/app?target_session_attrs=read-write&sslmode=verify-full"
+	found.ReaderURL = "postgresql://" + strings.Join(readers, ",") + "/app?load_balance_hosts=random&sslmode=verify-full"
 	return found, nil
 }
 

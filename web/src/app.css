@@ -136,6 +136,15 @@ button.destructive {
   font-size: 12px;
   padding: 9px 14px;
 }
+/* A filled control that cannot act loses its fill. The dashed border from
+   button[disabled] stays, the hatch replaces the solid fill, and the ink dims.
+   Shape carries the state, so it reads the same in both themes. */
+button.primary:disabled,
+button.destructive:disabled {
+  background: var(--hatch);
+  border-color: var(--line-strong);
+  color: var(--ink-dim);
+}
 button.quiet {
   border-color: var(--danger-line);
   color: var(--danger-ink);

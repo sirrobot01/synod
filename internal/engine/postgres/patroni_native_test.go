@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/pbkdf2"
@@ -12,10 +13,10 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -68,6 +69,11 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 			})
 			subnet := netip.MustParsePrefix(strings.TrimSpace(f.docker(t, "network", "inspect", "--format", "{{(index .IPAM.Config 0).Subnet}}", network)))
 			names := []string{prefix + "-dcs", prefix + "-one", prefix + "-two"}
+			// The router takes a fixed address that member leaves also name.
+			routerAddress := subnet.Addr()
+			for range 10 {
+				routerAddress = routerAddress.Next()
+			}
 			memberCommands := make([][]string, 3)
 			for index, name := range names {
 				address := subnet.Addr().Next().Next()
@@ -119,23 +125,46 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 					}
 				})
 			}
-			caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			installation, clusterID := uuid.New(), uuid.New()
+			caPEM, caKeyPEM, err := pki.CreatePatroniCA(installation, time.Now(), 2*time.Hour)
 			if err != nil {
 				t.Fatal(err)
 			}
-			ca := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: prefix}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature}
-			der, err := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
+			issuer, err := pki.LoadPatroniCA(installation, caPEM, caKeyPEM)
 			if err != nil {
 				t.Fatal(err)
 			}
-			caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-			ca, err = x509.ParseCertificate(der)
+			caBlock, _ := pem.Decode(caPEM)
+			ca, err := x509.ParseCertificate(caBlock.Bytes)
 			if err != nil {
 				t.Fatal(err)
 			}
+			keyBlock, _ := pem.Decode(caKeyPEM)
+			parsedCAKey, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			caKey := parsedCAKey.(*ecdsa.PrivateKey)
 			roots := x509.NewCertPool()
 			roots.AppendCertsFromPEM(caPEM)
-			installation, clusterID := uuid.New(), uuid.New()
+			_, dcsKey, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dcsCSR, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, dcsKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dcsCert, err := issuer.IssuePatroni(dcsCSR, pki.PatroniIdentity{InstallationID: installation, ClusterID: clusterID}, netip.Addr{}, time.Now(), time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dcsKeyDER, err := x509.MarshalPKCS8PrivateKey(dcsKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dcsKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: dcsKeyDER})
+			dcsMaterial := PatroniTLSMaterial{CA: caPEM, Certificate: dcsCert, PrivateKey: dcsKeyPEM}
 			secrets := PatroniSecrets{Superuser: uuid.NewString(), Replication: uuid.NewString(), Rewind: uuid.NewString(), DCS: uuid.NewString(), REST: uuid.NewString()}
 
 			applicationID, applicationPassword := uuid.New(), uuid.NewString()
@@ -151,6 +180,7 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 			serverKey.Write([]byte("Server Key"))
 			secrets.ApplicationVerifier = "SCRAM-SHA-256$4096:" + base64.StdEncoding.EncodeToString(salt) + "$" + base64.StdEncoding.EncodeToString(storedKey[:]) + ":" + base64.StdEncoding.EncodeToString(serverKey.Sum(nil))
 			dirs, addresses := make([]string, 3), make([]string, 3)
+			materials := make([]PatroniTLSMaterial, 3)
 			settings := make([]PatroniSettings, 3)
 			var clientPair tls.Certificate
 			install := func(index int) {
@@ -193,21 +223,43 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 			for index, name := range names {
 				addresses[index] = strings.TrimSpace(f.docker(t, "inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", name))
 				dirs[index] = t.TempDir()
-				key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-				if err != nil {
-					t.Fatal(err)
+				resourceID := uuid.New()
+				var certPEM, keyPEM []byte
+				if index == 0 {
+					key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+					if err != nil {
+						t.Fatal(err)
+					}
+					leaf := &x509.Certificate{SerialNumber: big.NewInt(2), NotBefore: ca.NotBefore, NotAfter: ca.NotAfter, IPAddresses: []net.IP{net.ParseIP(addresses[index]), net.ParseIP("127.0.0.1")}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, KeyUsage: x509.KeyUsageDigitalSignature}
+					der, err := x509.CreateCertificate(rand.Reader, leaf, ca, &key.PublicKey, caKey)
+					if err != nil {
+						t.Fatal(err)
+					}
+					keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+					keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+				} else {
+					_, key, err := ed25519.GenerateKey(rand.Reader)
+					if err != nil {
+						t.Fatal(err)
+					}
+					csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					certPEM, err = issuer.IssuePatroni(csr, pki.PatroniIdentity{InstallationID: installation, ClusterID: clusterID, ResourceID: resourceID}, netip.MustParseAddr(addresses[index]), time.Now(), time.Hour, routerAddress)
+					if err != nil {
+						t.Fatal(err)
+					}
+					keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 				}
-				// The etcd HTTPS gateway rejects client certificates with a common name.
-				leaf := &x509.Certificate{SerialNumber: big.NewInt(int64(index + 2)), NotBefore: ca.NotBefore, NotAfter: ca.NotAfter, IPAddresses: []net.IP{net.ParseIP(addresses[index]), net.ParseIP("127.0.0.1")}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, KeyUsage: x509.KeyUsageDigitalSignature}
-				der, err := x509.CreateCertificate(rand.Reader, leaf, ca, &key.PublicKey, caKey)
-				if err != nil {
-					t.Fatal(err)
-				}
-				keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-				if err != nil {
-					t.Fatal(err)
-				}
-				certPEM, keyPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 				if index == 0 {
 					clientPair, err = tls.X509KeyPair(certPEM, keyPEM)
 					if err != nil {
@@ -218,15 +270,16 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 				if index > 0 {
 					program, applicationProgram = memberCommands[index][4], memberCommands[index][5]
 				}
-				for filename, data := range map[string][]byte{"application.py": []byte(applicationProgram), "guard.py": []byte(program), "ca.crt": caPEM, "member.crt": certPEM, "member.key": keyPEM, "dcs-ca.crt": caPEM, "dcs-client.crt": certPEM, "dcs-client.key": keyPEM} {
+				for filename, data := range map[string][]byte{"application.py": []byte(applicationProgram), "guard.py": []byte(program), "ca.crt": caPEM, "member.crt": certPEM, "member.key": keyPEM, "dcs-ca.crt": caPEM, "dcs-client.crt": dcsCert, "dcs-client.key": dcsKeyPEM} {
 					if err := os.WriteFile(filepath.Join(dirs[index], filename), data, 0o600); err != nil {
 						t.Fatal(err)
 					}
 				}
 				if index > 0 {
-					settings[index] = PatroniSettings{RequiredFreeBytes: 1 << 30, ApplicationCredentialID: applicationID, ApplicationCredentialVersion: 1, InstallationID: installation, ClusterID: clusterID, ResourceID: uuid.New(), VolumeID: uuid.New(), ProvisionID: uuid.New(), AllowInitialization: true, Address: netip.MustParseAddr(addresses[index]), DatabasePort: 5432, RESTPort: 8008, DCSEndpoints: []string{net.JoinHostPort(addresses[0], "2379")}, PeerNetworks: []netip.Prefix{subnet}, ClientNetworks: []netip.Prefix{subnet}, Synchronous: synchronous}
+					settings[index] = PatroniSettings{RequiredFreeBytes: 1 << 30, ApplicationCredentialID: applicationID, ApplicationCredentialVersion: 1, InstallationID: installation, ClusterID: clusterID, ResourceID: resourceID, VolumeID: uuid.New(), ProvisionID: uuid.New(), AllowInitialization: true, Address: netip.MustParseAddr(addresses[index]), DatabasePort: 5432, RESTPort: 8008, DCSEndpoints: []string{net.JoinHostPort(addresses[0], "2379")}, PeerNetworks: []netip.Prefix{subnet}, ClientNetworks: []netip.Prefix{subnet}, Synchronous: synchronous}
 					material := PatroniTLSMaterial{CA: caPEM, Certificate: certPEM, PrivateKey: keyPEM}
-					files, err := PatroniFiles(settings[index], secrets, material, material, time.Now())
+					materials[index] = material
+					files, err := PatroniFiles(settings[index], secrets, material, dcsMaterial, time.Now())
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -272,7 +325,26 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 			}
 			rest := make([]string, 3)
 			database := make([]*pgx.ConnConfig, 3)
-			transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{clientPair}}}
+			publishedREST := func(index int) string {
+				t.Helper()
+				endpoint := strings.TrimSpace(f.docker(t, "port", names[index], "8008/tcp"))
+				_, port, err := net.SplitHostPort(endpoint)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return "https://" + net.JoinHostPort(addresses[index], port)
+			}
+			dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+				host, port, err := net.SplitHostPort(address)
+				if err != nil {
+					return nil, err
+				}
+				if host == addresses[1] || host == addresses[2] {
+					address = net.JoinHostPort("127.0.0.1", port)
+				}
+				return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, network, address)
+			}
+			transport := &http.Transport{DialContext: dial, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{clientPair}}}
 			defer transport.CloseIdleConnections()
 			httpClient := &http.Client{Transport: transport, Timeout: 2 * time.Second}
 			authBody, err := json.Marshal(map[string]string{"name": dcsUser, "password": secrets.DCS})
@@ -289,7 +361,7 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 				t.Fatalf("DCS gateway authentication HTTP %d: %s; %v", authResponse.StatusCode, strings.ReplaceAll(string(authResult), secrets.DCS, "[redacted]"), err)
 			}
 			for index := 1; index < 3; index++ {
-				rest[index] = "https://" + strings.TrimSpace(f.docker(t, "port", names[index], "8008/tcp"))
+				rest[index] = publishedREST(index)
 				endpoint := strings.TrimSpace(f.docker(t, "port", names[index], "5432/tcp"))
 				dbHost, dbPort, err := net.SplitHostPort(endpoint)
 				if err != nil {
@@ -553,6 +625,11 @@ for name in os.listdir('/proc'):
 				if observed := New().Probe(testCtx, endpoint, []byte(applicationPassword), 155); !observed.Healthy() {
 					t.Fatalf("native TLS application readiness failed: %+v", observed)
 				}
+				// Role any accepts the elected primary and a replica that streams from it.
+				endpoint.PostgresRole = "any"
+				if observed := New().Probe(testCtx, endpoint, []byte(applicationPassword), 169); !observed.Healthy() || observed.Postgres == nil || observed.Postgres.Role != role {
+					t.Fatalf("role-any readiness on the %s: %+v", role, observed)
+				}
 				f.docker(t, "exec", "--user", "postgres", names[index], "/usr/bin/python3", PatroniDirectory+"/application.py", "verify")
 				arguments := append([]string{"exec", names[index]}, PatroniHealthCommand()...)
 				if output := f.docker(t, arguments...); output != "patroni_ready" {
@@ -568,7 +645,7 @@ for name in os.listdir('/proc'):
 				}
 				expired := *ca
 				expired.NotBefore, expired.NotAfter = time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour)
-				expiredDER, err := x509.CreateCertificate(rand.Reader, &expired, &expired, &caKey.PublicKey, caKey)
+				expiredDER, err := x509.CreateCertificate(rand.Reader, &expired, &expired, caKey.Public(), caKey)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -666,7 +743,171 @@ for name in os.listdir('/proc'):
 				conn.Close(testCtx)
 				t.Fatal("untrusted database connection accepted")
 			}
-			noCertificate := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}}
+			// Route: a pooler in each member's network namespace, and one router on the bridge.
+			// Clients verify the router address, which each member leaf names.
+			routed := policy.name == "false"
+			var routeConfig func(route string) *pgx.ConnConfig
+			var routeServer func(route string, wantAddress string, recovery bool)
+			var held *pgx.Conn
+			if routed {
+				installRoute := func(container, directory string, files map[string][]byte) {
+					t.Helper()
+					var archive bytes.Buffer
+					writer := tar.NewWriter(&archive)
+					if err := writer.WriteHeader(&tar.Header{Name: filepath.Base(directory) + "/", Typeflag: tar.TypeDir, Mode: 0o700}); err != nil {
+						t.Fatal(err)
+					}
+					for name, data := range files {
+						if err := writer.WriteHeader(&tar.Header{Name: filepath.Base(directory) + "/" + name, Mode: 0o600, Size: int64(len(data))}); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := writer.Write(data); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := writer.Close(); err != nil {
+						t.Fatal(err)
+					}
+					command := exec.CommandContext(testCtx, "docker", "--host", host, "cp", "-", container+":/etc")
+					command.Stdin = &archive
+					if output, err := command.CombinedOutput(); err != nil {
+						t.Fatalf("install route files: %v %s", err, output)
+					}
+				}
+				removeLater := func(name string) {
+					t.Cleanup(func() {
+						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						exec.CommandContext(ctx, "docker", "--host", host, "rm", "--force", name).Run()
+					})
+				}
+				var backends []RouterBackend
+				for _, index := range []int{1, 2} {
+					member := netip.MustParseAddr(addresses[index])
+					files, err := PoolerFiles(PoolerSettings{Address: member, Port: 6432, DatabasePort: 5432, RESTPort: 8008}, applicationPassword, materials[index])
+					if err != nil {
+						t.Fatal(err)
+					}
+					pooler := names[index] + "-pooler"
+					f.docker(t, append([]string{"create", "--name", pooler, "--label", "io.synod.fixture=patroni", "--network", "container:" + names[index], "--entrypoint", PoolerCommand()[0], image}, PoolerCommand()[1:]...)...)
+					removeLater(pooler)
+					installRoute(pooler, PoolerSourceDirectory, files)
+					f.docker(t, "start", pooler)
+					backends = append(backends, RouterBackend{Address: member, PoolerPort: 6432, RESTPort: 8008})
+				}
+				files, err := RouterFiles(RouterSettings{Address: routerAddress, WriterPort: 5000, ReaderPort: 5001, Backends: backends}, materials[1])
+				if err != nil {
+					t.Fatal(err)
+				}
+				router := prefix + "-router"
+				f.docker(t, append([]string{"create", "--name", router, "--label", "io.synod.fixture=patroni", "--network", network, "--ip", routerAddress.String(), "--publish", "127.0.0.1::5000", "--publish", "127.0.0.1::5001", "--entrypoint", RouterCommand()[0], image}, RouterCommand()[1:]...)...)
+				removeLater(router)
+				installRoute(router, RouterSourceDirectory, files)
+				f.docker(t, "start", router)
+				routeConfig = func(route string) *pgx.ConnConfig {
+					t.Helper()
+					container := map[string]string{"writer": "5000/tcp", "reader": "5001/tcp"}[route]
+					endpoint := strings.TrimSpace(f.docker(t, "port", router, container))
+					routeHost, routePort, err := net.SplitHostPort(endpoint)
+					if err != nil {
+						t.Fatal(err)
+					}
+					port, err := strconv.ParseUint(routePort, 10, 16)
+					if err != nil {
+						t.Fatal(err)
+					}
+					config, err := pgx.ParseConfig("user=synod_app dbname=app sslmode=verify-full")
+					if err != nil {
+						t.Fatal(err)
+					}
+					config.Host, config.Port, config.Password = routeHost, uint16(port), applicationPassword
+					config.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: routerAddress.String()}
+					config.Fallbacks = nil
+					config.ConnectTimeout = 2 * time.Second
+					return config
+				}
+				// routeServer waits until the route reaches the member at wantAddress in the expected role.
+				// The in_hot_standby value that the pooler reports at startup must agree, because libpq
+				// target_session_attrs trusts it. A pool that logged in before a role change reports the old value.
+				routeServer = func(route string, wantAddress string, recovery bool) {
+					t.Helper()
+					deadline := time.Now().Add(45 * time.Second)
+					var last error
+					for {
+						connection, err := pgx.ConnectConfig(testCtx, routeConfig(route))
+						if err == nil {
+							var server string
+							var inRecovery bool
+							err = connection.QueryRow(testCtx, "SELECT host(inet_server_addr()), pg_catalog.pg_is_in_recovery()").Scan(&server, &inRecovery)
+							reported := connection.PgConn().ParameterStatus("in_hot_standby")
+							connection.Close(testCtx)
+							want := map[bool]string{true: "on", false: "off"}[recovery]
+							if err == nil && server == wantAddress && inRecovery == recovery && reported == want {
+								return
+							}
+							if err == nil {
+								err = fmt.Errorf("route reached %s with recovery %t and reported in_hot_standby %q", server, inRecovery, reported)
+							}
+						}
+						last = err
+						if time.Now().After(deadline) {
+							t.Fatalf("%s route did not reach %s: %v; router: %s", route, wantAddress, last, f.docker(t, "logs", "--tail", "20", router))
+						}
+						time.Sleep(250 * time.Millisecond)
+					}
+				}
+				// A failed login in a new pool must not stop later logins. With SCRAM pass-through,
+				// PgBouncer 1.25 then refuses every server login until it restarts.
+				// The attempt repeats until PgBouncer itself refuses the password, because the router
+				// can refuse a connection before its first health checks pass.
+				wrong := routeConfig("writer")
+				wrong.Password = "wrong-" + applicationPassword
+				deadline := time.Now().Add(45 * time.Second)
+				for {
+					connection, err := pgx.ConnectConfig(testCtx, wrong)
+					if err == nil {
+						connection.Close(testCtx)
+						t.Fatal("the pooler accepted a wrong password")
+					}
+					if strings.Contains(err.Error(), "SASL authentication failed") {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("the wrong password never reached the pooler", err)
+					}
+					time.Sleep(250 * time.Millisecond)
+				}
+				routeServer("writer", addresses[1], false)
+				routeServer("reader", addresses[2], true)
+				through, err := pgx.ConnectConfig(testCtx, routeConfig("writer"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := through.Exec(testCtx, "INSERT INTO application_ha VALUES(0)"); err != nil {
+					t.Fatal("write through the writer route", err)
+				}
+				through.Close(testCtx)
+				// Plaintext and a wrong router name are refused.
+				plain := routeConfig("writer")
+				plain.TLSConfig = nil
+				if connection, err := pgx.ConnectConfig(testCtx, plain); err == nil {
+					connection.Close(testCtx)
+					t.Fatal("the pooler accepted plaintext")
+				}
+				misnamed := routeConfig("writer")
+				misnamed.TLSConfig.ServerName = "192.0.2.250"
+				if connection, err := pgx.ConnectConfig(testCtx, misnamed); err == nil {
+					connection.Close(testCtx)
+					t.Fatal("the pooler certificate matched a wrong name")
+				}
+				// A writer session held across the switchover must be cut.
+				held, err = pgx.ConnectConfig(testCtx, routeConfig("writer"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer held.Close(context.WithoutCancel(testCtx))
+			}
+			noCertificate := &http.Transport{DialContext: dial, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}}
 			defer noCertificate.CloseIdleConnections()
 			unauthenticated := &http.Client{Transport: noCertificate, Timeout: 2 * time.Second}
 			if response, err := unauthenticated.Get(rest[1] + "/primary"); err == nil {
@@ -693,22 +934,23 @@ for name in os.listdir('/proc'):
 			if response.StatusCode != http.StatusUnauthorized {
 				t.Fatal("REST mutation did not require password", response.StatusCode)
 			}
-			req, err = http.NewRequestWithContext(testCtx, http.MethodPost, rest[1]+"/switchover", bytes.NewReader(body))
+			// The agent's client verifies the member it names and presents that member's certificate.
+			// Only the dial differs, because the fixture publishes REST on loopback ports.
+			control, err := PatroniRESTClient(materials[2], netip.MustParseAddr(addresses[1]))
 			if err != nil {
 				t.Fatal(err)
 			}
-			req.Header.Set("Content-Type", "application/json")
-			req.SetBasicAuth("synod_patroni", secrets.REST)
-			// A switchover may take longer than a health read.
-			control := &http.Client{Transport: transport, Timeout: 30 * time.Second}
-			response, err = control.Do(req)
-			if err != nil {
-				t.Fatal(err)
+			control.Transport.(*http.Transport).DialContext = dial
+			defer control.CloseIdleConnections()
+			switchCtx, cancelSwitch := context.WithTimeout(testCtx, 60*time.Second)
+			moved, err := PatroniSwitchover(switchCtx, control, rest[1], settings[2].ResourceID, secrets.REST)
+			cancelSwitch()
+			if err != nil || !moved {
+				t.Fatal("switchover to member 2 failed", moved, err)
 			}
-			result, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
-			response.Body.Close()
-			if readErr != nil || response.StatusCode != 200 && response.StatusCode != 202 {
-				t.Fatal("switchover refused", response.StatusCode, string(result), readErr)
+			// A repeat finds member 2 leading and sends no request.
+			if moved, err := PatroniSwitchover(testCtx, control, rest[1], settings[2].ResourceID, secrets.REST); err != nil || moved {
+				t.Fatal("a repeated switchover acted again", moved, err)
 			}
 			waitRole(2, "primary", 200)
 			waitRole(1, "replica", 200)
@@ -717,6 +959,13 @@ for name in os.listdir('/proc'):
 			}
 			verifyApplication(2, 147)
 			verifyApplication(1, 147)
+			if routed {
+				routeServer("writer", addresses[2], false)
+				routeServer("reader", addresses[1], true)
+				if _, err := held.Exec(testCtx, "SELECT 1"); err == nil {
+					t.Fatal("a writer session to the demoted member survived the switchover")
+				}
+			}
 			writer.Close(testCtx)
 			reader.Close(testCtx)
 			switched, err := pgx.ConnectConfig(testCtx, database[2])
@@ -746,6 +995,9 @@ for name in os.listdir('/proc'):
 			}
 			f.docker(t, "kill", names[2])
 			waitRole(1, "primary", 200)
+			if routed {
+				routeServer("writer", addresses[1], false)
+			}
 			recovered, err := pgx.ConnectConfig(testCtx, database[1])
 			if err != nil {
 				t.Fatal(err)
@@ -796,7 +1048,7 @@ for name in os.listdir('/proc'):
 				t.Fatal(err)
 			}
 			f.docker(t, "start", names[2])
-			rest[2] = "https://" + strings.TrimSpace(f.docker(t, "port", names[2], "8008/tcp"))
+			rest[2] = publishedREST(2)
 			_, restartedPort, err := net.SplitHostPort(strings.TrimSpace(f.docker(t, "port", names[2], "5432/tcp")))
 			if err != nil {
 				t.Fatal(err)
@@ -854,7 +1106,7 @@ for name in os.listdir('/proc'):
 						t.Fatal(err)
 					}
 					install(2)
-					rest[2] = "https://" + strings.TrimSpace(f.docker(t, "port", names[2], "8008/tcp"))
+					rest[2] = publishedREST(2)
 					_, port, err := net.SplitHostPort(strings.TrimSpace(f.docker(t, "port", names[2], "5432/tcp")))
 					if err != nil {
 						t.Fatal(err)
@@ -976,7 +1228,7 @@ for name in os.listdir('/proc'):
 						waitRole(2, "primary", 200)
 					}
 					f.docker(t, "start", names[index])
-					rest[index] = "https://" + strings.TrimSpace(f.docker(t, "port", names[index], "8008/tcp"))
+					rest[index] = publishedREST(index)
 					_, port, err := net.SplitHostPort(strings.TrimSpace(f.docker(t, "port", names[index], "5432/tcp")))
 					if err != nil {
 						t.Fatal(err)

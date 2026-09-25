@@ -14,7 +14,7 @@ func newNodeCommand(api **client.Client, result *Result, prepare func(cmd *cobra
 	var policy client.NodePolicy
 	var node string
 	var expected int64
-	var engines []string
+	var engines, domains []string
 	group := &cobra.Command{Use: "node", Short: "Manage enrolled nodes"}
 	approve := &cobra.Command{Use: "approve", Short: "Approve one enrolled node for placement", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -28,6 +28,19 @@ func newNodeCommand(api **client.Client, result *Result, prepare func(cmd *cobra
 					return &client.Error{Code: "invalid_request", Message: "Declare each engine as engine:version, such as postgres:17.11."}
 				}
 				policy.Engines = append(policy.Engines, client.EngineVersion{Engine: name, Version: version})
+			}
+			for _, declared := range domains {
+				key, value, ok := strings.Cut(declared, "=")
+				if !ok || key == "" || value == "" {
+					return &client.Error{Code: "invalid_request", Message: "Declare each failure domain as key=value, such as host=rack1-server2."}
+				}
+				if _, repeated := policy.FailureDomains[key]; repeated {
+					return &client.Error{Code: "invalid_request", Message: "Declare each failure-domain key once."}
+				}
+				if policy.FailureDomains == nil {
+					policy.FailureDomains = make(map[string]string)
+				}
+				policy.FailureDomains[key] = value
 			}
 			if len(policy.Engines) == 0 {
 				return &client.Error{Code: "invalid_request", Message: "Declare at least one engine the node may run."}
@@ -48,6 +61,8 @@ func newNodeCommand(api **client.Client, result *Result, prepare func(cmd *cobra
 	approve.Flags().StringVar(&policy.StorageID, "storage-id", "", "Storage pool identifier (required)")
 	approve.Flags().StringVar(&policy.ClientAddress, "client-address", "", "Canonical node IPv4 or IPv6 address for database clients")
 	approve.Flags().StringSliceVar(&engines, "engine", nil, "Engine and version the node may run, as engine:version (repeatable, required)")
+	// HA placement spreads members across distinct values of one key, such as host.
+	approve.Flags().StringArrayVar(&domains, "failure-domain", nil, "Failure domain as key=value, such as host=rack1-server2 (repeatable)")
 	// No default headroom: a figure invented here reserves an amount nobody chose.
 	approve.Flags().Int64Var(&policy.Headroom.CPUMillis, "headroom-cpu-millis", 0, "CPU millis placement must leave unused (required)")
 	approve.Flags().Int64Var(&policy.Headroom.MemoryBytes, "headroom-memory-bytes", 0, "Memory bytes placement must leave unused (required)")

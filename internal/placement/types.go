@@ -133,6 +133,8 @@ type Port struct {
 	Address   string `json:"address"`
 	Transport string `json:"transport"`
 	Number    uint16 `json:"number"`
+	// Name tells apart two ports of one resource, such as database and rest.
+	Name string `json:"name,omitempty"`
 }
 
 // Resource is one unit to place with the requirements a node must meet.

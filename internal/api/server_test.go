@@ -134,6 +134,9 @@ func TestHTTPSAdmission(t *testing.T) {
 		{"changed key input", "POST", "/v1/clusters", strings.Replace(body, "example", "changed", 1), "stable-key", 409},
 		{"name conflict", "POST", "/v1/clusters", body, "new-key", 409},
 		{"unsupported version", "POST", "/v1/clusters", strings.Replace(body, "17.11", "99.0", 1), "unsupported", 422},
+		// A controller without Patroni HA configuration refuses a Patroni create.
+		{"patroni not configured", "POST", "/v1/clusters", strings.Replace(body, `"topology":"standalone"`, `"topology":"patroni","failure_domain":"host"`, 1), "patroni", 422},
+		{"patroni without failure domain", "POST", "/v1/clusters", strings.Replace(body, `"topology":"standalone"`, `"topology":"patroni"`, 1), "patroni-domain", 400},
 		{"missing key", "POST", "/v1/clusters", body, "", 400},
 		{"unknown field", "POST", "/v1/clusters", strings.Replace(body, `"name":`, `"password":"private-input","name":`, 1), "unknown", 400},
 		{"second object", "POST", "/v1/clusters", body + `{}`, "extra", 400},
@@ -168,6 +171,22 @@ func TestHTTPSAdmission(t *testing.T) {
 	changed.ServeHTTP(recorder, request)
 	if recorder.Code != 202 {
 		t.Fatalf("catalog replay: %d %s", recorder.Code, recorder.Body)
+	}
+	// A controller with Patroni HA configuration admits a Patroni create.
+	configured, err := NewServer(store, verifier, installation, testCatalog(t), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured.PatroniCA = []byte("-----BEGIN CERTIFICATE-----\n")
+	patroni := strings.Replace(strings.Replace(body, `"topology":"standalone"`, `"topology":"patroni","failure_domain":"host"`, 1), "example", "ha", 1)
+	request = httptest.NewRequest("POST", "/v1/clusters", strings.NewReader(patroni))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Idempotency-Key", "patroni-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	configured.ServeHTTP(recorder, request)
+	if recorder.Code != 202 {
+		t.Fatalf("configured Patroni admission: %d %s", recorder.Code, recorder.Body)
 	}
 	other, err := NewServer(store, verifier, uuid.New(), nil, logger)
 	if err != nil {

@@ -25,6 +25,9 @@ const (
 	scaleKind          = "cluster.scale"
 	recoverSetupKind   = "cluster.recover_setup"
 	rebuildReplicaKind = "cluster.rebuild_replica"
+	rebuildMemberKind  = "cluster.rebuild_member"
+	renewKind          = "cluster.renew_certificates"
+	switchoverKind     = "cluster.switchover"
 )
 
 var (
@@ -47,6 +50,12 @@ func (p *Planner) Plan(ctx context.Context, claim operation.Claim) error {
 		return err
 	case rebuildReplicaKind:
 		return p.rebuildReplica(ctx, claim, op)
+	case rebuildMemberKind:
+		return p.rebuildMember(ctx, claim, op)
+	case renewKind:
+		return p.renewCertificates(ctx, claim, op)
+	case switchoverKind:
+		return p.switchover(ctx, claim, op)
 	case scaleKind:
 		return p.scale(ctx, claim, op)
 	}
@@ -68,20 +77,40 @@ func (p *Planner) lifecycle(ctx context.Context, claim operation.Claim, op opera
 		return err
 	}
 	var steps []*agentv1.PlanStep
+	// Patroni members stop together. Stopping the leader alone makes a replica promote
+	// only to be stopped next.
+	together := found.Spec.PostgreSQL != nil && found.Spec.PostgreSQL.Topology == "patroni"
 	switch op.Kind {
 	case stopKind:
-		steps, err = p.stopSteps(claim, op, running)
+		steps, err = p.stopSteps(claim, op, running, together)
 	case startKind:
-		steps, err = p.startSteps(ctx, claim, op, found, running)
+		if together {
+			steps, err = p.patroniStartSteps(ctx, claim, op, running)
+		} else {
+			steps, err = p.startSteps(ctx, claim, op, found, running)
+		}
 	case recoverSetupKind:
 		steps, err = p.recoverSetupSteps(ctx, claim, op, found, running)
 	case deleteKind:
-		steps, err = p.deleteSteps(claim, op, running)
+		steps, err = p.deleteSteps(claim, op, running, together)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnplannable, op.Kind)
 	}
 	if err != nil {
 		return err
+	}
+	// Routes stop and leave with their members.
+	if together && (op.Kind == stopKind || op.Kind == deleteKind) && routed(running) {
+		// Each node's route steps follow that node's last member step.
+		last := map[uuid.UUID]string{}
+		for _, step := range steps {
+			last[uuid.MustParse(step.Command.Epoch.NodeId)] = step.Command.StepId
+		}
+		routes, err := p.routeStopSteps(claim, op, running, op.Kind == deleteKind, last)
+		if err != nil {
+			return err
+		}
+		steps = append(steps, routes...)
 	}
 	plan := &agentv1.ExecutionPlan{Version: 1, Steps: steps}
 	if err := operation.ValidatePlan(plan, op); err != nil {
@@ -100,6 +129,8 @@ type member struct {
 	NodeID     uuid.UUID
 	ResourceID uuid.UUID
 	Port       uint16
+	// Ports holds the named ports of the reservation, such as a Patroni member's routes.
+	Ports map[string]uint16
 }
 
 // members answers what the cluster runs. The recorded membership names each instance
@@ -128,11 +159,13 @@ func (p *Planner) members(ctx context.Context, claim operation.Claim) ([]member,
 		if !live {
 			return nil, fmt.Errorf("%w: member %s holds no reservation", ErrNoWorkload, each.MemberID)
 		}
-		instance := member{MemberID: each.MemberID, Role: each.Role, State: each.State, NodeID: hold.NodeID, ResourceID: each.ResourceID}
+		instance := member{MemberID: each.MemberID, Role: each.Role, State: each.State, NodeID: hold.NodeID, ResourceID: each.ResourceID, Ports: map[string]uint16{}}
 		for _, port := range hold.Ports {
-			if port.Transport == "tcp" {
+			if port.Transport == "tcp" && instance.Port == 0 {
 				instance.Port = port.Number
-				break
+			}
+			if port.Name != "" {
+				instance.Ports[port.Name] = port.Number
 			}
 		}
 		running = append(running, instance)
@@ -153,12 +186,13 @@ func epochFor(claim operation.Claim, nodeID uuid.UUID) *agentv1.Epoch {
 	}
 }
 
-// stopSteps stops every member and leaves their data alone.
-func (p *Planner) stopSteps(claim operation.Claim, op operation.Operation, running []member) ([]*agentv1.PlanStep, error) {
+// stopSteps stops every member and leaves their data alone. Together stops them with
+// no ordering between members.
+func (p *Planner) stopSteps(claim operation.Claim, op operation.Operation, running []member, together bool) ([]*agentv1.PlanStep, error) {
 	steps := make([]*agentv1.PlanStep, 0, len(running))
 	for _, each := range running {
 		var dependsOn []string
-		if len(steps) > 0 {
+		if len(steps) > 0 && !together {
 			dependsOn = []string{steps[len(steps)-1].Command.StepId}
 		}
 		stop, err := p.step(claim, epochFor(claim, each.NodeID), op.DesiredRevision, &agentv1.CommandInput{
@@ -306,12 +340,13 @@ func (p *Planner) startSteps(ctx context.Context, claim operation.Claim, op oper
 
 // deleteSteps stop the engine and remove its container. The volume is not touched:
 // specification 33 retains data on a delete, and purge is a separate operation.
-func (p *Planner) deleteSteps(claim operation.Claim, op operation.Operation, running []member) ([]*agentv1.PlanStep, error) {
+// Together removes members with no ordering between them.
+func (p *Planner) deleteSteps(claim operation.Claim, op operation.Operation, running []member, together bool) ([]*agentv1.PlanStep, error) {
 	steps := make([]*agentv1.PlanStep, 0, 2*len(running))
 	for _, each := range running {
 		epoch := epochFor(claim, each.NodeID)
 		var dependsOn []string
-		if len(steps) > 0 {
+		if len(steps) > 0 && !together {
 			dependsOn = []string{steps[len(steps)-1].Command.StepId}
 		}
 		stop, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{

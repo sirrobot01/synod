@@ -112,7 +112,7 @@ func (p Port) Validate() error {
 // binding checks everything about a port except its number.
 func (p Port) binding() error {
 	address, err := netip.ParseAddr(p.Address)
-	if err != nil || address.Zone() != "" || address.IsMulticast() || address.Unmap().String() != p.Address || (p.Transport != "tcp" && p.Transport != "udp") {
+	if err != nil || address.Zone() != "" || address.IsMulticast() || address.Unmap().String() != p.Address || (p.Transport != "tcp" && p.Transport != "udp") || len(p.Name) > 32 || (p.Name != "" && !validText(p.Name)) {
 		return ErrInvalid
 	}
 	return nil
@@ -156,7 +156,9 @@ func (r Request) Validate() error {
 		}
 		// An instance is a member of the cluster, so it names which member it is.
 		// Nothing else is a member, so nothing else carries a role.
-		if (resource.Kind == "instance") != (resource.Role == "primary" || resource.Role == "replica") {
+		// A Patroni member has no Synod-declared role, because Patroni elects its primary.
+		// It only exists in an HA placement that spreads it from its peers.
+		if (resource.Kind == "instance") != (resource.Role == "primary" || resource.Role == "replica" || resource.Role == "patroni") || (resource.Role == "patroni" && r.Profile != "ha") {
 			return ErrInvalid
 		}
 		if resource.Kind == "instance" && (resource.Budgets.Workload.CPUMillis == 0 || resource.Budgets.Workload.MemoryBytes == 0 || resource.Budgets.Workload.DiskBytes == 0) {
@@ -179,7 +181,7 @@ func (r Request) Validate() error {
 			for _, previous := range resource.Ports[:i] {
 				// Two chosen ports never collide, because placement gives them
 				// different numbers.
-				if port.Number != 0 && PortsConflict(port, previous) {
+				if port.Number != 0 && PortsConflict(port, previous) || port.Name != "" && port.Name == previous.Name {
 					return ErrInvalid
 				}
 			}

@@ -58,3 +58,40 @@ func TestSharedReceiptChecksRejectMissingPlanInput(t *testing.T) {
 		}
 	}
 }
+
+// An agent runs one command of a cluster at a time, so two steps on one node need a
+// dependency path. Steps on different nodes do not.
+func TestPlanOrdersStepsOnEachNode(t *testing.T) {
+	op := Operation{ID: uuid.New(), InstallationID: uuid.New(), ClusterID: uuid.New(), DesiredRevision: 1}
+	step := func(node string, after ...string) *agentv1.PlanStep {
+		command := commandFixture()
+		command.Epoch.InstallationId, command.Epoch.ClusterId, command.Epoch.NodeId = op.InstallationID.String(), op.ClusterID.String(), node
+		command.OperationId = op.ID.String()
+		hash, err := CommandHash(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		command.InputHash = hash[:]
+		return &agentv1.PlanStep{Command: command, MaxAttempts: 1, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, DependsOn: after}
+	}
+	a, b := uuid.NewString(), uuid.NewString()
+	first := step(a)
+	middle := step(b, first.Command.StepId)
+	// peer is on node b with no path to the lone step on node a.
+	lone, peer := step(a), step(b)
+	for name, test := range map[string]struct {
+		steps []*agentv1.PlanStep
+		ok    bool
+	}{
+		"different nodes":    {[]*agentv1.PlanStep{step(a), step(b)}, true},
+		"direct dependency":  {[]*agentv1.PlanStep{first, step(a, first.Command.StepId)}, true},
+		"path through peer":  {[]*agentv1.PlanStep{first, middle, step(a, middle.Command.StepId)}, true},
+		"unordered one node": {[]*agentv1.PlanStep{step(a), step(a)}, false},
+		"ordered to another": {[]*agentv1.PlanStep{lone, peer, step(a, peer.Command.StepId)}, false},
+	} {
+		err := ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: test.steps}, op)
+		if (err == nil) != test.ok {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

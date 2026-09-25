@@ -57,6 +57,34 @@ func planStep(t *testing.T, op operation.Operation, nodeID, resourceID string, p
 			input.Secrets = nil
 			input.Payload = &agentv1.CommandInput_VerifyPostgresReplicaFailure{VerifyPostgresReplicaFailure: &agentv1.VerifyPostgresReplicaFailure{Postgres: config, CloneCommandId: uuid.NewString()}}
 		}
+	case agentv1.Postcondition_POSTCONDITION_PATRONI_START_FAILED, agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_NOT_SERVING, agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_FAILED, agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_RECREATED:
+		var refs []*agentv1.SecretReference
+		for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_dcs", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
+			refs = append(refs, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: purpose})
+		}
+		member := &agentv1.EnsureContainer{
+			ImageDigest: testImageDigest, Engine: "postgres", VolumeId: uuid.NewString(), NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST,
+			Postgres: &agentv1.PostgresContainerConfig{Port: 15432,
+				SuperuserCredentialId: refs[0].CredentialId, SuperuserCredentialVersion: 1,
+				ApplicationCredentialId: refs[1].CredentialId, ApplicationCredentialVersion: 1, ReplicationCredentialId: refs[2].CredentialId, ReplicationCredentialVersion: 1,
+				Patroni: &agentv1.PatroniContainerConfig{Address: "192.0.2.10", RestPort: 8008, DcsEndpoints: []string{"192.0.2.20:2379"}, PeerNetworks: []string{"192.0.2.0/24"}, ClientNetworks: []string{"198.51.100.0/24"}, ProvisionId: uuid.NewString(), AllowInitialization: true, RequiredFreeBytes: 1 << 30, Credentials: refs}},
+		}
+		switch postcondition {
+		case agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_NOT_SERVING:
+			input.Payload = &agentv1.CommandInput_VerifyPatroniMemberNotServing{VerifyPatroniMemberNotServing: &agentv1.VerifyPatroniMemberNotServing{Container: member}}
+		case agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_FAILED:
+			input.Payload = &agentv1.CommandInput_VerifyPatroniMemberFailed{VerifyPatroniMemberFailed: &agentv1.VerifyPatroniMemberFailed{Container: member}}
+		case agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_RECREATED:
+			next := proto.Clone(member).(*agentv1.EnsureContainer)
+			next.Postgres.Patroni.Credentials[6].Version = 2
+			input.Secrets = next.Postgres.Patroni.Credentials
+			input.Payload = &agentv1.CommandInput_RecreatePatroniMember{RecreatePatroniMember: &agentv1.RecreatePatroniMember{Previous: member, Next: next}}
+		default:
+			input.Payload = &agentv1.CommandInput_VerifyPatroniStartFailure{VerifyPatroniStartFailure: &agentv1.VerifyPatroniStartFailure{Container: member}}
+		}
+	case agentv1.Postcondition_POSTCONDITION_PATRONI_LEADER:
+		input.Secrets = []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "patroni_rest"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "patroni_member_tls"}}
+		input.Payload = &agentv1.CommandInput_SwitchoverPatroni{SwitchoverPatroni: &agentv1.SwitchoverPatroni{Address: "192.0.2.10", RestPort: 8008}}
 	case agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_PREPARED:
 		input.Payload = &agentv1.CommandInput_PreparePostgresReplica{PreparePostgresReplica: &agentv1.PreparePostgresReplica{}}
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING:
@@ -98,7 +126,8 @@ func provisionPlan(t *testing.T, op operation.Operation) *agentv1.ExecutionPlan 
 	t.Helper()
 	node, container := uuid.NewString(), uuid.NewString()
 	volume := planStep(t, op, node, uuid.NewString(), agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS)
-	network := planStep(t, op, node, uuid.NewString(), agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS)
+	// An agent runs one command of a cluster at a time, so steps on one node form a chain.
+	network := planStep(t, op, node, uuid.NewString(), agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS, volume.Command.StepId)
 	create := planStep(t, op, node, container, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, volume.Command.StepId, network.Command.StepId)
 	start := planStep(t, op, node, container, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, create.Command.StepId)
 	return &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{volume, network, create, start}}
@@ -182,10 +211,11 @@ func TestValidatePlanRejectsUnsupportedContent(t *testing.T) {
 }
 
 func TestValidatePlanBoundsStepCount(t *testing.T) {
-	op, node := testOperation(), uuid.NewString()
+	op := testOperation()
 	var steps []*agentv1.PlanStep
+	// Each step has its own node, so no two steps need an order.
 	for range 129 {
-		steps = append(steps, planStep(t, op, node, uuid.NewString(), agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS))
+		steps = append(steps, planStep(t, op, uuid.NewString(), uuid.NewString(), agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS))
 	}
 	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps[:128]}, op); err != nil {
 		t.Fatal(err)
@@ -425,7 +455,8 @@ func TestValidatePlanAcceptsEveryPostcondition(t *testing.T) {
 		case agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT:
 			steps = append(steps, planStep(t, op, node, torn, postcondition, stopStep))
 		default:
-			steps = append(steps, planStep(t, op, node, uuid.NewString(), postcondition))
+			// Other steps use their own nodes, so no two steps need an order.
+			steps = append(steps, planStep(t, op, uuid.NewString(), uuid.NewString(), postcondition))
 		}
 	}
 	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps}, op); err != nil {

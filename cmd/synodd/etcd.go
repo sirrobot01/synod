@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/config"
+	"github.com/sirrobot01/synod/internal/coordinator"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
@@ -36,6 +38,27 @@ func connectEtcd(ctx context.Context, settings config.Controller) (*clientv3.Cli
 		}
 	}
 	return client, nil
+}
+
+// connectPatroniDCSAdmin opens the Patroni account administration connection over the
+// coordination transport and refuses an account without the etcd root role.
+func connectPatroniDCSAdmin(ctx context.Context, settings config.Controller) (*coordinator.PatroniAccounts, *clientv3.Client, error) {
+	admin := settings
+	admin.EtcdUsername, admin.EtcdPasswordFile = settings.PatroniDCSAdminUsername, settings.PatroniDCSAdminPasswordFile
+	client, err := connectEtcd(ctx, admin)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect Patroni DCS administration: %w", err)
+	}
+	accounts, err := coordinator.NewPatroniAccounts(client, uuid.MustParse(settings.InstallationID))
+	if err == nil {
+		verifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err = accounts.VerifyAdmin(verifyCtx, settings.PatroniDCSAdminUsername)
+		cancel()
+	}
+	if err != nil {
+		return nil, nil, errors.Join(err, client.Close())
+	}
+	return accounts, client, nil
 }
 
 // etcdClientConfig loads protected credentials before the controller serves requests.

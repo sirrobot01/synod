@@ -107,18 +107,20 @@ func testPool(t *testing.T) *pgxpool.Pool {
 
 // harness runs the worker against real PostgreSQL and a real mutual TLS control stream.
 type harness struct {
-	store      *postgres.Store
-	pool       *pgxpool.Pool
-	worker     *Worker
-	transport  *controlstream.Server
-	leader     *coordinator.Leadership
-	claim      operation.Claim
-	plan       *agentv1.ExecutionPlan
-	node       uuid.UUID
-	received   chan *agentv1.ControllerMessage
-	address    string
-	roots      *x509.CertPool
-	agent      tls.Certificate
+	store     *postgres.Store
+	pool      *pgxpool.Pool
+	worker    *Worker
+	transport *controlstream.Server
+	leader    *coordinator.Leadership
+	claim     operation.Claim
+	plan      *agentv1.ExecutionPlan
+	node      uuid.UUID
+	received  chan *agentv1.ControllerMessage
+	address   string
+	roots     *x509.CertPool
+	ca        *pki.CA
+	// agents holds each enrolled node's identity.
+	agents     map[uuid.UUID]tls.Certificate
 	controller tls.Certificate
 }
 
@@ -189,7 +191,7 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 			t.Fatal(err)
 		}
 	}
-	if _, err := pool.Exec(t.Context(), `INSERT INTO allocation_ports(installation_id,cluster_id,node_id,allocation_id,address,transport,port) VALUES($1,$2,$3,$4,$5,$6,$7)`, installation, claim.ClusterID, node, allocation.ID, allocation.Ports[0].Address, allocation.Ports[0].Transport, allocation.Ports[0].Number); err != nil {
+	if _, err := pool.Exec(t.Context(), `INSERT INTO allocation_ports(installation_id,cluster_id,node_id,allocation_id,address,transport,port,name) VALUES($1,$2,$3,$4,$5,$6,$7,'')`, installation, claim.ClusterID, node, allocation.ID, allocation.Ports[0].Address, allocation.Ports[0].Transport, allocation.Ports[0].Number); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(t.Context(), `INSERT INTO operation_allocation_bindings(installation_id,cluster_id,operation_id,allocation_id) VALUES($1,$2,$3,$4)`, installation, claim.ClusterID, admission.OperationID, allocation.ID); err != nil {
@@ -252,57 +254,72 @@ func (h *harness) issueIdentities(t *testing.T, installation, node uuid.UUID) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ca, err := pki.LoadCA(installation, caCert, caKey)
-	if err != nil {
+	if h.ca, err = pki.LoadCA(installation, caCert, caKey); err != nil {
 		t.Fatal(err)
 	}
 	h.roots = x509.NewCertPool()
 	if !h.roots.AppendCertsFromPEM(caCert) {
 		t.Fatal("invalid fixture CA")
 	}
-	for _, role := range []pki.Role{pki.Agent, pki.Controller} {
-		_, private, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, private)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var leaf []byte
-		if role == pki.Agent {
-			verifier := sha256.Sum256([]byte(uuid.NewString()))
-			if _, err := h.store.RegisterEnrollmentToken(t.Context(), postgres.TokenRegistration{InstallationID: installation, NodeID: node, ActorID: "test-admin", RequestID: uuid.NewString(), IdempotencyKey: uuid.NewString(), TokenVerifier: verifier, TTLSeconds: 600}); err != nil {
-				t.Fatal(err)
-			}
-			enrolled, err := h.store.EnrollAgent(t.Context(), postgres.EnrollmentRequest{InstallationID: installation, NodeID: node, RequestID: uuid.New(), TokenVerifier: verifier, CSRDER: csr}, ca)
-			if err != nil {
-				t.Fatal(err)
-			}
-			leaf = []byte(enrolled.CertificatePEM)
-		} else if leaf, err = ca.Issue(csr, pki.Identity{InstallationID: installation, Role: role, SubjectID: uuid.New()}, []string{"127.0.0.1"}, time.Now(), time.Hour); err != nil {
-			t.Fatal(err)
-		}
-		key, err := x509.MarshalPKCS8PrivateKey(private)
-		if err != nil {
-			t.Fatal(err)
-		}
-		pair, err := tls.X509KeyPair(leaf, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if role == pki.Agent {
-			h.agent = pair
-			continue
-		}
-		h.controller = pair
+	private, csr := fixtureKey(t)
+	leaf, err := h.ca.Issue(csr, pki.Identity{InstallationID: installation, Role: pki.Controller, SubjectID: uuid.New()}, []string{"127.0.0.1"}, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
 	}
+	h.controller = fixturePair(t, leaf, private)
+	h.enroll(t, installation, node)
+}
+
+// enroll registers a token for node, enrolls it, and keeps its agent identity.
+func (h *harness) enroll(t *testing.T, installation, node uuid.UUID) {
+	t.Helper()
+	private, csr := fixtureKey(t)
+	verifier := sha256.Sum256([]byte(uuid.NewString()))
+	if _, err := h.store.RegisterEnrollmentToken(t.Context(), postgres.TokenRegistration{InstallationID: installation, NodeID: node, ActorID: "test-admin", RequestID: uuid.NewString(), IdempotencyKey: uuid.NewString(), TokenVerifier: verifier, TTLSeconds: 600}); err != nil {
+		t.Fatal(err)
+	}
+	enrolled, err := h.store.EnrollAgent(t.Context(), postgres.EnrollmentRequest{InstallationID: installation, NodeID: node, RequestID: uuid.New(), TokenVerifier: verifier, CSRDER: csr}, h.ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.agents == nil {
+		h.agents = map[uuid.UUID]tls.Certificate{}
+	}
+	h.agents[node] = fixturePair(t, []byte(enrolled.CertificatePEM), private)
+}
+
+// fixtureKey creates one Ed25519 key and its certificate request.
+func fixtureKey(t *testing.T) (ed25519.PrivateKey, []byte) {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return private, csr
+}
+
+// fixturePair joins a leaf certificate and its key.
+func fixturePair(t *testing.T, leaf []byte, private ed25519.PrivateKey) tls.Certificate {
+	t.Helper()
+	key, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.X509KeyPair(leaf, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pair
 }
 
 // connect runs one scripted agent that answers controller messages over the real stream.
 func (h *harness) connect(t *testing.T, installation, node uuid.UUID, reply func(*agentv1.ControllerMessage) []*agentv1.AgentMessage) {
 	t.Helper()
-	connection, err := grpc.NewClient(h.address, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, RootCAs: h.roots, Certificates: []tls.Certificate{h.agent}})))
+	connection, err := grpc.NewClient(h.address, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, RootCAs: h.roots, Certificates: []tls.Certificate{h.agents[node]}})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1352,7 +1369,10 @@ const dropTimeout = 60 * time.Second
 func TestWorkerKeepsActiveEffectsAfterFailure(t *testing.T) {
 	for _, failureKind := range []string{"delivery_exhausted", "failed_receipt"} {
 		t.Run(failureKind, func(t *testing.T) {
-			h := newHarness(t, func(message *agentv1.ControllerMessage) []*agentv1.AgentMessage {
+			// The start and its readiness check run beside the volume on a second node. One node
+			// never runs two commands of a cluster at once, so siblings are on different nodes.
+			second := uuid.New()
+			reply := func(message *agentv1.ControllerMessage) []*agentv1.AgentMessage {
 				script := agentScript{drained: true, admit: true}
 				if command := message.GetCommand(); command != nil && command.Input.GetStartContainer() != nil {
 					if failureKind == "delivery_exhausted" {
@@ -1362,7 +1382,17 @@ func TestWorkerKeepsActiveEffectsAfterFailure(t *testing.T) {
 					}
 				}
 				return script.answer(message)
-			}, func(plan *agentv1.ExecutionPlan) { plan.Steps[1].DependsOn = nil })
+			}
+			h := newHarness(t, reply, func(plan *agentv1.ExecutionPlan) {
+				plan.Steps[1].DependsOn = nil
+				// The readiness check follows the start on its node.
+				for _, step := range plan.Steps[1:] {
+					step.Command.Epoch.NodeId = second.String()
+					rehash(t, step.Command)
+				}
+			})
+			h.enroll(t, h.claim.InstallationID, second)
+			h.connect(t, h.claim.InstallationID, second, reply)
 			if err := h.worker.Run(t.Context()); !errors.Is(err, ErrEvidencePending) {
 				t.Fatalf("worker ended with an active sibling: %v", err)
 			}

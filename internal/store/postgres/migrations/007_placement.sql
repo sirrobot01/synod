@@ -38,6 +38,8 @@ CREATE TABLE allocation_ports (
  allocation_id uuid NOT NULL, address inet NOT NULL,
  transport text NOT NULL CHECK (transport IN ('tcp','udp')),
  port integer NOT NULL CHECK (port BETWEEN 1 AND 65535),
+ -- name tells apart two ports of one resource, such as database and rest. Empty for one port.
+ name text NOT NULL CHECK (length(name)<=32),
  released_at timestamptz,
  PRIMARY KEY (allocation_id,address,transport,port),
  FOREIGN KEY (installation_id,cluster_id,node_id,allocation_id) REFERENCES resource_allocations (installation_id,cluster_id,node_id,id),

@@ -144,6 +144,96 @@ func TestEtcdNativeTLSCoordination(t *testing.T) {
 	if err := leadership.Verify(ctx); !errors.Is(err, coordinator.ErrNotLeader) {
 		t.Fatal("released lease retained authority", err)
 	}
+	// Patroni DCS accounts use the root account over the same TLS transport.
+	adminPasswordFile := filepath.Join(dir, "admin-password")
+	if err := os.WriteFile(adminPasswordFile, []byte(rootPassword), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	patroniSettings := settings
+	patroniSettings.InstallationID = installation.String()
+	patroniSettings.PatroniDCSAdminUsername, patroniSettings.PatroniDCSAdminPasswordFile = "root", adminPasswordFile
+	accounts, adminClient, err := connectPatroniDCSAdmin(ctx, patroniSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminClient.Close()
+	nonRoot := patroniSettings
+	nonRoot.PatroniDCSAdminUsername, nonRoot.PatroniDCSAdminPasswordFile = settings.EtcdUsername, passwordFile
+	if unexpected, client, err := connectPatroniDCSAdmin(ctx, nonRoot); err == nil {
+		client.Close()
+		t.Fatal("a non-root account passed Patroni DCS administration", unexpected)
+	}
+	patroniCluster := uuid.New()
+	name, scope := accounts.PatroniScope(patroniCluster)
+	patroniPassword := strings.Repeat("p", 8) + uuid.NewString()
+	for range 2 {
+		if err := accounts.EnsureAccount(ctx, patroniCluster, patroniPassword); err != nil {
+			t.Fatal("ensure Patroni DCS account", err)
+		}
+	}
+	patroniClient := func(password string) (*clientv3.Client, error) {
+		account := connection
+		account.Username, account.Password = name, password
+		return clientv3.New(account)
+	}
+	member, err := patroniClient(patroniPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := member.Put(ctx, scope+"leader", "member"); err != nil {
+		t.Fatal("Patroni account cannot use its scope", err)
+	}
+	otherName, otherScope := accounts.PatroniScope(uuid.New())
+	for _, key := range []string{otherScope + "leader", owned + "probe", "/synod-patroni/" + installation.String() + "/initialize"} {
+		if _, err := member.Put(ctx, key, "refuse"); !errors.Is(err, rpctypes.ErrPermissionDenied) {
+			t.Fatalf("Patroni account crossed its scope at %s: %v", key, err)
+		}
+	}
+	member.Close()
+	if _, err := adminClient.Auth.RoleGrantPermission(ctx, name, otherScope, clientv3.GetPrefixRangeEnd(otherScope), clientv3.PermissionType(clientv3.PermRead)); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.EnsureAccount(ctx, patroniCluster, patroniPassword); !errors.Is(err, coordinator.ErrPatroniAccountDrift) {
+		t.Fatal("drifted Patroni role accepted", err)
+	}
+	if _, err := adminClient.Auth.RoleRevokePermission(ctx, name, otherScope, clientv3.GetPrefixRangeEnd(otherScope)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminClient.Auth.RoleAdd(ctx, otherName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminClient.Auth.UserGrantRole(ctx, name, otherName); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.EnsureAccount(ctx, patroniCluster, patroniPassword); !errors.Is(err, coordinator.ErrPatroniAccountDrift) {
+		t.Fatal("drifted Patroni account accepted", err)
+	}
+	if _, err := adminClient.Auth.UserRevokeRole(ctx, name, otherName); err != nil {
+		t.Fatal(err)
+	}
+	rotated := strings.Repeat("r", 8) + uuid.NewString()
+	if err := accounts.EnsureAccount(ctx, patroniCluster, rotated); err != nil {
+		t.Fatal("rotate Patroni DCS password", err)
+	}
+	if old, err := patroniClient(patroniPassword); err == nil {
+		_, err = old.Get(ctx, scope+"leader")
+		old.Close()
+		if err == nil {
+			t.Fatal("old Patroni DCS password still authenticates")
+		}
+	}
+	for range 2 {
+		if err := accounts.DeleteAccount(ctx, patroniCluster); err != nil {
+			t.Fatal("delete Patroni DCS account", err)
+		}
+	}
+	if deleted, err := patroniClient(rotated); err == nil {
+		_, err = deleted.Get(ctx, scope+"leader")
+		deleted.Close()
+		if err == nil {
+			t.Fatal("deleted Patroni DCS account still authenticates")
+		}
+	}
 	for _, test := range []string{"untrusted server", "wrong server identity", "wrong password", "missing client certificate", "plaintext"} {
 		t.Run(test, func(t *testing.T) {
 			bad := connection

@@ -196,6 +196,10 @@ func TestLifecycleCompletionCommitsObservedStateAndDeleteTogether(t *testing.T) 
 	if host.count(t, `SELECT count(*) FROM cluster_tombstone_nodes WHERE acknowledged_at IS NOT NULL`) != 1 {
 		t.Fatal("native absence did not acknowledge the node")
 	}
+	// Only a Patroni cluster has a DCS scope to remove.
+	if host.count(t, `SELECT count(*) FROM patroni_dcs_cleanups`) != 0 {
+		t.Fatal("a standalone delete requested Patroni DCS cleanup")
+	}
 	for _, table := range []string{"resource_allocations", "allocation_ports"} {
 		if host.count(t, `SELECT count(*) FROM `+table+` WHERE released_at IS NULL`) != 0 {
 			t.Fatalf("%s still holds deleted cluster", table)

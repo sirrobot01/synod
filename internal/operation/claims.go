@@ -69,6 +69,24 @@ func NegotiateHello(hello *agentv1.Hello, supportedCapabilities []string) ([]str
 
 var imageDigestPattern = regexp.MustCompile(`^.+@sha256:[0-9a-f]{64}$`)
 
+// PatroniMemberContainer returns the stored container configuration that a typed Patroni
+// member command repeats, or nil for any other payload.
+func PatroniMemberContainer(input *agentv1.CommandInput) *agentv1.EnsureContainer {
+	switch payload := input.GetPayload().(type) {
+	case *agentv1.CommandInput_StartPatroniMember:
+		return payload.StartPatroniMember.GetContainer()
+	case *agentv1.CommandInput_VerifyPatroniStartFailure:
+		return payload.VerifyPatroniStartFailure.GetContainer()
+	case *agentv1.CommandInput_VerifyPatroniMemberNotServing:
+		return payload.VerifyPatroniMemberNotServing.GetContainer()
+	case *agentv1.CommandInput_VerifyPatroniMemberFailed:
+		return payload.VerifyPatroniMemberFailed.GetContainer()
+	case *agentv1.CommandInput_RecreatePatroniMember:
+		return payload.RecreatePatroniMember.GetNext()
+	}
+	return nil
+}
+
 // CommandHash covers immutable identities and typed input. It excludes authority and tracing.
 // New ownership reuses command IDs and input hashes with a higher execution epoch.
 func CommandHash(command *agentv1.Command) ([32]byte, error) {
@@ -112,6 +130,12 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 		p := payload.EnsureContainer
 		if p == nil || !imageDigestPattern.MatchString(p.ImageDigest) || (p.Engine != "postgres" && p.Engine != "redis") || p.MemoryBytes < 0 || p.CpuMillis < 0 {
 			return [32]byte{}, fmt.Errorf("container input is invalid")
+		}
+		if p.Route != nil {
+			if err := validateRouteContainer(p, command.Input.Secrets); err != nil {
+				return [32]byte{}, err
+			}
+			break
 		}
 		if p.Engine == "redis" && p.Redis == nil {
 			return [32]byte{}, fmt.Errorf("redis container settings are required")
@@ -208,15 +232,25 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 		if err := validatePostgresCloneVerification(command, p.GetPostgres(), p.GetCloneCommandId()); err != nil {
 			return [32]byte{}, err
 		}
-	case *agentv1.CommandInput_StartPatroniMember:
-		p := payload.StartPatroniMember
-		if p == nil || p.Container == nil || p.Container.Postgres == nil || p.Container.Postgres.Patroni == nil || len(command.Input.Secrets) != 0 || p.AllowInitialization && !p.Container.Postgres.Patroni.AllowInitialization {
-			return [32]byte{}, fmt.Errorf("Patroni start input is invalid")
+	case *agentv1.CommandInput_StartPatroniMember, *agentv1.CommandInput_VerifyPatroniStartFailure,
+		*agentv1.CommandInput_VerifyPatroniMemberNotServing, *agentv1.CommandInput_VerifyPatroniMemberFailed:
+		start := command.Input.GetStartPatroniMember()
+		stored := PatroniMemberContainer(command.Input)
+		if stored.GetPostgres().GetPatroni() == nil || len(command.Input.Secrets) != 0 || start.GetAllowInitialization() && !stored.Postgres.Patroni.AllowInitialization {
+			return [32]byte{}, fmt.Errorf("Patroni member input is invalid")
 		}
 		validation := proto.Clone(command).(*agentv1.Command)
-		validation.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: p.Container}
-		validation.Input.Secrets = p.Container.Postgres.Patroni.Credentials
+		validation.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: stored}
+		validation.Input.Secrets = stored.Postgres.Patroni.Credentials
 		if _, err := CommandHash(validation); err != nil {
+			return [32]byte{}, err
+		}
+	case *agentv1.CommandInput_RecreatePatroniMember:
+		if err := validatePatroniRecreate(command); err != nil {
+			return [32]byte{}, err
+		}
+	case *agentv1.CommandInput_SwitchoverPatroni:
+		if err := validateSwitchover(payload.SwitchoverPatroni, command.Input.Secrets); err != nil {
 			return [32]byte{}, err
 		}
 	case *agentv1.CommandInput_StartContainer:
@@ -247,8 +281,12 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 			(p.Engine != "postgres" && p.Engine != "redis") {
 			return [32]byte{}, fmt.Errorf("readiness input is invalid")
 		}
-		if (p.Engine == "postgres" && p.PostgresRole != "primary" && p.PostgresRole != "replica") || (p.Engine != "postgres" && p.PostgresRole != "") {
+		if (p.Engine == "postgres" && p.PostgresRole != "primary" && p.PostgresRole != "replica" && p.PostgresRole != "any") || (p.Engine != "postgres" && p.PostgresRole != "") {
 			return [32]byte{}, fmt.Errorf("postgres readiness requires its native role only")
+		}
+		// Role any serves Patroni, whose members elect their own roles over TLS.
+		if p.PostgresRole == "any" && (p.PostgresTls == nil || p.PostgresReplication != nil) {
+			return [32]byte{}, fmt.Errorf("postgres readiness for any role requires TLS and no replication check")
 		}
 		address, err := netip.ParseAddr(p.Address)
 		if err != nil || !address.IsLoopback() {
@@ -362,4 +400,94 @@ type Claim struct {
 	ExpiresAt          time.Time
 	Active             bool
 	AffectedNodes      []uuid.UUID
+}
+
+// renewedPurposes are the Patroni credentials whose certificates a recreate may renew.
+var renewedPurposes = []string{"patroni_member_tls", "patroni_dcs_tls"}
+
+// validatePatroniRecreate allows a recreate to change only the versions of the two
+// certificate credentials. Each keeps its credential ID and moves to a higher version.
+// The command carries the next credential references, and both configurations must be
+// valid member configurations on their own.
+func validatePatroniRecreate(command *agentv1.Command) error {
+	p := command.Input.GetRecreatePatroniMember()
+	previous, next := p.GetPrevious(), p.GetNext()
+	if previous.GetPostgres().GetPatroni() == nil || next.GetPostgres().GetPatroni() == nil {
+		return fmt.Errorf("Patroni recreate input is invalid")
+	}
+	before, after := previous.Postgres.Patroni.Credentials, next.Postgres.Patroni.Credentials
+	if len(before) != len(after) || !slices.EqualFunc(command.Input.Secrets, after, func(a, b *agentv1.SecretReference) bool { return proto.Equal(a, b) }) {
+		return fmt.Errorf("Patroni recreate credentials are invalid")
+	}
+	renewed := 0
+	for index, old := range before {
+		current := after[index]
+		if old.Purpose != current.Purpose || old.CredentialId != current.CredentialId {
+			return fmt.Errorf("Patroni recreate credentials are invalid")
+		}
+		if old.Version == current.Version {
+			continue
+		}
+		if !slices.Contains(renewedPurposes, current.Purpose) || current.Version < old.Version {
+			return fmt.Errorf("Patroni recreate changes a credential it cannot renew")
+		}
+		renewed++
+	}
+	unchanged := proto.Clone(next).(*agentv1.EnsureContainer)
+	unchanged.Postgres.Patroni.Credentials = before
+	if renewed == 0 || !proto.Equal(unchanged, previous) {
+		return fmt.Errorf("Patroni recreate changes more than certificate versions")
+	}
+	for _, stored := range []*agentv1.EnsureContainer{previous, next} {
+		validation := proto.Clone(command).(*agentv1.Command)
+		validation.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: stored}
+		validation.Input.Secrets = stored.Postgres.Patroni.Credentials
+		if _, err := CommandHash(validation); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateSwitchover checks a switchover. The agent dials the member REST API on the member
+// address, so the address is a canonical unicast IP. It needs the REST password and the
+// member certificate, and nothing else.
+func validateSwitchover(p *agentv1.SwitchoverPatroni, secrets []*agentv1.SecretReference) error {
+	address, err := netip.ParseAddr(p.GetAddress())
+	if err != nil || address.String() != p.Address || address.Zone() != "" || !address.IsGlobalUnicast() || p.RestPort == 0 || p.RestPort > 65535 {
+		return fmt.Errorf("Patroni switchover target is invalid")
+	}
+	purposes := make([]string, 0, len(secrets))
+	for _, reference := range secrets {
+		purposes = append(purposes, reference.Purpose)
+	}
+	slices.Sort(purposes)
+	if !slices.Equal(purposes, []string{"patroni_member_tls", "patroni_rest"}) {
+		return fmt.Errorf("Patroni switchover credentials are invalid")
+	}
+	return nil
+}
+
+// validateRouteContainer checks a pooler or router beside a Patroni member. It runs on host
+// networking with no volume and no environment. Its secrets are exactly the credentials its
+// kind needs, and the command carries the same references.
+func validateRouteContainer(p *agentv1.EnsureContainer, secrets []*agentv1.SecretReference) error {
+	if p.Engine != "postgres" || p.Postgres != nil || p.Redis != nil || p.VolumeId != "" || p.NetworkId != "" ||
+		p.NetworkMode != agentv1.NetworkMode_NETWORK_MODE_HOST || len(p.Ports) != 0 || len(p.SecretEnv) != 0 || len(p.PlainEnv) != 0 {
+		return fmt.Errorf("route container shape is invalid")
+	}
+	_, _, purposes, err := postgresengine.RouteSettings(p.Route)
+	if err != nil {
+		return err
+	}
+	credentials := p.Route.Credentials
+	if len(credentials) != len(purposes) || !slices.EqualFunc(credentials, secrets, func(a, b *agentv1.SecretReference) bool { return proto.Equal(a, b) }) {
+		return fmt.Errorf("route container credentials are invalid")
+	}
+	for _, purpose := range purposes {
+		if !slices.ContainsFunc(credentials, func(reference *agentv1.SecretReference) bool { return reference.GetPurpose() == purpose }) {
+			return fmt.Errorf("route container needs a %s credential", purpose)
+		}
+	}
+	return nil
 }

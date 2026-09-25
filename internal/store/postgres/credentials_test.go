@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/placement"
@@ -27,6 +28,9 @@ func keyring(t *testing.T) *secret.Keyring {
 func sealed(t *testing.T, ring *secret.Keyring, host *placementHost, clusterID uuid.UUID, purpose, role, password string) Credential {
 	t.Helper()
 	credential := Credential{CredentialID: uuid.New(), Version: 1, Purpose: purpose, RoleName: role}
+	if purpose == PatroniMemberTLSCredential || purpose == PatroniDCSTLSCredential {
+		credential.ExpiresAt = time.Now().Add(30 * 24 * time.Hour)
+	}
 	binding := secret.Binding{
 		InstallationID: host.id, OwnerType: "cluster", OwnerID: clusterID,
 		CredentialID: credential.CredentialID, Version: credential.Version,
@@ -352,6 +356,10 @@ func TestNativeCredentialIdentityAndIsolation(t *testing.T) {
 		"unallocated member":          func(c *Credential) { c.MemberID = uuid.New() },
 		"TLS role":                    func(c *Credential) { c.RoleName = "synod_admin" },
 		"cluster purpose with member": func(c *Credential) { c.Purpose = PatroniDCSTLSCredential },
+		"TLS without expiry":          func(c *Credential) { c.ExpiresAt = time.Time{} },
+		"password with expiry": func(c *Credential) {
+			c.Purpose, c.RoleName, c.MemberID = PatroniRESTCredential, "synod_patroni", uuid.Nil
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := old

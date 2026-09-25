@@ -52,6 +52,10 @@ func postgresPhase(item container.InspectResponse) (string, error) {
 	if !item.State.Running && !item.State.Restarting {
 		return "", nil
 	}
+	// A pooler or router has no bootstrap phase.
+	if stored.Route != nil {
+		return "", nil
+	}
 	if stored.Postgres == nil {
 		return "bootstrap_unknown", runtime.ErrOutcomeUnknown
 	}

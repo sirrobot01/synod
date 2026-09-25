@@ -12,6 +12,7 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/capacity"
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/controlstream"
+	"github.com/sirrobot01/synod/internal/engine/postgres"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -252,6 +253,15 @@ func failureCode(err error) string {
 		return notReadyCode
 	case errors.Is(err, ErrSecretUnavailable):
 		return "secret_unavailable"
+	// Each switchover error text is its stable code.
+	case errors.Is(err, errSwitchoverInterrupted):
+		return errSwitchoverInterrupted.Error()
+	case errors.Is(err, postgres.ErrSwitchoverIneligible):
+		return postgres.ErrSwitchoverIneligible.Error()
+	case errors.Is(err, postgres.ErrSwitchoverRefused):
+		return postgres.ErrSwitchoverRefused.Error()
+	case errors.Is(err, postgres.ErrSwitchoverUnconfirmed):
+		return postgres.ErrSwitchoverUnconfirmed.Error()
 	case errors.Is(err, journal.ErrRecoveryRequired):
 		return "recovery_required"
 	case errors.Is(err, capacity.ErrCapacityUnavailable):

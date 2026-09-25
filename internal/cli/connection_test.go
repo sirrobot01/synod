@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -172,5 +174,36 @@ func TestNodeApproveSendsDeclaredClientAddress(t *testing.T) {
 	code := cli.Run(t.Context(), append(flags, "node", "approve", "--node-id", id.String(), "--architecture", "arm64", "--runtime-version", "29.7.2", "--storage-id", "local", "--engine", "redis:8.2.7", "--client-address", "2001:db8::8"), &stdout, &stderr)
 	if code != 0 || requests.Load() != 1 {
 		t.Fatalf("node approve failed: code=%d diagnostics=%s", code, stderr.String())
+	}
+}
+
+// Only an endpoint without verify-full TLS earns the plaintext warning.
+func TestEndpointWarnsOnlyForPlaintext(t *testing.T) {
+	id := uuid.New()
+	routed := cluster.EndpointInspection{ClusterID: id, Engine: cluster.PostgreSQL, DesiredRevision: 1, DesiredLifecycle: cluster.DesiredRunning, ObservedLifecycle: cluster.ObservedRunning,
+		CACertificatePEM: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"}
+	var writers, readers []string
+	for index, host := range []string{"192.0.2.10", "192.0.2.11", "2001:db8::12"} {
+		resource, node := uuid.New(), uuid.New()
+		for position, role := range []string{"writer", "reader"} {
+			port := 6000 + 10*index + position
+			routed.Endpoints = append(routed.Endpoints, cluster.Endpoint{ID: resource, NodeID: node, Host: host, Port: uint16(port), Transport: "tcp", Database: "app", ClientMode: "routed", AvailabilityProfile: "patroni_routed", TLSMode: "verify-full", Role: role})
+			hostPort := net.JoinHostPort(host, strconv.Itoa(port))
+			if role == "writer" {
+				writers = append(writers, hostPort)
+			} else {
+				readers = append(readers, hostPort)
+			}
+		}
+	}
+	routed.WriterURL = "postgresql://" + strings.Join(writers, ",") + "/app?target_session_attrs=read-write&sslmode=verify-full"
+	routed.ReaderURL = "postgresql://" + strings.Join(readers, ",") + "/app?load_balance_hosts=random&sslmode=verify-full"
+	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { json.NewEncoder(w).Encode(routed) }))
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(t.Context(), append(flags, "endpoint", "get", id.String()), &stdout, &stderr); code != 0 {
+		t.Fatalf("endpoint get: code=%d err=%s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "plaintext") || !strings.Contains(stderr.String(), "not a live health check") {
+		t.Fatalf("routed verify-full endpoint diagnostics: %q", stderr.String())
 	}
 }

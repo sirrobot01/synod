@@ -208,3 +208,123 @@ func memberVolumeIDs(ctx context.Context, tx pgx.Tx, installationID, clusterID, 
 	}
 	return found, nil
 }
+
+// PreviewMemberRebuild binds one named Patroni member and its retained data before replacement.
+//
+// Patroni elects its own primary, so the operator names the failed member. The plan
+// proves failure natively before it removes anything.
+func (s *Store) PreviewMemberRebuild(ctx context.Context, installationID, clusterID, memberID uuid.UUID, actorID string) (cluster.ActionPlan, error) {
+	if installationID == uuid.Nil || clusterID == uuid.Nil || memberID == uuid.Nil || len(actorID) < 1 || len(actorID) > 256 || !utf8.ValidString(actorID) || strings.ContainsRune(actorID, 0) {
+		return cluster.ActionPlan{}, &AdmissionError{Code: InvalidRequest}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return cluster.ActionPlan{}, admissionError(err)
+	}
+	defer tx.Rollback(ctx)
+	plan := cluster.ActionPlan{PlanToken: uuid.New(), ClusterID: clusterID, Action: "rebuild_member", DataDisposition: "retain", MemberID: memberID,
+		Downtime: "Prove that the member does not serve, remove its container, and create a fresh member on the same node. The other two members keep serving. Keep the old volume. Reserve extra capacity on that node for the new member and volume."}
+	var deleted bool
+	var lifecycle, topology string
+	if err := tx.QueryRow(ctx, `SELECT name,desired_revision,desired_lifecycle,(deleted_at IS NOT NULL OR desired_lifecycle='deleted'),COALESCE(spec->'postgresql'->>'topology','')
+ FROM clusters WHERE installation_id=$1 AND id=$2 FOR UPDATE`, installationID, clusterID).
+		Scan(&plan.ClusterName, &plan.ExpectedRevision, &lifecycle, &deleted, &topology); err != nil {
+		return cluster.ActionPlan{}, admissionError(err)
+	}
+	if deleted {
+		return cluster.ActionPlan{}, &AdmissionError{Code: NotFound}
+	}
+	if topology != "patroni" {
+		return cluster.ActionPlan{}, &AdmissionError{Code: UnsupportedSpec}
+	}
+	if lifecycle != string(cluster.DesiredRunning) {
+		return cluster.ActionPlan{}, &AdmissionError{Code: OperationConflict}
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE installation_id=$1 AND cluster_id=$2 AND status IN ('pending','running','waiting','cancelling'))`, installationID, clusterID).Scan(&active); err != nil {
+		return cluster.ActionPlan{}, admissionError(err)
+	}
+	if active {
+		return cluster.ActionPlan{}, &AdmissionError{Code: OperationConflict}
+	}
+	var residual bool
+	plan.ResourceID, residual, err = patroniRebuildTarget(ctx, tx, installationID, clusterID, memberID)
+	if err != nil {
+		return cluster.ActionPlan{}, err
+	}
+	if residual {
+		history, err := patroniStartHistory(ctx, tx, installationID, clusterID, plan.ResourceID)
+		if err != nil {
+			return cluster.ActionPlan{}, err
+		}
+		plan.Downtime = "Resume the member left by a failed rebuild with its own storage. The two active members keep serving."
+		if !history.Resume() {
+			plan.Downtime = "Stop the member left by a failed rebuild, prove that its storage failed, and remove its container. Create a fresh member on the same node. The two active members keep serving. Keep the old volume. Reserve extra capacity on that node."
+		}
+	}
+	plan.RetainedVolumes, err = memberVolumeIDs(ctx, tx, installationID, clusterID, plan.ResourceID)
+	if err != nil {
+		return cluster.ActionPlan{}, err
+	}
+	if err := tx.QueryRow(ctx, `INSERT INTO cluster_action_plans
+ (plan_token,installation_id,actor_id,cluster_id,cluster_name,expected_revision,action,data_disposition,retained_volumes,downtime,member_id,resource_id,created_at,expires_at)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,statement_timestamp(),statement_timestamp()+interval '5 minutes') RETURNING expires_at`,
+		plan.PlanToken, installationID, actorID, clusterID, plan.ClusterName, plan.ExpectedRevision, plan.Action,
+		plan.DataDisposition, plan.RetainedVolumes, plan.Downtime, plan.MemberID, plan.ResourceID).Scan(&plan.ExpiresAt); err != nil {
+		return cluster.ActionPlan{}, admissionError(err)
+	}
+	if err := s.commitMetadata(ctx, tx); err != nil {
+		return cluster.ActionPlan{}, err
+	}
+	return plan, nil
+}
+
+// patroniRebuildTarget returns the named member's resource and whether it is residual.
+//
+// It accepts three active Patroni members with an active target, or two active members and
+// one residual target that a failed member rebuild created. Other memberships hold work
+// that a rebuild must not hide.
+func patroniRebuildTarget(ctx context.Context, tx pgx.Tx, installationID, clusterID, memberID uuid.UUID) (uuid.UUID, bool, error) {
+	rows, err := tx.Query(ctx, `SELECT m.member_id,m.resource_id,m.role,m.state,COALESCE(o.kind,'') FROM cluster_members m
+ LEFT JOIN operations o ON o.installation_id=m.installation_id AND o.id=m.created_operation_id
+ WHERE m.installation_id=$1 AND m.cluster_id=$2 AND m.removed_at IS NULL ORDER BY m.member_id FOR UPDATE OF m`, installationID, clusterID)
+	if err != nil {
+		return uuid.Nil, false, admissionError(err)
+	}
+	defer rows.Close()
+	var target uuid.UUID
+	var targetState string
+	active, residual := 0, 0
+	for rows.Next() {
+		var member, resource uuid.UUID
+		var role, state, kind string
+		if err := rows.Scan(&member, &resource, &role, &state, &kind); err != nil {
+			return uuid.Nil, false, admissionError(err)
+		}
+		switch {
+		case role == "patroni" && state == "active":
+			active++
+		case role == "patroni" && state == "residual" && kind == "cluster.rebuild_member":
+			residual++
+		default:
+			return uuid.Nil, false, &AdmissionError{Code: OperationConflict}
+		}
+		if member == memberID {
+			target, targetState = resource, state
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return uuid.Nil, false, admissionError(err)
+	}
+	if active+residual != 3 || residual > 1 {
+		return uuid.Nil, false, &AdmissionError{Code: OperationConflict}
+	}
+	if target == uuid.Nil {
+		return uuid.Nil, false, &AdmissionError{Code: NotFound}
+	}
+	// With a residual member, only that member can be rebuilt.
+	if residual == 1 && targetState != "residual" {
+		return uuid.Nil, false, &AdmissionError{Code: OperationConflict}
+	}
+	return target, residual == 1, nil
+}

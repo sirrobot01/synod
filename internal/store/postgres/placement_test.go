@@ -255,8 +255,8 @@ func (s *Store) seedAllocation(t *testing.T, allocation placement.Allocation, op
 		}
 	}
 	for _, port := range allocation.Ports {
-		if _, err := s.pool.Exec(t.Context(), `INSERT INTO allocation_ports (installation_id,cluster_id,node_id,allocation_id,address,transport,port) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-			allocation.InstallationID, allocation.ClusterID, allocation.NodeID, allocation.ID, port.Address, port.Transport, port.Number); err != nil {
+		if _, err := s.pool.Exec(t.Context(), `INSERT INTO allocation_ports (installation_id,cluster_id,node_id,allocation_id,address,transport,port,name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+			allocation.InstallationID, allocation.ClusterID, allocation.NodeID, allocation.ID, port.Address, port.Transport, port.Number, port.Name); err != nil {
 			t.Fatal(err)
 		}
 	}

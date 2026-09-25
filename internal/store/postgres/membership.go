@@ -8,6 +8,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/placement"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // Member is one named instance of a cluster.
@@ -23,6 +25,10 @@ type Member struct {
 	CreatedByOperation uuid.UUID
 	CreatedRevision    int64
 	RemovedAt          *time.Time
+	// NodeID and Address name where the member's live reservation runs and the client address
+	// its node declares. They are empty when the member has no live reservation.
+	NodeID  uuid.UUID
+	Address string
 }
 
 // ReadClusterMembers lists the members a cluster still has, oldest first.
@@ -30,9 +36,13 @@ func (s *Store) ReadClusterMembers(ctx context.Context, installationID, clusterI
 	if installationID == uuid.Nil || clusterID == uuid.Nil {
 		return nil, &AdmissionError{Code: InvalidRequest}
 	}
-	rows, err := s.pool.Query(ctx, `SELECT member_id,resource_id,role,state,created_operation_id,created_revision,removed_at
- FROM cluster_members WHERE installation_id=$1 AND cluster_id=$2 AND removed_at IS NULL
- ORDER BY created_at, member_id`, installationID, clusterID)
+	rows, err := s.pool.Query(ctx, `SELECT m.member_id,m.resource_id,m.role,m.state,m.created_operation_id,m.created_revision,m.removed_at,
+ COALESCE(a.node_id,'00000000-0000-0000-0000-000000000000'::uuid),COALESCE(convert_from(p.policy_bytes,'UTF8')::jsonb->>'client_address','')
+ FROM cluster_members m
+ LEFT JOIN resource_allocations a ON a.installation_id=m.installation_id AND a.cluster_id=m.cluster_id AND a.resource_id=m.resource_id AND a.released_at IS NULL
+ LEFT JOIN node_placement_policies p ON p.installation_id=a.installation_id AND p.node_id=a.node_id
+ WHERE m.installation_id=$1 AND m.cluster_id=$2 AND m.removed_at IS NULL
+ ORDER BY m.created_at, m.member_id`, installationID, clusterID)
 	if err != nil {
 		return nil, admissionError(err)
 	}
@@ -41,7 +51,7 @@ func (s *Store) ReadClusterMembers(ctx context.Context, installationID, clusterI
 	for rows.Next() {
 		var member Member
 		if err := rows.Scan(&member.MemberID, &member.ResourceID, &member.Role, &member.State,
-			&member.CreatedByOperation, &member.CreatedRevision, &member.RemovedAt); err != nil {
+			&member.CreatedByOperation, &member.CreatedRevision, &member.RemovedAt, &member.NodeID, &member.Address); err != nil {
 			return nil, admissionError(err)
 		}
 		members = append(members, member)
@@ -77,20 +87,50 @@ func recordMembers(ctx context.Context, tx pgx.Tx, claim operation.Claim, reques
 	return nil
 }
 
-// ReadReplicaActionTarget answers the member and proof mode one admitted replica removal or rebuild named.
+// ReadReplicaActionTarget answers the member and proof mode one admitted replica removal, replica rebuild, or member rebuild named.
 //
 // The operation carries the reviewed plan, so the planner removes the member the
 // operator saw rather than choosing one again when the plan runs.
 func (s *Store) ReadReplicaActionTarget(ctx context.Context, installationID, operationID uuid.UUID) (uuid.UUID, bool, error) {
 	var member uuid.UUID
 	var failed bool
-	err := s.pool.QueryRow(ctx, `SELECT p.member_id,p.action IN ('scale_down_failed','rebuild_replica') FROM cluster_action_plans p
+	err := s.pool.QueryRow(ctx, `SELECT p.member_id,p.action IN ('scale_down_failed','rebuild_replica','rebuild_member') FROM cluster_action_plans p
  JOIN operations o ON o.installation_id=p.installation_id AND o.cluster_id=p.cluster_id
  AND o.actor_id=p.actor_id AND o.action_plan_token=p.plan_token
  AND o.desired_revision=p.expected_revision+1
- WHERE p.installation_id=$1 AND o.id=$2 AND p.action IN ('scale_down','scale_down_failed','rebuild_replica')`, installationID, operationID).Scan(&member, &failed)
+ WHERE p.installation_id=$1 AND o.id=$2 AND p.action IN ('scale_down','scale_down_failed','rebuild_replica','rebuild_member')`, installationID, operationID).Scan(&member, &failed)
 	if err != nil {
 		return uuid.Nil, false, admissionError(err)
 	}
 	return member, failed, nil
+}
+
+// ReadMemberContainer returns the current container configuration of one live member. It is
+// in the plan that created the member, or in the plan of the renewal that last recreated it.
+// A Patroni start must repeat that exact configuration.
+func (s *Store) ReadMemberContainer(ctx context.Context, installationID, clusterID, resourceID uuid.UUID) (*agentv1.EnsureContainer, error) {
+	if installationID == uuid.Nil || clusterID == uuid.Nil || resourceID == uuid.Nil {
+		return nil, &AdmissionError{Code: InvalidRequest}
+	}
+	var planBytes []byte
+	if err := s.pool.QueryRow(ctx, `SELECT o.plan_bytes FROM cluster_members m
+ JOIN operations o ON o.installation_id=m.installation_id AND o.cluster_id=m.cluster_id AND o.id=COALESCE(m.container_operation_id,m.created_operation_id)
+ WHERE m.installation_id=$1 AND m.cluster_id=$2 AND m.resource_id=$3 AND m.removed_at IS NULL`,
+		installationID, clusterID, resourceID).Scan(&planBytes); err != nil {
+		return nil, admissionError(err)
+	}
+	var plan agentv1.ExecutionPlan
+	if proto.Unmarshal(planBytes, &plan) != nil {
+		return nil, &AdmissionError{Code: DependencyUnavailable}
+	}
+	for _, step := range plan.Steps {
+		container := step.Command.GetInput().GetEnsureContainer()
+		if recreate := step.Command.GetInput().GetRecreatePatroniMember(); recreate != nil {
+			container = recreate.Next
+		}
+		if container != nil && step.Command.Input.ResourceId == resourceID.String() {
+			return proto.Clone(container).(*agentv1.EnsureContainer), nil
+		}
+	}
+	return nil, &AdmissionError{Code: NotFound}
 }

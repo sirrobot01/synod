@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -237,5 +239,125 @@ func TestCredentialInspectionRejectsInvalidCollections(t *testing.T) {
 		if _, err := api.ListCredentials(t.Context(), id); err == nil {
 			t.Fatal("invalid credential collection was accepted")
 		}
+	}
+}
+
+// A Patroni inspection carries three members, their writer URL, and the CA that verifies them.
+func TestPatroniEndpointInspection(t *testing.T) {
+	id := uuid.New()
+	patroni := func() cluster.EndpointInspection {
+		value := cluster.EndpointInspection{ClusterID: id, Engine: cluster.PostgreSQL, DesiredRevision: 1, DesiredLifecycle: cluster.DesiredRunning, ObservedLifecycle: cluster.ObservedRunning,
+			CACertificatePEM: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"}
+		var hosts []string
+		for index, host := range []string{"192.0.2.10", "192.0.2.11", "2001:db8::12"} {
+			port := uint16(15432 + index)
+			value.Endpoints = append(value.Endpoints, cluster.Endpoint{ID: uuid.New(), NodeID: uuid.New(), Host: host, Port: port, Transport: "tcp", Database: "app", ClientMode: "direct", AvailabilityProfile: "patroni_direct", TLSMode: "verify-full"})
+			hosts = append(hosts, net.JoinHostPort(host, strconv.Itoa(int(port))))
+		}
+		value.WriterURL = "postgresql://" + strings.Join(hosts, ",") + "/app?target_session_attrs=read-write&sslmode=verify-full"
+		return value
+	}
+	serve := func(value cluster.EndpointInspection) (cluster.EndpointInspection, error) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { json.NewEncoder(w).Encode(value) }))
+		defer server.Close()
+		api := &Client{endpoint: server.URL, http: server.Client(), attempts: 1}
+		return api.GetEndpoints(t.Context(), id)
+	}
+	if result, err := serve(patroni()); err != nil || len(result.Endpoints) != 3 || !strings.Contains(result.WriterURL, "[2001:db8::12]:15434") {
+		t.Fatalf("valid Patroni inspection refused: %+v %v", result, err)
+	}
+	for name, change := range map[string]func(*cluster.EndpointInspection){
+		"two members": func(v *cluster.EndpointInspection) { v.Endpoints = v.Endpoints[:2] },
+		"missing CA":  func(v *cluster.EndpointInspection) { v.CACertificatePEM = "" },
+		"changed writer": func(v *cluster.EndpointInspection) {
+			v.WriterURL = strings.Replace(v.WriterURL, "read-write", "any", 1)
+		},
+		"credential in URL": func(v *cluster.EndpointInspection) {
+			v.WriterURL = strings.Replace(v.WriterURL, "//", "//synod_app:secret@", 1)
+		},
+		"plaintext member": func(v *cluster.EndpointInspection) { v.Endpoints[1].TLSMode = "disabled" },
+		"single profile":   func(v *cluster.EndpointInspection) { v.Endpoints[2].AvailabilityProfile = "single_node" },
+		"redis engine":     func(v *cluster.EndpointInspection) { v.Engine = cluster.Redis },
+		"writer on standalone": func(v *cluster.EndpointInspection) {
+			v.Endpoints = v.Endpoints[:1]
+			v.Endpoints[0].AvailabilityProfile, v.Endpoints[0].TLSMode = "single_node", "disabled"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := patroni()
+			change(&value)
+			if _, err := serve(value); err == nil {
+				t.Fatal("invalid Patroni inspection accepted")
+			}
+		})
+	}
+	incomplete := patroni()
+	incomplete.Endpoints, incomplete.WriterURL, incomplete.CACertificatePEM, incomplete.UnavailableReason = []cluster.Endpoint{}, "", "", "members_incomplete"
+	if _, err := serve(incomplete); err != nil {
+		t.Fatal("incomplete Patroni membership refused", err)
+	}
+}
+
+// A routed Patroni inspection lists a writer and a reader route on each router, with URLs over
+// every router or over the load balancer.
+func TestRoutedPatroniEndpointInspection(t *testing.T) {
+	id := uuid.New()
+	routedValue := func() cluster.EndpointInspection {
+		value := cluster.EndpointInspection{ClusterID: id, Engine: cluster.PostgreSQL, DesiredRevision: 1, DesiredLifecycle: cluster.DesiredRunning, ObservedLifecycle: cluster.ObservedRunning,
+			CACertificatePEM: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"}
+		var writers, readers []string
+		for index, host := range []string{"192.0.2.10", "192.0.2.11", "2001:db8::12"} {
+			resource, node := uuid.New(), uuid.New()
+			for position, role := range []string{"writer", "reader"} {
+				port := uint16(6000 + 10*index + position)
+				value.Endpoints = append(value.Endpoints, cluster.Endpoint{ID: resource, NodeID: node, Host: host, Port: port, Transport: "tcp", Database: "app", ClientMode: "routed", AvailabilityProfile: "patroni_routed", TLSMode: "verify-full", Role: role})
+				if role == "writer" {
+					writers = append(writers, net.JoinHostPort(host, strconv.Itoa(int(port))))
+				} else {
+					readers = append(readers, net.JoinHostPort(host, strconv.Itoa(int(port))))
+				}
+			}
+		}
+		value.WriterURL = "postgresql://" + strings.Join(writers, ",") + "/app?target_session_attrs=read-write&sslmode=verify-full"
+		value.ReaderURL = "postgresql://" + strings.Join(readers, ",") + "/app?load_balance_hosts=random&sslmode=verify-full"
+		return value
+	}
+	serve := func(value cluster.EndpointInspection) (cluster.EndpointInspection, error) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { json.NewEncoder(w).Encode(value) }))
+		defer server.Close()
+		api := &Client{endpoint: server.URL, http: server.Client(), attempts: 1}
+		return api.GetEndpoints(t.Context(), id)
+	}
+	if _, err := serve(routedValue()); err != nil {
+		t.Fatal("routed inspection refused", err)
+	}
+	balanced := routedValue()
+	balanced.WriterURL, balanced.ReaderURL = "postgresql://198.51.100.7:5432/app?sslmode=verify-full", "postgresql://198.51.100.7:5433/app?sslmode=verify-full"
+	if _, err := serve(balanced); err != nil {
+		t.Fatal("load balancer inspection refused", err)
+	}
+	for name, change := range map[string]func(*cluster.EndpointInspection){
+		"missing reader URL": func(v *cluster.EndpointInspection) { v.ReaderURL = "" },
+		"swapped roles":      func(v *cluster.EndpointInspection) { v.Endpoints[0].Role, v.Endpoints[1].Role = "reader", "writer" },
+		"direct mode":        func(v *cluster.EndpointInspection) { v.Endpoints[2].ClientMode = "direct" },
+		"balancer same port": func(v *cluster.EndpointInspection) {
+			v.WriterURL, v.ReaderURL = "postgresql://198.51.100.7:5432/app?sslmode=verify-full", "postgresql://198.51.100.7:5432/app?sslmode=verify-full"
+		},
+		"balancer loopback": func(v *cluster.EndpointInspection) {
+			v.WriterURL, v.ReaderURL = "postgresql://127.0.0.1:5432/app?sslmode=verify-full", "postgresql://127.0.0.1:5433/app?sslmode=verify-full"
+		},
+		"URLs without endpoints": func(v *cluster.EndpointInspection) {
+			direct := *v
+			direct.Endpoints = nil
+			*v = direct
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := routedValue()
+			change(&value)
+			if _, err := serve(value); err == nil {
+				t.Fatal("invalid routed inspection accepted")
+			}
+		})
 	}
 }

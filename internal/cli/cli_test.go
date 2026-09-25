@@ -427,7 +427,8 @@ func TestNodeApproveSendsTheDeclaredPolicy(t *testing.T) {
 	code := cli.Run(t.Context(), append(flags, "node", "approve", "--node-id", node,
 		"--architecture", "arm64", "--runtime-version", "27.1.1", "--storage-id", "pool-a",
 		"--engine", "postgres:17.11", "--headroom-cpu-millis", "500",
-		"--headroom-memory-bytes", "268435456", "--headroom-disk-bytes", "1073741824"), &stdout, &stderr)
+		"--headroom-memory-bytes", "268435456", "--headroom-disk-bytes", "1073741824",
+		"--failure-domain", "host=rack1-server2", "--failure-domain", "zone=a"), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -449,21 +450,34 @@ func TestNodeApproveSendsTheDeclaredPolicy(t *testing.T) {
 	if !ok || len(engines) != 1 {
 		t.Fatalf("engines=%v, want the declared engine", sent["engines"])
 	}
+	domains, ok := sent["failure_domains"].(map[string]any)
+	if !ok || len(domains) != 2 || domains["host"] != "rack1-server2" || domains["zone"] != "a" {
+		t.Fatalf("failure_domains=%v, want the declared domains", sent["failure_domains"])
+	}
 }
 
-// An engine declared without a version is refused before anything is sent.
-func TestNodeApproveRefusesAMalformedEngine(t *testing.T) {
-	var reached bool
-	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
-	var stdout, stderr bytes.Buffer
-	code := cli.Run(t.Context(), append(flags, "node", "approve", "--node-id", uuid.NewString(),
-		"--architecture", "arm64", "--runtime-version", "27.1.1", "--storage-id", "pool-a",
-		"--engine", "postgres"), &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("an engine with no version was accepted")
-	}
-	if reached {
-		t.Fatal("a malformed declaration was sent to the API")
+// A malformed engine or failure domain is refused before anything is sent.
+func TestNodeApproveRefusesAMalformedDeclaration(t *testing.T) {
+	for name, declaration := range map[string][]string{
+		"engine without version":    {"--engine", "postgres"},
+		"domain without value":      {"--engine", "postgres:17.11", "--failure-domain", "host="},
+		"domain without key":        {"--engine", "postgres:17.11", "--failure-domain", "=rack1"},
+		"domain without separator":  {"--engine", "postgres:17.11", "--failure-domain", "rack1"},
+		"domain key declared twice": {"--engine", "postgres:17.11", "--failure-domain", "host=a", "--failure-domain", "host=b"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var reached bool
+			flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+			var stdout, stderr bytes.Buffer
+			code := cli.Run(t.Context(), append(append(flags, "node", "approve", "--node-id", uuid.NewString(),
+				"--architecture", "arm64", "--runtime-version", "27.1.1", "--storage-id", "pool-a"), declaration...), &stdout, &stderr)
+			if code == 0 {
+				t.Fatal("a malformed declaration was accepted")
+			}
+			if reached {
+				t.Fatal("a malformed declaration was sent to the API")
+			}
+		})
 	}
 }
 
@@ -552,5 +566,39 @@ func TestMembersRenderWithoutJSON(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout=%q, want it to name %q", stdout.String(), want)
 		}
+	}
+}
+
+// A patroni create names its topology and failure domain. A patroni create without
+// the domain, or a domain on a standalone create, is refused before any request.
+func TestCreatePostgresSendsTopology(t *testing.T) {
+	var body []byte
+	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(202)
+		json.NewEncoder(w).Encode(map[string]any{"cluster_id": uuid.New(), "operation_id": uuid.New(), "desired_revision": 1})
+	}))
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(t.Context(), append(flags, "db", "create", "postgres", "--name", "orders", "--version", "17.11", "--topology", "patroni", "--failure-domain", "host"), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var sent cluster.CreateSpec
+	if err := json.Unmarshal(body, &sent); err != nil || sent.PostgreSQL == nil || sent.PostgreSQL.Topology != "patroni" || sent.PostgreSQL.FailureDomain != "host" {
+		t.Fatalf("body=%s", body)
+	}
+	for name, extra := range map[string][]string{
+		"patroni without domain": {"--topology", "patroni"},
+		"standalone with domain": {"--failure-domain", "host"},
+		"unknown topology":       {"--topology", "replicas"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var reached bool
+			flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+			var stdout, stderr bytes.Buffer
+			if code := cli.Run(t.Context(), append(append(flags, "db", "create", "postgres", "--name", "orders", "--version", "17.11"), extra...), &stdout, &stderr); code == 0 || reached {
+				t.Fatalf("code=%d reached=%v", code, reached)
+			}
+		})
 	}
 }

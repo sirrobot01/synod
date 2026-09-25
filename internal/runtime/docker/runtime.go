@@ -105,7 +105,10 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 	switch payload := command.Input.Payload.(type) {
 	case *agentv1.CommandInput_StartPatroniMember:
 		return r.startPatroni(ctx, command)
-	case *agentv1.CommandInput_VerifyContainerAbsent:
+	case *agentv1.CommandInput_RecreatePatroniMember:
+		return r.recreatePatroni(ctx, command, secrets)
+	case *agentv1.CommandInput_VerifyContainerAbsent, *agentv1.CommandInput_VerifyPatroniStartFailure,
+		*agentv1.CommandInput_VerifyPatroniMemberNotServing, *agentv1.CommandInput_VerifyPatroniMemberFailed:
 		return r.inspectCommand(ctx, command)
 	case *agentv1.CommandInput_RecoverPostgresSetup:
 		return r.executePostgresRecovery(ctx, command, secrets)
@@ -155,6 +158,9 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 		if p.Postgres != nil && p.Postgres.Patroni != nil {
 			return r.preparePatroni(ctx, command, secrets)
 		}
+		if p.Route != nil {
+			return r.prepareRoute(ctx, command, secrets)
+		}
 		options, err := r.containerOptions(ctx, command, p, true)
 		if err != nil {
 			return runtime.Result{}, err
@@ -179,7 +185,9 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 	case *agentv1.CommandInput_StartContainer, *agentv1.CommandInput_StopContainer, *agentv1.CommandInput_RemoveContainer, *agentv1.CommandInput_InspectContainer:
 		current, err := r.api.ContainerInspect(ctx, "synod-instance-"+id, client.ContainerInspectOptions{})
 		if errdefs.IsNotFound(err) {
-			if _, remove := payload.(*agentv1.CommandInput_RemoveContainer); remove {
+			// A missing container runs nothing, so it is stopped as well as absent.
+			switch payload.(type) {
+			case *agentv1.CommandInput_RemoveContainer, *agentv1.CommandInput_StopContainer:
 				return runtime.Result{Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: id, NativeOperationId: "docker-command:" + command.CommandId, State: "absent"}}}, nil
 			}
 			return runtime.Result{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
@@ -265,6 +273,12 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 		result.Effects[0].State = "present"
 		result.Effects[0].Active, result.Effects[0].OutcomeUnknown = false, false
 		return result, runtime.ErrConfigurationConflict
+	case *agentv1.CommandInput_VerifyPatroniStartFailure:
+		return r.verifyPatroniStartFailure(ctx, command, result)
+	case *agentv1.CommandInput_VerifyPatroniMemberNotServing, *agentv1.CommandInput_VerifyPatroniMemberFailed:
+		return r.verifyPatroniMember(ctx, command, result)
+	case *agentv1.CommandInput_RecreatePatroniMember:
+		return r.inspectRecreate(ctx, command, result)
 	case *agentv1.CommandInput_RecoverPostgresSetup:
 		return r.inspectPostgresRecovery(ctx, command)
 	case *agentv1.CommandInput_PreparePostgresReplica, *agentv1.CommandInput_ClonePostgresReplica, *agentv1.CommandInput_VerifyPostgresReplicaClone, *agentv1.CommandInput_VerifyPostgresReplicaFailure:
@@ -292,8 +306,11 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 	default:
 		item, err := r.api.ContainerInspect(ctx, "synod-instance-"+id, client.ContainerInspectOptions{})
 		if errdefs.IsNotFound(err) {
-			if _, remove := p.(*agentv1.CommandInput_RemoveContainer); remove {
+			switch p.(type) {
+			case *agentv1.CommandInput_RemoveContainer, *agentv1.CommandInput_StopContainer:
 				result.Effects[0].State = "absent"
+			}
+			if result.Effects[0].State == "absent" {
 				break
 			}
 		}
@@ -311,6 +328,20 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 			return result, err
 		}
 		result = r.containerResult(command, item.Container)
+		sourceCheck := command.Input.GetEnsureContainer() != nil || command.Input.GetInspectContainer() != nil || command.Input.GetStartPatroniMember() != nil || command.Input.GetStartContainer() != nil
+		if item.Container.Config != nil && item.Container.Config.Labels[labelRouteSource] != "" && sourceCheck {
+			stored, err := storedConfig(item.Container)
+			if err == nil && stored.Route != nil {
+				err = r.inspectSource(ctx, item.Container, routeSource(stored.Route))
+			} else if err == nil {
+				err = runtime.ErrConfigurationConflict
+			}
+			if err != nil {
+				result.Effects[0].State = "route_configuration_unknown"
+				result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
+				return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+			}
+		}
 		if item.Container.Config != nil && item.Container.Config.Labels[labelPatroniSource] != "" && (command.Input.GetEnsureContainer() != nil || command.Input.GetInspectContainer() != nil || command.Input.GetStartPatroniMember() != nil) {
 			if err := r.inspectPatroniSource(ctx, item.Container); err != nil {
 				result.Effects[0].State = "patroni_configuration_unknown"
@@ -407,6 +438,9 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	if p.Redis != nil {
 		validation.Input.Secrets = p.Redis.Credentials
 	}
+	if p.Route != nil {
+		validation.Input.Secrets = p.Route.Credentials
+	}
 	if _, err := operation.CommandHash(validation); err != nil {
 		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrConfigurationConflict, Cause: err}
 	}
@@ -421,12 +455,17 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	}
 	// The engine is about to read this volume, so its identity is proved first. A
 	// missing volume must never be created here by the daemon and initialized over.
-	if err := r.verifyVolume(ctx, command, p.VolumeId); err != nil {
-		return client.ContainerCreateOptions{}, err
-	}
-	volume, err := r.api.VolumeInspect(ctx, "synod-volume-"+p.VolumeId, client.VolumeInspectOptions{})
-	if err != nil {
-		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+	// A route container holds no data and mounts no volume.
+	var mounts []mount.Mount
+	if p.Route == nil {
+		if err := r.verifyVolume(ctx, command, p.VolumeId); err != nil {
+			return client.ContainerCreateOptions{}, err
+		}
+		volume, err := r.api.VolumeInspect(ctx, "synod-volume-"+p.VolumeId, client.VolumeInspectOptions{})
+		if err != nil {
+			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+		}
+		mounts = []mount.Mount{{Type: mount.TypeVolume, Source: volume.Volume.Name, Target: dataTarget(p)}}
 	}
 	mode := container.NetworkMode("host")
 	if p.NetworkMode == agentv1.NetworkMode_NETWORK_MODE_BRIDGE {
@@ -457,10 +496,7 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	if err != nil {
 		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
 	}
-	target := "/data"
-	if p.Engine == "postgres" {
-		target = postgres.DataDirectory
-	}
+	target := dataTarget(p)
 	if image.Config == nil {
 		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 	}
@@ -482,7 +518,7 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	if memory < 16<<20 || cpu < 1 || cpu > 1000000 {
 		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 	}
-	host := &container.HostConfig{NetworkMode: mode, RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}, Resources: container.Resources{Memory: memory, NanoCPUs: cpu * 1000000, PidsLimit: new(int64(256))}, Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: volume.Volume.Name, Target: target}}, LogConfig: container.LogConfig{Type: "local", Config: map[string]string{"max-size": "1m", "max-file": "2"}}, PortBindings: network.PortMap{}}
+	host := &container.HostConfig{NetworkMode: mode, RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}, Resources: container.Resources{Memory: memory, NanoCPUs: cpu * 1000000, PidsLimit: new(int64(256))}, Mounts: mounts, LogConfig: container.LogConfig{Type: "local", Config: map[string]string{"max-size": "1m", "max-file": "2"}}, PortBindings: network.PortMap{}}
 	// Pin the Linux namespace and path protections instead of inheriting daemon overrides.
 	host.IpcMode = "private"
 	host.CgroupnsMode = "private"
@@ -514,6 +550,10 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 			config.Healthcheck = patroniHealthcheck()
 			host.Tmpfs = map[string]string{postgres.PatroniDirectory: patroniTmpfs}
 		}
+	}
+	if p.Route != nil {
+		config.Cmd, host.Tmpfs = routeShape(p.Route)
+		config.StopSignal = image.Config.StopSignal
 	}
 	for _, binding := range p.Ports {
 		address, err := netip.ParseAddr(binding.HostAddress)
@@ -569,9 +609,13 @@ func (r *Runtime) checkContainer(ctx context.Context, command *agentv1.Command, 
 	if expected != nil && !proto.Equal(expected, &stored) {
 		return runtime.ErrConfigurationConflict
 	}
-	if stored.Postgres != nil && stored.Postgres.Patroni != nil {
-		source, err := hex.DecodeString(item.Config.Labels[labelPatroniSource])
-		if err != nil || len(source) != sha256.Size || hex.EncodeToString(source) != item.Config.Labels[labelPatroniSource] {
+	if stored.Postgres != nil && stored.Postgres.Patroni != nil || stored.Route != nil {
+		label := labelPatroniSource
+		if stored.Route != nil {
+			label = labelRouteSource
+		}
+		source, err := hex.DecodeString(item.Config.Labels[label])
+		if err != nil || len(source) != sha256.Size || hex.EncodeToString(source) != item.Config.Labels[label] {
 			return runtime.ErrConfigurationConflict
 		}
 	}
@@ -585,7 +629,8 @@ func (r *Runtime) checkContainer(ctx context.Context, command *agentv1.Command, 
 	if item.Image != options.Config.Labels["io.synod.image-id"] || !reflect.DeepEqual(item.Config.Cmd, options.Config.Cmd) || !reflect.DeepEqual(item.Config.Entrypoint, options.Config.Entrypoint) || !sameEnvironment(item.Config.Env, options.Config.Env, &stored) || item.Config.User != options.Config.User || item.Config.WorkingDir != options.Config.WorkingDir || item.HostConfig.PidsLimit == nil || *item.HostConfig.PidsLimit != 256 || item.Config.Image != options.Config.Image || item.HostConfig.NetworkMode != options.HostConfig.NetworkMode || item.HostConfig.Memory != options.HostConfig.Memory || item.HostConfig.NanoCPUs != options.HostConfig.NanoCPUs || !reflect.DeepEqual(item.HostConfig.PortBindings, options.HostConfig.PortBindings) || !reflect.DeepEqual(item.HostConfig.LogConfig, options.HostConfig.LogConfig) {
 		return runtime.ErrConfigurationConflict
 	}
-	if len(item.Mounts) != 1 {
+	// A route container mounts nothing. Every other container mounts its one data volume.
+	if len(item.Mounts) != len(options.HostConfig.Mounts) {
 		return runtime.ErrConfigurationConflict
 	}
 	for _, mounted := range item.Mounts {
@@ -632,4 +677,24 @@ func (r *Runtime) Logs(ctx context.Context, command *agentv1.Command, maxBytes i
 	}
 	defer logs.Close()
 	return io.ReadAll(io.LimitReader(logs, maxBytes))
+}
+
+// dataTarget is where a container's data volume is mounted.
+func dataTarget(p *agentv1.EnsureContainer) string {
+	if p.Engine == "postgres" {
+		return postgres.DataDirectory
+	}
+	return "/data"
+}
+
+// routeTmpfs covers the image data volume of a route container. The image declares one,
+// and without a mount Docker would create an anonymous volume that nothing owns.
+const routeTmpfs = "rw,noexec,nosuid,nodev,size=1m"
+
+// routeShape is the command and tmpfs set of a pooler or router container.
+func routeShape(route *agentv1.PostgresRouteConfig) ([]string, map[string]string) {
+	if route.Pooler != nil {
+		return postgres.PoolerCommand(), map[string]string{postgres.PoolerDirectory: patroniTmpfs, postgres.DataDirectory: routeTmpfs}
+	}
+	return postgres.RouterCommand(), map[string]string{postgres.RouterDirectory: patroniTmpfs, postgres.DataDirectory: routeTmpfs}
 }

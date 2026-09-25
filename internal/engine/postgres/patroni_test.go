@@ -3,6 +3,7 @@ package postgres
 import (
 	"encoding/json"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
@@ -34,10 +35,24 @@ func TestPatroniConfigurationBoundaries(t *testing.T) {
 		if config.PostgreSQL.RemoveDataDirectoryOnRewindFailure || config.PostgreSQL.RemoveDataDirectoryOnDivergedTimelines || config.PostgreSQL.Parameters.MaxSlotWALKeepSize != "1GB" {
 			t.Fatal("unsafe data or WAL retention policy")
 		}
-		for _, line := range config.PostgreSQL.PGHBA {
+		loopback := "hostssl all synod_admin,synod_app 127.0.0.0/8 scram-sha-256"
+		for index, line := range config.PostgreSQL.PGHBA {
+			if line == loopback {
+				// First match wins, so the loopback rule must precede the administrative reject.
+				if !slices.Contains(config.PostgreSQL.PGHBA[index:], "host all synod_admin,synod_repl,synod_rewind 0.0.0.0/0 reject") {
+					t.Fatal("loopback readiness rule follows the administrative reject")
+				}
+				continue
+			}
 			if strings.Contains(line, "hostssl") && !strings.Contains(line, "192.0.2.0/24") && !strings.Contains(line, "198.51.100.0/24") {
 				t.Fatal("undeclared client network")
 			}
+		}
+		if !slices.Contains(config.PostgreSQL.PGHBA, loopback) {
+			t.Fatal("missing loopback readiness rule")
+		}
+		if config.PostgreSQL.Listen != "192.0.2.10,127.0.2.10:5432" || config.PostgreSQL.ConnectAddress != "192.0.2.10:5432" {
+			t.Fatalf("listen %q and connect %q", config.PostgreSQL.Listen, config.PostgreSQL.ConnectAddress)
 		}
 	}
 	for name, change := range map[string]func(*PatroniSettings){
@@ -84,6 +99,21 @@ func TestPatroniConfigurationBoundaries(t *testing.T) {
 		changed.ApplicationVerifier = verifier
 		if value, err := RenderPatroni(settings, changed); err == nil || value != nil || verifier != "" && strings.Contains(err.Error(), verifier) {
 			t.Fatal("invalid application verifier accepted or disclosed")
+		}
+	}
+}
+
+// Members on one host with different addresses listen on different loopback addresses.
+func TestReadinessLoopbackFollowsTheMember(t *testing.T) {
+	for member, want := range map[string]string{
+		"192.168.0.219":  "127.168.0.219/32",
+		"100.87.229.38":  "127.87.229.38/32",
+		"10.0.0.1":       "127.0.0.2/32",
+		"10.255.255.255": "127.0.0.2/32",
+		"fd00::10":       "::1/128",
+	} {
+		if got := ReadinessLoopback(netip.MustParseAddr(member)).String(); got != want {
+			t.Errorf("%s: loopback %s, want %s", member, got, want)
 		}
 	}
 }

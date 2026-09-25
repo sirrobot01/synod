@@ -14,7 +14,10 @@ import (
 func TestScaleRetryReadChecksDispatchAndResultIdentity(t *testing.T) {
 	for _, change := range []string{"unchanged", "result_epoch", "result_hash", "result_command", "result_state", "result_sequence", "malformed_result", "command_node", "command_epoch", "command_input", "command_plan", "dispatch_step", "malformed_command", "oversized_command"} {
 		t.Run(change, func(t *testing.T) {
-			s, request, claim, plan, node, _ := readsFixture(t)
+			// A retry reads a valid plan, and steps on one node form a chain.
+			s, request, claim, plan, node, _ := readsFixtureWith(t, func(plan *agentv1.ExecutionPlan) {
+				plan.Steps[1].DependsOn = []string{plan.Steps[0].Command.StepId}
+			})
 			first, second := plan.Steps[0].Command, plan.Steps[1].Command
 			for _, command := range []*agentv1.Command{first, second} {
 				if err := s.RecordDispatch(t.Context(), claim, command); err != nil {

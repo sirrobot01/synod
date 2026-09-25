@@ -21,6 +21,7 @@ const (
 	reasonRoleInvalid           = "postgres_role_invalid"
 	reasonRoleUnavailable       = "postgres_role_unavailable"
 	reasonRoleMismatch          = "postgres_role_mismatch"
+	reasonReplicaNotStreaming   = "postgres_replica_not_streaming"
 	reasonReadOnlyMismatch      = "postgres_read_only_mismatch"
 	reasonNoEndpoint            = "endpoint_not_declared"
 	reasonUnreachable           = "endpoint_refused_connection"
@@ -52,7 +53,7 @@ func (Engine) Probe(ctx context.Context, endpoint engine.Endpoint, password []by
 			return observed
 		}
 	}
-	if endpoint.PostgresRole != "primary" && endpoint.PostgresRole != "replica" {
+	if endpoint.PostgresRole != "primary" && endpoint.PostgresRole != "replica" && (endpoint.PostgresRole != "any" || endpoint.PostgresTLS == nil || endpoint.PostgresReplication != nil) {
 		observed.Reachable = engine.Probe{State: engine.ProbeFailed, Reason: reasonRoleInvalid}
 		return observed
 	}
@@ -154,7 +155,16 @@ func (Engine) Probe(ctx context.Context, endpoint engine.Endpoint, password []by
 		role = "replica"
 	}
 	observed.Postgres = &engine.PostgresObservation{Role: role, ReadOnly: readOnly}
-	if role != endpoint.PostgresRole {
+	if endpoint.PostgresRole == "any" && recovery {
+		// Every Patroni member runs as a replica until a leader exists. A replica proves a
+		// writer only once it has streamed since this server started.
+		var streaming bool
+		if err := conn2.QueryRow(session, "SELECT pg_catalog.pg_last_wal_receive_lsn() IS NOT NULL").Scan(&streaming); err != nil || !streaming {
+			observed.Ready = engine.Probe{State: engine.ProbeFailed, Reason: reasonReplicaNotStreaming}
+			return observed
+		}
+	}
+	if role != endpoint.PostgresRole && endpoint.PostgresRole != "any" {
 		observed.Ready = engine.Probe{State: engine.ProbeFailed, Reason: reasonRoleMismatch}
 		return observed
 	}

@@ -55,7 +55,7 @@ func (r *Runtime) startPatroni(ctx context.Context, command *agentv1.Command) (r
 	if err := r.inspectPatroniSource(ctx, item.Container); err != nil {
 		return runtime.Result{}, err
 	}
-	if err := r.checkPatroniStartStorage(ctx, command, item.Container); err != nil {
+	if err := r.checkPatroniStartStorage(ctx, command, item.Container, p.Container, p.AllowInitialization); err != nil {
 		return runtime.Result{}, err
 	}
 	_, mutationErr := r.api.ContainerUpdate(ctx, item.Container.ID, client.ContainerUpdateOptions{RestartPolicy: &container.RestartPolicy{Name: container.RestartPolicyUnlessStopped}})
@@ -71,14 +71,15 @@ func (r *Runtime) startPatroni(ctx context.Context, command *agentv1.Command) (r
 	return result, nil
 }
 
-func (r *Runtime) checkPatroniStartStorage(ctx context.Context, command *agentv1.Command, item container.InspectResponse) error {
-	p := command.Input.GetStartPatroniMember()
+// checkPatroniStartStorage checks the storage a start would use. Initial requires untouched
+// empty storage. Otherwise it is the restart check, which a failure proof also runs.
+func (r *Runtime) checkPatroniStartStorage(ctx context.Context, command *agentv1.Command, item container.InspectResponse, stored *agentv1.EnsureContainer, initial bool) error {
 	started, err := time.Parse(time.RFC3339Nano, item.State.StartedAt)
 	if err != nil {
 		return runtime.ErrOutcomeUnknown
 	}
-	if p.AllowInitialization {
-		if !started.IsZero() || item.State.Status != container.StateCreated || !p.Container.Postgres.Patroni.AllowInitialization {
+	if initial {
+		if !started.IsZero() || item.State.Status != container.StateCreated || !stored.Postgres.Patroni.AllowInitialization {
 			return runtime.ErrConfigurationConflict
 		}
 		for _, filename := range []string{postgres.DataDirectory, "/var/lib/synod-patroni"} {
@@ -113,7 +114,7 @@ func (r *Runtime) checkPatroniStartStorage(ctx context.Context, command *agentv1
 		}
 		return nil
 	}
-	expected := patroniIdentity{Installation: command.Epoch.InstallationId, Cluster: command.Epoch.ClusterId, Resource: command.Input.ResourceId, Volume: p.Container.VolumeId, Provision: p.Container.Postgres.Patroni.ProvisionId, Format: 1}
+	expected := patroniIdentity{Installation: command.Epoch.InstallationId, Cluster: command.Epoch.ClusterId, Resource: command.Input.ResourceId, Volume: stored.VolumeId, Provision: stored.Postgres.Patroni.ProvisionId, Format: 1}
 	for _, filename := range []string{postgres.DataDirectory + "/.synod-patroni-identity.json", "/var/lib/synod-patroni/identity.json"} {
 		var found patroniIdentity
 		if err := r.patroniRecord(ctx, item.ID, filename, &found); err != nil {

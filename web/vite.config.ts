@@ -27,5 +27,7 @@ export default defineConfig({
     // certificate, which exists only on a workstation.
     proxy: { "/v1": { target: "https://127.0.0.1:8443", secure: false } },
   },
-  test: { environment: "jsdom", include: ["src/**/*.test.ts"], globals: true },
+  // The test runner stubs styles. The disabled-button test needs the global sheet and the
+  // confirm dialog's scoped styles, so jsdom can apply the real cascade to them.
+  test: { environment: "jsdom", include: ["src/**/*.test.ts"], globals: true, css: { include: [/app\.css/, /ClusterActions\.svelte/] } },
 });

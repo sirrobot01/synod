@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,7 @@ type Result struct {
 	CredentialInspection *cluster.CredentialInspection `json:"credential_inspection,omitzero"`
 	RevealedCredential   *cluster.RevealedCredential   `json:"revealed_credential,omitzero"`
 	Members              []client.ClusterMember        `json:"members,omitempty"`
+	Installation         *client.Installation          `json:"installation,omitzero"`
 }
 
 // Run writes one result to stdout and keeps progress and diagnostics on stderr.
@@ -47,7 +49,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var jsonOutput, wait bool
 	var name, version, key, persistence string
 	var redisMaxmemory int64
-	var redisEviction, postgresReplication string
+	var redisEviction, postgresReplication, postgresTopology, postgresFailureDomain, endpointAddress string
+	var endpointWriter, endpointReader uint16
 	var timeout, interval time.Duration
 	var result Result
 	var api *client.Client
@@ -79,22 +82,34 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return err
 	}
 	db := &cobra.Command{Use: "db", Aliases: []string{"cluster"}, Short: "Create, inspect, and change a dedicated cluster", PersistentPreRunE: prepare}
-	create := &cobra.Command{Use: "create", Short: "Create a standalone cluster"}
+	create := &cobra.Command{Use: "create", Short: "Create a cluster"}
 	create.PersistentFlags().StringVar(&name, "name", "", "Cluster name (required)")
 	create.PersistentFlags().StringVar(&version, "version", "", "Exact engine version (required; the server checks its catalog)")
 	create.PersistentFlags().StringVar(&key, "idempotency-key", "", "Reuse a prior key with the same request for recovery")
 	create.PersistentFlags().BoolVar(&wait, "wait", false, "Wait for terminal work within --timeout")
 	for _, engine := range []cluster.Engine{cluster.PostgreSQL, cluster.Redis} {
-		command := &cobra.Command{Use: string(engine), Short: "Admit a standalone " + string(engine) + " cluster", Args: cobra.NoArgs,
+		command := &cobra.Command{Use: string(engine), Short: "Admit a " + string(engine) + " cluster", Args: cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, _ []string) error {
 				spec := cluster.CreateSpec{SchemaVersion: 1, Name: name, Engine: engine}
 				if engine == cluster.PostgreSQL {
-					spec.PostgreSQL = &cluster.PostgreSQLSpec{Version: version, Topology: "standalone", ReplicationPolicy: postgresReplication}
+					spec.PostgreSQL = &cluster.PostgreSQLSpec{Version: version, Topology: postgresTopology, ReplicationPolicy: postgresReplication, FailureDomain: postgresFailureDomain}
+					changed := 0
+					for _, flag := range []string{"endpoint-address", "endpoint-writer-port", "endpoint-reader-port"} {
+						if cmd.Flags().Changed(flag) {
+							changed++
+						}
+					}
+					if changed != 0 && changed != 3 {
+						return &client.Error{Code: "invalid_request", Message: "Set --endpoint-address, --endpoint-writer-port, and --endpoint-reader-port together."}
+					}
+					if changed == 3 {
+						spec.PostgreSQL.Endpoint = &cluster.PostgresEndpoint{Address: endpointAddress, WriterPort: endpointWriter, ReaderPort: endpointReader}
+					}
 				} else {
 					spec.Redis = &cluster.RedisSpec{Version: version, Topology: "standalone", Persistence: persistence, MaxmemoryBytes: redisMaxmemory, EvictionPolicy: redisEviction}
 				}
 				if err := spec.Validate(); err != nil {
-					return &client.Error{Code: "invalid_request", Message: "Set a valid --name, exact --version, and supported persistence mode. See command help."}
+					return &client.Error{Code: "invalid_request", Message: "Set a valid --name, exact --version, supported persistence mode, and a patroni topology with --failure-domain host. An endpoint needs topology patroni, a routable IP, and two different ports. See command help."}
 				}
 				if key == "" {
 					id, err := uuid.NewRandom()
@@ -137,6 +152,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			}}
 		if engine == cluster.PostgreSQL {
 			command.Flags().StringVar(&postgresReplication, "replication-policy", "asynchronous", "Replication policy: asynchronous or synchronous (commits wait for one replica)")
+			command.Flags().StringVar(&postgresTopology, "topology", "standalone", "Topology: standalone, or patroni for three members with native failover")
+			command.Flags().StringVar(&postgresFailureDomain, "failure-domain", "", "Host failure a patroni cluster survives: host (required for patroni)")
+			command.Flags().StringVar(&endpointAddress, "endpoint-address", "", "Load balancer IP in front of the patroni routers (optional)")
+			command.Flags().Uint16Var(&endpointWriter, "endpoint-writer-port", 0, "Load balancer port that forwards to the router writer ports")
+			command.Flags().Uint16Var(&endpointReader, "endpoint-reader-port", 0, "Load balancer port that forwards to the router reader ports")
 		}
 		if engine == cluster.Redis {
 			command.Flags().StringVar(&persistence, "persistence", "rdb+aof", "Persistence: none, rdb, aof, or rdb+aof")
@@ -173,11 +193,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return err
 		}}
 	// Confirm actions that change retained data availability before admission.
-	actions := make([]*cobra.Command, 0, 5)
-	for _, action := range []string{"stop", "start", "delete", "recover-setup", "rebuild-replica"} {
-		reviewed := action == "delete" || action == "recover-setup" || action == "rebuild-replica"
+	actions := make([]*cobra.Command, 0, 8)
+	for _, action := range []string{"stop", "start", "renew-certificates", "switchover", "delete", "recover-setup", "rebuild-replica", "rebuild-member"} {
+		reviewed := action == "delete" || action == "recover-setup" || action == "rebuild-replica" || action == "rebuild-member"
 		var expected int64
-		var planToken string
+		var planToken, memberFlag string
 		var yes bool
 		command := &cobra.Command{Use: action + " ID", Short: strings.ToUpper(action[:1]) + action[1:] + " a cluster", Args: cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
@@ -187,6 +207,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 				}
 				if cmd.Flags().Changed("expected-revision") && expected < 1 {
 					return &client.Error{Code: "invalid_request", Message: "Use a positive expected revision."}
+				}
+				var member uuid.UUID
+				if (action == "rebuild-member" && planToken == "") || action == "switchover" {
+					member, err = uuid.Parse(memberFlag)
+					if err != nil || member == uuid.Nil {
+						return &client.Error{Code: "invalid_request", Message: "Name the member with --member."}
+					}
 				}
 				var confirmation *cluster.ActionConfirmation
 				if reviewed && cmd.Flags().Changed("plan-token") && planToken == "" {
@@ -220,6 +247,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 						if action == "rebuild-replica" {
 							preview = api.PlanReplicaRebuild
 						}
+						if action == "rebuild-member" {
+							preview = func(ctx context.Context, id uuid.UUID) (cluster.ActionPlan, error) {
+								return api.PlanMemberRebuild(ctx, id, member)
+							}
+						}
 						plan, err := preview(cmd.Context(), id)
 						if err != nil {
 							return err
@@ -233,7 +265,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 						if _, err := fmt.Fprintf(stderr, "Action: %s\nCluster: %s (%s)\nData disposition: %s\nRetained volumes: %v\nDowntime: %s\nPlan token: %s\nPlan expires: %s\n", action, plan.ClusterName, plan.ClusterID, plan.DataDisposition, plan.RetainedVolumes, plan.Downtime, plan.PlanToken, plan.ExpiresAt.Format(time.RFC3339)); err != nil {
 							return &client.Error{Code: "local_error", Message: "Display the action plan failed. No action request was sent."}
 						}
-						if action == "recover-setup" || action == "rebuild-replica" {
+						if action == "recover-setup" || action == "rebuild-replica" || action == "rebuild-member" {
 							if _, err := fmt.Fprintf(stderr, "Member: %s\nResource: %s\n", plan.MemberID, plan.ResourceID); err != nil {
 								return &client.Error{Code: "local_error", Message: "Display the recovery target failed. No action request was sent."}
 							}
@@ -258,7 +290,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 				if reviewed && !yes {
 					return &client.Error{Code: "confirmation_required", Message: fmt.Sprintf("Review the plan. Confirm with --yes --plan-token %s --expected-revision %d --idempotency-key %s.", confirmation.PlanToken, expected, key)}
 				}
-				admission, err := api.Act(cmd.Context(), id, action, expected, key, confirmation)
+				var admission client.Admission
+				if action == "switchover" {
+					admission, err = api.Switchover(cmd.Context(), id, member, expected, key)
+				} else {
+					admission, err = api.Act(cmd.Context(), id, action, expected, key, confirmation)
+				}
 				if err != nil {
 					return err
 				}
@@ -279,6 +316,17 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		if action == "rebuild-replica" {
 			command.Short = "Rebuild a failed PostgreSQL replica and retain its old volume"
+		}
+		if action == "renew-certificates" {
+			command.Short = "Renew the native certificates of a Patroni cluster one member at a time"
+		}
+		if action == "rebuild-member" {
+			command.Short = "Rebuild a failed Patroni member on its node and retain its old volume"
+			command.Flags().StringVar(&memberFlag, "member", "", "Member ID of the failed Patroni member")
+		}
+		if action == "switchover" {
+			command.Short = "Make a named Patroni member the leader"
+			command.Flags().StringVar(&memberFlag, "member", "", "Member ID of the Patroni member that becomes the leader")
 		}
 		command.Flags().StringVar(&key, "idempotency-key", "", "Reuse a prior key with the same request for recovery")
 		command.Flags().BoolVar(&wait, "wait", false, "Wait for terminal work within --timeout")
@@ -438,7 +486,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	root.AddCommand(db, operations, newEnrollmentTokenCommand(&settings, &result, &executed),
 		newUserCommand(&api, &result, prepare, stderr), newTokenCommand(&api, &result, prepare),
 		newNodeCommand(&api, &result, prepare), newEndpointCommand(&api, &result, prepare, stderr),
-		newCredentialCommand(&api, &result, prepare, stderr))
+		newCredentialCommand(&api, &result, prepare, stderr), newInstallationCommand(&api, &result, prepare))
 	selected, err := root.ExecuteContextC(ctx)
 	for command := selected; command != nil; command = command.Parent() {
 		if command.Name() == "endpoint" || command.Name() == "credential" {
@@ -508,6 +556,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(&output, "Next cursor: %q\n", result.ClusterPage.NextCursor)
 		}
 	}
+	if result.Installation != nil {
+		fmt.Fprintf(&output, "Installation: %s\nRecovery generation: %s\n", result.Installation.InstallationID, result.Installation.RecoveryGeneration)
+	}
 	if result.Operation != nil {
 		fmt.Fprintf(&output, "Operation: %s\nStatus: %s\nPlan version: %d\n", result.Operation.ID, result.Operation.Status, result.Operation.PlanVersion)
 	}
@@ -527,7 +578,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(&output, "%s  %-24s %-16s %s\n", token.ID, token.Name, token.ActorID, state)
 	}
 	for _, member := range result.Members {
-		fmt.Fprintf(&output, "%s  %-8s %s\n", member.ID, member.Role, member.State)
+		node := "-"
+		if member.NodeID != uuid.Nil {
+			node = member.NodeID.String()
+		}
+		address := cmp.Or(member.Address, "-")
+		fmt.Fprintf(&output, "%s  %-8s %-9s %-36s %s\n", member.ID, member.Role, member.State, node, address)
 	}
 	if _, err := io.WriteString(stdout, output.String()); err != nil {
 		fmt.Fprintln(stderr, "Write the result failed: "+err.Error())

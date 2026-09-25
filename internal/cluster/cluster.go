@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"time"
 
@@ -48,6 +49,18 @@ type PostgreSQLSpec struct {
 	Version           string `json:"version"`
 	Topology          string `json:"topology"`
 	ReplicationPolicy string `json:"replication_policy,omitempty"`
+	// FailureDomain is the host failure a patroni cluster survives. Only host is supported.
+	FailureDomain string `json:"failure_domain,omitempty"`
+	// Endpoint is an optional operator load balancer in front of the routers of a patroni cluster.
+	Endpoint *PostgresEndpoint `json:"endpoint,omitempty"`
+}
+
+// PostgresEndpoint is an operator TCP load balancer. It listens on the writer and reader
+// ports and forwards to the router ports that the endpoint output lists.
+type PostgresEndpoint struct {
+	Address    string `json:"address"`
+	WriterPort uint16 `json:"writer_port"`
+	ReaderPort uint16 `json:"reader_port"`
 }
 
 // RedisSpec holds the Redis version, topology, and persistence.
@@ -75,8 +88,18 @@ func (s CreateSpec) Validate() error {
 		if s.PostgreSQL == nil || s.Redis != nil {
 			return fmt.Errorf("postgres requires only a postgresql spec")
 		}
-		if s.PostgreSQL.Topology != "standalone" {
-			return fmt.Errorf("postgres topology must be standalone")
+		switch {
+		case s.PostgreSQL.Topology == "standalone" && s.PostgreSQL.FailureDomain == "":
+		case s.PostgreSQL.Topology == "patroni" && s.PostgreSQL.FailureDomain == "host":
+		default:
+			return fmt.Errorf("postgres topology must be standalone, or patroni with failure domain host")
+		}
+		if endpoint := s.PostgreSQL.Endpoint; endpoint != nil {
+			address, err := netip.ParseAddr(endpoint.Address)
+			if s.PostgreSQL.Topology != "patroni" || err != nil || address.String() != endpoint.Address || !address.IsGlobalUnicast() || address.Zone() != "" ||
+				endpoint.WriterPort == 0 || endpoint.ReaderPort == 0 || endpoint.WriterPort == endpoint.ReaderPort {
+				return fmt.Errorf("postgres endpoint needs topology patroni, a canonical routable IP, and two different ports")
+			}
 		}
 		switch s.PostgreSQL.ReplicationPolicy {
 		case "", "asynchronous", "synchronous":

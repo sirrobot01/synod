@@ -23,6 +23,12 @@ const (
 	ScaleClusterAPIOperation   = "clusters.scale.v1"
 	RecoverSetupAPIOperation   = "clusters.recover_setup.v1"
 	RebuildReplicaAPIOperation = "clusters.rebuild_replica.v1"
+	RebuildMemberAPIOperation  = "clusters.rebuild_member.v1"
+	// RenewCertificatesAPIOperation renews the native certificates of a Patroni cluster.
+	// The controller admits it on its own before expiry. An operator can also ask for it.
+	RenewCertificatesAPIOperation = "clusters.renew_certificates.v1"
+	// SwitchoverAPIOperation moves the Patroni leader to a named member.
+	SwitchoverAPIOperation = "clusters.switchover.v1"
 )
 
 // ClusterActionRequest asks for one lifecycle change to an existing cluster.
@@ -37,6 +43,8 @@ type ClusterActionRequest struct {
 	// Replicas is how many replicas the cluster should run beside its primary. Only a
 	// scale carries it. A nil value leaves the count where it is.
 	Replicas *int
+	// MemberID names the member that a switchover makes the leader. Only a switchover carries it.
+	MemberID uuid.UUID
 }
 
 // AdmitClusterAction records one lifecycle change and the work that carries it out.
@@ -69,6 +77,7 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 		return Admission{}, err
 	}
 	confirmed := request.Identity.APIOperation == DeleteClusterAPIOperation || request.Identity.APIOperation == RecoverSetupAPIOperation || request.Identity.APIOperation == RebuildReplicaAPIOperation ||
+		request.Identity.APIOperation == RebuildMemberAPIOperation ||
 		(request.Identity.APIOperation == ScaleClusterAPIOperation && request.Replicas != nil && *request.Replicas == 0)
 	if confirmed {
 		if request.Confirmation == nil || request.Confirmation.PlanToken == uuid.Nil || !request.Confirmation.Confirm || request.Confirmation.DataDisposition != "retain" {
@@ -83,9 +92,10 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 	var current string
 	var replicas int
 	var deleted *string
-	if err := tx.QueryRow(ctx, `SELECT desired_revision,desired_lifecycle,desired_replicas,deleted_at::text FROM clusters
+	var topology string
+	if err := tx.QueryRow(ctx, `SELECT desired_revision,desired_lifecycle,desired_replicas,deleted_at::text,COALESCE(spec->'postgresql'->>'topology','') FROM clusters
  WHERE installation_id=$1 AND id=$2 FOR UPDATE`,
-		request.Identity.InstallationID, request.ClusterID).Scan(&revision, &current, &replicas, &deleted); err != nil {
+		request.Identity.InstallationID, request.ClusterID).Scan(&revision, &current, &replicas, &deleted, &topology); err != nil {
 		return Admission{}, admissionError(err)
 	}
 	operationID, err := uuid.NewRandom()
@@ -115,7 +125,45 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 	if request.ExpectedRevision != revision {
 		return Admission{}, &AdmissionError{Code: RevisionConflict}
 	}
-	if request.Identity.APIOperation == ScaleClusterAPIOperation || request.Identity.APIOperation == RebuildReplicaAPIOperation {
+	// Patroni fixes its members and elects its own primary. Replica actions and setup
+	// recovery are standalone workflows. A member rebuild is a Patroni workflow.
+	patroniAction := request.Identity.APIOperation == StopClusterAPIOperation || request.Identity.APIOperation == StartClusterAPIOperation ||
+		request.Identity.APIOperation == DeleteClusterAPIOperation || request.Identity.APIOperation == RebuildMemberAPIOperation ||
+		request.Identity.APIOperation == RenewCertificatesAPIOperation || request.Identity.APIOperation == SwitchoverAPIOperation
+	patroniOnly := request.Identity.APIOperation == RebuildMemberAPIOperation || request.Identity.APIOperation == RenewCertificatesAPIOperation ||
+		request.Identity.APIOperation == SwitchoverAPIOperation
+	if (topology == "patroni" && !patroniAction) || (topology != "patroni" && patroniOnly) {
+		return Admission{}, &AdmissionError{Code: UnsupportedSpec}
+	}
+	// A residual Patroni member may hold incomplete storage. Stop and start would act on it
+	// with the plan of a whole member, so it must be rebuilt first. Delete stays available.
+	// A renewal recreates every member, so each must be active. A switchover proves every
+	// member before and after the leader moves, so each must be active too.
+	if request.Identity.APIOperation == RenewCertificatesAPIOperation || request.Identity.APIOperation == SwitchoverAPIOperation {
+		var members, active int
+		var named bool
+		if err := tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE role='patroni' AND state='active'),COALESCE(bool_or(member_id=$3),false)
+ FROM cluster_members WHERE installation_id=$1 AND cluster_id=$2 AND removed_at IS NULL`, identity.InstallationID, request.ClusterID, request.MemberID).Scan(&members, &active, &named); err != nil {
+			return Admission{}, admissionError(err)
+		}
+		if members != 3 || active != 3 {
+			return Admission{}, &AdmissionError{Code: OperationConflict}
+		}
+		if request.Identity.APIOperation == SwitchoverAPIOperation && !named {
+			return Admission{}, &AdmissionError{Code: InvalidRequest}
+		}
+	}
+	if topology == "patroni" && (request.Identity.APIOperation == StopClusterAPIOperation || request.Identity.APIOperation == StartClusterAPIOperation) {
+		var residual bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cluster_members WHERE installation_id=$1 AND cluster_id=$2 AND state='residual' AND removed_at IS NULL)`, identity.InstallationID, request.ClusterID).Scan(&residual); err != nil {
+			return Admission{}, admissionError(err)
+		}
+		if residual {
+			return Admission{}, &AdmissionError{Code: OperationConflict}
+		}
+	}
+	if request.Identity.APIOperation == ScaleClusterAPIOperation || request.Identity.APIOperation == RebuildReplicaAPIOperation || request.Identity.APIOperation == RebuildMemberAPIOperation ||
+		request.Identity.APIOperation == SwitchoverAPIOperation {
 		// A scale acts on a running cluster. Scaling a stopped one would plan work for
 		// an engine that is not there.
 		if current != string(cluster.DesiredRunning) {
@@ -170,6 +218,9 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 		if request.Identity.APIOperation == RebuildReplicaAPIOperation {
 			action = "rebuild_replica"
 		}
+		if request.Identity.APIOperation == RebuildMemberAPIOperation {
+			action = "rebuild_member"
+		}
 		var planned []uuid.UUID
 		var member, resource *uuid.UUID
 		err := tx.QueryRow(ctx, `SELECT retained_volumes,member_id,resource_id,action FROM cluster_action_plans
@@ -218,6 +269,25 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 					return Admission{}, &AdmissionError{Code: OperationConflict}
 				}
 			}
+		} else if action == "rebuild_member" {
+			// The reviewed member must still be a rebuild target with the same storage.
+			if member == nil {
+				return Admission{}, &AdmissionError{Code: OperationConflict}
+			}
+			targetResource, _, err := patroniRebuildTarget(ctx, tx, identity.InstallationID, request.ClusterID, *member)
+			if refused, ok := errors.AsType[*AdmissionError](err); ok && refused.Code == NotFound {
+				return Admission{}, &AdmissionError{Code: OperationConflict}
+			}
+			if err != nil {
+				return Admission{}, err
+			}
+			owned, err := memberVolumeIDs(ctx, tx, identity.InstallationID, request.ClusterID, targetResource)
+			if err != nil {
+				return Admission{}, err
+			}
+			if resource == nil || *resource != targetResource || !slices.Equal(planned, owned) {
+				return Admission{}, &AdmissionError{Code: OperationConflict}
+			}
 		} else if action == "recover_setup" {
 			targetMember, targetResource, targetVolumes, err := setupRecoveryTarget(ctx, tx, identity.InstallationID, request.ClusterID)
 			if err != nil {
@@ -229,6 +299,10 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 		} else if !slices.Equal(planned, volumes) {
 			return Admission{}, &AdmissionError{Code: OperationConflict}
 		}
+	}
+	var target *uuid.UUID
+	if request.MemberID != uuid.Nil {
+		target = &request.MemberID
 	}
 	var desired *string
 	if lifecycle != "" {
@@ -247,10 +321,10 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 		return Admission{}, admissionError(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operations
- (id,installation_id,cluster_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at,retry_of,action_plan_token)
- VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,'pending',0,0,0,transaction_timestamp(),transaction_timestamp(),$10,$11)`,
+ (id,installation_id,cluster_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at,retry_of,action_plan_token,target_member_id)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,'pending',0,0,0,transaction_timestamp(),transaction_timestamp(),$10,$11,$12)`,
 		operationID, identity.InstallationID, request.ClusterID, identity.ActorID,
-		identity.APIOperation, identity.IdempotencyKey, hash[:], kind, next, retryOf, actionPlanToken); err != nil {
+		identity.APIOperation, identity.IdempotencyKey, hash[:], kind, next, retryOf, actionPlanToken, target); err != nil {
 		return Admission{}, admissionError(err)
 	}
 	eventID, err := uuid.NewRandom()
@@ -312,6 +386,12 @@ func actionOf(apiOperation string) (lifecycle cluster.DesiredLifecycle, kind str
 		return cluster.DesiredRunning, "cluster.recover_setup", nil
 	case RebuildReplicaAPIOperation:
 		return "", "cluster.rebuild_replica", nil
+	case RebuildMemberAPIOperation:
+		return "", "cluster.rebuild_member", nil
+	case RenewCertificatesAPIOperation:
+		return "", "cluster.renew_certificates", nil
+	case SwitchoverAPIOperation:
+		return "", "cluster.switchover", nil
 	case ScaleClusterAPIOperation:
 		// A scale changes the member count. It does not move the lifecycle, so it
 		// names no lifecycle to write.
@@ -329,7 +409,8 @@ func actionHash(request ClusterActionRequest) ([32]byte, error) {
 		Expected     int64                       `json:"expected_revision"`
 		Confirmation *cluster.ActionConfirmation `json:"confirmation,omitempty"`
 		Replicas     *int                        `json:"replicas,omitempty"`
-	}{request.Identity.APIOperation, request.ClusterID, request.ExpectedRevision, request.Confirmation, request.Replicas})
+		MemberID     uuid.UUID                   `json:"member_id,omitzero"`
+	}{request.Identity.APIOperation, request.ClusterID, request.ExpectedRevision, request.Confirmation, request.Replicas, request.MemberID})
 	if err != nil {
 		return [32]byte{}, &AdmissionError{Code: InvalidRequest, Cause: err}
 	}
@@ -349,6 +430,10 @@ func validActionRequest(request ClusterActionRequest) error {
 		return &AdmissionError{Code: InvalidRequest}
 	}
 	if request.Replicas != nil && (*request.Replicas < 0 || *request.Replicas > 1) {
+		return &AdmissionError{Code: InvalidRequest}
+	}
+	// Only a switchover names a member, and it must name one.
+	if (identity.APIOperation == SwitchoverAPIOperation) != (request.MemberID != uuid.Nil) {
 		return &AdmissionError{Code: InvalidRequest}
 	}
 	return nil

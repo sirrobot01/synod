@@ -42,7 +42,15 @@ func (w *Worker) pushSecrets(ctx context.Context, nodeID uuid.UUID, sessionID st
 			return fmt.Errorf("%w: %s", ErrSecretUnresolvable, reference.Purpose)
 		}
 		if credential.MemberID != uuid.Nil && credential.MemberID.String() != command.Input.ResourceId {
-			return fmt.Errorf("%w: member identity mismatch", ErrSecretUnresolvable)
+			// A member credential also serves a resource the member's reservation owns on this node.
+			resource, err := uuid.Parse(command.Input.ResourceId)
+			if err != nil {
+				return ErrSecretUnresolvable
+			}
+			owned, err := w.config.Store.MemberOwnsResource(ctx, w.config.Claim.InstallationID, clusterID, credential.MemberID, resource, nodeID)
+			if err != nil || !owned {
+				return fmt.Errorf("%w: member identity mismatch", ErrSecretUnresolvable)
+			}
 		}
 		binding := secret.Binding{
 			InstallationID: w.config.Claim.InstallationID, OwnerType: "cluster", OwnerID: clusterID,

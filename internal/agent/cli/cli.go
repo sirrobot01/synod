@@ -34,6 +34,9 @@ type Identity struct {
 type Failure struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Detail names the cause of a journal or inventory refusal. Those errors carry paths,
+	// identities, and states, never arguments or secrets. Other failures leave it empty.
+	Detail string `json:"detail,omitempty"`
 }
 
 // Run returns an exit status. Enrollment output contains public identity only.
@@ -139,6 +142,15 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err == nil {
 		return 0
 	}
+	failure := failureOf(err)
+	// Cobra parse errors can contain raw argument values. Emit only fixed text.
+	_ = json.NewEncoder(stderr).Encode(failure)
+	return 1
+}
+
+// failureOf maps an error to its stable code and fixed message. Only a journal or inventory
+// refusal adds its cause as detail.
+func failureOf(err error) Failure {
 	failure := Failure{Code: "invalid_configuration", Message: "Check command arguments and protected enrollment inputs. Use command help."}
 	for _, known := range []struct {
 		err  error
@@ -155,12 +167,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	} {
 		if errors.Is(err, known.err) {
 			failure = Failure{Code: known.code, Message: known.err.Error()}
+			if known.err == daemon.ErrJournal || known.err == daemon.ErrInventory {
+				failure.Detail = err.Error()
+			}
 			break
 		}
 	}
-	// Cobra parse errors can contain raw argument values. Emit only fixed text.
-	_ = json.NewEncoder(stderr).Encode(failure)
-	return 1
+	return failure
 }
 
 func readTrust(path string) (*x509.CertPool, error) {

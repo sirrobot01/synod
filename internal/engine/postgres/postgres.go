@@ -79,5 +79,19 @@ func (Engine) Advertised() []engine.Capabilities {
 		}
 		all = append(all, found)
 	}
+	// Patroni runs three members: one elected primary and two replicas. Native Patroni
+	// tests cover 17.11 only. Clients reach members directly with a multi-host URL.
+	all = append(all, engine.Capabilities{
+		Combination:    engine.Combination{Engine: cluster.PostgreSQL, Version: "17.11", Topology: "patroni"},
+		Status:         engine.RequiredPending,
+		Replicas:       engine.Replicas{Minimum: 2, Maximum: 2},
+		NativeFailover: true,
+		// A libpq multi-host URL finds the writer. Synod runs no proxy yet.
+		ClientDiscovery: true,
+		BackupFormats:   []string{},
+		RestoreScopes:   []string{},
+		EndpointType:    "multi_host",
+		TLS:             true,
+	})
 	return all
 }

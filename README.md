@@ -238,6 +238,9 @@ Shutdown stops management dispatch. It never stops native work that an agent acc
 The controller produces standalone PostgreSQL and Redis plans when it has a credential
 wrapping key and a complete placement profile. The approved node must match that profile.
 Use `--secret-key-file`, `--secret-key-id`, and the `--placement-*` flags to configure them.
+`--placement-architecture` accepts `amd64`, `arm64`, or both separated by a comma, in preference order.
+Each cluster stays on nodes of one architecture, because PostgreSQL replication needs one architecture.
+With both architectures, set the Patroni image to an image index digest that covers both.
 Use `--engine-endpoint-first-port` and `--engine-endpoint-last-port` to set the reserved port range.
 
 New Redis clusters have separate admin, application, and replication credentials.
@@ -262,6 +265,43 @@ For an uncertain response, keep the original key and expected revision.
 That request returns the original operation.
 Use `synod db scale CLUSTER_ID --replicas 0` to preview replica removal.
 Review the plan before you confirm it. Removal retains the replica volume.
+
+## Agent configuration
+
+An agent reads one JSON file. Give it with `--config`.
+The file must belong to the agent user. It must have no group or other permission.
+Unknown fields are refused.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `installation_id` | yes | The installation UUID. |
+| `node_id` | yes | The node UUID from the enrollment token. |
+| `enrollment_dir` | yes | The completed enrollment state directory. |
+| `journal_dir` | yes | The journal directory. It must not be inside `enrollment_dir`. |
+| `recovery_generation` | yes | The installation recovery generation UUID. Read it with `synod installation get`. |
+| `controller_endpoints` | yes | One to eight controller agent addresses as `host:port`. |
+| `storage_id` | yes | The storage pool identity. Use the same value as `synod node approve --storage-id`. |
+| `storage_path` | no | The filesystem that capacity is measured on. The default is `journal_dir`. |
+| `min_free_bytes` | no | The free space that new work must leave on `storage_path`. |
+| `docker_socket` | no | The Docker socket path. The default is `/var/run/docker.sock`. |
+
+Put `storage_path` on the filesystem that holds the Docker volumes.
+Without `storage_id`, the agent cannot report capacity, so it refuses to start.
+
+`synod installation get` shows `installation_id` and `recovery_generation`.
+The recovery generation can change after controller recovery. Read it when you write a new configuration.
+It is available after a controller with etcd and the agent transport starts.
+
+Run `synod-agent journal init --config FILE` once after enrollment.
+Then run `synod-agent run --config FILE`.
+
+A journal or inventory refusal prints its cause in the `detail` field of the error.
+Other errors print fixed text only, because an argument error can repeat raw input.
+
+Before the first release, the agent protocol can change without a migration.
+A new agent refuses a journal that holds commands from an older build.
+It reports `journal_recovery_required`, and `detail` names the saved command it refused.
+Upgrade an agent only when its node has no cluster. Then create a new journal directory.
 
 ## Find a database cluster
 

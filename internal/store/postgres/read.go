@@ -41,12 +41,12 @@ func (s *Store) GetOperation(ctx context.Context, installationID, operationID uu
 	var hash []byte
 	err := s.pool.QueryRow(ctx, `SELECT id, installation_id, cluster_id, actor_id, api_operation, request_hash,
 		idempotency_key, desired_revision, kind, status, plan_version, owner_id, execution_epoch,
-		claim_expires_at, attempts, next_attempt_at, cancellation_requested_at, created_at, updated_at, finished_at, failure_code, retry_of
+		claim_expires_at, attempts, next_attempt_at, cancellation_requested_at, created_at, updated_at, finished_at, failure_code, retry_of, target_member_id
 		FROM operations WHERE installation_id=$1 AND id=$2`, installationID, operationID).
 		Scan(&result.ID, &result.InstallationID, &result.ClusterID, &result.ActorID, &result.APIOperation, &hash,
 			&result.IdempotencyKey, &result.DesiredRevision, &result.Kind, &result.Status, &result.PlanVersion, &result.OwnerID,
 			&result.ExecutionEpoch, &result.ClaimExpiresAt, &result.Attempts, &result.NextAttemptAt, &result.CancellationRequestedAt,
-			&result.CreatedAt, &result.UpdatedAt, &result.FinishedAt, &result.FailureCode, &result.RetryOf)
+			&result.CreatedAt, &result.UpdatedAt, &result.FinishedAt, &result.FailureCode, &result.RetryOf, &result.TargetMemberID)
 	if err != nil {
 		return operation.Operation{}, admissionError(err)
 	}

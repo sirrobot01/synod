@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/pki"
 )
 
 func TestPatroniTLSMaterial(t *testing.T) {
@@ -183,5 +184,82 @@ func TestPatroniTLSMaterial(t *testing.T) {
 	settings.ResourceID = uuid.Nil
 	if files, err := PatroniFiles(settings, secrets, member, dcs, now); err == nil || files != nil {
 		t.Fatal("invalid member settings accepted")
+	}
+}
+
+func TestIssuePatroniMaterial(t *testing.T) {
+	now := time.Now()
+	installation, cluster, resource := uuid.New(), uuid.New(), uuid.New()
+	nativeCert, nativeKey, err := pki.CreatePatroniCA(installation, now, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native, err := pki.LoadPatroniCA(installation, nativeCert, nativeKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	etcdTrust, _, err := pki.CreateCA(uuid.New(), now, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := netip.MustParseAddr("192.0.2.10")
+	settings := PatroniSettings{RequiredFreeBytes: 1 << 30, InstallationID: installation, ClusterID: cluster, ResourceID: resource, VolumeID: uuid.New(), ProvisionID: uuid.New(), ApplicationCredentialID: uuid.New(), ApplicationCredentialVersion: 1, Address: address, DatabasePort: 5432, RESTPort: 8008, DCSEndpoints: []string{"192.0.2.20:2379"}, PeerNetworks: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, ClientNetworks: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}}
+	secrets := PatroniSecrets{Superuser: uuid.NewString(), Replication: uuid.NewString(), Rewind: uuid.NewString(), DCS: uuid.NewString(), REST: uuid.NewString(), ApplicationVerifier: "SCRAM-SHA-256$4096:AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+	member, err := IssuePatroniMemberMaterial(native, pki.PatroniIdentity{InstallationID: installation, ClusterID: cluster, ResourceID: resource}, address, now, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dcs, err := IssuePatroniDCSMaterial(native, pki.PatroniIdentity{InstallationID: installation, ClusterID: cluster}, etcdTrust, now, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := PatroniFiles(settings, secrets, member, dcs, now)
+	if err != nil {
+		t.Fatal("issued material refused", err)
+	}
+	if !bytes.Contains(files["dcs-ca.crt"], bytes.TrimSpace(etcdTrust)) || !bytes.Contains(files["dcs-ca.crt"], native.CertificatePEM()) {
+		t.Fatal("DCS trust does not carry the etcd server trust and the native CA")
+	}
+	if bytes.Equal(member.PrivateKey, dcs.PrivateKey) {
+		t.Fatal("member and DCS material share a key")
+	}
+	moved := settings
+	moved.Address = netip.MustParseAddr("192.0.2.11")
+	if _, err := PatroniFiles(moved, secrets, member, dcs, now); err == nil {
+		t.Fatal("member material accepted another member address")
+	}
+	controlCert, controlKey, err := pki.CreateCA(installation, now, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := pki.LoadCA(installation, controlCert, controlKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, issue := range map[string]func() error{
+		"control CA": func() error {
+			_, err := IssuePatroniMemberMaterial(control, pki.PatroniIdentity{InstallationID: installation, ClusterID: cluster, ResourceID: resource}, address, now, time.Hour)
+			return err
+		},
+		"member without resource": func() error {
+			_, err := IssuePatroniMemberMaterial(native, pki.PatroniIdentity{InstallationID: installation, ClusterID: cluster}, address, now, time.Hour)
+			return err
+		},
+		"DCS with resource": func() error {
+			_, err := IssuePatroniDCSMaterial(native, pki.PatroniIdentity{InstallationID: installation, ClusterID: cluster, ResourceID: resource}, etcdTrust, now, time.Hour)
+			return err
+		},
+		"DCS without trust": func() error {
+			_, err := IssuePatroniDCSMaterial(native, pki.PatroniIdentity{InstallationID: installation, ClusterID: cluster}, []byte(" \n"), now, time.Hour)
+			return err
+		},
+		"lifetime beyond CA": func() error {
+			_, err := IssuePatroniMemberMaterial(native, pki.PatroniIdentity{InstallationID: installation, ClusterID: cluster, ResourceID: resource}, address, now, 48*time.Hour)
+			return err
+		},
+	} {
+		if err := issue(); err == nil {
+			t.Fatalf("%s: material issued", name)
+		}
 	}
 }

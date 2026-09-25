@@ -31,6 +31,9 @@ CREATE TABLE cluster_credentials (
  key_id uuid NOT NULL,
  format_version integer NOT NULL CHECK (format_version = 1),
  sealed bytea NOT NULL CHECK (octet_length(sealed) BETWEEN 1 AND 1048604),
+ -- The certificate expiry of TLS material. Renewal reads it without opening the seal.
+ expires_at timestamptz,
+ CHECK ((purpose IN ('patroni_member_tls','patroni_dcs_tls')) = (expires_at IS NOT NULL)),
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY (installation_id,credential_id,version),
  UNIQUE (installation_id,cluster_id,credential_id,version),

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -40,7 +41,20 @@ type Controller struct {
 	EtcdAllowPlaintext bool   `json:"etcd_allow_plaintext,omitzero"`
 	PublicOrigin       string `json:"public_origin"`
 	EtcdPrefix         string `json:"etcd_prefix"`
-	LogLevel           string `json:"log_level"`
+	// The Patroni DCS admin account creates and deletes one etcd account for each
+	// Patroni cluster. It needs the root role. Without it, Patroni HA is unavailable.
+	PatroniDCSAdminUsername     string `json:"patroni_dcs_admin_username"`
+	PatroniDCSAdminPasswordFile string `json:"patroni_dcs_admin_password_file"`
+	// The native Patroni CA signs member and DCS client certificates. Patroni HA needs
+	// it together with the DCS admin account.
+	PatroniCACertFile string `json:"patroni_ca_cert_file"`
+	PatroniCAKeyFile  string `json:"patroni_ca_key_file"`
+	// PatroniDCSEndpoints are the etcd host:port pairs that Patroni members reach.
+	// PatroniImage is the name@sha256 digest of the member image. With more than one placement
+	// architecture, it is an image index that covers each one.
+	PatroniDCSEndpoints string `json:"patroni_dcs_endpoints"`
+	PatroniImage        string `json:"patroni_image"`
+	LogLevel            string `json:"log_level"`
 	// SecretKeyFile holds the base64 of one 32-byte wrapping key, and SecretKeyID
 	// names it. A controller without both seals nothing, so it admits clusters and
 	// cannot provision them: a credential this installation cannot name later is
@@ -84,7 +98,7 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 	flags.StringVar(&override.CAKeyFile, "ca-key-file", "", "protected enrollment CA private key file")
 	flags.StringVar(&override.SecretKeyFile, "secret-key-file", "", "protected file holding the base64 of one 32-byte credential wrapping key")
 	flags.StringVar(&override.SecretKeyID, "secret-key-id", "", "UUID naming the active credential wrapping key")
-	flags.StringVar(&override.PlacementArchitecture, "placement-architecture", "", "node CPU architecture to place onto, amd64 or arm64")
+	flags.StringVar(&override.PlacementArchitecture, "placement-architecture", "", "node CPU architectures to place onto in preference order, amd64, arm64, or both separated by a comma")
 	flags.StringVar(&override.PlacementRuntimeVersion, "placement-runtime-version", "", "container runtime version the nodes report")
 	flags.StringVar(&override.PlacementStorageID, "placement-storage-id", "", "storage pool identifier the nodes declare")
 	flags.IntVar(&override.EngineEndpointFirstPort, "engine-endpoint-first-port", 0, "lowest host port an engine may publish on (default 5432)")
@@ -98,6 +112,12 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 	flags.BoolVar(&override.EtcdAllowPlaintext, "etcd-allow-plaintext", false, "allow unauthenticated plaintext coordination for development")
 	flags.StringVar(&override.PublicOrigin, "public-origin", "", "browser origin of this API, such as https://synod.example.com")
 	flags.StringVar(&override.EtcdPrefix, "etcd-prefix", config.EtcdPrefix, "absolute etcd key prefix for elections")
+	flags.StringVar(&override.PatroniDCSAdminUsername, "patroni-dcs-admin-username", "", "etcd root account that creates per-cluster Patroni accounts")
+	flags.StringVar(&override.PatroniDCSAdminPasswordFile, "patroni-dcs-admin-password-file", "", "protected Patroni DCS admin password file")
+	flags.StringVar(&override.PatroniCACertFile, "patroni-ca-cert-file", "", "native Patroni CA certificate")
+	flags.StringVar(&override.PatroniCAKeyFile, "patroni-ca-key-file", "", "protected native Patroni CA private key")
+	flags.StringVar(&override.PatroniDCSEndpoints, "patroni-dcs-endpoints", "", "comma-separated etcd host:port pairs that Patroni members reach")
+	flags.StringVar(&override.PatroniImage, "patroni-image", "", "Patroni member image as name@sha256:digest; an image index for every placement architecture")
 	flags.StringVar(&override.LogLevel, "log-level", config.LogLevel, "debug, info, warn, or error")
 	if err := flags.Parse(args); err != nil {
 		return Controller{}, err
@@ -160,6 +180,12 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 		{"SYNOD_ETCD_PASSWORD_FILE", &config.EtcdPasswordFile},
 		{"SYNOD_PUBLIC_ORIGIN", &config.PublicOrigin},
 		{"SYNOD_ETCD_PREFIX", &config.EtcdPrefix},
+		{"SYNOD_PATRONI_DCS_ADMIN_USERNAME", &config.PatroniDCSAdminUsername},
+		{"SYNOD_PATRONI_DCS_ADMIN_PASSWORD_FILE", &config.PatroniDCSAdminPasswordFile},
+		{"SYNOD_PATRONI_CA_CERT_FILE", &config.PatroniCACertFile},
+		{"SYNOD_PATRONI_CA_KEY_FILE", &config.PatroniCAKeyFile},
+		{"SYNOD_PATRONI_DCS_ENDPOINTS", &config.PatroniDCSEndpoints},
+		{"SYNOD_PATRONI_IMAGE", &config.PatroniImage},
 		{"SYNOD_LOG_LEVEL", &config.LogLevel},
 		{"SYNOD_SECRET_KEY_FILE", &config.SecretKeyFile},
 		{"SYNOD_SECRET_KEY_ID", &config.SecretKeyID},
@@ -253,6 +279,18 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 			config.PublicOrigin = override.PublicOrigin
 		case "etcd-prefix":
 			config.EtcdPrefix = override.EtcdPrefix
+		case "patroni-dcs-admin-username":
+			config.PatroniDCSAdminUsername = override.PatroniDCSAdminUsername
+		case "patroni-dcs-admin-password-file":
+			config.PatroniDCSAdminPasswordFile = override.PatroniDCSAdminPasswordFile
+		case "patroni-ca-cert-file":
+			config.PatroniCACertFile = override.PatroniCACertFile
+		case "patroni-ca-key-file":
+			config.PatroniCAKeyFile = override.PatroniCAKeyFile
+		case "patroni-dcs-endpoints":
+			config.PatroniDCSEndpoints = override.PatroniDCSEndpoints
+		case "patroni-image":
+			config.PatroniImage = override.PatroniImage
 		case "log-level":
 			config.LogLevel = override.LogLevel
 		}
@@ -292,8 +330,11 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 	// A controller that can provision must say what it places onto. Guessing would
 	// produce a profile that silently matches no node in the fleet.
 	if config.SecretKeyFile != "" {
-		if config.PlacementArchitecture != "amd64" && config.PlacementArchitecture != "arm64" {
-			return Controller{}, errors.New("placement_architecture must be amd64 or arm64 when provisioning is configured")
+		// Each cluster stays on one of these, because PostgreSQL replication needs one architecture.
+		architectures := strings.Split(config.PlacementArchitecture, ",")
+		if len(architectures) > 2 || slices.ContainsFunc(architectures, func(value string) bool { return value != "amd64" && value != "arm64" }) ||
+			(len(architectures) == 2 && architectures[0] == architectures[1]) {
+			return Controller{}, errors.New("placement_architecture must be amd64, arm64, or both separated by a comma when provisioning is configured")
 		}
 		if config.PlacementRuntimeVersion == "" || config.PlacementStorageID == "" {
 			return Controller{}, errors.New("placement_runtime_version and placement_storage_id are required when provisioning is configured")
@@ -390,6 +431,44 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 		// The prefix only matters to an election, so an unused value never blocks startup.
 		if !strings.HasPrefix(config.EtcdPrefix, "/") || strings.HasSuffix(config.EtcdPrefix, "/") || strings.Contains(config.EtcdPrefix, "//") {
 			return Controller{}, errors.New("etcd_prefix must be an absolute key prefix without a trailing slash")
+		}
+	}
+	if (config.PatroniDCSAdminUsername == "") != (config.PatroniDCSAdminPasswordFile == "") {
+		return Controller{}, errors.New("patroni_dcs_admin_username and patroni_dcs_admin_password_file must be supplied together")
+	}
+	if (config.PatroniCACertFile == "") != (config.PatroniCAKeyFile == "") {
+		return Controller{}, errors.New("patroni_ca_cert_file and patroni_ca_key_file must be supplied together")
+	}
+	if (config.PatroniCACertFile == "") != (config.PatroniDCSAdminUsername == "") {
+		return Controller{}, errors.New("patroni HA requires both the Patroni CA files and the Patroni DCS admin account")
+	}
+	if (config.PatroniDCSEndpoints == "" || config.PatroniImage == "") != (config.PatroniDCSAdminUsername == "") {
+		return Controller{}, errors.New("patroni HA requires patroni_dcs_endpoints and patroni_image with the Patroni DCS admin account")
+	}
+	if config.PatroniImage != "" {
+		name, digest, found := strings.Cut(config.PatroniImage, "@sha256:")
+		if !found || name == "" || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" || strings.ContainsFunc(name, func(r rune) bool { return r < '!' || r > '~' }) {
+			return Controller{}, errors.New("patroni_image must be name@sha256 followed by 64 lowercase hex digits")
+		}
+	}
+	if config.PatroniDCSEndpoints != "" {
+		for endpoint := range strings.SplitSeq(config.PatroniDCSEndpoints, ",") {
+			host, port, err := net.SplitHostPort(endpoint)
+			number, parseErr := strconv.ParseUint(port, 10, 16)
+			if err != nil || parseErr != nil || number == 0 || host == "" || endpoint != net.JoinHostPort(host, port) {
+				return Controller{}, errors.New("patroni_dcs_endpoints must be comma-separated host:port pairs")
+			}
+		}
+	}
+	if config.PatroniDCSAdminUsername != "" {
+		if config.EtcdEndpoints == "" || config.EtcdAllowPlaintext {
+			return Controller{}, errors.New("patroni DCS administration requires secure etcd coordination")
+		}
+		if len(config.PatroniDCSAdminUsername) > 128 || strings.ContainsAny(config.PatroniDCSAdminUsername, ":/@\\") || strings.ContainsFunc(config.PatroniDCSAdminUsername, func(r rune) bool { return r < '!' || r > '~' }) {
+			return Controller{}, errors.New("patroni_dcs_admin_username must be a bounded account name without credentials")
+		}
+		if config.PatroniDCSAdminUsername == config.EtcdUsername {
+			return Controller{}, errors.New("patroni_dcs_admin_username must differ from etcd_username")
 		}
 	}
 	if config.EtcdEndpoints == "" && (config.EtcdAllowPlaintext || config.EtcdCAFile != "" || config.EtcdTLSCertFile != "" || config.EtcdTLSKeyFile != "" || config.EtcdUsername != "" || config.EtcdPasswordFile != "") {

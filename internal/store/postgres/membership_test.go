@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -32,6 +33,22 @@ func TestPlacementNamesTheClusterPrimary(t *testing.T) {
 	}
 	if member.CreatedByOperation != claim.OperationID || member.CreatedRevision != request.DesiredRevision {
 		t.Fatalf("member provenance %+v", member)
+	}
+	// The member names its reservation's node and the client address that node declares.
+	if member.NodeID != host.node || member.Address != host.policy.ClientAddress {
+		t.Fatalf("member placement %s %q, want %s %q", member.NodeID, member.Address, host.node, host.policy.ClientAddress)
+	}
+	policy := host.policy
+	policy.ClientAddress = "192.0.2.40"
+	encoded, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.store.pool.Exec(t.Context(), `UPDATE node_placement_policies SET policy_bytes=$1 WHERE installation_id=$2`, encoded, host.id); err != nil {
+		t.Fatal(err)
+	}
+	if members, err = host.store.ReadClusterMembers(t.Context(), host.id, claim.ClusterID); err != nil || members[0].Address != "192.0.2.40" {
+		t.Fatalf("member address after the node declares one: %+v %v", members, err)
 	}
 }
 

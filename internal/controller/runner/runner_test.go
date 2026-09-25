@@ -388,7 +388,7 @@ func (i *installation) install(t *testing.T, admission postgres.Admission) *agen
 			t.Fatal(err)
 		}
 	}
-	if _, err := i.pool.Exec(t.Context(), `INSERT INTO allocation_ports(installation_id,cluster_id,node_id,allocation_id,address,transport,port) VALUES($1,$2,$3,$4,$5,$6,$7)`, i.id, claim.ClusterID, i.node, allocation.ID, allocation.Ports[0].Address, allocation.Ports[0].Transport, port); err != nil {
+	if _, err := i.pool.Exec(t.Context(), `INSERT INTO allocation_ports(installation_id,cluster_id,node_id,allocation_id,address,transport,port,name) VALUES($1,$2,$3,$4,$5,$6,$7,'')`, i.id, claim.ClusterID, i.node, allocation.ID, allocation.Ports[0].Address, allocation.Ports[0].Transport, port); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := i.pool.Exec(t.Context(), `INSERT INTO operation_allocation_bindings(installation_id,cluster_id,operation_id,allocation_id) VALUES($1,$2,$3,$4)`, i.id, claim.ClusterID, admission.OperationID, allocation.ID); err != nil {
@@ -877,3 +877,58 @@ func TestNewRunnerChecksInputs(t *testing.T) {
 // dropTimeout bounds one test database teardown. It exists to stop a hang, not to
 // assert how fast PostgreSQL drops a database under load.
 const dropTimeout = 60 * time.Second
+
+// The runner removes a deleted Patroni cluster's DCS scope and records completion.
+// A failed removal leaves the request pending for the next pass.
+func TestRunnerCleansPatroniDCSScope(t *testing.T) {
+	inst := newInstallation(t)
+	admission := inst.admit(t, "patroni-cleanup")
+	if _, err := inst.pool.Exec(t.Context(), `INSERT INTO patroni_dcs_cleanups (installation_id,cluster_id,requested_by_operation,requested_at)
+ VALUES ($1,$2,$3,clock_timestamp())`, inst.id, admission.ClusterID, admission.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	client, err := clientv3.New(clientv3.Config{Endpoints: []string{os.Getenv("SYNOD_TEST_ETCD_ENDPOINT")}, DialTimeout: 2 * time.Second, Logger: zap.NewNop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := coordinator.NewPatroniAccounts(client, inst.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.EnsureAccount(t.Context(), admission.ClusterID, strings.Repeat("p", 40)); err != nil {
+		t.Fatal(err)
+	}
+	name, scope := accounts.PatroniScope(admission.ClusterID)
+	if _, err := client.Put(t.Context(), scope+"leader", "member"); err != nil {
+		t.Fatal(err)
+	}
+	// A closed client cannot reach etcd, so the request must stay pending.
+	closed, err := clientv3.New(clientv3.Config{Endpoints: []string{os.Getenv("SYNOD_TEST_ETCD_ENDPOINT")}, DialTimeout: 2 * time.Second, Logger: zap.NewNop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed.Close()
+	unreachable, err := coordinator.NewPatroniAccounts(closed, inst.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.runner.config.PatroniAccounts = unreachable
+	inst.runner.cleanDCS(t.Context())
+	if inst.count(t, `SELECT count(*) FROM patroni_dcs_cleanups WHERE completed_at IS NULL`) != 1 {
+		t.Fatal("a failed DCS removal was recorded as complete")
+	}
+	inst.runner.config.PatroniAccounts = accounts
+	for range 2 {
+		inst.runner.cleanDCS(t.Context())
+	}
+	if inst.count(t, `SELECT count(*) FROM patroni_dcs_cleanups WHERE completed_at IS NOT NULL`) != 1 {
+		t.Fatal("DCS cleanup was not recorded as complete")
+	}
+	if remaining, err := client.Get(t.Context(), scope, clientv3.WithPrefix(), clientv3.WithCountOnly()); err != nil || remaining.Count != 0 {
+		t.Fatalf("DCS scope keeps keys: %v %v", remaining, err)
+	}
+	if _, err := client.Auth.UserGet(t.Context(), name); err == nil {
+		t.Fatal("DCS account survived cleanup")
+	}
+	client.Close()
+}

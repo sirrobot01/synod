@@ -7,6 +7,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -148,6 +149,18 @@ func TestHAAndConstrainedSearch(t *testing.T) {
 	if err != nil || len(decision.Assignments) != 3 {
 		t.Fatal("three-domain placement", err)
 	}
+	patroni := request
+	patroni.Resources = slices.Clone(request.Resources)
+	for index := range patroni.Resources {
+		patroni.Resources[index].Role = "patroni"
+	}
+	if decision, err := Plan(patroni, snapshot); err != nil || len(decision.Assignments) != 3 {
+		t.Fatal("three Patroni members were not spread", err)
+	}
+	patroni.Profile, patroni.Groups = "compact", nil
+	if _, err := Plan(patroni, snapshot); !errors.Is(err, ErrInvalid) {
+		t.Fatal("Patroni members were placed without an HA spread", err)
+	}
 	if err := CheckDecision(request, snapshot, decision); err != nil {
 		t.Fatal(err)
 	}
@@ -179,10 +192,10 @@ func TestPortsAndInvalidBudgets(t *testing.T) {
 		a, b     Port
 		conflict bool
 	}{
-		{Port{"0.0.0.0", "tcp", 5432}, Port{"127.0.0.1", "tcp", 5432}, true},
-		{Port{"::", "tcp", 5432}, Port{"127.0.0.1", "tcp", 5432}, true},
-		{Port{"127.0.0.1", "tcp", 5432}, Port{"127.0.0.2", "tcp", 5432}, false},
-		{Port{"127.0.0.1", "tcp", 5432}, Port{"127.0.0.1", "udp", 5432}, false},
+		{Port{"0.0.0.0", "tcp", 5432, ""}, Port{"127.0.0.1", "tcp", 5432, ""}, true},
+		{Port{"::", "tcp", 5432, ""}, Port{"127.0.0.1", "tcp", 5432, ""}, true},
+		{Port{"127.0.0.1", "tcp", 5432, ""}, Port{"127.0.0.2", "tcp", 5432, ""}, false},
+		{Port{"127.0.0.1", "tcp", 5432, ""}, Port{"127.0.0.1", "udp", 5432, ""}, false},
 	} {
 		if PortsConflict(test.a, test.b) != test.conflict {
 			t.Fatal("wrong wildcard overlap")
@@ -190,12 +203,12 @@ func TestPortsAndInvalidBudgets(t *testing.T) {
 	}
 	request, snapshot := fixture()
 	snapshot.Nodes = snapshot.Nodes[:1]
-	request.Resources[0].Ports = []Port{{"127.0.0.1", "tcp", 5432}}
-	snapshot.Allocations = []Allocation{{ID: uuid.New(), InstallationID: request.InstallationID, NodeID: snapshot.Nodes[0].ID, ClusterID: uuid.New(), ResourceID: uuid.New(), Budget: Vector{}, Ports: []Port{{"0.0.0.0", "tcp", 5432}}}}
+	request.Resources[0].Ports = []Port{{"127.0.0.1", "tcp", 5432, ""}}
+	snapshot.Allocations = []Allocation{{ID: uuid.New(), InstallationID: request.InstallationID, NodeID: snapshot.Nodes[0].ID, ClusterID: uuid.New(), ResourceID: uuid.New(), Budget: Vector{}, Ports: []Port{{"0.0.0.0", "tcp", 5432, ""}}}}
 	if _, err := Plan(request, snapshot); !errors.Is(err, ErrUnsatisfied) {
 		t.Fatal("occupied reservation ignored", err)
 	}
-	for _, port := range []Port{{"::ffff:127.0.0.1", "tcp", 5432}, {"fe80::1%eth0", "tcp", 5432}, {"224.0.0.1", "tcp", 5432}, {"127.0.0.1", "tcp", 0}} {
+	for _, port := range []Port{{"::ffff:127.0.0.1", "tcp", 5432, ""}, {"fe80::1%eth0", "tcp", 5432, ""}, {"224.0.0.1", "tcp", 5432, ""}, {"127.0.0.1", "tcp", 0, ""}} {
 		if port.Validate() == nil {
 			t.Fatal("invalid address accepted")
 		}
@@ -369,5 +382,52 @@ func TestInstanceMustDeclareItsMemberRole(t *testing.T) {
 	request.Resources[0].Kind, request.Resources[0].Role = "backup", "primary"
 	if _, err := Plan(request, snapshot); !errors.Is(err, ErrInvalid) {
 		t.Fatal("a role on a backup reservation was accepted")
+	}
+}
+
+// Two chosen ports of one resource are told apart by name, so a retry that lists them
+// in another order still gives each its own number.
+func TestNamedPortsKeepTheirNumbersOnRetry(t *testing.T) {
+	request, snapshot := fixture()
+	request.PortRange = PortRange{First: 5432, Last: 5440}
+	request.Resources[0].Ports = []Port{{Address: "0.0.0.0", Transport: "tcp", Name: "database"}, {Address: "0.0.0.0", Transport: "tcp", Name: "rest"}}
+	decision, err := Plan(request, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	numbers := map[string]uint16{}
+	for _, port := range decision.Assignments[0].Ports {
+		numbers[port.Name] = port.Number
+	}
+	if len(numbers) != 2 || numbers["database"] == numbers["rest"] {
+		t.Fatalf("named ports: %+v", decision.Assignments[0].Ports)
+	}
+	snapshot.Allocations = []Allocation{{
+		ID: request.Resources[0].ReservationID, InstallationID: request.InstallationID,
+		NodeID: decision.Assignments[0].NodeID, ClusterID: request.ClusterID,
+		ResourceID: request.Resources[0].ID, Budget: Vector{1, 1, 1},
+		OwnedResourceIDs: request.Resources[0].OwnedResourceIDs, Ports: decision.Assignments[0].Ports,
+	}}
+	slices.Reverse(request.Resources[0].Ports)
+	replayed, err := Plan(request, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, port := range replayed.Assignments[0].Ports {
+		if numbers[port.Name] != port.Number {
+			t.Fatalf("retry moved %s from %d to %d", port.Name, numbers[port.Name], port.Number)
+		}
+	}
+	for name, ports := range map[string][]Port{
+		"duplicate name": {{Address: "0.0.0.0", Transport: "tcp", Name: "database"}, {Address: "0.0.0.0", Transport: "tcp", Name: "database"}},
+		"long name":      {{Address: "0.0.0.0", Transport: "tcp", Name: strings.Repeat("n", 33)}},
+		"spaced name":    {{Address: "0.0.0.0", Transport: "tcp", Name: "data base"}},
+	} {
+		invalid, snapshot := fixture()
+		invalid.PortRange = request.PortRange
+		invalid.Resources[0].Ports = ports
+		if _, err := Plan(invalid, snapshot); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("%s accepted: %v", name, err)
+		}
 	}
 }

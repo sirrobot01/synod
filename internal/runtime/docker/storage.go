@@ -32,6 +32,10 @@ func (r *Runtime) checkStartStorage(ctx context.Context, command *agentv1.Comman
 		if stored.Postgres != nil && stored.Postgres.Patroni != nil {
 			return runtime.ErrUnsupportedConfiguration
 		}
+		// A pooler or router holds no data. Its protected files are checked instead.
+		if stored.Route != nil {
+			return r.inspectSource(ctx, item, routeSource(stored.Route))
+		}
 		// The marker must refer to the directory the image will use inside the owned mount.
 		dataDirectory := ""
 		for _, entry := range item.Config.Env {

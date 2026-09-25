@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,10 +42,13 @@ type Image struct {
 }
 
 // Profile is the node shape this installation places onto. A cluster spec names none
-// of it and placement requires all three to match a node's policy, so it is
-// configuration rather than a guess taken from whichever nodes happen to be up.
+// of it and placement requires it to match a node's policy, so it is configuration
+// rather than a guess taken from whichever nodes happen to be up.
+//
+// Architectures lists the node architectures in preference order. A cluster uses one of
+// them, because PostgreSQL physical replication needs the same architecture on every member.
 type Profile struct {
-	Architecture   string
+	Architectures  []string
 	RuntimeVersion string
 	StorageID      string
 }
@@ -69,6 +73,8 @@ type Config struct {
 	// exactly the chosen binding rather than to the container.
 	EndpointAddress string
 	EndpointPorts   placement.PortRange
+	// Patroni enables topology patroni. Nil leaves Patroni creation unavailable.
+	Patroni *PatroniConfig
 }
 
 // Planner produces and installs provisioning plans.
@@ -79,7 +85,7 @@ func New(config Config) (*Planner, error) {
 	if config.Store == nil || config.Decider == nil || config.Catalog == nil || config.Keyring == nil {
 		return nil, errors.New("provision planner requires a store, a decider, a catalog, and a keyring")
 	}
-	if config.Profile.Architecture == "" || config.Profile.RuntimeVersion == "" || config.Profile.StorageID == "" {
+	if len(config.Profile.Architectures) == 0 || slices.Contains(config.Profile.Architectures, "") || config.Profile.RuntimeVersion == "" || config.Profile.StorageID == "" {
 		return nil, errors.New("provision planner requires a complete node profile")
 	}
 	if len(config.Images) == 0 {
@@ -106,6 +112,9 @@ func New(config Config) (*Planner, error) {
 	if !config.Budget.Valid() || config.Budget.CPUMillis == 0 || config.Budget.MemoryBytes == 0 || config.Budget.DiskBytes == 0 {
 		return nil, errors.New("provision planner requires a complete budget")
 	}
+	if native := config.Patroni; native != nil && (native.Accounts == nil || native.CA == nil || len(native.EtcdTrust) == 0 || len(native.DCSEndpoints) == 0 || native.Image == "") {
+		return nil, errors.New("Patroni planning requires DCS accounts, the native CA, etcd trust, DCS endpoints, and an image")
+	}
 	return &Planner{config: config}, nil
 }
 
@@ -123,12 +132,21 @@ func (p *Planner) provision(ctx context.Context, claim operation.Claim) (postgre
 	if err != nil {
 		return postgres.PlacementRecord{}, err
 	}
+	if found.Spec.PostgreSQL != nil && found.Spec.PostgreSQL.Topology == "patroni" {
+		return p.provisionPatroni(ctx, claim, found, capabilities.Combination)
+	}
 	if found.Spec.Engine == cluster.Redis && found.Spec.Redis.MaxmemoryBytes > p.config.Budget.MemoryBytes/4*3 {
 		return postgres.PlacementRecord{}, errors.New("redis maxmemory exceeds three quarters of the container memory")
 	}
-	digest, err := p.image(capabilities.Combination)
-	if err != nil {
-		return postgres.PlacementRecord{}, err
+	// Only an architecture with a pinned image can run the engine.
+	var architectures []string
+	for _, architecture := range p.config.Profile.Architectures {
+		if _, err := p.image(capabilities.Combination, architecture); err == nil {
+			architectures = append(architectures, architecture)
+		}
+	}
+	if len(architectures) == 0 {
+		return postgres.PlacementRecord{}, fmt.Errorf("%w: %s on %v", ErrNoImage, capabilities.Combination, p.config.Profile.Architectures)
 	}
 	intent, err := p.intent(ctx, found)
 	if err != nil {
@@ -140,8 +158,13 @@ func (p *Planner) provision(ctx context.Context, claim operation.Claim) (postgre
 		return postgres.PlacementRecord{}, err
 	}
 	resources := resources{instance: uuid.New(), volume: uuid.New(), reservationID: uuid.New()}
-	request := p.request(claim, found, capabilities.Combination, resources)
-	decision, _, err := p.config.Decider.Decide(ctx, request)
+	request, decision, _, err := p.decide(ctx, architectures, func(architecture string) placement.Request {
+		return p.request(claim, found, capabilities.Combination, resources, architecture)
+	})
+	if err != nil {
+		return postgres.PlacementRecord{}, err
+	}
+	digest, err := p.image(capabilities.Combination, request.Resources[0].Architecture)
 	if err != nil {
 		return postgres.PlacementRecord{}, err
 	}
@@ -181,7 +204,7 @@ type resources struct {
 }
 
 // request asks placement for one instance and the storage it owns.
-func (p *Planner) request(claim operation.Claim, found cluster.Cluster, combination engine.Combination, r resources) placement.Request {
+func (p *Planner) request(claim operation.Claim, found cluster.Cluster, combination engine.Combination, r resources, architecture string) placement.Request {
 	budget := p.config.Budget
 	empty := placement.Vector{}
 	return placement.Request{
@@ -198,7 +221,7 @@ func (p *Planner) request(claim operation.Claim, found cluster.Cluster, combinat
 			Role:           "primary",
 			Engine:         string(combination.Engine),
 			Version:        combination.Version,
-			Architecture:   p.config.Profile.Architecture,
+			Architecture:   architecture,
 			RuntimeVersion: p.config.Profile.RuntimeVersion,
 			StorageID:      p.config.Profile.StorageID,
 			Budgets: placement.Budgets{
@@ -405,15 +428,44 @@ func (p *Planner) intent(ctx context.Context, found cluster.Cluster) (postgres.C
 	return intent, nil
 }
 
-// image answers the pinned digest for one combination.
-func (p *Planner) image(combination engine.Combination) (string, error) {
+// image answers the pinned digest for one combination on one architecture.
+func (p *Planner) image(combination engine.Combination, architecture string) (string, error) {
 	for _, pinned := range p.config.Images {
-		if pinned.Engine == combination.Engine && pinned.Version == combination.Version &&
-			pinned.Architecture == p.config.Profile.Architecture {
+		if pinned.Engine == combination.Engine && pinned.Version == combination.Version && pinned.Architecture == architecture {
 			return pinned.Digest, nil
 		}
 	}
-	return "", fmt.Errorf("%w: %s on %s", ErrNoImage, combination, p.config.Profile.Architecture)
+	return "", fmt.Errorf("%w: %s on %s", ErrNoImage, combination, architecture)
+}
+
+// decide asks placement for a new cluster's members on each architecture in order and
+// returns the first request that placement satisfies. Every member of one request has one
+// architecture, so a cluster never spans two.
+func (p *Planner) decide(ctx context.Context, architectures []string, build func(architecture string) placement.Request) (placement.Request, placement.Decision, placement.Snapshot, error) {
+	var err error
+	for _, architecture := range architectures {
+		request := build(architecture)
+		var decision placement.Decision
+		var snapshot placement.Snapshot
+		decision, snapshot, err = p.config.Decider.Decide(ctx, request)
+		if err == nil || !errors.Is(err, placement.ErrUnsatisfied) {
+			return request, decision, snapshot, err
+		}
+	}
+	return placement.Request{}, placement.Decision{}, placement.Snapshot{}, err
+}
+
+// nodeArchitecture returns the architecture that a node's policy declares. A member added
+// to or rebuilt in an existing cluster uses the architecture of the cluster's nodes.
+func (p *Planner) nodeArchitecture(ctx context.Context, installationID, nodeID uuid.UUID) (string, error) {
+	policy, err := p.config.Store.ReadNodePlacementPolicy(ctx, installationID, nodeID)
+	if err != nil {
+		return "", err
+	}
+	if !slices.Contains(p.config.Profile.Architectures, policy.Architecture) {
+		return "", fmt.Errorf("%w: node %s declares architecture %q outside this installation's profile", ErrUnplannable, nodeID, policy.Architecture)
+	}
+	return policy.Architecture, nil
 }
 
 // beforeExecution is the boundary for a step that creates or starts something.
@@ -453,7 +505,12 @@ func (p *Planner) addReplica(ctx context.Context, claim operation.Claim, found c
 	if err != nil {
 		return err
 	}
-	digest, err := p.image(capabilities.Combination)
+	// A replica uses the primary's architecture, so replication stays on one architecture.
+	architecture, err := p.nodeArchitecture(ctx, claim.InstallationID, primary.NodeID)
+	if err != nil {
+		return err
+	}
+	digest, err := p.image(capabilities.Combination, architecture)
 	if err != nil {
 		return err
 	}
@@ -464,7 +521,7 @@ func (p *Planner) addReplica(ctx context.Context, claim operation.Claim, found c
 		return err
 	}
 	added := resources{instance: uuid.New(), volume: uuid.New(), reservationID: uuid.New()}
-	request := p.request(claim, found, capabilities.Combination, added)
+	request := p.request(claim, found, capabilities.Combination, added, architecture)
 	request.Resources[0].Role = "replica"
 	diskBytes := p.config.Budget.DiskBytes
 	if found.Spec.Engine == cluster.PostgreSQL {

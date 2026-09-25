@@ -56,9 +56,18 @@ func drainNode(t *testing.T, s *Store, claim operation.Claim, node, session uuid
 
 func readsFixture(t *testing.T) (*Store, ClaimRequest, operation.Claim, *agentv1.ExecutionPlan, uuid.UUID, uuid.UUID) {
 	t.Helper()
+	return readsFixtureWith(t, nil)
+}
+
+// readsFixtureWith lets edit change the plan before it is installed.
+func readsFixtureWith(t *testing.T, edit func(*agentv1.ExecutionPlan)) (*Store, ClaimRequest, operation.Claim, *agentv1.ExecutionPlan, uuid.UUID, uuid.UUID) {
+	t.Helper()
 	s, request, claim := claimFixture(t)
 	node := uuid.New()
 	plan := readsPlan(t, claim, node, 2)
+	if edit != nil {
+		edit(plan)
+	}
 	if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
 		t.Fatal(err)
 	}

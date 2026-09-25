@@ -263,7 +263,7 @@ func (p *planner) ports(resource Resource, index int) ([]Port, bool) {
 				}) {
 					continue
 				}
-				if !matched[i] && port.Address == asked.Address && port.Transport == asked.Transport && (asked.Number == 0 || asked.Number == port.Number) {
+				if !matched[i] && port.Address == asked.Address && port.Transport == asked.Transport && port.Name == asked.Name && (asked.Number == 0 || asked.Number == port.Number) {
 					found = i
 					break
 				}

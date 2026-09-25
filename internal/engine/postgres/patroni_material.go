@@ -2,11 +2,18 @@ package postgres
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"net/netip"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/pki"
 )
 
 // PatroniTLSMaterial contains the protected native trust and identity files.
@@ -14,6 +21,56 @@ type PatroniTLSMaterial struct {
 	CA          []byte `json:"ca"`
 	Certificate []byte `json:"certificate"`
 	PrivateKey  []byte `json:"private_key"`
+}
+
+// IssuePatroniMemberMaterial creates a member key and has the native CA certify its member identity,
+// its IP, and each routed endpoint address.
+func IssuePatroniMemberMaterial(ca *pki.CA, identity pki.PatroniIdentity, address netip.Addr, now time.Time, lifetime time.Duration, endpoints ...netip.Addr) (PatroniTLSMaterial, error) {
+	if identity.ResourceID == uuid.Nil {
+		return PatroniTLSMaterial{}, errors.New("Patroni member material requires a member resource")
+	}
+	certificate, key, err := issuePatroniLeaf(ca, identity, address, now, lifetime, endpoints...)
+	if err != nil {
+		return PatroniTLSMaterial{}, err
+	}
+	return PatroniTLSMaterial{CA: ca.CertificatePEM(), Certificate: certificate, PrivateKey: key}, nil
+}
+
+// IssuePatroniDCSMaterial creates the cluster DCS client key and certificate.
+// Its trust bundle is the etcd server trust followed by the native CA, so Patroni can verify
+// the etcd server and the client leaf chains to a root in the same bundle.
+func IssuePatroniDCSMaterial(ca *pki.CA, identity pki.PatroniIdentity, etcdTrust []byte, now time.Time, lifetime time.Duration) (PatroniTLSMaterial, error) {
+	trust := bytes.TrimSpace(etcdTrust)
+	if identity.ResourceID != uuid.Nil || len(trust) == 0 {
+		return PatroniTLSMaterial{}, errors.New("Patroni DCS material requires a cluster identity and the etcd server trust")
+	}
+	certificate, key, err := issuePatroniLeaf(ca, identity, netip.Addr{}, now, lifetime)
+	if err != nil {
+		return PatroniTLSMaterial{}, err
+	}
+	bundle := append(append(bytes.Clone(trust), '\n'), ca.CertificatePEM()...)
+	return PatroniTLSMaterial{CA: bundle, Certificate: certificate, PrivateKey: key}, nil
+}
+
+// issuePatroniLeaf keeps key generation and the CSR together for both native profiles.
+func issuePatroniLeaf(ca *pki.CA, identity pki.PatroniIdentity, address netip.Addr, now time.Time, lifetime time.Duration, endpoints ...netip.Addr) (certificate, key []byte, err error) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate a Patroni key: %w", err)
+	}
+	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, private)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sign a Patroni certificate request: %w", err)
+	}
+	certificate, err = ca.IssuePatroni(csr, identity, address, now, lifetime, endpoints...)
+	if err != nil {
+		return nil, nil, err
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode a Patroni key: %w", err)
+	}
+	return certificate, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
 }
 
 // PatroniFiles validates native identities and returns the seven secret-bearing source files.
@@ -103,4 +160,17 @@ func PatroniFiles(settings PatroniSettings, secrets PatroniSecrets, member, dcs 
 		"ca.crt":      bytes.Clone(member.CA), "member.crt": bytes.Clone(member.Certificate), "member.key": bytes.Clone(member.PrivateKey),
 		"dcs-ca.crt": bytes.Clone(dcs.CA), "dcs-client.crt": bytes.Clone(dcs.Certificate), "dcs-client.key": bytes.Clone(dcs.PrivateKey),
 	}, nil
+}
+
+// Expiry reads the NotAfter time of the leaf certificate.
+func (m PatroniTLSMaterial) Expiry() (time.Time, error) {
+	block, _ := pem.Decode(m.Certificate)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return time.Time{}, errors.New("Patroni TLS material holds no certificate")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return certificate.NotAfter, nil
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -540,5 +541,41 @@ func TestInstallPriorPostgresCloneVerification(t *testing.T) {
 				t.Fatalf("original clone identity changed after plan installation: %v", err)
 			}
 		})
+	}
+}
+
+func TestInstallPatroniStartFailureProof(t *testing.T) {
+	s, _, claim := claimFixture(t)
+	plan := claimPlan(t, claim)
+	step := plan.Steps[0]
+	var refs []*agentv1.SecretReference
+	for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_dcs", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
+		refs = append(refs, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: purpose})
+	}
+	member := &agentv1.EnsureContainer{Engine: "postgres", ImageDigest: "postgres@sha256:" + strings.Repeat("a", 64), VolumeId: uuid.NewString(), NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST, MemoryBytes: 64 << 20,
+		Postgres: &agentv1.PostgresContainerConfig{Port: 15432, SuperuserCredentialId: refs[0].CredentialId, SuperuserCredentialVersion: 1, ApplicationCredentialId: refs[1].CredentialId, ApplicationCredentialVersion: 1, ReplicationCredentialId: refs[2].CredentialId, ReplicationCredentialVersion: 1,
+			Patroni: &agentv1.PatroniContainerConfig{Address: "192.0.2.10", RestPort: 8008, DcsEndpoints: []string{"192.0.2.20:2379"}, PeerNetworks: []string{"192.0.2.0/24"}, ClientNetworks: []string{"198.51.100.0/24"}, ProvisionId: uuid.NewString(), AllowInitialization: true, RequiredFreeBytes: 1 << 30, Credentials: refs}}}
+	step.Command.Input.Payload = &agentv1.CommandInput_VerifyPatroniStartFailure{VerifyPatroniStartFailure: &agentv1.VerifyPatroniStartFailure{Container: member}}
+	step.Postcondition = agentv1.Postcondition_POSTCONDITION_PATRONI_START_FAILED
+	hash, err := operation.CommandHash(step.Command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.Command.InputHash = hash[:]
+	if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
+		t.Fatal("native failure proof plan refused", err)
+	}
+	if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
+		t.Fatal("native failure proof plan replay refused", err)
+	}
+	changed := proto.Clone(plan).(*agentv1.ExecutionPlan)
+	changed.Steps[0].Command.Input.GetVerifyPatroniStartFailure().Container.Postgres.Patroni.ProvisionId = uuid.NewString()
+	hash, err = operation.CommandHash(changed.Steps[0].Command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed.Steps[0].Command.InputHash = hash[:]
+	if err := s.InstallPlan(t.Context(), claim, changed); !errors.Is(err, operation.ErrCommandConflict) {
+		t.Fatalf("native provision identity changed after plan installation: %v", err)
 	}
 }

@@ -3,9 +3,11 @@ package cli
 import (
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/client"
+	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +23,12 @@ func newEndpointCommand(api **client.Client, result *Result, prepare func(*cobra
 			if err != nil {
 				return err
 			}
-			if _, err := fmt.Fprintln(stderr, "Warning: this standalone profile uses plaintext database traffic. Database TLS is disabled. This metadata is not a live health check."); err != nil {
+			// Only an endpoint without verify-full TLS carries plaintext traffic.
+			message := "This metadata is not a live health check."
+			if slices.ContainsFunc(value.Endpoints, func(endpoint cluster.Endpoint) bool { return endpoint.TLSMode != "verify-full" }) {
+				message = "Warning: this standalone profile uses plaintext database traffic. Database TLS is disabled. " + message
+			}
+			if _, err := fmt.Fprintln(stderr, message); err != nil {
 				return &client.Error{Code: "local_error", Message: "Display the database traffic warning failed."}
 			}
 			result.EndpointInspection = &value

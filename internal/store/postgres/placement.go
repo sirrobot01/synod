@@ -439,8 +439,8 @@ func reserve(ctx context.Context, tx pgx.Tx, claim operation.Claim, request plac
 			if err := port.Validate(); err != nil {
 				return nil, &AdmissionError{Code: InvalidRequest, Cause: err}
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO allocation_ports (installation_id,cluster_id,node_id,allocation_id,address,transport,port) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-				allocation.InstallationID, allocation.ClusterID, allocation.NodeID, allocation.ID, port.Address, port.Transport, port.Number); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO allocation_ports (installation_id,cluster_id,node_id,allocation_id,address,transport,port,name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+				allocation.InstallationID, allocation.ClusterID, allocation.NodeID, allocation.ID, port.Address, port.Transport, port.Number, port.Name); err != nil {
 				return nil, admissionError(err)
 			}
 		}

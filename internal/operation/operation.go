@@ -21,16 +21,18 @@ const (
 
 // Operation describes durable work. PlanVersion zero forbids command dispatch.
 type Operation struct {
-	ID                      uuid.UUID  `json:"id"`
-	InstallationID          uuid.UUID  `json:"installation_id"`
-	ClusterID               uuid.UUID  `json:"cluster_id"`
-	ActorID                 string     `json:"actor_id"`
-	APIOperation            string     `json:"api_operation"`
-	RequestHash             [32]byte   `json:"-"`
-	IdempotencyKey          string     `json:"-"`
-	DesiredRevision         int64      `json:"desired_revision"`
-	Kind                    string     `json:"kind"`
-	RetryOf                 *uuid.UUID `json:"retry_of,omitempty"`
+	ID              uuid.UUID  `json:"id"`
+	InstallationID  uuid.UUID  `json:"installation_id"`
+	ClusterID       uuid.UUID  `json:"cluster_id"`
+	ActorID         string     `json:"actor_id"`
+	APIOperation    string     `json:"api_operation"`
+	RequestHash     [32]byte   `json:"-"`
+	IdempotencyKey  string     `json:"-"`
+	DesiredRevision int64      `json:"desired_revision"`
+	Kind            string     `json:"kind"`
+	RetryOf         *uuid.UUID `json:"retry_of,omitempty"`
+	// TargetMemberID is the member that a switchover makes the leader.
+	TargetMemberID          *uuid.UUID `json:"target_member_id,omitempty"`
 	Status                  Status     `json:"status"`
 	PlanVersion             int        `json:"plan_version"`
 	OwnerID                 *string    `json:"owner_id"`

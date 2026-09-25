@@ -283,7 +283,7 @@ func validateInstalledPlan(claim operation.Claim, plan *agentv1.ExecutionPlan) (
 	stepIDs := make([]string, 0, len(plan.Steps))
 	commandIDs := make([]string, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
-		if step == nil || step.Command == nil || step.MaxAttempts < 1 || step.MaxAttempts > 10 || step.CancellationBoundary < agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION || step.CancellationBoundary > agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP || step.Postcondition < agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS || step.Postcondition > agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED {
+		if step == nil || step.Command == nil || step.MaxAttempts < 1 || step.MaxAttempts > 10 || step.CancellationBoundary < agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION || step.CancellationBoundary > agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP || step.Postcondition < agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS || step.Postcondition > agentv1.Postcondition_POSTCONDITION_PATRONI_LEADER {
 			return nil, &AdmissionError{Code: InvalidRequest}
 		}
 		command := step.Command
@@ -699,12 +699,19 @@ func (s *Store) UpdateProgress(ctx context.Context, claim operation.Claim, updat
 		if err := settleReplicaRebuild(ctx, tx, claim, plan, false); err != nil {
 			return err
 		}
+		if err := settleMemberRebuild(ctx, tx, claim, plan, false); err != nil {
+			return err
+		}
+		if err := settleRenewal(ctx, tx, claim, plan, false); err != nil {
+			return err
+		}
 		if _, _, _, err := lockClaim(ctx, tx, claim); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE cluster_members SET state='residual',updated_at=clock_timestamp()
- WHERE installation_id=$1 AND cluster_id=$2 AND role='replica' AND state='pending' AND removed_at IS NULL
- AND EXISTS (SELECT 1 FROM operations WHERE id=$3 AND kind IN ('cluster.scale','cluster.rebuild_replica'))`,
+ WHERE installation_id=$1 AND cluster_id=$2 AND state='pending' AND removed_at IS NULL
+ AND ((role='replica' AND EXISTS (SELECT 1 FROM operations WHERE id=$3 AND kind IN ('cluster.scale','cluster.rebuild_replica')))
+ OR (role='patroni' AND created_operation_id=$3 AND EXISTS (SELECT 1 FROM operations WHERE id=$3 AND kind='cluster.rebuild_member')))`,
 			claim.InstallationID, claim.ClusterID, claim.OperationID); err != nil {
 			return admissionError(err)
 		}

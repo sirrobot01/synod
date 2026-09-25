@@ -117,6 +117,24 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return fmt.Errorf("load the enrollment CA: %w", err)
 		}
 	}
+	// Patroni HA stays unavailable without the native CA. A wrong pair stops startup.
+	var patroniCertificate []byte
+	var patroniCA *pki.CA
+	if settings.PatroniCACertFile != "" {
+		patroniCertificate, err = readStartupFile(settings.PatroniCACertFile, 64<<10, false)
+		if err != nil {
+			return fmt.Errorf("read the Patroni CA certificate: %w", err)
+		}
+		patroniKey, err := readStartupFile(settings.PatroniCAKeyFile, 64<<10, true)
+		if err != nil {
+			return fmt.Errorf("read the protected Patroni CA key: %w", err)
+		}
+		patroniCA, err = pki.LoadPatroniCA(uuid.MustParse(settings.InstallationID), patroniCertificate, patroniKey)
+		clear(patroniKey)
+		if err != nil {
+			return fmt.Errorf("load the Patroni CA: %w", err)
+		}
+	}
 	var agentTLS *tls.Config
 	if settings.AgentListen != "" {
 		agentCert, err := readStartupFile(settings.AgentTLSCertFile, 64<<10, false)
@@ -173,6 +191,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	handler.EnrollmentAuthority = authority
 	handler.PublicOrigin = settings.PublicOrigin
 	handler.SecretKeyring = ring
+	handler.PatroniCA = patroniCertificate
 	assets, err := web.Assets()
 	if err != nil {
 		return fmt.Errorf("load the web application: %w", err)
@@ -241,6 +260,28 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			if err != nil {
 				return err
 			}
+			var patroni *provision.PatroniConfig
+			// Patroni HA stays unavailable without an administration account. A wrong
+			// account stops startup, so a later create never finds it missing.
+			if settings.PatroniDCSAdminUsername != "" {
+				accounts, dcsAdmin, err := connectPatroniDCSAdmin(ctx, settings)
+				if err != nil {
+					return err
+				}
+				// Members verify etcd with the coordination trust bundle.
+				etcdTrust, err := readStartupFile(settings.EtcdCAFile, 1<<20, false)
+				if err != nil {
+					return fmt.Errorf("read the etcd trust for Patroni members: %w", err)
+				}
+				patroni = &provision.PatroniConfig{Accounts: accounts, CA: patroniCA, EtcdTrust: etcdTrust,
+					DCSEndpoints: strings.Split(settings.PatroniDCSEndpoints, ","), Image: settings.PatroniImage}
+				defer func() {
+					if err := dcsAdmin.Close(); err != nil {
+						logger.Error("close the Patroni DCS administration client", "error", err)
+					}
+				}()
+				logger.Info("Patroni DCS account administration is available")
+			}
 			// Provisioning needs a wrapping key, because a plan names a credential
 			// and the controller has to open it to deliver one. Without a key the
 			// runner still runs plans that need none, so a controller can admit and
@@ -248,6 +289,9 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			runnerConfig := runner.Config{
 				Store: store, Transport: agentServer, Coordinator: elector,
 				InstallationID: uuid.MustParse(settings.InstallationID), OwnerID: ownerID(), Logger: logger,
+			}
+			if patroni != nil {
+				runnerConfig.PatroniAccounts = patroni.Accounts
 			}
 			if ring != nil {
 				driver, err := capacity.New(capacity.Config{Store: store, Transport: agentServer, Logger: logger})
@@ -257,12 +301,13 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				planner, err := provision.New(provision.Config{
 					Store: store, Decider: driver, Catalog: catalog, Keyring: ring,
 					Profile: provision.Profile{
-						Architecture:   settings.PlacementArchitecture,
+						Architectures:  strings.Split(settings.PlacementArchitecture, ","),
 						RuntimeVersion: settings.PlacementRuntimeVersion,
 						StorageID:      settings.PlacementStorageID,
 					},
-					Images: pinnedImages,
-					Budget: provisionBudget,
+					Images:  pinnedImages,
+					Budget:  provisionBudget,
+					Patroni: patroni,
 					EndpointPorts: placement.PortRange{
 						First: uint16(settings.EngineEndpointFirstPort),
 						Last:  uint16(settings.EngineEndpointLastPort),

@@ -69,6 +69,12 @@ func bootstrap(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Patroni members use a separate P-256 root, because native SCRAM channel binding
+	// cannot hash an Ed25519 certificate signature.
+	patroniCertificatePEM, patroniKeyPEM, err := pki.CreatePatroniCA(id, time.Now(), caLifetime)
+	if err != nil {
+		return fmt.Errorf("create the Patroni CA for %s: %w", id, err)
+	}
 	wrapping := make([]byte, 32)
 	if _, err := rand.Read(wrapping); err != nil {
 		return fmt.Errorf("generate the credential wrapping key: %w", err)
@@ -84,6 +90,8 @@ func bootstrap(args []string, output io.Writer) error {
 	}{
 		{"ca.crt", 0o644, certificatePEM},
 		{"ca.key", 0o600, keyPEM},
+		{"patroni-ca.crt", 0o644, patroniCertificatePEM},
+		{"patroni-ca.key", 0o600, patroniKeyPEM},
 		{"agent-tls.crt", 0o644, controllerCert},
 		{"agent-tls.key", 0o600, controllerKey},
 		{"secret.key", 0o600, []byte(base64.StdEncoding.EncodeToString(wrapping) + "\n")},
@@ -104,7 +112,7 @@ func bootstrap(args []string, output io.Writer) error {
 	}
 	// The operator needs both lines. A bootstrap whose report did not reach them
 	// looks identical to one that did, and secret_key_id cannot be recovered.
-	if _, err := fmt.Fprintf(output, "Wrote installation %s material to %s.\nsecret_key_id is %s. Back up ca.key and secret.key: neither can be recovered.\n", id, *directory, wrappingID); err != nil {
+	if _, err := fmt.Fprintf(output, "Wrote installation %s material to %s.\nsecret_key_id is %s. Back up ca.key, patroni-ca.key, and secret.key: none can be recovered.\n", id, *directory, wrappingID); err != nil {
 		return fmt.Errorf("report the bootstrap result: %w", err)
 	}
 	return nil

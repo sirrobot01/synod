@@ -3,7 +3,10 @@ package pki
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -51,15 +54,28 @@ func (i Identity) URI() (*url.URL, error) {
 type CA struct {
 	installationID uuid.UUID
 	certificate    *x509.Certificate
-	key            ed25519.PrivateKey
+	key            crypto.Signer
+	native         bool
 }
 
 // CreateCA creates a self-signed Ed25519 installation CA in PEM form.
 func CreateCA(installationID uuid.UUID, now time.Time, lifetime time.Duration) (certificatePEM, privateKeyPEM []byte, err error) {
+	return createCA(installationID, now, lifetime, false)
+}
+
+func createCA(installationID uuid.UUID, now time.Time, lifetime time.Duration, native bool) ([]byte, []byte, error) {
 	if installationID == uuid.Nil || lifetime < time.Hour || lifetime > 10*365*24*time.Hour {
 		return nil, nil, fmt.Errorf("%w: create a CA for installation %s with a lifetime of %s", ErrCertificate, installationID, lifetime)
 	}
-	public, private, err := ed25519.GenerateKey(rand.Reader)
+	var private crypto.Signer
+	var err error
+	path, name := "/ca", "Synod installation CA"
+	if native {
+		private, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		path, name = "/patroni-ca", "Synod Patroni CA"
+	} else {
+		_, private, err = ed25519.GenerateKey(rand.Reader)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: generate the CA key: %w", ErrCertificate, err)
 	}
@@ -71,13 +87,13 @@ func CreateCA(installationID uuid.UUID, now time.Time, lifetime time.Duration) (
 		serial.SetInt64(1)
 	}
 	template := &x509.Certificate{
-		SerialNumber: serial, Subject: pkix.Name{CommonName: "Synod installation CA"},
+		SerialNumber: serial, Subject: pkix.Name{CommonName: name},
 		NotBefore: now.Add(-5 * time.Minute), NotAfter: now.Add(lifetime),
 		IsCA: true, BasicConstraintsValid: true, MaxPathLenZero: true,
 		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		URIs:     []*url.URL{{Scheme: "spiffe", Host: installationID.String() + ".synod", Path: "/ca"}},
+		URIs:     []*url.URL{{Scheme: "spiffe", Host: installationID.String() + ".synod", Path: path}},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, public, private)
+	der, err := x509.CreateCertificate(rand.Reader, template, template, private.Public(), private)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: sign the CA certificate: %w", ErrCertificate, err)
 	}
@@ -90,6 +106,10 @@ func CreateCA(installationID uuid.UUID, now time.Time, lifetime time.Duration) (
 
 // LoadCA parses a stored installation CA and checks that it can sign.
 func LoadCA(installationID uuid.UUID, certificatePEM, privateKeyPEM []byte) (*CA, error) {
+	return loadCA(installationID, certificatePEM, privateKeyPEM, false)
+}
+
+func loadCA(installationID uuid.UUID, certificatePEM, privateKeyPEM []byte, native bool) (*CA, error) {
 	if installationID == uuid.Nil || len(certificatePEM) > 64<<10 || len(privateKeyPEM) > 64<<10 {
 		return nil, fmt.Errorf("%w: the installation must be named and the CA material bounded", ErrCertificate)
 	}
@@ -107,7 +127,11 @@ func LoadCA(installationID uuid.UUID, certificatePEM, privateKeyPEM []byte) (*CA
 	if err := cert.CheckSignatureFrom(cert); err != nil {
 		return nil, fmt.Errorf("%w: the CA certificate is not self-signed: %w", ErrCertificate, err)
 	}
-	expected := (&url.URL{Scheme: "spiffe", Host: installationID.String() + ".synod", Path: "/ca"}).String()
+	path := "/ca"
+	if native {
+		path = "/patroni-ca"
+	}
+	expected := (&url.URL{Scheme: "spiffe", Host: installationID.String() + ".synod", Path: path}).String()
 	if len(cert.URIs) != 1 || cert.URIs[0].String() != expected {
 		return nil, fmt.Errorf("%w: the CA names %v and installation %s expects %q", ErrCertificate, cert.URIs, installationID, expected)
 	}
@@ -119,50 +143,41 @@ func LoadCA(installationID uuid.UUID, certificatePEM, privateKeyPEM []byte) (*CA
 	if err != nil {
 		return nil, fmt.Errorf("%w: parse the CA key: %w", ErrCertificate, err)
 	}
-	key, ok := parsed.(ed25519.PrivateKey)
-	if !ok || !key.Public().(ed25519.PublicKey).Equal(cert.PublicKey) {
-		return nil, fmt.Errorf("%w: the stored key is not the Ed25519 key of the stored CA certificate", ErrCertificate)
+	key, ok := parsed.(crypto.Signer)
+	if !ok {
+		return nil, ErrCertificate
 	}
-	return &CA{installationID: installationID, certificate: cert, key: key}, nil
+	if native {
+		p256, ok := key.(*ecdsa.PrivateKey)
+		if !ok || p256.Curve != elliptic.P256() || cert.SignatureAlgorithm != x509.ECDSAWithSHA256 {
+			return nil, ErrCertificate
+		}
+	} else if _, ok := key.(ed25519.PrivateKey); !ok {
+		return nil, ErrCertificate
+	}
+	public, err := x509.MarshalPKIXPublicKey(key.Public())
+	if err != nil || !bytes.Equal(public, cert.RawSubjectPublicKeyInfo) {
+		return nil, fmt.Errorf("%w: the stored key does not match the CA certificate", ErrCertificate)
+	}
+	return &CA{installationID: installationID, certificate: cert, key: key, native: native}, nil
 }
 
 // Issue signs a CSR public key under the supplied authorized identity.
 // Server names apply only to controllers. Requested CSR names are never copied.
 func (ca *CA) Issue(csrDER []byte, identity Identity, serverNames []string, now time.Time, lifetime time.Duration) ([]byte, error) {
-	if ca == nil || ca.certificate == nil || len(ca.key) != ed25519.PrivateKeySize || identity.InstallationID != ca.installationID || lifetime < 5*time.Minute || lifetime > 30*24*time.Hour || now.Before(ca.certificate.NotBefore) || now.Add(lifetime).After(ca.certificate.NotAfter) {
-		return nil, fmt.Errorf("%w: this CA cannot issue for installation %s with a lifetime of %s at %s", ErrCertificate, identity.InstallationID, lifetime, now.UTC().Format(time.RFC3339))
+	if ca == nil || ca.certificate == nil || ca.key == nil || identity.InstallationID != ca.installationID {
+		return nil, ErrCertificate
+	}
+	if ca.native {
+		return nil, ErrIdentity
 	}
 	uri, err := identity.URI()
 	if err != nil {
 		return nil, err
 	}
-	if len(csrDER) > 64<<10 {
-		return nil, fmt.Errorf("%w: the request is %d bytes", ErrCSR, len(csrDER))
-	}
-	csr, err := x509.ParseCertificateRequest(csrDER)
-	if err != nil {
-		return nil, fmt.Errorf("%w: parse the request: %w", ErrCSR, err)
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("%w: check the request signature: %w", ErrCSR, err)
-	}
-	if _, ok := csr.PublicKey.(ed25519.PublicKey); !ok {
-		return nil, fmt.Errorf("%w: the request carries a %T public key and an Ed25519 key is required", ErrCSR, csr.PublicKey)
-	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, fmt.Errorf("%w: draw the certificate serial: %w", ErrCertificate, err)
-	}
-	if serial.Sign() == 0 {
-		serial.SetInt64(1)
-	}
 	template := &x509.Certificate{
-		SerialNumber: serial, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.Add(lifetime),
 		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, URIs: []*url.URL{uri},
-	}
-	if template.NotBefore.Before(ca.certificate.NotBefore) {
-		template.NotBefore = ca.certificate.NotBefore
 	}
 	if identity.Role == Agent && len(serverNames) != 0 {
 		return nil, fmt.Errorf("%w: an agent certificate carries no server name and %d were requested", ErrIdentity, len(serverNames))
@@ -190,9 +205,43 @@ func (ca *CA) Issue(csrDER []byte, identity Identity, serverNames []string, now 
 			template.DNSNames = append(template.DNSNames, name)
 		}
 	}
+	return ca.issueLeaf(csrDER, template, now, lifetime)
+}
+
+// issueLeaf keeps validity and proof-of-possession checks common to all profiles.
+func (ca *CA) issueLeaf(csrDER []byte, template *x509.Certificate, now time.Time, lifetime time.Duration) ([]byte, error) {
+	if ca == nil || ca.certificate == nil || ca.key == nil || lifetime < 5*time.Minute || lifetime > 30*24*time.Hour || now.Before(ca.certificate.NotBefore) || now.Add(lifetime).After(ca.certificate.NotAfter) {
+		return nil, fmt.Errorf("%w: CA validity or leaf lifetime does not permit issuance", ErrCertificate)
+	}
+	if len(csrDER) > 64<<10 {
+		return nil, fmt.Errorf("%w: the request is %d bytes", ErrCSR, len(csrDER))
+	}
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parse the request: %w", ErrCSR, err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("%w: check the request signature: %w", ErrCSR, err)
+	}
+	if _, ok := csr.PublicKey.(ed25519.PublicKey); !ok {
+		return nil, fmt.Errorf("%w: the request carries a %T public key and an Ed25519 key is required", ErrCSR, csr.PublicKey)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("%w: draw the certificate serial: %w", ErrCertificate, err)
+	}
+	if serial.Sign() == 0 {
+		serial.SetInt64(1)
+	}
+	template.SerialNumber = serial
+	template.NotBefore = now.Add(-5 * time.Minute)
+	template.NotAfter = now.Add(lifetime)
+	if template.NotBefore.Before(ca.certificate.NotBefore) {
+		template.NotBefore = ca.certificate.NotBefore
+	}
 	der, err := x509.CreateCertificate(rand.Reader, template, ca.certificate, csr.PublicKey, ca.key)
 	if err != nil {
-		return nil, fmt.Errorf("%w: sign the certificate for %s: %w", ErrCertificate, uri, err)
+		return nil, fmt.Errorf("%w: sign leaf certificate: %w", ErrCertificate, err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }

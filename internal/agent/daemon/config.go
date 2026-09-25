@@ -39,7 +39,9 @@ type Config struct {
 	// placement contract forbids summing unrelated filesystems, so exactly one
 	// path is measured and its identity is declared beside it.
 	StoragePath string `json:"storage_path"`
-	// StorageID is the stable identity that operator policy approves.
+	// StorageID is the stable identity that operator policy approves. It is required,
+	// because the agent answers no capacity probe without it and placement then has
+	// no node to choose.
 	StorageID string `json:"storage_id"`
 	// MinFreeBytes is the floor this operator declares for the local pool. New
 	// work that would take it to or below this is refused. Zero declares no floor,
@@ -122,6 +124,12 @@ func (c Config) validate() error {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 			return fmt.Errorf("%w: %q is not a clean absolute path", ErrConfiguration, path)
 		}
+	}
+	if c.StoragePath != "" && (!filepath.IsAbs(c.StoragePath) || filepath.Clean(c.StoragePath) != c.StoragePath) {
+		return fmt.Errorf("%w: storage_path %q is not a clean absolute path", ErrConfiguration, c.StoragePath)
+	}
+	if len(c.StorageID) < 1 || len(c.StorageID) > 128 || strings.ContainsFunc(c.StorageID, func(r rune) bool { return r < '!' || r > '~' }) {
+		return fmt.Errorf("%w: storage_id must be 1 to 128 visible ASCII characters and match the --storage-id of synod node approve", ErrConfiguration)
 	}
 	if c.EnrollmentDir == c.JournalDir || strings.HasPrefix(c.EnrollmentDir, c.JournalDir+string(os.PathSeparator)) || strings.HasPrefix(c.JournalDir, c.EnrollmentDir+string(os.PathSeparator)) {
 		return fmt.Errorf("%w: enrollment_dir %q and journal_dir %q must not contain one another", ErrConfiguration, c.EnrollmentDir, c.JournalDir)

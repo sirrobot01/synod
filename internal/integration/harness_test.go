@@ -208,7 +208,7 @@ func startWithAgentOptions(t *testing.T, options agentTestOptions, stepTimeout .
 	h.driver = driver
 	planner, err := provision.New(provision.Config{
 		Store: store, Decider: driver, Catalog: catalog, Keyring: ring,
-		Profile: provision.Profile{Architecture: nodeArchitecture, RuntimeVersion: nodeRuntime, StorageID: nodeStorage},
+		Profile: provision.Profile{Architectures: []string{nodeArchitecture}, RuntimeVersion: nodeRuntime, StorageID: nodeStorage},
 		Images: []provision.Image{
 			{Engine: cluster.PostgreSQL, Version: "17.11", Architecture: nodeArchitecture, Digest: engineImage(t)},
 			{Engine: cluster.Redis, Version: "8.2.7", Architecture: nodeArchitecture, Digest: pinnedRedis},

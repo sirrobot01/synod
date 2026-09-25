@@ -91,7 +91,7 @@ func settleReplicaRebuild(ctx context.Context, tx pgx.Tx, claim operation.Claim,
 	if succeeded {
 		proof = &plan
 	}
-	err = checkPlanCompletions(ctx, tx, op, proof)
+	_, _, err = checkPlanCompletions(ctx, tx, op, proof)
 	retired := oldResource
 	if err != nil {
 		if succeeded || !errors.Is(err, operation.ErrBarrierPending) {

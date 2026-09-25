@@ -30,13 +30,15 @@ CREATE TABLE operations (
     installation_id uuid NOT NULL,
     cluster_id uuid NOT NULL,
     actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 256),
-    api_operation text NOT NULL CHECK (api_operation IN ('clusters.create.v1','clusters.stop.v1','clusters.start.v1','clusters.delete.v1','clusters.scale.v1','clusters.recover_setup.v1','clusters.rebuild_replica.v1')),
+    api_operation text NOT NULL CHECK (api_operation IN ('clusters.create.v1','clusters.stop.v1','clusters.start.v1','clusters.delete.v1','clusters.scale.v1','clusters.recover_setup.v1','clusters.rebuild_replica.v1','clusters.rebuild_member.v1','clusters.renew_certificates.v1','clusters.switchover.v1')),
     idempotency_key text NOT NULL CHECK (idempotency_key ~ '^[!-~]{1,128}$'),
     request_hash bytea NOT NULL CHECK (octet_length(request_hash) = 32),
     hash_version integer NOT NULL CHECK (hash_version = 1),
-    kind text NOT NULL CHECK (kind IN ('cluster.create','cluster.stop','cluster.start','cluster.delete','cluster.scale','cluster.recover_setup','cluster.rebuild_replica')),
+    kind text NOT NULL CHECK (kind IN ('cluster.create','cluster.stop','cluster.start','cluster.delete','cluster.scale','cluster.recover_setup','cluster.rebuild_replica','cluster.rebuild_member','cluster.renew_certificates','cluster.switchover')),
     retry_of uuid,
     action_plan_token uuid,
+    -- A switchover names the member that becomes the leader. Nothing else names one here.
+    target_member_id uuid,
     desired_revision bigint NOT NULL CHECK (desired_revision > 0),
     status text NOT NULL CHECK (status IN ('pending', 'running', 'waiting', 'cancelling', 'succeeded', 'failed', 'cancelled')),
     plan_version integer NOT NULL CHECK (plan_version >= 0),
@@ -54,6 +56,7 @@ CREATE TABLE operations (
     FOREIGN KEY (installation_id, cluster_id) REFERENCES clusters (installation_id, id),
     FOREIGN KEY (installation_id, cluster_id, retry_of) REFERENCES operations (installation_id, cluster_id, id),
     CHECK (retry_of IS NULL OR (retry_of <> id AND kind IN ('cluster.scale','cluster.rebuild_replica'))),
+    CHECK ((kind = 'cluster.switchover') = (target_member_id IS NOT NULL)),
     CHECK ((owner_id IS NULL) = (claim_expires_at IS NULL))
 );
 CREATE UNIQUE INDEX operations_active_cluster ON operations (installation_id, cluster_id)
@@ -62,7 +65,7 @@ CREATE UNIQUE INDEX operations_active_cluster ON operations (installation_id, cl
 CREATE TABLE idempotency_results (
     installation_id uuid NOT NULL,
     actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 256),
-    api_operation text NOT NULL CHECK (api_operation IN ('clusters.create.v1','clusters.stop.v1','clusters.start.v1','clusters.delete.v1','clusters.scale.v1','clusters.recover_setup.v1','clusters.rebuild_replica.v1')),
+    api_operation text NOT NULL CHECK (api_operation IN ('clusters.create.v1','clusters.stop.v1','clusters.start.v1','clusters.delete.v1','clusters.scale.v1','clusters.recover_setup.v1','clusters.rebuild_replica.v1','clusters.rebuild_member.v1','clusters.renew_certificates.v1','clusters.switchover.v1')),
     idempotency_key text NOT NULL CHECK (idempotency_key ~ '^[!-~]{1,128}$'),
     request_hash bytea NOT NULL CHECK (octet_length(request_hash) = 32),
     hash_version integer NOT NULL CHECK (hash_version = 1),
@@ -113,7 +116,7 @@ CREATE TABLE audit_events (
     credential_version bigint CHECK (credential_version > 0),
     actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 256),
     request_id text NOT NULL CHECK (request_id ~ '^[!-~]{1,128}$'),
-    action text NOT NULL CHECK (action IN ('cluster.create.accepted','cluster.stop.accepted','cluster.start.accepted','cluster.delete.accepted','cluster.scale.accepted','cluster.recover_setup.accepted','cluster.rebuild_replica.accepted','enrollment.token.registered','node.enrolled','node.certificate.revoked','credential.reveal.accepted')),
+    action text NOT NULL CHECK (action IN ('cluster.create.accepted','cluster.stop.accepted','cluster.start.accepted','cluster.delete.accepted','cluster.scale.accepted','cluster.recover_setup.accepted','cluster.rebuild_replica.accepted','cluster.rebuild_member.accepted','cluster.renew_certificates.accepted','cluster.switchover.accepted','enrollment.token.registered','node.enrolled','node.certificate.revoked','credential.reveal.accepted')),
     outcome text NOT NULL CHECK (outcome = 'accepted'),
     created_at timestamptz NOT NULL,
     FOREIGN KEY (installation_id, cluster_id, operation_id) REFERENCES operations (installation_id, cluster_id, id),

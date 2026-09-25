@@ -35,6 +35,13 @@ func TestBootstrapWritesWhatAControllerNeeds(t *testing.T) {
 	if authority == nil {
 		t.Fatal("no certificate authority")
 	}
+	// The native Patroni CA loads under the same installation and refuses the control-plane profile.
+	if _, err := pki.LoadPatroniCA(id, []byte(readFile(t, dir, "patroni-ca.crt")), []byte(readFile(t, dir, "patroni-ca.key"))); err != nil {
+		t.Fatalf("the Patroni CA it wrote does not load: %v", err)
+	}
+	if _, err := pki.LoadCA(id, []byte(readFile(t, dir, "patroni-ca.crt")), []byte(readFile(t, dir, "patroni-ca.key"))); err == nil {
+		t.Fatal("the Patroni CA loaded as the control-plane CA")
+	}
 	// The controller certificate is signed by that CA and carries the controller role.
 	block, _ := pem.Decode([]byte(readFile(t, dir, "agent-tls.crt")))
 	if block == nil {
@@ -79,7 +86,7 @@ func TestBootstrapKeepsPrivateMaterialPrivate(t *testing.T) {
 	if err := bootstrap([]string{"-dir", dir}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"ca.key", "agent-tls.key", "secret.key"} {
+	for _, name := range []string{"ca.key", "patroni-ca.key", "agent-tls.key", "secret.key"} {
 		info, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatal(err)
@@ -99,12 +106,12 @@ func TestBootstrapRefusesToReplaceMaterial(t *testing.T) {
 	if err := bootstrap([]string{"-dir", dir}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	before := readFile(t, dir, "ca.crt")
+	before, patroniBefore := readFile(t, dir, "ca.crt"), readFile(t, dir, "patroni-ca.crt")
 	if err := bootstrap([]string{"-dir", dir}, &bytes.Buffer{}); err == nil {
 		t.Fatal("a rerun replaced installation material")
 	}
-	if readFile(t, dir, "ca.crt") != before {
-		t.Fatal("a refused rerun still changed the CA")
+	if readFile(t, dir, "ca.crt") != before || readFile(t, dir, "patroni-ca.crt") != patroniBefore {
+		t.Fatal("a refused rerun still changed a CA")
 	}
 }
 

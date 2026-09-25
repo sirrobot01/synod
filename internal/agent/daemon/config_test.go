@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 
 func TestProtectedConfiguration(t *testing.T) {
 	dir := t.TempDir()
-	config := Config{InstallationID: uuid.NewString(), NodeID: uuid.NewString(), RecoveryGeneration: uuid.NewString(), EnrollmentDir: filepath.Join(dir, "enrollment"), JournalDir: filepath.Join(dir, "journal"), ControllerEndpoints: []string{"localhost:8444"}, JournalMaxRetainedBytes: 512 << 20, JournalMaxStoredBytes: 2 << 30, JournalRecoveryWindowSeconds: 3600}
+	config := Config{InstallationID: uuid.NewString(), NodeID: uuid.NewString(), RecoveryGeneration: uuid.NewString(), EnrollmentDir: filepath.Join(dir, "enrollment"), JournalDir: filepath.Join(dir, "journal"), ControllerEndpoints: []string{"localhost:8444"}, StorageID: "pool-a", JournalMaxRetainedBytes: 512 << 20, JournalMaxStoredBytes: 2 << 30, JournalRecoveryWindowSeconds: 3600}
 	data, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
@@ -60,8 +61,18 @@ func TestProtectedConfiguration(t *testing.T) {
 			t.Fatal("non-regular config accepted")
 		}
 	}
+	// An agent without a storage pool identity would refuse every capacity probe.
+	if err := os.WriteFile(path, bytes.Replace(data, []byte(`"storage_id":"pool-a"`), []byte(`"storage_id":""`), 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "storage_id") {
+		t.Fatalf("missing storage_id: %v", err)
+	}
 	config.DockerSocket = "/var/run/docker.sock"
-	for _, change := range []func(*Config){func(c *Config) { c.JournalMaxRetainedBytes = -1 }, func(c *Config) { c.JournalMaxStoredBytes = -1 }, func(c *Config) { c.JournalRecoveryWindowSeconds = -1 }, func(c *Config) { c.JournalRecoveryWindowSeconds = math.MaxInt64 }, func(c *Config) { c.RecoveryGeneration = uuid.Nil.String() }, func(c *Config) { c.JournalDir = c.EnrollmentDir }, func(c *Config) { c.JournalDir = filepath.Join(c.EnrollmentDir, "journal") }, func(c *Config) { c.ControllerEndpoints = []string{"https://user:secret@example:123"} }, func(c *Config) { c.DockerSocket = "tcp://localhost:2375" }} {
+	for _, change := range []func(*Config){func(c *Config) { c.JournalMaxRetainedBytes = -1 }, func(c *Config) { c.JournalMaxStoredBytes = -1 }, func(c *Config) { c.JournalRecoveryWindowSeconds = -1 }, func(c *Config) { c.JournalRecoveryWindowSeconds = math.MaxInt64 }, func(c *Config) { c.RecoveryGeneration = uuid.Nil.String() }, func(c *Config) { c.JournalDir = c.EnrollmentDir }, func(c *Config) { c.JournalDir = filepath.Join(c.EnrollmentDir, "journal") }, func(c *Config) { c.ControllerEndpoints = []string{"https://user:secret@example:123"} }, func(c *Config) { c.DockerSocket = "tcp://localhost:2375" }, func(c *Config) { c.StorageID = "" }, func(c *Config) { c.StorageID = "pool a" }, func(c *Config) { c.StoragePath = "data/pool" }} {
 		bad := config
 		change(&bad)
 		if bad.validate() == nil {

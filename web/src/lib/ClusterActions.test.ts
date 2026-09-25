@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import ClusterActions from "./ClusterActions.svelte";
+import globalCSS from "../app.css?raw";
 import { api, Failure, type ActionPlan, type Admission, type Cluster, type ClusterMember, type ScaleDownPlan, type PostgresRecoveryPlan } from "./api";
 
 vi.mock("./api", async () => {
@@ -181,6 +182,37 @@ describe("cluster lifecycle actions", () => {
     await fireEvent.click(confirm);
     await screen.findByRole("link", { name: /Open operation/ });
     expect(api.actOnCluster).toHaveBeenCalledWith(cluster.id, "delete", 9, expect.any(String), { plan_token: plan.plan_token, confirm: true, data_disposition: "retain" });
+  });
+
+  it("shows a disabled filled confirm button without its fill until the name matches", async () => {
+    // jsdom resolves the cascade, not custom properties, so the check compares declared values.
+    const sheet = document.createElement("style");
+    sheet.textContent = globalCSS;
+    document.head.append(sheet);
+    try {
+      render(ClusterActions, props);
+      await fireEvent.click(screen.getByRole("button", { name: "Delete…" }));
+      const dialog = await screen.findByRole("dialog");
+      const confirm = (await within(dialog).findByRole("button", { name: "Confirm delete" })) as HTMLButtonElement;
+      expect(confirm.disabled).toBe(true);
+      expect(confirm.classList.contains("destructive")).toBe(true);
+      let style = getComputedStyle(confirm);
+      expect([style.background, style.borderStyle, style.color]).toEqual(["var(--hatch)", "dashed", "var(--ink-dim)"]);
+      await fireEvent.input(screen.getByLabelText("Cluster name confirmation"), { target: { value: "pg-core" } });
+      expect(confirm.disabled).toBe(false);
+      style = getComputedStyle(confirm);
+      expect(style.background).toBe("var(--fail)");
+      expect(style.borderStyle).not.toBe("dashed");
+      expect(style.color).toBe("var(--invert-ink)");
+      const primary = document.createElement("button");
+      primary.className = "primary";
+      primary.disabled = true;
+      document.body.append(primary);
+      expect(getComputedStyle(primary).background).toBe("var(--hatch)");
+      primary.remove();
+    } finally {
+      sheet.remove();
+    }
   });
 
   it("restores an uncertain delete after close and reload and retries the exact expired request", async () => {
