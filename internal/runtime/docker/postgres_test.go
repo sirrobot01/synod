@@ -28,7 +28,7 @@ import (
 
 func TestPostgresPhaseRequiresCurrentNativeProof(t *testing.T) {
 	started := time.Now().Add(-time.Minute).UTC()
-	p := &agentv1.EnsureContainer{Engine: "postgres", Postgres: &agentv1.PostgresContainerConfig{Port: 5432, ApplicationCredentialId: uuid.NewString(), ApplicationCredentialVersion: 1, SuperuserCredentialId: uuid.NewString(), SuperuserCredentialVersion: 1, ReplicationCredentialId: uuid.NewString(), ReplicationCredentialVersion: 1}}
+	p := &agentv1.EnsureContainer{Engine: "postgres", Postgres: &agentv1.PostgresContainerConfig{Port: 5432, ApplicationCredentialId: uuid.NewString(), ApplicationCredentialVersion: 1, SuperuserCredentialId: uuid.NewString(), SuperuserCredentialVersion: 1}}
 	encoded, err := proto.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestPostgresPhaseRequiresCurrentNativeProof(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			item := container.InspectResponse{
-				Config:     &container.Config{Labels: map[string]string{labelInstallation: installation, labelCluster: clusterID, labelResource: resource, labelConfig: base64.RawStdEncoding.EncodeToString(encoded), labelHash: hex.EncodeToString(hash[:])}, Cmd: postgres.ContainerCommand(p.Postgres, installation, clusterID, resource), Healthcheck: postgresHealthcheck(false)},
+				Config:     &container.Config{Labels: map[string]string{labelInstallation: installation, labelCluster: clusterID, labelResource: resource, labelConfig: base64.RawStdEncoding.EncodeToString(encoded), labelHash: hex.EncodeToString(hash[:])}, Cmd: postgres.ContainerCommand(p.Postgres, installation, clusterID, resource), Healthcheck: postgresHealthcheck()},
 				HostConfig: &container.HostConfig{Tmpfs: map[string]string{postgres.ConfigDirectory: postgresTmpfs}},
 				State:      &container.State{Running: true, StartedAt: started.Format(time.RFC3339Nano), Health: &container.Health{Status: container.Healthy, Log: []*container.HealthcheckResult{{Start: started.Add(time.Second), End: started.Add(2 * time.Second), ExitCode: 0, Output: "ready"}}}},
 			}
@@ -97,43 +97,6 @@ func TestPostgresVerifierHasStableCredentialIdentity(t *testing.T) {
 	}
 	if _, err := secretEnvironment(nil, p, runtime.Secrets{"application": []byte("invalid\x00password")}); !errors.Is(err, runtime.ErrConfigurationConflict) {
 		t.Fatal("non-ASCII credential was accepted")
-	}
-}
-
-func TestPostgresReplicationVerifierSeparatesPurposeAndIdentity(t *testing.T) {
-	id := uuid.NewString()
-	p := &agentv1.EnsureContainer{Postgres: &agentv1.PostgresContainerConfig{
-		ApplicationCredentialId: id, ApplicationCredentialVersion: 1,
-		ReplicationCredentialId: id, ReplicationCredentialVersion: 1,
-	}, SecretEnv: []*agentv1.SecretEnv{{Name: "SYNOD_APP_VERIFIER", Purpose: "application"}, {Name: "SYNOD_REPL_VERIFIER", Purpose: "replication"}}}
-	password := []byte("Same-material-tests-purpose-separation-90")
-	secrets := runtime.Secrets{"application": password, "replication": password}
-	first, err := secretEnvironment(nil, p, secrets)
-	if err != nil || len(first) != 2 || !strings.HasPrefix(first[1], "SYNOD_REPL_VERIFIER=SCRAM-SHA-256$4096:") || strings.Contains(first[1], string(password)) {
-		t.Fatal("replication verifier is missing or exposes password material")
-	}
-	_, app, _ := strings.Cut(first[0], "=")
-	_, repl, _ := strings.Cut(first[1], "=")
-	if app == repl {
-		t.Fatal("replication verifier reused the application purpose salt")
-	}
-	second, err := secretEnvironment(nil, p, secrets)
-	if err != nil || !slices.Equal(first, second) {
-		t.Fatal("unchanged replication identity changed its verifier")
-	}
-	p.Postgres.ReplicationCredentialVersion++
-	versioned, err := secretEnvironment(nil, p, secrets)
-	if err != nil || versioned[0] != first[0] || versioned[1] == first[1] {
-		t.Fatal("replication version was not isolated and bound")
-	}
-	p.Postgres.ReplicationCredentialId = uuid.NewString()
-	changed, err := secretEnvironment(nil, p, secrets)
-	if err != nil || changed[0] != first[0] || changed[1] == versioned[1] {
-		t.Fatal("replication identity was not isolated and bound")
-	}
-	secrets["replication"] = []byte("invalid\x00password")
-	if _, err := secretEnvironment(nil, p, secrets); !errors.Is(err, runtime.ErrConfigurationConflict) {
-		t.Fatal("invalid replication material was accepted")
 	}
 }
 
@@ -260,7 +223,7 @@ func TestPostgresPhaseConfigurationDrift(t *testing.T) {
 	if _, err := api.ContainerRemove(t.Context(), changed.ID, client.ContainerRemoveOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	options.Config.Healthcheck = postgresHealthcheck(false)
+	options.Config.Healthcheck = postgresHealthcheck()
 	originalEntrypoint := slices.Clone(options.Config.Entrypoint)
 	options.Config.Entrypoint = []string{"/bin/sh", "-c", "printf ready > /run/synod-postgres/bootstrap-complete; sleep 300"}
 	forged, err := api.ContainerCreate(t.Context(), options)

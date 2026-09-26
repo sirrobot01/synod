@@ -313,20 +313,13 @@ describe("the live cluster collection", () => {
 });
 
 
-describe("PostgreSQL replication policy", () => {
-  it("shows the write availability choice before creation and changes the retry key with policy", async () => {
+describe("standalone PostgreSQL", () => {
+  it("offers no replication policy, because a standalone cluster has no replicas", async () => {
     answer = () => new Failure(503, { code: "outcome_unknown", message: "", requestID: "req_policy" });
     await open();
     type("orders-eu");
-    expect(screen.getByText(/Recent writes can be lost if the primary is lost/)).toBeTruthy();
+    expect(screen.queryByLabelText("Replication policy")).toBeNull();
     await submit();
-    expect(sent[0]?.spec["postgresql"]).toMatchObject({ replication_policy: "asynchronous" });
-    await fireEvent.change(screen.getByLabelText("Replication policy"), { target: { value: "synchronous" } });
-    expect(screen.getByText(/This cluster starts without replicas; add one before writing/)).toBeTruthy();
-    await submit();
-    expect(sent[1]?.spec["postgresql"]).toMatchObject({ replication_policy: "synchronous" });
-    expect(sent[1]?.key).not.toBe(sent[0]?.key);
-    await submit();
-    expect(sent[2]?.key).toBe(sent[1]?.key);
+    expect(sent[0]?.spec["postgresql"]).toEqual({ version: "17.11", topology: "standalone" });
   });
 });

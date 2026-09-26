@@ -34,9 +34,6 @@ func completeLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim, pl
 		Scan(&op.Kind, &op.DesiredRevision, &op.PlanVersion, &desiredRevision, &desiredLifecycle, &deleted); err != nil {
 		return admissionError(err)
 	}
-	if op.Kind == "cluster.rebuild_replica" {
-		return settleReplicaRebuild(ctx, tx, claim, planBytes, true)
-	}
 	if op.Kind == "cluster.rebuild_member" {
 		return settleMemberRebuild(ctx, tx, claim, planBytes, true)
 	}
@@ -56,6 +53,24 @@ func completeLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim, pl
 	elected, primaries, err := checkPlanCompletions(ctx, tx, op, &plan)
 	if err != nil {
 		return err
+	}
+	// A Patroni removal proves the kept members in its final checks and releases the member it took.
+	if prefix := operation.PatroniRemovalPrefix(&plan); op.Kind == "cluster.scale" && prefix > 0 {
+		return settlePatroniRemoval(ctx, tx, claim, op, &plan, prefix, deleted || desiredRevision != op.DesiredRevision || desiredLifecycle != "running")
+	}
+	// A Patroni scale checks each member several times. Its final checks, one per member,
+	// prove the writer. The members it recreated now run the configuration of this plan.
+	if prefix := operation.PatroniScalePrefix(&plan); op.Kind == "cluster.scale" && prefix > 0 {
+		members := operation.LeadingChecks(plan.Steps) + 2
+		if elected, primaries, err = checkPlanCompletions(ctx, tx, op, &agentv1.ExecutionPlan{Version: plan.Version, Steps: plan.Steps[prefix-members : prefix]}); err != nil {
+			return err
+		}
+		if elected != members {
+			return operation.ErrPostconditionUnproved
+		}
+		if err := recordRecreated(ctx, tx, claim, op, &plan, true); err != nil {
+			return err
+		}
 	}
 	// Patroni elects its primary. A start that proves no writer, or two, is not running.
 	if elected > 0 && primaries != 1 {
@@ -122,10 +137,12 @@ func completeLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim, pl
 		}
 		ancestors[step.Command.StepId] = prior
 	}
-	// Current allocations all represent instances. A future retained-disk allocation
-	// must have an explicit kind before it can bypass instance completion proofs.
-	rows, err := tx.Query(ctx, `SELECT node_id,resource_id FROM resource_allocations
- WHERE installation_id=$1 AND cluster_id=$2 AND released_at IS NULL ORDER BY id FOR UPDATE`, claim.InstallationID, claim.ClusterID)
+	// Allocations represent instances, or the etcd services of a Patroni cluster. An etcd
+	// service has no engine readiness, so a running container proves it. A future
+	// retained-disk allocation must have an explicit kind before it can bypass these proofs.
+	rows, err := tx.Query(ctx, `SELECT a.node_id,a.resource_id,e.resource_id IS NOT NULL FROM resource_allocations a
+ LEFT JOIN etcd_members e ON e.installation_id=a.installation_id AND e.cluster_id=a.cluster_id AND e.resource_id=a.resource_id
+ WHERE a.installation_id=$1 AND a.cluster_id=$2 AND a.released_at IS NULL ORDER BY a.id FOR UPDATE OF a`, claim.InstallationID, claim.ClusterID)
 	if err != nil {
 		return admissionError(err)
 	}
@@ -133,14 +150,19 @@ func completeLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim, pl
 	var activated []uuid.UUID
 	for rows.Next() {
 		var nodeID, resourceID uuid.UUID
-		if err := rows.Scan(&nodeID, &resourceID); err != nil {
+		var etcd bool
+		if err := rows.Scan(&nodeID, &resourceID, &etcd); err != nil {
 			rows.Close()
 			return admissionError(err)
+		}
+		want := postcondition
+		if etcd && want == agentv1.Postcondition_POSTCONDITION_ENGINE_READY {
+			want = agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING
 		}
 		proved := false
 		for _, step := range plan.Steps {
 			command := step.Command
-			if command.Epoch.NodeId != nodeID.String() || command.Input.ResourceId != resourceID.String() || step.Postcondition != postcondition {
+			if command.Epoch.NodeId != nodeID.String() || command.Input.ResourceId != resourceID.String() || step.Postcondition != want {
 				continue
 			}
 			ordered := true
@@ -184,12 +206,6 @@ func completeLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim, pl
  (installation_id,cluster_id,deleted_by_operation,retained_volumes,backup_disposition,cleared_at)
  SELECT $1,$2,$3,count(*),'no_policy',clock_timestamp() FROM volume_identities
  WHERE installation_id=$1 AND cluster_id=$2 AND retention<>'purged'`, claim.InstallationID, claim.ClusterID, claim.OperationID); err != nil {
-			return admissionError(err)
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO patroni_dcs_cleanups (installation_id,cluster_id,requested_by_operation,requested_at)
- SELECT installation_id,id,$3,clock_timestamp() FROM clusters
- WHERE installation_id=$1 AND id=$2 AND spec->'postgresql'->>'topology'='patroni'
- ON CONFLICT DO NOTHING`, claim.InstallationID, claim.ClusterID, claim.OperationID); err != nil {
 			return admissionError(err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO cluster_tombstone_nodes (installation_id,cluster_id,node_id,acknowledged_at)
@@ -292,4 +308,73 @@ func names(plan *agentv1.ExecutionPlan, nodeID, resourceID uuid.UUID) bool {
 		}
 	}
 	return false
+}
+
+// settlePatroniScale records the members that a failed or cancelled Patroni scale recreated.
+func settlePatroniScale(ctx context.Context, tx pgx.Tx, claim operation.Claim, encoded []byte) error {
+	op := operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID}
+	if err := tx.QueryRow(ctx, `SELECT kind,desired_revision,plan_version FROM operations WHERE installation_id=$1 AND id=$2`,
+		claim.InstallationID, claim.OperationID).Scan(&op.Kind, &op.DesiredRevision, &op.PlanVersion); err != nil {
+		return admissionError(err)
+	}
+	if op.Kind != "cluster.scale" || len(encoded) == 0 {
+		return nil
+	}
+	var plan agentv1.ExecutionPlan
+	if proto.Unmarshal(encoded, &plan) != nil || int(plan.Version) != op.PlanVersion {
+		return operation.ErrCommandConflict
+	}
+	if operation.PatroniScalePrefix(&plan) == 0 {
+		return nil
+	}
+	if err := operation.ValidatePlan(&plan, op); err != nil {
+		return err
+	}
+	return recordRecreated(ctx, tx, claim, op, &plan, false)
+}
+
+// settlePatroniRemoval completes a Patroni member removal. Every step has its receipt, and the
+// final checks of the kept members prove one writer. The removed member leaves the cluster and
+// releases its reservation and ports, as does an etcd service that moved off its node. Volume
+// identities stay retained.
+func settlePatroniRemoval(ctx context.Context, tx pgx.Tx, claim operation.Claim, op operation.Operation, plan *agentv1.ExecutionPlan, prefix int, moved bool) error {
+	if moved {
+		return operation.ErrCommandConflict
+	}
+	kept := operation.LeadingChecks(plan.Steps)
+	elected, primaries, err := checkPlanCompletions(ctx, tx, op, &agentv1.ExecutionPlan{Version: plan.Version, Steps: plan.Steps[prefix-kept : prefix]})
+	if err != nil {
+		return err
+	}
+	if elected != kept || primaries != 1 {
+		return operation.ErrPostconditionUnproved
+	}
+	removed := plan.Steps[kept].Command.Input.ResourceId
+	tag, err := tx.Exec(ctx, `UPDATE cluster_members SET removed_at=clock_timestamp(),updated_at=clock_timestamp()
+ WHERE installation_id=$1 AND cluster_id=$2 AND resource_id=$3 AND role='patroni' AND removed_at IS NULL`, claim.InstallationID, claim.ClusterID, removed)
+	if err != nil {
+		return admissionError(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return operation.ErrCommandConflict
+	}
+	// A move also releases the etcd service that left the member's node. The plan removed its container.
+	released := []string{removed}
+	if moved := operation.EtcdMoveSource(plan); moved != "" {
+		released = append(released, moved)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE allocation_ports SET released_at=clock_timestamp()
+ WHERE installation_id=$1 AND cluster_id=$2 AND released_at IS NULL AND allocation_id IN
+ (SELECT id FROM resource_allocations WHERE installation_id=$1 AND cluster_id=$2 AND resource_id=ANY($3::uuid[]))`, claim.InstallationID, claim.ClusterID, released); err != nil {
+		return admissionError(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE resource_allocations SET released_at=clock_timestamp()
+ WHERE installation_id=$1 AND cluster_id=$2 AND released_at IS NULL AND resource_id=ANY($3::uuid[])`, claim.InstallationID, claim.ClusterID, released); err != nil {
+		return admissionError(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE clusters SET observed_revision=$1,observed_lifecycle='running',updated_at=clock_timestamp() WHERE installation_id=$2 AND id=$3`,
+		op.DesiredRevision, claim.InstallationID, claim.ClusterID); err != nil {
+		return admissionError(err)
+	}
+	return nil
 }

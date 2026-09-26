@@ -126,6 +126,18 @@ message EnsureContainer {
   PostgresContainerConfig postgres = 12;
   // A pooler or router beside a Patroni member. It has no volume and uses host networking.
   PostgresRouteConfig route = 13;
+  // An etcd member container beside a Patroni member. It uses an isolated volume and host networking.
+  EtcdContainerConfig etcd = 14;
+}
+message EtcdContainerConfig {
+  string name = 1;
+  string address = 2;
+  uint32 client_port = 3;
+  uint32 peer_port = 4;
+  string initial_cluster = 5;
+  string initial_cluster_state = 6;
+  string cluster_id = 7;
+  repeated SecretReference credentials = 8;
 }
 message PostgresRouteConfig {
   // Exactly one of pooler or router.
@@ -163,8 +175,6 @@ message PostgresContainerConfig {
   int64 superuser_credential_version = 5;
   string replication_credential_id = 6;
   int64 replication_credential_version = 7;
-  // An absent source selects a primary.
-  PostgresReplicaSource replica_source = 8;
   // Require one cluster-named standby to flush WAL before default commits return.
   bool synchronous_replication = 9;
   PatroniContainerConfig patroni = 10;
@@ -179,16 +189,6 @@ message PatroniContainerConfig {
   bool allow_initialization = 7;
   repeated SecretReference credentials = 8;
   int64 required_free_bytes = 9;
-}
-message PostgresReplicaSource {
-  string address = 1;
-  uint32 port = 2;
-  string resource_id = 3;
-}
-message PostgresReplicationCheck {
-  PostgresReplicaSource source = 1;
-  int64 max_replay_lag_bytes = 2;
-  google.protobuf.Duration max_message_age = 3;
 }
 message RedisContainerConfig {
   uint32 port = 1;
@@ -230,6 +230,16 @@ message SwitchoverPatroni {
   string address = 1;
   uint32 rest_port = 2;
 }
+// Change the membership of a Patroni cluster's etcd through the local member at address.
+// add_learner adds name at peer_url as a learner. promote makes name a voting member once it is
+// in sync. remove takes name out of the cluster. Each action succeeds when its result holds.
+message EtcdMembership {
+  string address = 1;
+  uint32 client_port = 2;
+  string action = 3;
+  string name = 4;
+  string peer_url = 5;
+}
 // Replace a stopped Patroni member container with one that holds renewed certificate files.
 // The member keeps its volume, identity, provision, and storage records.
 message RecreatePatroniMember {
@@ -237,20 +247,6 @@ message RecreatePatroniMember {
   EnsureContainer next = 2;
 }
 message RecoverPostgresSetup { PostgresContainerConfig postgres = 1; }
-message PreparePostgresReplica {}
-message ClonePostgresReplica {
-  PostgresContainerConfig postgres = 1;
-  int64 required_free_bytes = 2;
-}
-message VerifyPostgresReplicaClone {
-  PostgresContainerConfig postgres = 1;
-  string clone_command_id = 2;
-}
-// Prove durable replica failure for the original clone after native work stopped.
-message VerifyPostgresReplicaFailure {
-  PostgresContainerConfig postgres = 1;
-  string clone_command_id = 2;
-}
 message StopContainer { google.protobuf.Duration grace_period = 1; }
 message RemoveContainer {}
 message InspectContainer {}
@@ -280,7 +276,6 @@ message CheckReadiness {
   RedisReplicationCheck redis_replication = 6;
   // Required primary or replica for PostgreSQL. Separate from the SQL login role.
   string postgres_role = 7;
-  PostgresReplicationCheck postgres_replication = 8;
   PostgresTLS postgres_tls = 9;
 }
 
@@ -300,10 +295,6 @@ message CommandInput {
     InspectContainer inspect_container = 16;
     CheckReadiness check_readiness = 17;
     RecoverPostgresSetup recover_postgres_setup = 18;
-    PreparePostgresReplica prepare_postgres_replica = 19;
-    ClonePostgresReplica clone_postgres_replica = 20;
-    VerifyPostgresReplicaClone verify_postgres_replica_clone = 21;
-    VerifyPostgresReplicaFailure verify_postgres_replica_failure = 22;
     VerifyContainerAbsent verify_container_absent = 23;
     StartPatroniMember start_patroni_member = 24;
     VerifyPatroniStartFailure verify_patroni_start_failure = 25;
@@ -311,6 +302,7 @@ message CommandInput {
     VerifyPatroniMemberFailed verify_patroni_member_failed = 27;
     RecreatePatroniMember recreate_patroni_member = 28;
     SwitchoverPatroni switchover_patroni = 29;
+    EtcdMembership etcd_membership = 30;
   }
 }
 message Command {
@@ -503,12 +495,10 @@ enum Postcondition {
   POSTCONDITION_CONTAINER_INSPECTED = 7;
   POSTCONDITION_ENGINE_READY = 8;
   POSTCONDITION_POSTGRES_SETUP_RECOVERED = 9;
-  POSTCONDITION_POSTGRES_REPLICA_PREPARED = 10;
-  POSTCONDITION_POSTGRES_REPLICA_CLONED = 11;
-  POSTCONDITION_POSTGRES_REPLICA_FAILED = 12;
   POSTCONDITION_PATRONI_START_FAILED = 13;
   POSTCONDITION_PATRONI_MEMBER_NOT_SERVING = 14;
   POSTCONDITION_PATRONI_MEMBER_FAILED = 15;
   POSTCONDITION_PATRONI_MEMBER_RECREATED = 16;
   POSTCONDITION_PATRONI_LEADER = 17;
+  POSTCONDITION_ETCD_MEMBERSHIP = 18;
 }

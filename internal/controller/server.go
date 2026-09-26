@@ -1,17 +1,15 @@
-package main
+package controller
 
 import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,6 +38,7 @@ import (
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	"github.com/sirrobot01/synod/internal/web"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
+	"github.com/spf13/cobra"
 )
 
 // ownerID identifies this controller process in claims and elections.
@@ -51,29 +50,39 @@ func ownerID() string {
 	return host + "/" + strconv.Itoa(os.Getpid())
 }
 
-func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	if err := run(ctx, os.Args[1:], os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+// Command returns the server command. It runs the controller, and its init
+// subcommand writes the installation material.
+func Command() *cobra.Command {
+	command := &cobra.Command{Use: "server", Short: "Run the Synod controller", SilenceErrors: true, SilenceUsage: true,
+		// Cobra's own refusal repeats the argument, which can be a misplaced secret.
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return errors.New("unexpected controller arguments")
+			}
+			return nil
+		}}
+	load := config.BindController(command.Flags())
+	command.RunE = func(cmd *cobra.Command, _ []string) error {
+		settings, err := load()
+		if err != nil {
+			return err
+		}
+		return serve(cmd.Context(), settings, cmd.ErrOrStderr())
 	}
+	command.AddCommand(initCommand())
+	return command
 }
 
-func run(ctx context.Context, args []string, output io.Writer) error {
-	// Bootstrap writes material and exits. It is a subcommand rather than a flag
-	// because it starts nothing, and mixing it with the serving flags invites
-	// running it against a live controller.
-	if len(args) > 0 && args[0] == "bootstrap" {
-		return bootstrap(args[1:], output)
+// Report writes err to stderr and returns the exit status.
+func Report(err error, stderr io.Writer) int {
+	if err == nil {
+		return 0
 	}
-	settings, err := config.LoadController(args, output)
-	if errors.Is(err, flag.ErrHelp) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
+	fmt.Fprintln(stderr, err)
+	return 1
+}
+
+func serve(ctx context.Context, settings config.Controller, output io.Writer) error {
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(settings.LogLevel)); err != nil {
 		return fmt.Errorf("invalid log level %q: %w", settings.LogLevel, err)
@@ -190,6 +199,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	handler.EnrollmentAuthority = authority
 	handler.PublicOrigin = settings.PublicOrigin
+	handler.AgentListen = settings.AgentListen
 	handler.SecretKeyring = ring
 	handler.PatroniCA = patroniCertificate
 	assets, err := web.Assets()
@@ -241,87 +251,59 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				logger.Error("close the agent transport listener", "error", err)
 			}
 		}()
-		if settings.EtcdEndpoints != "" {
-			if settings.EtcdAllowPlaintext {
-				logger.Warn("coordination uses explicit plaintext development mode")
+		elector, err := coordinator.New(pool)
+		if err != nil {
+			return err
+		}
+		var patroni *provision.PatroniConfig
+		if patroniCA != nil && settings.PatroniImage != "" && settings.EtcdImage != "" {
+			patroni = &provision.PatroniConfig{
+				CA:        patroniCA,
+				Image:     settings.PatroniImage,
+				EtcdImage: settings.EtcdImage,
 			}
-			etcd, err := connectEtcd(ctx, settings)
+			logger.Info("Patroni HA provisioner is available")
+		}
+		// Provisioning needs a wrapping key, because a plan names a credential
+		// and the controller has to open it to deliver one. Without a key the
+		// runner still runs plans that need none, so a controller can admit and
+		// observe without being able to create.
+		runnerConfig := runner.Config{
+			Store: store, Transport: agentServer, Coordinator: elector,
+			InstallationID: uuid.MustParse(settings.InstallationID), OwnerID: ownerID(), Logger: logger,
+		}
+		if ring != nil {
+			driver, err := capacity.New(capacity.Config{Store: store, Transport: agentServer, Logger: logger})
 			if err != nil {
 				return err
 			}
-			// A client that will not close can leave an election lease alive, which
-			// keeps this process's ownership past its own exit.
-			defer func() {
-				if err := etcd.Close(); err != nil {
-					logger.Error("close the etcd client", "error", err)
-				}
-			}()
-			elector, err := coordinator.New(etcd, settings.EtcdPrefix)
+			var architectures []string
+			if settings.PlacementArchitecture != "" {
+				architectures = strings.Split(settings.PlacementArchitecture, ",")
+			}
+			planner, err := provision.New(provision.Config{
+				Store: store, Decider: driver, Catalog: catalog, Keyring: ring,
+				Profile: provision.Profile{
+					Architectures:  architectures,
+					RuntimeVersion: settings.PlacementRuntimeVersion,
+					StorageID:      settings.PlacementStorageID,
+				},
+				Images:  pinnedImages,
+				Budget:  provisionBudget,
+				Patroni: patroni,
+				EndpointPorts: placement.PortRange{
+					First: uint16(settings.EngineEndpointFirstPort),
+					Last:  uint16(settings.EngineEndpointLastPort),
+				},
+			})
 			if err != nil {
 				return err
 			}
-			var patroni *provision.PatroniConfig
-			// Patroni HA stays unavailable without an administration account. A wrong
-			// account stops startup, so a later create never finds it missing.
-			if settings.PatroniDCSAdminUsername != "" {
-				accounts, dcsAdmin, err := connectPatroniDCSAdmin(ctx, settings)
-				if err != nil {
-					return err
-				}
-				// Members verify etcd with the coordination trust bundle.
-				etcdTrust, err := readStartupFile(settings.EtcdCAFile, 1<<20, false)
-				if err != nil {
-					return fmt.Errorf("read the etcd trust for Patroni members: %w", err)
-				}
-				patroni = &provision.PatroniConfig{Accounts: accounts, CA: patroniCA, EtcdTrust: etcdTrust,
-					DCSEndpoints: strings.Split(settings.PatroniDCSEndpoints, ","), Image: settings.PatroniImage}
-				defer func() {
-					if err := dcsAdmin.Close(); err != nil {
-						logger.Error("close the Patroni DCS administration client", "error", err)
-					}
-				}()
-				logger.Info("Patroni DCS account administration is available")
-			}
-			// Provisioning needs a wrapping key, because a plan names a credential
-			// and the controller has to open it to deliver one. Without a key the
-			// runner still runs plans that need none, so a controller can admit and
-			// observe without being able to create.
-			runnerConfig := runner.Config{
-				Store: store, Transport: agentServer, Coordinator: elector,
-				InstallationID: uuid.MustParse(settings.InstallationID), OwnerID: ownerID(), Logger: logger,
-			}
-			if patroni != nil {
-				runnerConfig.PatroniAccounts = patroni.Accounts
-			}
-			if ring != nil {
-				driver, err := capacity.New(capacity.Config{Store: store, Transport: agentServer, Logger: logger})
-				if err != nil {
-					return err
-				}
-				planner, err := provision.New(provision.Config{
-					Store: store, Decider: driver, Catalog: catalog, Keyring: ring,
-					Profile: provision.Profile{
-						Architectures:  strings.Split(settings.PlacementArchitecture, ","),
-						RuntimeVersion: settings.PlacementRuntimeVersion,
-						StorageID:      settings.PlacementStorageID,
-					},
-					Images:  pinnedImages,
-					Budget:  provisionBudget,
-					Patroni: patroni,
-					EndpointPorts: placement.PortRange{
-						First: uint16(settings.EngineEndpointFirstPort),
-						Last:  uint16(settings.EngineEndpointLastPort),
-					},
-				})
-				if err != nil {
-					return err
-				}
-				runnerConfig.Keyring, runnerConfig.Planner = ring, planner
-			}
-			operations, err = runner.New(runnerConfig)
-			if err != nil {
-				return err
-			}
+			runnerConfig.Keyring, runnerConfig.Planner = ring, planner
+		}
+		operations, err = runner.New(runnerConfig)
+		if err != nil {
+			return err
 		}
 	}
 	stopped := make(chan error, 2)
@@ -344,7 +326,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				logger.Error("controller runner stopped", "error", err.Error())
 			}
 		}()
-		logger.Info("controller runner electing cluster owners", "etcd_prefix", settings.EtcdPrefix, "installation_id", settings.InstallationID)
+		logger.Info("controller runner electing cluster owners", "installation_id", settings.InstallationID)
 	} else {
 		close(running)
 	}

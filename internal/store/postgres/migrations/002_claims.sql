@@ -1,3 +1,15 @@
+CREATE SEQUENCE cluster_lease_id_seq START WITH 1;
+
+CREATE TABLE cluster_leases (
+    installation_id uuid NOT NULL,
+    cluster_id uuid NOT NULL,
+    owner_id text NOT NULL,
+    lease_id bigint NOT NULL,
+    revision bigint NOT NULL CHECK (revision>0),
+    expires_at timestamptz NOT NULL,
+    PRIMARY KEY (installation_id, cluster_id)
+);
+
 CREATE TABLE installation_generations (
     installation_id uuid PRIMARY KEY,
     recovery_generation uuid NOT NULL
@@ -10,9 +22,8 @@ CREATE TABLE execution_claims (
     execution_epoch bigint NOT NULL CHECK (execution_epoch>0),
     recovery_generation uuid NOT NULL,
     owner_id text NOT NULL,
-    coordination_key text NOT NULL,
-    coordination_lease bigint NOT NULL,
-    coordination_revision bigint NOT NULL CHECK (coordination_revision>0),
+    lease_id bigint NOT NULL,
+    lease_revision bigint NOT NULL CHECK (lease_revision>0),
     acquired_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (installation_id,cluster_id,execution_epoch),
     FOREIGN KEY (installation_id,cluster_id,operation_id) REFERENCES operations (installation_id,cluster_id,id)
@@ -20,13 +31,12 @@ CREATE TABLE execution_claims (
 ALTER TABLE operations ADD COLUMN claim_id uuid REFERENCES execution_claims (claim_id);
 ALTER TABLE operations ADD COLUMN recovery_generation uuid;
 ALTER TABLE operations ADD COLUMN claim_active boolean NOT NULL DEFAULT false;
-ALTER TABLE operations ADD COLUMN coordination_key text;
-ALTER TABLE operations ADD COLUMN coordination_lease bigint;
-ALTER TABLE operations ADD COLUMN coordination_revision bigint;
+ALTER TABLE operations ADD COLUMN lease_id bigint;
+ALTER TABLE operations ADD COLUMN lease_revision bigint;
 ALTER TABLE operations ADD COLUMN plan_bytes bytea;
 ALTER TABLE operations ADD CONSTRAINT operations_claim_identity CHECK (
-    (claim_id IS NULL AND recovery_generation IS NULL AND coordination_key IS NULL AND coordination_lease IS NULL AND coordination_revision IS NULL AND NOT claim_active)
-    OR (claim_id IS NOT NULL AND recovery_generation IS NOT NULL AND owner_id IS NOT NULL AND coordination_key IS NOT NULL AND coordination_lease IS NOT NULL AND coordination_revision > 0)
+    (claim_id IS NULL AND recovery_generation IS NULL AND lease_id IS NULL AND lease_revision IS NULL AND NOT claim_active)
+    OR (claim_id IS NOT NULL AND recovery_generation IS NOT NULL AND owner_id IS NOT NULL AND lease_id IS NOT NULL AND lease_revision > 0)
 );
 ALTER TABLE operations ADD CONSTRAINT operations_plan_present CHECK ((plan_version=0)=(plan_bytes IS NULL));
 CREATE UNIQUE INDEX operations_claim_id ON operations (claim_id) WHERE claim_id IS NOT NULL;

@@ -43,3 +43,16 @@ CREATE UNIQUE INDEX cluster_members_primary ON cluster_members (installation_id,
 
 CREATE INDEX cluster_members_live ON cluster_members (installation_id,cluster_id)
  WHERE removed_at IS NULL;
+
+-- The etcd members of a Patroni cluster. Each runs as its own service reservation on the
+-- node of one Patroni member. They are not cluster members: they hold no database role,
+-- and a member rebuild leaves them alone. The live reservation says where each runs.
+CREATE TABLE etcd_members (
+ installation_id uuid NOT NULL,
+ cluster_id uuid NOT NULL,
+ resource_id uuid NOT NULL,
+ -- The operation whose plan holds the container configuration.
+ created_operation_id uuid NOT NULL,
+ PRIMARY KEY (installation_id,resource_id),
+ FOREIGN KEY (installation_id,cluster_id,created_operation_id) REFERENCES operations (installation_id,cluster_id,id)
+);

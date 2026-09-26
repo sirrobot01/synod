@@ -191,7 +191,7 @@ func newFixtureWith(t *testing.T, spec cluster.CreateSpec, customize func(*place
 	claim, err := store.AcquireClaim(t.Context(), postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: installation, OperationID: admission.OperationID,
 		RecoveryGeneration: generation, OwnerID: "owner-1", TTL: 2 * time.Minute,
-		CoordinationKey: "/provision/test", CoordinationLease: 1, CoordinationRevision: 1,
+		LeaseID: 1, LeaseRevision: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +211,7 @@ func newFixtureWith(t *testing.T, spec cluster.CreateSpec, customize func(*place
 		Profile:       Profile{Architectures: []string{nodeArchitecture}, RuntimeVersion: nodeRuntime, StorageID: nodeStorage},
 		Images:        []Image{{Engine: cluster.PostgreSQL, Version: "17.11", Architecture: "amd64", Digest: testDigest}, {Engine: cluster.Redis, Version: "8.2.7", Architecture: "amd64", Digest: "redis@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}},
 		Budget:        placement.Vector{CPUMillis: 1000, MemoryBytes: 1 << 30, DiskBytes: 1 << 32},
-		EndpointPorts: placement.PortRange{First: endpointPort, Last: endpointPort + 9},
+		EndpointPorts: placement.PortRange{First: endpointPort, Last: endpointPort + 11},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -329,8 +329,8 @@ func TestProvisionPlanNamesACredentialAndCarriesNone(t *testing.T) {
 		t.Fatal("the installed plan carries the credential")
 	}
 	container := plan.Steps[1].Command
-	if len(container.Input.Secrets) != 3 {
-		t.Fatalf("secrets=%v, want three references", container.Input.Secrets)
+	if len(container.Input.Secrets) != 2 {
+		t.Fatalf("secrets=%v, want two references", container.Input.Secrets)
 	}
 	reference := container.Input.Secrets[0]
 	if reference.CredentialId != stored.CredentialID.String() || reference.Version != stored.Version {
@@ -338,7 +338,7 @@ func TestProvisionPlanNamesACredentialAndCarriesNone(t *testing.T) {
 	}
 	// The variable name travels so the agent knows where to put the value.
 	env := container.Input.GetEnsureContainer().SecretEnv
-	if len(env) != 3 || env[0].Name != "POSTGRES_PASSWORD" || env[0].Purpose != postgres.SuperuserCredential || env[1].Name != "SYNOD_APP_VERIFIER" || env[1].Purpose != postgres.ApplicationCredential || env[2].Name != "SYNOD_REPL_VERIFIER" || env[2].Purpose != postgres.ReplicationCredential {
+	if len(env) != 2 || env[0].Name != "POSTGRES_PASSWORD" || env[0].Purpose != postgres.SuperuserCredential || env[1].Name != "SYNOD_APP_VERIFIER" || env[1].Purpose != postgres.ApplicationCredential {
 		t.Fatalf("env=%+v, want the engine's password variable", env)
 	}
 }
@@ -422,12 +422,13 @@ func TestPostgresProvisionReusesAllCredentialsAfterPlacementFailure(t *testing.T
 	if err := f.pool.QueryRow(t.Context(), `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1 AND cluster_id=$2`, f.claim.InstallationID, f.claim.ClusterID).Scan(&credentialCount); err != nil {
 		t.Fatal(err)
 	}
-	if credentialCount != 3 {
-		t.Fatalf("PostgreSQL stored credentials=%d, want exactly three", credentialCount)
+	// Standalone PostgreSQL has no replicas, so it records no replication credential.
+	if credentialCount != 2 {
+		t.Fatalf("PostgreSQL stored credentials=%d, want exactly two", credentialCount)
 	}
 	var recorded []postgres.Credential
 	var plaintext [][]byte
-	for _, purpose := range []string{postgres.SuperuserCredential, postgres.ApplicationCredential, postgres.ReplicationCredential} {
+	for _, purpose := range []string{postgres.SuperuserCredential, postgres.ApplicationCredential} {
 		credential, err := f.store.ReadClusterCredential(t.Context(), f.claim.InstallationID, f.claim.ClusterID, purpose)
 		if err != nil {
 			t.Fatal(err)
@@ -441,8 +442,8 @@ func TestPostgresProvisionReusesAllCredentialsAfterPlacementFailure(t *testing.T
 		}
 		recorded, plaintext = append(recorded, credential), append(plaintext, password)
 	}
-	if recorded[0].CredentialID == recorded[1].CredentialID || recorded[0].CredentialID == recorded[2].CredentialID || recorded[1].CredentialID == recorded[2].CredentialID || string(plaintext[0]) == string(plaintext[1]) || string(plaintext[0]) == string(plaintext[2]) || string(plaintext[1]) == string(plaintext[2]) {
-		t.Fatal("administrative, application, and replication credentials are not separate")
+	if recorded[0].CredentialID == recorded[1].CredentialID || string(plaintext[0]) == string(plaintext[1]) {
+		t.Fatal("administrative and application credentials are not separate")
 	}
 	f.decider.err = nil
 	if err := f.planner.Plan(t.Context(), f.claim); err != nil {

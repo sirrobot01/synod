@@ -49,26 +49,22 @@ func (f *bootstrapFixture) recoverSetup(t *testing.T, commandID string, outcome 
 }
 
 func TestPostgresRecoveryFinishesPreparedReceipt(t *testing.T) {
-	for _, synchronous := range []bool{false, true} {
-		t.Run(map[bool]string{false: "asynchronous", true: "synchronous"}[synchronous], func(t *testing.T) {
-			startup := strings.Replace(postgresStartup, "COMMIT;\nSELECT 'CREATE DATABASE", `COMMIT;
+	startup := strings.Replace(postgresStartup, "COMMIT;\nSELECT 'CREATE DATABASE", `COMMIT;
 COPY (SELECT app_oid FROM synod_control.bootstrap) TO '/var/lib/synod-postgres/test-role';
 SELECT 1 / CASE WHEN (SELECT phase FROM synod_control.bootstrap)='prepared' THEN 0 ELSE 1 END;
 SELECT 'CREATE DATABASE`, 1)
-			f := bootstrapContainerWithPolicy(t, startup, synchronous)
-			f.waitPhase(t, "failed")
-			before := strings.TrimSpace(f.docker(t, "exec", f.name, "cat", InitializationDirectory+"/test-role"))
-			// COPY refuses an existing target. The proof file is only a fixture fault.
-			f.docker(t, "exec", f.name, "rm", InitializationDirectory+"/test-role")
-			f.recoverSetup(t, uuid.NewString(), "validated")
-			f.docker(t, "restart", "--time", "10", f.name)
-			f.waitPhase(t, "ready")
-			if after := strings.TrimSpace(f.adminSQL(t, "SELECT app_oid FROM synod_control.bootstrap")); before != after {
-				t.Fatal("recovery replaced the prepared application role")
-			}
-			f.connect(t)
-		})
+	f := bootstrapContainer(t, startup)
+	f.waitPhase(t, "failed")
+	before := strings.TrimSpace(f.docker(t, "exec", f.name, "cat", InitializationDirectory+"/test-role"))
+	// COPY refuses an existing target. The proof file is only a fixture fault.
+	f.docker(t, "exec", f.name, "rm", InitializationDirectory+"/test-role")
+	f.recoverSetup(t, uuid.NewString(), "validated")
+	f.docker(t, "restart", "--time", "10", f.name)
+	f.waitPhase(t, "ready")
+	if after := strings.TrimSpace(f.adminSQL(t, "SELECT app_oid FROM synod_control.bootstrap")); before != after {
+		t.Fatal("recovery replaced the prepared application role")
 	}
+	f.connect(t)
 }
 
 func TestPostgresRecoveryVerifiesCompletedData(t *testing.T) {
@@ -79,7 +75,7 @@ func TestPostgresRecoveryVerifiesCompletedData(t *testing.T) {
 	if _, err := conn.Exec(t.Context(), "CREATE TABLE kept(value integer); INSERT INTO kept VALUES(91)"); err != nil {
 		t.Fatal(err)
 	}
-	before := f.adminSQL(t, "SELECT app_oid,replication_oid,database_oid,encode(verifier_fingerprint,'hex'),encode(replication_verifier_fingerprint,'hex') FROM synod_control.bootstrap")
+	before := f.adminSQL(t, "SELECT app_oid,database_oid,encode(verifier_fingerprint,'hex') FROM synod_control.bootstrap")
 	conn.Close(t.Context())
 	f.docker(t, "exec", f.name, "touch", InitializationDirectory+"/test-fail")
 	f.docker(t, "restart", "--time", "10", f.name)
@@ -88,7 +84,7 @@ func TestPostgresRecoveryVerifiesCompletedData(t *testing.T) {
 	f.recoverSetup(t, uuid.NewString(), "validated")
 	f.docker(t, "restart", "--time", "10", f.name)
 	f.waitPhase(t, "ready")
-	if after := f.adminSQL(t, "SELECT app_oid,replication_oid,database_oid,encode(verifier_fingerprint,'hex'),encode(replication_verifier_fingerprint,'hex') FROM synod_control.bootstrap"); before != after {
+	if after := f.adminSQL(t, "SELECT app_oid,database_oid,encode(verifier_fingerprint,'hex') FROM synod_control.bootstrap"); before != after {
 		t.Fatal("recovery changed native identity")
 	}
 	var value int

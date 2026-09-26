@@ -96,6 +96,57 @@ func TestNodePolicyMakesANodePlaceable(t *testing.T) {
 	}
 }
 
+// Approval with only the node ID takes its facts from the agent report.
+func TestNodePolicyDefaultsToMeasuredFacts(t *testing.T) {
+	store, pool, _ := apiTestStore(t)
+	token := strings.Repeat("secret-", 8)
+	verifier, err := auth.NewAdminToken(token, "test-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation, node := uuid.New(), uuid.New()
+	server, err := NewServer(store, verifier, installation, testCatalog(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO nodes (id,installation_id,public_key_hash,enrolled_at)
+ VALUES ($1,$2,$3,clock_timestamp())`, node, installation, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, data := approved(t, server, token, node, "0", `{}`); status != http.StatusConflict || !strings.Contains(string(data), `"node_facts_unavailable"`) {
+		t.Fatalf("status=%d body=%s, want node_facts_unavailable before any report", status, data)
+	}
+	report, err := json.Marshal(placement.CapacityReport{Architecture: "arm64", RuntimeVersion: "29.1.3", StorageID: "local", Capacity: placement.Vector{CPUMillis: 4000, MemoryBytes: 8 << 30, DiskBytes: 100 << 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO node_capacity (installation_id,node_id,probe_revision,probe_id,probe_bytes,report_bytes)
+ VALUES ($1,$2,1,$3,'{}',$4)`, installation, node, uuid.New(), report); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, data := approved(t, server, token, node, "0", `{"headroom":{"cpu_millis":250}}`); status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, data)
+	}
+	stored, err := store.ReadNodePlacementPolicy(t.Context(), installation, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Architecture != "arm64" || stored.RuntimeVersion != "29.1.3" || stored.StorageID != "local" {
+		t.Fatalf("policy=%+v, want the measured architecture, runtime, and storage", stored)
+	}
+	if stored.Headroom != (placement.Vector{CPUMillis: 250, MemoryBytes: 8 << 30 / 10, DiskBytes: 100 << 30 / 10}) {
+		t.Fatalf("headroom=%+v, want the declared CPU and a tenth of measured memory and disk", stored.Headroom)
+	}
+	if len(stored.Engines) == 0 {
+		t.Fatal("approval without engines must allow every served engine")
+	}
+	for _, engine := range stored.Engines {
+		if !server.served(engine) {
+			t.Fatalf("engine %+v is not served", engine)
+		}
+	}
+}
+
 // Two operators editing one node must not silently overwrite each other.
 func TestNodePolicyCarriesItsExpectedRevision(t *testing.T) {
 	store, pool, _ := apiTestStore(t)

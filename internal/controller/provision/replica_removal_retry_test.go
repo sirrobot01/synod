@@ -14,15 +14,8 @@ import (
 func TestRemovalRetryRequiresProvedDeletionAndCompletesMembership(t *testing.T) {
 	for _, evidence := range []string{"missing", "failed", "no_effect", "wrong_state", "deleted"} {
 		t.Run(evidence, func(t *testing.T) {
-			f := provisioned(t)
-			copied := f.act(t, postgres.ScaleClusterAPIOperation)
-			if err := f.planner.Plan(t.Context(), copied); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := f.pool.Exec(t.Context(), `UPDATE operations SET status='failed',claim_active=false WHERE id=$1`, copied.OperationID); err != nil {
-				t.Fatal(err)
-			}
-			preview, err := f.store.PreviewFailedReplicaRemoval(t.Context(), copied.InstallationID, copied.ClusterID, "integration")
+			f, _ := scaledUp(t)
+			preview, err := f.store.PreviewClusterScaleDown(t.Context(), f.claim.InstallationID, f.claim.ClusterID, "integration")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -68,7 +61,7 @@ func TestRemovalRetryRequiresProvedDeletionAndCompletesMembership(t *testing.T) 
 				if _, err := f.pool.Exec(t.Context(), `UPDATE operations SET status='failed',claim_active=false WHERE id=$1`, claim.OperationID); err != nil {
 					t.Fatal(err)
 				}
-				again, err := f.store.PreviewFailedReplicaRemoval(t.Context(), claim.InstallationID, claim.ClusterID, "integration")
+				again, err := f.store.PreviewClusterScaleDown(t.Context(), claim.InstallationID, claim.ClusterID, "integration")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -78,8 +71,8 @@ func TestRemovalRetryRequiresProvedDeletionAndCompletesMembership(t *testing.T) 
 				}
 				retried := installedPlanFor(t, f, claim.OperationID)
 				if evidence != "deleted" {
-					if len(retried.Steps) != 3 || retried.Steps[0].Command.Input.GetVerifyPostgresReplicaFailure() == nil {
-						t.Fatal("unproved deletion bypassed failure guard")
+					if len(retried.Steps) != 3 || retried.Steps[0].Command.Input.GetCheckReadiness().GetRedisReplication().GetExpectedRole() != "replica" {
+						t.Fatal("unproved deletion bypassed the native role check")
 					}
 					break
 				}

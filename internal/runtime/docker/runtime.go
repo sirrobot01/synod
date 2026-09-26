@@ -112,12 +112,6 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 		return r.inspectCommand(ctx, command)
 	case *agentv1.CommandInput_RecoverPostgresSetup:
 		return r.executePostgresRecovery(ctx, command, secrets)
-	case *agentv1.CommandInput_PreparePostgresReplica:
-		return r.executePostgresPrepare(ctx, command)
-	case *agentv1.CommandInput_ClonePostgresReplica:
-		return r.executePostgresClone(ctx, command, secrets)
-	case *agentv1.CommandInput_VerifyPostgresReplicaClone, *agentv1.CommandInput_VerifyPostgresReplicaFailure:
-		return r.inspectPostgresReplica(ctx, command)
 	case *agentv1.CommandInput_EnsureVolume:
 		name := "synod-volume-" + id
 		current, err := r.api.VolumeInspect(ctx, name, client.VolumeInspectOptions{})
@@ -157,6 +151,9 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 		p := payload.EnsureContainer
 		if p.Postgres != nil && p.Postgres.Patroni != nil {
 			return r.preparePatroni(ctx, command, secrets)
+		}
+		if p.Etcd != nil {
+			return r.prepareEtcd(ctx, command, secrets)
 		}
 		if p.Route != nil {
 			return r.prepareRoute(ctx, command, secrets)
@@ -203,11 +200,6 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 		}
 		switch p := payload.(type) {
 		case *agentv1.CommandInput_StartContainer:
-			if phase, err := postgresPhase(current.Container); err == nil && (phase == "replica_prepared" || phase == "replica_cloned") {
-				result := r.containerResult(command, current.Container)
-				result.Effects[0].State = phase
-				return result, runtime.ErrConfigurationConflict
-			}
 			if err := r.checkStartStorage(ctx, command, current.Container); err != nil {
 				if current.Container.State.Running || current.Container.State.Restarting || len(current.Container.ExecIDs) != 0 {
 					result := r.containerResult(command, current.Container)
@@ -281,8 +273,6 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 		return r.inspectRecreate(ctx, command, result)
 	case *agentv1.CommandInput_RecoverPostgresSetup:
 		return r.inspectPostgresRecovery(ctx, command)
-	case *agentv1.CommandInput_PreparePostgresReplica, *agentv1.CommandInput_ClonePostgresReplica, *agentv1.CommandInput_VerifyPostgresReplicaClone, *agentv1.CommandInput_VerifyPostgresReplicaFailure:
-		return r.inspectPostgresReplica(ctx, command)
 	case *agentv1.CommandInput_EnsureVolume:
 		if err := r.verifyVolume(ctx, command, id); err != nil {
 			return result, err
@@ -342,6 +332,19 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 				return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
 			}
 		}
+		if item.Container.Config != nil && item.Container.Config.Labels[labelEtcdSource] != "" && sourceCheck {
+			stored, err := storedConfig(item.Container)
+			if err == nil && stored.Etcd != nil {
+				err = r.inspectSource(ctx, item.Container, etcdSource)
+			} else if err == nil {
+				err = runtime.ErrConfigurationConflict
+			}
+			if err != nil {
+				result.Effects[0].State = "etcd_configuration_unknown"
+				result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
+				return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+			}
+		}
 		if item.Container.Config != nil && item.Container.Config.Labels[labelPatroniSource] != "" && (command.Input.GetEnsureContainer() != nil || command.Input.GetInspectContainer() != nil || command.Input.GetStartPatroniMember() != nil) {
 			if err := r.inspectPatroniSource(ctx, item.Container); err != nil {
 				result.Effects[0].State = "patroni_configuration_unknown"
@@ -354,10 +357,6 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 			return result, runtime.ErrOutcomeUnknown
 		}
 		phase, phaseErr := postgresPhase(item.Container)
-		if command.Input.GetStartContainer() != nil && phaseErr == nil && (phase == "replica_prepared" || phase == "replica_cloned") {
-			result.Effects[0].State = phase
-			return result, runtime.ErrConfigurationConflict
-		}
 		matched := false
 		switch p.(type) {
 		case *agentv1.CommandInput_EnsureContainer, *agentv1.CommandInput_InspectContainer:
@@ -366,8 +365,7 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 			matched = state.Running && !state.Restarting && !state.Dead && item.Container.HostConfig.RestartPolicy.Name == container.RestartPolicyUnlessStopped
 		case *agentv1.CommandInput_StartContainer:
 			// The first start can be running while initdb still creates the data files.
-			replica := len(item.Container.Config.Cmd) > 3 && item.Container.Config.Cmd[3] == "synod-postgres-replica"
-			if replica || !command.Input.GetStartContainer().AllowInitialization || !state.Running || state.Restarting || state.Dead {
+			if !command.Input.GetStartContainer().AllowInitialization || !state.Running || state.Restarting || state.Dead {
 				if err := r.checkStartStorage(ctx, command, item.Container); err != nil {
 					if errors.Is(err, runtime.ErrStorageLost) && !state.Running && !state.Restarting && len(item.Container.ExecIDs) == 0 {
 						result.Effects[0].State = "storage_lost"
@@ -391,7 +389,7 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 			result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
 			return result, phaseErr
 		}
-		if (phase == "bootstrap_failed" || phase == "bootstrap_recovered" || phase == "replica_prepared" || phase == "replica_cloned") && command.Input.GetStartContainer() != nil {
+		if (phase == "bootstrap_failed" || phase == "bootstrap_recovered") && command.Input.GetStartContainer() != nil {
 			result.Effects[0].State = phase
 			result.Effects[0].Active, result.Effects[0].OutcomeUnknown = false, false
 			return result, runtime.ErrConfigurationConflict
@@ -426,10 +424,6 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 		validation.Input.Secrets = []*agentv1.SecretReference{
 			{CredentialId: p.Postgres.SuperuserCredentialId, Version: p.Postgres.SuperuserCredentialVersion, Purpose: "superuser"},
 			{CredentialId: p.Postgres.ApplicationCredentialId, Version: p.Postgres.ApplicationCredentialVersion, Purpose: "application"},
-			{CredentialId: p.Postgres.ReplicationCredentialId, Version: p.Postgres.ReplicationCredentialVersion, Purpose: "replication"},
-		}
-		if p.Postgres.ReplicaSource != nil {
-			validation.Input.Secrets = validation.Input.Secrets[1:]
 		}
 		if p.Postgres.Patroni != nil {
 			validation.Input.Secrets = p.Postgres.Patroni.Credentials
@@ -440,6 +434,9 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	}
 	if p.Route != nil {
 		validation.Input.Secrets = p.Route.Credentials
+	}
+	if p.Etcd != nil {
+		validation.Input.Secrets = p.Etcd.Credentials
 	}
 	if _, err := operation.CommandHash(validation); err != nil {
 		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrConfigurationConflict, Cause: err}
@@ -543,7 +540,7 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 		if err != nil {
 			return client.ContainerCreateOptions{}, runtime.ErrConfigurationConflict
 		}
-		config.Healthcheck = postgresHealthcheck(p.Postgres.ReplicaSource != nil)
+		config.Healthcheck = postgresHealthcheck()
 		config.StopSignal = image.Config.StopSignal
 		host.Tmpfs = map[string]string{postgres.ConfigDirectory: postgresTmpfs}
 		if p.Postgres.Patroni != nil {
@@ -554,6 +551,11 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	if p.Route != nil {
 		config.Cmd, host.Tmpfs = routeShape(p.Route)
 		config.StopSignal = image.Config.StopSignal
+	}
+	if p.Etcd != nil {
+		config.Cmd = etcdCommand(p.Etcd)
+		config.StopSignal = image.Config.StopSignal
+		host.Tmpfs = map[string]string{"/run/synod-etcd": "rw,noexec,nosuid,nodev,size=4m"}
 	}
 	for _, binding := range p.Ports {
 		address, err := netip.ParseAddr(binding.HostAddress)
@@ -609,10 +611,12 @@ func (r *Runtime) checkContainer(ctx context.Context, command *agentv1.Command, 
 	if expected != nil && !proto.Equal(expected, &stored) {
 		return runtime.ErrConfigurationConflict
 	}
-	if stored.Postgres != nil && stored.Postgres.Patroni != nil || stored.Route != nil {
+	if stored.Postgres != nil && stored.Postgres.Patroni != nil || stored.Route != nil || stored.Etcd != nil {
 		label := labelPatroniSource
 		if stored.Route != nil {
 			label = labelRouteSource
+		} else if stored.Etcd != nil {
+			label = labelEtcdSource
 		}
 		source, err := hex.DecodeString(item.Config.Labels[label])
 		if err != nil || len(source) != sha256.Size || hex.EncodeToString(source) != item.Config.Labels[label] {
@@ -681,7 +685,7 @@ func (r *Runtime) Logs(ctx context.Context, command *agentv1.Command, maxBytes i
 
 // dataTarget is where a container's data volume is mounted.
 func dataTarget(p *agentv1.EnsureContainer) string {
-	if p.Engine == "postgres" {
+	if p.Engine == "postgres" && p.Etcd == nil {
 		return postgres.DataDirectory
 	}
 	return "/data"

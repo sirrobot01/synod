@@ -32,8 +32,6 @@ func (e *Executor) precheck(command *agentv1.Command) error {
 	switch payload := command.Input.Payload.(type) {
 	case *agentv1.CommandInput_EnsureVolume:
 		return e.checkSpace(0, 0)
-	case *agentv1.CommandInput_ClonePostgresReplica:
-		return e.checkSpace(0, payload.ClonePostgresReplica.GetRequiredFreeBytes())
 	case *agentv1.CommandInput_StartPatroniMember:
 		p := payload.StartPatroniMember
 		if p == nil || p.Container == nil || p.Container.Postgres == nil || p.Container.Postgres.Patroni == nil {

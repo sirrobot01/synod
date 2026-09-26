@@ -41,20 +41,8 @@ tasks:
   # ---------------------------------------------------------------- build ---
 
   build:
-    desc: Build every binary into dist/
-    deps: [build:controller, build:cli, build:agent]
-
-  build:controller:
-    desc: Build the controller
-    cmds: ["go build -o dist/synodd ./cmd/synodd"]
-
-  build:cli:
-    desc: Build the command line
+    desc: Build the synod binary into dist/
     cmds: ["go build -o dist/synod ./cmd/synod"]
-
-  build:agent:
-    desc: Build the node agent
-    cmds: ["go build -o dist/synod-agent ./cmd/synod-agent"]
 
   build:web:
     desc: Build the browser application into internal/web/dist
@@ -260,7 +248,7 @@ tasks:
     deps: [dev:up]
     cmds:
       - 'echo "Open https://{{.LISTEN}} and sign in. The certificate is self-signed, so the browser warns once."'
-      - go run ./cmd/synodd --listen {{.LISTEN}} --installation-id "$(cat .dev/installation-id)" {{.CLI_ARGS}}
+      - go run ./cmd/synod server --listen {{.LISTEN}} --installation-id "$(cat .dev/installation-id)" {{.CLI_ARGS}}
 
   dev:web:
     desc: Serve the browser application with hot reload against a running controller

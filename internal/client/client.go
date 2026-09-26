@@ -154,21 +154,6 @@ func (c *Client) PlanDelete(ctx context.Context, id uuid.UUID) (cluster.ActionPl
 	return value, err
 }
 
-// PlanScaleDown reviews the replica a removal would take away.
-func (c *Client) PlanScaleDown(ctx context.Context, id uuid.UUID) (cluster.ActionPlan, error) {
-	return c.planReplicaAction(ctx, id, "scale_down")
-}
-
-// PlanFailedReplicaRemoval reviews removal with native PostgreSQL failure proof.
-func (c *Client) PlanFailedReplicaRemoval(ctx context.Context, id uuid.UUID) (cluster.ActionPlan, error) {
-	return c.planReplicaAction(ctx, id, "scale_down_failed")
-}
-
-// PlanReplicaRebuild reviews replacement while retaining the failed replica's data.
-func (c *Client) PlanReplicaRebuild(ctx context.Context, id uuid.UUID) (cluster.ActionPlan, error) {
-	return c.planReplicaAction(ctx, id, "rebuild_replica")
-}
-
 // PlanMemberRebuild reviews replacement of one named Patroni member while retaining its data.
 func (c *Client) PlanMemberRebuild(ctx context.Context, id, member uuid.UUID) (cluster.ActionPlan, error) {
 	var value cluster.ActionPlan
@@ -187,19 +172,20 @@ func (c *Client) PlanMemberRebuild(ctx context.Context, id, member uuid.UUID) (c
 	return value, err
 }
 
-func (c *Client) planReplicaAction(ctx context.Context, id uuid.UUID, action string) (cluster.ActionPlan, error) {
+// PlanScaleDown reviews the member a removal would take away. A Redis cluster names its own
+// replica, so member is nil. A Patroni cluster removes the member the operator names.
+func (c *Client) PlanScaleDown(ctx context.Context, id, member uuid.UUID) (cluster.ActionPlan, error) {
 	var value cluster.ActionPlan
 	if id == uuid.Nil {
 		return value, &Error{Code: "invalid_request", Message: "Name a cluster."}
 	}
 	err := c.request(ctx, http.MethodPost, "/v1/clusters/"+id.String()+"/action-plans", struct {
-		Action string `json:"action"`
-	}{Action: action}, "", http.StatusOK, &value)
-	if err == nil && (value.ClusterID != id || value.PlanToken == uuid.Nil || value.MemberID == uuid.Nil ||
-		value.ExpectedRevision < 1 || value.Action != action || value.DataDisposition != "retain" ||
-		value.Downtime == "" || value.ExpiresAt.IsZero() ||
-		(action == "rebuild_replica" && (value.ClusterName == "" || len(value.RetainedVolumes) != 1)) ||
-		(action != "scale_down" && (value.ResourceID == uuid.Nil || value.RetainedVolumes == nil || slices.Contains(value.RetainedVolumes, uuid.Nil)))) {
+		Action   string    `json:"action"`
+		MemberID uuid.UUID `json:"member_id,omitzero"`
+	}{Action: "scale_down", MemberID: member}, "", http.StatusOK, &value)
+	if err == nil && (value.ClusterID != id || value.PlanToken == uuid.Nil || value.MemberID == uuid.Nil || member != uuid.Nil && value.MemberID != member ||
+		value.ExpectedRevision < 1 || value.Action != "scale_down" || value.DataDisposition != "retain" ||
+		value.Downtime == "" || value.ExpiresAt.IsZero()) {
 		err = &Error{Code: "invalid_response", Message: "The API returned an invalid replica action plan. No action request was sent."}
 	}
 	return value, err
@@ -208,9 +194,9 @@ func (c *Client) planReplicaAction(ctx context.Context, id uuid.UUID, action str
 // Act submits a lifecycle action with a fixed revision, retry key, and required confirmation.
 func (c *Client) Act(ctx context.Context, id uuid.UUID, action string, expected int64, key string, confirmation *cluster.ActionConfirmation) (Admission, error) {
 	var value Admission
-	reviewed := action == "delete" || action == "recover-setup" || action == "rebuild-replica" || action == "rebuild-member"
+	reviewed := action == "delete" || action == "recover-setup" || action == "rebuild-member"
 	if id == uuid.Nil || (action != "stop" && action != "start" && action != "renew-certificates" && !reviewed) || expected < 1 {
-		return value, &Error{Code: "invalid_request", Message: "Name a cluster, a positive expected revision, and one of stop, start, renew-certificates, delete, recover-setup, rebuild-replica, or rebuild-member."}
+		return value, &Error{Code: "invalid_request", Message: "Name a cluster, a positive expected revision, and one of stop, start, renew-certificates, delete, recover-setup, or rebuild-member."}
 	}
 	if len(key) < 1 || len(key) > 128 || strings.ContainsFunc(key, func(r rune) bool { return r < '!' || r > '~' }) {
 		return value, &Error{Code: "invalid_request", Message: "Use an idempotency key with 1 to 128 visible ASCII bytes."}
@@ -226,7 +212,7 @@ func (c *Client) Act(ctx context.Context, id uuid.UUID, action string, expected 
 			method, path = http.MethodDelete, "/v1/clusters/"+id.String()
 		}
 	} else if confirmation != nil {
-		return value, &Error{Code: "invalid_request", Message: "Use a plan confirmation only for delete, recover-setup, rebuild-replica, or rebuild-member."}
+		return value, &Error{Code: "invalid_request", Message: "Use a plan confirmation only for delete, recover-setup, or rebuild-member."}
 	}
 	match := strconv.Quote(strconv.FormatInt(expected, 10))
 	err := c.requestWith(ctx, method, path, body, key, match, http.StatusAccepted, &value)
@@ -395,7 +381,7 @@ func (c *Client) requestWith(ctx context.Context, method, path string, body any,
 		if json.Unmarshal(data, &wire) == nil {
 			// Server messages and unrecognized codes may contain private input.
 			switch wire.Code {
-			case "unauthenticated", "invalid_request", "unsupported_spec", "idempotency_conflict", "name_conflict", "operation_conflict", "revision_conflict", "confirmation_required", "not_found", "outcome_unknown", "dependency_unavailable", "internal_error", "request_too_large", "unsupported_media_type", "method_not_allowed", "rate_limited":
+			case "unauthenticated", "invalid_request", "unsupported_spec", "idempotency_conflict", "name_conflict", "operation_conflict", "revision_conflict", "confirmation_required", "not_found", "outcome_unknown", "dependency_unavailable", "internal_error", "request_too_large", "unsupported_media_type", "method_not_allowed", "rate_limited", "node_facts_unavailable":
 				apiError.Code = wire.Code
 			}
 			if _, err := uuid.Parse(wire.RequestID); err == nil {
@@ -405,6 +391,8 @@ func (c *Client) requestWith(ctx context.Context, method, path string, body any,
 		}
 		if apiError.Code == "outcome_unknown" {
 			apiError.Message = "The admission outcome is unknown. Retry with the same idempotency key, revision, and body."
+		} else if apiError.Code == "node_facts_unavailable" {
+			apiError.Message = "The node has not reported measured facts. Start its agent and retry, or declare the architecture, runtime version, storage ID, and headroom."
 		} else if apiError.Code == "revision_conflict" {
 			apiError.Message = "The resource revision changed. Review its current state before a new mutation. Keep the original retry inputs for an uncertain mutation."
 		}
@@ -422,12 +410,13 @@ func (c *Client) requestWith(ctx context.Context, method, path string, body any,
 // because a count of zero is a request, not an absent field.
 func (c *Client) Scale(ctx context.Context, id uuid.UUID, replicas int, expected int64, key string, confirmation *cluster.ActionConfirmation) (Admission, error) {
 	var value Admission
-	if id == uuid.Nil || expected < 1 || replicas < 0 || replicas > 1 {
-		return value, &Error{Code: "invalid_request", Message: "Name a cluster, a positive expected revision, and zero or one replicas."}
+	if id == uuid.Nil || expected < 1 || replicas < 0 || replicas > 4 {
+		return value, &Error{Code: "invalid_request", Message: "Name a cluster, a positive expected revision, and zero to four replicas."}
 	}
-	// Removing a member is destructive, so it carries the plan the operator reviewed.
-	if (replicas == 0) != (confirmation != nil) {
-		return value, &Error{Code: "invalid_request", Message: "Confirm a reviewed scale-down plan to remove a replica, and use no confirmation to add one."}
+	// Removing a member is destructive, so it carries the plan the operator reviewed. Only a
+	// Patroni removal keeps replicas above zero, and the server checks which scale this is.
+	if replicas == 0 && confirmation == nil {
+		return value, &Error{Code: "invalid_request", Message: "Confirm a reviewed scale-down plan to remove a replica."}
 	}
 	if len(key) < 1 || len(key) > 128 || strings.ContainsFunc(key, func(r rune) bool { return r < '!' || r > '~' }) {
 		return value, &Error{Code: "invalid_request", Message: "Use an idempotency key with 1 to 128 visible ASCII bytes."}

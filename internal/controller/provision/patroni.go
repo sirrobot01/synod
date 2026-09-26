@@ -5,13 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/cluster"
-	"github.com/sirrobot01/synod/internal/coordinator"
 	"github.com/sirrobot01/synod/internal/engine"
 	enginepostgres "github.com/sirrobot01/synod/internal/engine/postgres"
 	"github.com/sirrobot01/synod/internal/operation"
@@ -20,33 +22,34 @@ import (
 	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // PatroniConfig holds what a Patroni create needs beyond a standalone one.
 type PatroniConfig struct {
-	Accounts *coordinator.PatroniAccounts
-	CA       *pki.CA
-	// EtcdTrust is the CA bundle members use to verify the etcd server.
-	EtcdTrust    []byte
-	DCSEndpoints []string
-	// Image is the Patroni member image. With more than one placement architecture, it is
-	// an image index that covers each one.
-	Image string
+	CA        *pki.CA
+	Image     string
+	EtcdImage string
 }
-
-// patroniMembers is fixed for topology patroni: one elected primary and two replicas.
-const patroniMembers = 3
 
 // patroniLeafLifetime is the longest leaf the native CA issues. TASK-162 renews it.
 const patroniLeafLifetime = 30 * 24 * time.Hour
 
+// etcdBudget is what one etcd member reserves and runs with. The DCS holds only Patroni
+// state, so a small process and data directory are enough.
+var etcdBudget = placement.Vector{CPUMillis: 250, MemoryBytes: 256 << 20, DiskBytes: 1 << 30}
+
 // patroniMember is one member's identity and placement.
 type patroniMember struct {
 	resources
-	node     uuid.UUID
-	address  netip.Addr
-	database uint16
-	rest     uint16
+	// etcd is the etcd service beside this member. A rebuilt member has none of its own,
+	// because the etcd service on its node stays.
+	etcd               resources
+	node               uuid.UUID
+	address            netip.Addr
+	database           uint16
+	rest               uint16
+	dcsClient, dcsPeer uint16
 	// The pooler and router ports. Routing child 4 starts them.
 	pooler, writer, reader uint16
 }
@@ -70,12 +73,29 @@ func (p *Planner) provisionPatroni(ctx context.Context, claim operation.Claim, f
 	if op.PlanVersion != 0 {
 		return p.config.Store.ReadPlacement(ctx, claim.InstallationID, claim.OperationID)
 	}
-	members := make([]patroniMember, patroniMembers)
+	members := make([]patroniMember, operation.MinPatroniMembers)
 	for index := range members {
 		members[index].resources = resources{instance: uuid.New(), volume: uuid.New(), reservationID: uuid.New()}
+		members[index].etcd = resources{instance: uuid.New(), volume: uuid.New(), reservationID: uuid.New()}
 	}
 	request, decision, snapshot, err := p.decide(ctx, p.config.Profile.Architectures, func(architecture string) placement.Request {
-		return p.patroniRequest(claim, found, combination, members, architecture)
+		request := p.patroniRequest(claim, found, combination, members, architecture)
+		// Each etcd service shares its member's node and holds the DCS ports.
+		for _, member := range members {
+			request.Resources = append(request.Resources, placement.Resource{
+				ID: member.etcd.instance, ReservationID: member.etcd.reservationID,
+				OwnedResourceIDs: []uuid.UUID{member.etcd.instance, member.etcd.volume},
+				Kind:             "service", Role: "etcd", Colocate: member.instance,
+				Engine: string(combination.Engine), Version: combination.Version,
+				Architecture: architecture, RuntimeVersion: p.config.Profile.RuntimeVersion, StorageID: p.config.Profile.StorageID,
+				Budgets: placement.Budgets{Workload: &etcdBudget, Supporting: &placement.Vector{}, Backup: &placement.Vector{}},
+				Ports: []placement.Port{
+					{Address: wildcardAddress, Transport: "tcp", Name: "dcs_client"},
+					{Address: wildcardAddress, Transport: "tcp", Name: "dcs_peer"},
+				},
+			})
+		}
+		return request
 	})
 	if err != nil {
 		return postgres.PlacementRecord{}, err
@@ -91,8 +111,16 @@ func (p *Planner) provisionPatroni(ctx context.Context, claim operation.Claim, f
 		}); err != nil {
 			return postgres.PlacementRecord{}, err
 		}
+		if err := p.config.Store.RecordVolumeIdentity(ctx, postgres.VolumeIdentity{
+			InstallationID: claim.InstallationID, NodeID: member.node, ClusterID: claim.ClusterID,
+			// The etcd member belongs to the PostgreSQL cluster, so its volume carries the cluster engine.
+			ResourceID: member.etcd.volume, Engine: string(combination.Engine), EngineVersion: combination.Version,
+			DataPath: "/data", CapacityRequestBytes: etcdBudget.DiskBytes, Retention: postgres.Retained,
+		}); err != nil {
+			return postgres.PlacementRecord{}, err
+		}
 	}
-	intent, dcsPassword, err := p.patroniIntent(found, members)
+	intent, err := p.patroniIntent(found, members)
 	if err != nil {
 		return postgres.PlacementRecord{}, err
 	}
@@ -100,13 +128,11 @@ func (p *Planner) provisionPatroni(ctx context.Context, claim operation.Claim, f
 	if err != nil {
 		return postgres.PlacementRecord{}, err
 	}
-	if err := native.Accounts.EnsureAccount(ctx, claim.ClusterID, dcsPassword); err != nil {
-		return postgres.PlacementRecord{}, err
-	}
 	return p.config.Store.InstallPlacementPlan(ctx, claim, request, decision, plan, &intent)
 }
 
-// patroniRequest asks for three members on distinct host failure domains.
+// patroniRequest asks for members on distinct host failure domains. A new cluster adds
+// its etcd services to this request.
 func (p *Planner) patroniRequest(claim operation.Claim, found cluster.Cluster, combination engine.Combination, members []patroniMember, architecture string) placement.Request {
 	budget := p.config.Budget
 	// A replica copy keeps its archives beside the extracted data, so each member reserves
@@ -122,9 +148,12 @@ func (p *Planner) patroniRequest(claim operation.Claim, found cluster.Cluster, c
 	for _, member := range members {
 		request.Resources = append(request.Resources, placement.Resource{
 			ID: member.instance, ReservationID: member.reservationID,
-			// The member reservation owns its pooler and router, so a member credential serves them.
-			OwnedResourceIDs: []uuid.UUID{member.instance, member.volume, routeID(member.instance, "pooler"), routeID(member.instance, "router")},
-			Kind:             "instance", Role: "patroni",
+			// The member reservation owns its pooler and router.
+			OwnedResourceIDs: []uuid.UUID{
+				member.instance, member.volume,
+				routeID(member.instance, "pooler"), routeID(member.instance, "router"),
+			},
+			Kind: "instance", Role: "patroni",
 			Engine: string(combination.Engine), Version: combination.Version,
 			Architecture: architecture, RuntimeVersion: p.config.Profile.RuntimeVersion, StorageID: p.config.Profile.StorageID,
 			Budgets: placement.Budgets{Workload: &budget, Supporting: &allowance, Backup: &empty},
@@ -144,7 +173,13 @@ func (p *Planner) patroniRequest(claim operation.Claim, found cluster.Cluster, c
 
 // bindPatroniMembers reads each member's node, client address, and named ports from the decision.
 func bindPatroniMembers(members []patroniMember, decision placement.Decision, snapshot placement.Snapshot) error {
-	if len(decision.Assignments) != len(members) {
+	etcd := 0
+	for _, member := range members {
+		if member.etcd.instance != uuid.Nil {
+			etcd++
+		}
+	}
+	if len(decision.Assignments) != len(members)+etcd {
 		return fmt.Errorf("%w: placement returned %d assignments", placement.ErrUnsatisfied, len(decision.Assignments))
 	}
 	addresses := make(map[uuid.UUID]string, len(snapshot.Nodes))
@@ -175,21 +210,38 @@ func bindPatroniMembers(members []patroniMember, decision placement.Decision, sn
 				}
 			}
 		}
+		for _, assignment := range decision.Assignments {
+			if assignment.ResourceID != member.etcd.instance {
+				continue
+			}
+			if assignment.NodeID != member.node {
+				return fmt.Errorf("%w: etcd service %s left its member's node", placement.ErrUnsatisfied, member.etcd.instance)
+			}
+			for _, port := range assignment.Ports {
+				switch port.Name {
+				case "dcs_client":
+					member.dcsClient = port.Number
+				case "dcs_peer":
+					member.dcsPeer = port.Number
+				}
+			}
+		}
 		address, err := netip.ParseAddr(addresses[member.node])
 		if err != nil || !address.IsGlobalUnicast() || address.Zone() != "" {
 			return fmt.Errorf("%w: Patroni node %s declares no routable client address", placement.ErrUnsatisfied, member.node)
 		}
-		if member.database == 0 || member.rest == 0 || member.pooler == 0 || member.writer == 0 || member.reader == 0 {
-			return fmt.Errorf("%w: placement bound no database, REST, pooler, writer, and reader ports", placement.ErrUnsatisfied)
+		if member.database == 0 || member.rest == 0 || member.pooler == 0 || member.writer == 0 || member.reader == 0 ||
+			member.etcd.instance != uuid.Nil && (member.dcsClient == 0 || member.dcsPeer == 0) {
+			return fmt.Errorf("%w: placement bound no database, REST, DCS, pooler, writer, and reader ports", placement.ErrUnsatisfied)
 		}
 		member.address = address
 	}
 	return nil
 }
 
-// patroniIntent creates the eight native credential purposes and seals them. It also
-// returns the DCS password, which the controller writes to etcd.
-func (p *Planner) patroniIntent(found cluster.Cluster, members []patroniMember) (postgres.ClusterIntent, string, error) {
+// patroniIntent creates the native credentials and seals them: the cluster passwords, the
+// DCS client leaf, and one leaf for each member and each etcd service.
+func (p *Planner) patroniIntent(found cluster.Cluster, members []patroniMember) (postgres.ClusterIntent, error) {
 	native := p.config.Patroni
 	intent := postgres.ClusterIntent{InstallationID: found.InstallationID, ClusterID: found.ID,
 		Databases: []postgres.Database{{Name: defaultDatabase, OwnerRole: "synod_app"}}}
@@ -206,38 +258,34 @@ func (p *Planner) patroniIntent(found cluster.Cluster, members []patroniMember) 
 		intent.Credentials = append(intent.Credentials, credential)
 		return nil
 	}
-	var dcsPassword string
 	for _, password := range []struct{ purpose, role string }{
 		{postgres.SuperuserCredential, superuserRole}, {postgres.ApplicationCredential, "synod_app"},
 		{postgres.ReplicationCredential, "synod_repl"}, {postgres.PatroniRewindCredential, "synod_rewind"},
-		{postgres.PatroniDCSCredential, "synod_patroni_" + found.ID.String()}, {postgres.PatroniRESTCredential, "synod_patroni"},
+		{postgres.PatroniRESTCredential, "synod_patroni"},
 	} {
 		value, err := secret.NewPassword()
 		if err != nil {
-			return postgres.ClusterIntent{}, "", err
-		}
-		if password.purpose == postgres.PatroniDCSCredential {
-			dcsPassword = value
+			return postgres.ClusterIntent{}, err
 		}
 		if err := seal(password.purpose, password.role, uuid.Nil, []byte(value), time.Time{}); err != nil {
-			return postgres.ClusterIntent{}, "", err
+			return postgres.ClusterIntent{}, err
 		}
 	}
 	now := time.Now()
-	dcs, err := enginepostgres.IssuePatroniDCSMaterial(native.CA, pki.PatroniIdentity{InstallationID: found.InstallationID, ClusterID: found.ID}, native.EtcdTrust, now, patroniLeafLifetime)
+	dcs, err := enginepostgres.IssuePatroniDCSMaterial(native.CA, pki.PatroniIdentity{InstallationID: found.InstallationID, ClusterID: found.ID}, native.CA.CertificatePEM(), now, patroniLeafLifetime)
 	if err != nil {
-		return postgres.ClusterIntent{}, "", err
+		return postgres.ClusterIntent{}, err
 	}
 	encoded, err := json.Marshal(dcs)
 	if err != nil {
-		return postgres.ClusterIntent{}, "", err
+		return postgres.ClusterIntent{}, err
 	}
 	expires, err := dcs.Expiry()
 	if err != nil {
-		return postgres.ClusterIntent{}, "", err
+		return postgres.ClusterIntent{}, err
 	}
 	if err := seal(postgres.PatroniDCSTLSCredential, "", uuid.Nil, encoded, expires); err != nil {
-		return postgres.ClusterIntent{}, "", err
+		return postgres.ClusterIntent{}, err
 	}
 	addresses := make([]netip.Addr, len(members))
 	for index, member := range members {
@@ -246,25 +294,39 @@ func (p *Planner) patroniIntent(found cluster.Cluster, members []patroniMember) 
 	for _, member := range members {
 		endpoints, err := patroniEndpoints(found, member.address, addresses)
 		if err != nil {
-			return postgres.ClusterIntent{}, "", err
+			return postgres.ClusterIntent{}, err
 		}
 		material, err := enginepostgres.IssuePatroniMemberMaterial(native.CA, pki.PatroniIdentity{InstallationID: found.InstallationID, ClusterID: found.ID, ResourceID: member.instance}, member.address, now, patroniLeafLifetime, endpoints...)
 		if err != nil {
-			return postgres.ClusterIntent{}, "", err
+			return postgres.ClusterIntent{}, err
 		}
 		encoded, err := json.Marshal(material)
 		if err != nil {
-			return postgres.ClusterIntent{}, "", err
+			return postgres.ClusterIntent{}, err
 		}
 		expires, err := material.Expiry()
 		if err != nil {
-			return postgres.ClusterIntent{}, "", err
+			return postgres.ClusterIntent{}, err
 		}
 		if err := seal(postgres.PatroniMemberTLSCredential, "", member.instance, encoded, expires); err != nil {
-			return postgres.ClusterIntent{}, "", err
+			return postgres.ClusterIntent{}, err
+		}
+		// The etcd service has its own leaf, so a member rebuild can retire the member leaf.
+		etcd, err := enginepostgres.IssuePatroniMemberMaterial(native.CA, pki.PatroniIdentity{InstallationID: found.InstallationID, ClusterID: found.ID, ResourceID: member.etcd.instance}, member.address, now, patroniLeafLifetime)
+		if err != nil {
+			return postgres.ClusterIntent{}, err
+		}
+		if encoded, err = json.Marshal(etcd); err != nil {
+			return postgres.ClusterIntent{}, err
+		}
+		if expires, err = etcd.Expiry(); err != nil {
+			return postgres.ClusterIntent{}, err
+		}
+		if err := seal(postgres.PatroniMemberTLSCredential, "", member.etcd.instance, encoded, expires); err != nil {
+			return postgres.ClusterIntent{}, err
 		}
 	}
-	return intent, dcsPassword, nil
+	return intent, nil
 }
 
 // patroniPlan starts member A with initialization and proves it primary. Members B and C
@@ -291,22 +353,80 @@ func (p *Planner) patroniPlan(claim operation.Claim, found cluster.Cluster, memb
 	}
 	superuser, application, replication := credential(postgres.SuperuserCredential), credential(postgres.ApplicationCredential), credential(postgres.ReplicationCredential)
 	var peers []string
-	for _, member := range members {
+	dcsEndpoints := make([]string, len(members))
+	initialMembers := make([]string, len(members))
+	for index, member := range members {
 		peers = append(peers, netip.PrefixFrom(member.address, member.address.BitLen()).String())
+		name := fmt.Sprintf("etcd-%d", index)
+		dcsEndpoints[index] = net.JoinHostPort(member.address.String(), strconv.Itoa(int(member.dcsClient)))
+		initialMembers[index] = name + "=https://" + net.JoinHostPort(member.address.String(), strconv.Itoa(int(member.dcsPeer)))
 	}
+	initialCluster := strings.Join(initialMembers, ",")
 	var steps []*agentv1.PlanStep
 	var primaryReady string
 	var readySteps []string
+	var startEtcdSteps []string
+	type memberPlan struct {
+		volume, container *agentv1.PlanStep
+		configuration     *agentv1.EnsureContainer
+		epoch             *agentv1.Epoch
+	}
+	memberPlans := make([]memberPlan, len(members))
 	for index, member := range members {
 		epoch := &agentv1.Epoch{
 			InstallationId: claim.InstallationID.String(), NodeId: member.node.String(),
 			ClusterId: claim.ClusterID.String(), RecoveryGeneration: claim.RecoveryGeneration.String(),
 			ExecutionEpoch: claim.ExecutionEpoch,
 		}
+		volumeEtcd, err := p.step(claim, epoch, found.DesiredRevision, &agentv1.CommandInput{
+			ResourceId: member.etcd.volume.String(),
+			Payload:    &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: member.etcd.volume.String()}},
+		}, agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS, nil, beforeExecution)
+		if err != nil {
+			return nil, err
+		}
+		// The etcd service presents only its own leaf.
+		var etcdRefs []*agentv1.SecretReference
+		for _, credential := range intent.Credentials {
+			if credential.MemberID == member.etcd.instance {
+				etcdRefs = append(etcdRefs, &agentv1.SecretReference{CredentialId: credential.CredentialID.String(), Version: credential.Version, Purpose: credential.Purpose})
+			}
+		}
+		etcdConfiguration := &agentv1.EnsureContainer{
+			ImageDigest: native.EtcdImage, Engine: string(cluster.PostgreSQL), VolumeId: member.etcd.volume.String(),
+			NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST,
+			MemoryBytes: etcdBudget.MemoryBytes, CpuMillis: etcdBudget.CPUMillis,
+			Etcd: &agentv1.EtcdContainerConfig{
+				Name:                fmt.Sprintf("etcd-%d", index),
+				ClusterId:           claim.ClusterID.String(),
+				Address:             member.address.String(),
+				ClientPort:          uint32(member.dcsClient),
+				PeerPort:            uint32(member.dcsPeer),
+				InitialCluster:      initialCluster,
+				InitialClusterState: "new",
+				Credentials:         etcdRefs,
+			},
+		}
+		containerEtcd, err := p.step(claim, epoch, found.DesiredRevision, &agentv1.CommandInput{
+			ResourceId: member.etcd.instance.String(), Secrets: etcdRefs,
+			Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: etcdConfiguration},
+		}, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, []string{volumeEtcd.Command.StepId}, beforeExecution)
+		if err != nil {
+			return nil, err
+		}
+		startEtcd, err := p.step(claim, epoch, found.DesiredRevision, &agentv1.CommandInput{
+			ResourceId: member.etcd.instance.String(),
+			Payload:    &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}},
+		}, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, []string{containerEtcd.Command.StepId}, beforeExecution)
+		if err != nil {
+			return nil, err
+		}
+		startEtcdSteps = append(startEtcdSteps, startEtcd.Command.StepId)
+
 		volume, err := p.step(claim, epoch, found.DesiredRevision, &agentv1.CommandInput{
 			ResourceId: member.volume.String(),
 			Payload:    &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: member.volume.String()}},
-		}, agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS, nil, beforeExecution)
+		}, agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS, []string{startEtcd.Command.StepId}, beforeExecution)
 		if err != nil {
 			return nil, err
 		}
@@ -322,7 +442,7 @@ func (p *Planner) patroniPlan(claim operation.Claim, found cluster.Cluster, memb
 				ApplicationCredentialId: application.CredentialID.String(), ApplicationCredentialVersion: application.Version,
 				ReplicationCredentialId: replication.CredentialID.String(), ReplicationCredentialVersion: replication.Version,
 				Patroni: &agentv1.PatroniContainerConfig{
-					Address: member.address.String(), RestPort: uint32(member.rest), DcsEndpoints: native.DCSEndpoints,
+					Address: member.address.String(), RestPort: uint32(member.rest), DcsEndpoints: dcsEndpoints,
 					PeerNetworks: peers, ClientNetworks: []string{"0.0.0.0/0", "::/0"},
 					ProvisionId: uuid.NewString(), AllowInitialization: true,
 					RequiredFreeBytes: p.config.Budget.DiskBytes, Credentials: refs,
@@ -336,19 +456,31 @@ func (p *Planner) patroniPlan(claim operation.Claim, found cluster.Cluster, memb
 		if err != nil {
 			return nil, err
 		}
-		after := []string{container.Command.StepId}
+		memberPlans[index] = memberPlan{volume: volume, container: container, configuration: configuration, epoch: epoch}
+		steps = append(steps, volumeEtcd, containerEtcd, startEtcd, volume, container)
+	}
+
+	for index, member := range members {
+		mp := memberPlans[index]
+		after := []string{mp.container.Command.StepId}
 		role := "primary"
-		if index > 0 {
+		if index == 0 {
+			for _, stepID := range startEtcdSteps {
+				if !slices.Contains(after, stepID) {
+					after = append(after, stepID)
+				}
+			}
+		} else {
 			after, role = append(after, primaryReady), "replica"
 		}
-		start, err := p.step(claim, epoch, found.DesiredRevision, &agentv1.CommandInput{
+		start, err := p.step(claim, mp.epoch, found.DesiredRevision, &agentv1.CommandInput{
 			ResourceId: member.instance.String(),
-			Payload:    &agentv1.CommandInput_StartPatroniMember{StartPatroniMember: &agentv1.StartPatroniMember{Container: configuration, AllowInitialization: true}},
+			Payload:    &agentv1.CommandInput_StartPatroniMember{StartPatroniMember: &agentv1.StartPatroniMember{Container: mp.configuration, AllowInitialization: true}},
 		}, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, after, beforeExecution)
 		if err != nil {
 			return nil, err
 		}
-		ready, err := p.step(claim, epoch, found.DesiredRevision, &agentv1.CommandInput{
+		ready, err := p.step(claim, mp.epoch, found.DesiredRevision, &agentv1.CommandInput{
 			ResourceId: member.instance.String(),
 			Secrets:    []*agentv1.SecretReference{{CredentialId: application.CredentialID.String(), Version: application.Version, Purpose: application.Purpose}},
 			Payload: &agentv1.CommandInput_CheckReadiness{CheckReadiness: &agentv1.CheckReadiness{
@@ -363,7 +495,7 @@ func (p *Planner) patroniPlan(claim operation.Claim, found cluster.Cluster, memb
 		if index == 0 {
 			primaryReady = ready.Command.StepId
 		}
-		steps = append(steps, volume, container, start, ready)
+		steps = append(steps, start, ready)
 		readySteps = append(readySteps, ready.Command.StepId)
 	}
 	// Every member's pooler and router start after all members are ready.
@@ -402,8 +534,24 @@ func (p *Planner) patroniStartSteps(ctx context.Context, claim operation.Claim, 
 	if err != nil {
 		return nil, err
 	}
-	containers := make([]*agentv1.EnsureContainer, len(running))
+	// Each member starts after the etcd service on its node, so Patroni finds its DCS.
+	etcd, err := p.config.Store.ReadEtcdMembers(ctx, claim.InstallationID, claim.ClusterID)
+	if err != nil {
+		return nil, err
+	}
 	var starts []*agentv1.PlanStep
+	etcdStarted := map[uuid.UUID]string{}
+	for _, each := range etcd {
+		start, err := p.step(claim, epochFor(claim, each.NodeID), op.DesiredRevision, &agentv1.CommandInput{
+			ResourceId: each.ResourceID.String(),
+			Payload:    &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}},
+		}, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, nil, beforeExecution)
+		if err != nil {
+			return nil, err
+		}
+		starts, etcdStarted[each.NodeID] = append(starts, start), start.Command.StepId
+	}
+	containers := make([]*agentv1.EnsureContainer, len(running))
 	var started []string
 	for index, each := range running {
 		if each.Role != "patroni" {
@@ -414,10 +562,14 @@ func (p *Planner) patroniStartSteps(ctx context.Context, claim operation.Claim, 
 			return nil, err
 		}
 		containers[index] = container
+		var after []string
+		if step, found := etcdStarted[each.NodeID]; found {
+			after = []string{step}
+		}
 		start, err := p.step(claim, epochFor(claim, each.NodeID), op.DesiredRevision, &agentv1.CommandInput{
 			ResourceId: each.ResourceID.String(),
 			Payload:    &agentv1.CommandInput_StartPatroniMember{StartPatroniMember: &agentv1.StartPatroniMember{Container: container}},
-		}, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, nil, beforeExecution)
+		}, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, after, beforeExecution)
 		if err != nil {
 			return nil, err
 		}
@@ -464,6 +616,76 @@ func (p *Planner) patroniStartSteps(ctx context.Context, claim operation.Claim, 
 		return nil, err
 	}
 	return append(steps, checks...), nil
+}
+
+// dcsEndpoints lists the client endpoints of the cluster's live etcd services for a new member
+// configuration. Endpoints of stored that are still live keep their order, and live endpoints
+// that stored lacks follow, so a configuration changes only when an etcd service moved.
+func (p *Planner) dcsEndpoints(ctx context.Context, claim operation.Claim, stored []string) ([]string, error) {
+	etcd, err := p.config.Store.ReadEtcdMembers(ctx, claim.InstallationID, claim.ClusterID)
+	if err != nil {
+		return nil, err
+	}
+	var live []string
+	for _, each := range etcd {
+		container, err := p.config.Store.ReadEtcdContainer(ctx, claim.InstallationID, claim.ClusterID, each.ResourceID)
+		if err != nil {
+			return nil, err
+		}
+		live = append(live, net.JoinHostPort(container.Etcd.Address, strconv.Itoa(int(container.Etcd.ClientPort))))
+	}
+	var endpoints []string
+	for _, endpoint := range stored {
+		if slices.Contains(live, endpoint) {
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	for _, endpoint := range live {
+		if !slices.Contains(endpoints, endpoint) {
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("%w: the cluster holds no etcd service", ErrUnplannable)
+	}
+	return endpoints, nil
+}
+
+// etcdStopSteps stops each etcd service after the last step on its node. A delete also
+// removes the container. The volume stays, as a member volume does.
+func (p *Planner) etcdStopSteps(ctx context.Context, claim operation.Claim, op operation.Operation, remove bool, last map[uuid.UUID]string) ([]*agentv1.PlanStep, error) {
+	etcd, err := p.config.Store.ReadEtcdMembers(ctx, claim.InstallationID, claim.ClusterID)
+	if err != nil {
+		return nil, err
+	}
+	var steps []*agentv1.PlanStep
+	for _, each := range etcd {
+		epoch := epochFor(claim, each.NodeID)
+		var after []string
+		if step, found := last[each.NodeID]; found {
+			after = []string{step}
+		}
+		stop, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
+			ResourceId: each.ResourceID.String(),
+			Payload:    &agentv1.CommandInput_StopContainer{StopContainer: &agentv1.StopContainer{GracePeriod: durationpb.New(p.config.StopGrace)}},
+		}, agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED, after, agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP)
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, stop)
+		if !remove {
+			continue
+		}
+		removed, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
+			ResourceId: each.ResourceID.String(),
+			Payload:    &agentv1.CommandInput_RemoveContainer{RemoveContainer: &agentv1.RemoveContainer{}},
+		}, agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT, []string{stop.Command.StepId}, beforeExecution)
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, removed)
+	}
+	return steps, nil
 }
 
 // patroniReadiness checks one member over its loopback listener as the application role.

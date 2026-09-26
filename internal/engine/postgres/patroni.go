@@ -52,7 +52,6 @@ type PatroniSecrets struct {
 	Superuser           string
 	Replication         string
 	Rewind              string
-	DCS                 string
 	REST                string
 	ApplicationVerifier string
 }
@@ -116,8 +115,8 @@ type patroniConfiguration struct {
 	Etcd3 struct {
 		Hosts      []string `json:"hosts"`
 		Protocol   string   `json:"protocol"`
-		Username   string   `json:"username"`
-		Password   string   `json:"password"`
+		Username   string   `json:"username,omitempty"`
+		Password   string   `json:"password,omitempty"`
 		CACert     string   `json:"cacert"`
 		Cert       string   `json:"cert"`
 		Key        string   `json:"key"`
@@ -194,7 +193,7 @@ func RenderPatroni(settings PatroniSettings, secrets PatroniSecrets) ([]byte, er
 		}
 	}
 	seen := make(map[string]bool)
-	for _, secret := range []string{secrets.Superuser, secrets.Replication, secrets.Rewind, secrets.DCS, secrets.REST} {
+	for _, secret := range []string{secrets.Superuser, secrets.Replication, secrets.Rewind, secrets.REST} {
 		if len(secret) < 32 || len(secret) > 256 || seen[secret] {
 			return nil, errors.New("Patroni requires distinct credentials of 32 to 256 visible ASCII bytes")
 		}
@@ -227,8 +226,9 @@ func RenderPatroni(settings PatroniSettings, secrets PatroniSecrets) ([]byte, er
 	config.RESTAPI.VerifyClient = "required"
 	config.CTL.CACert, config.CTL.CertFile, config.CTL.KeyFile = config.RESTAPI.CAFile, config.RESTAPI.CertFile, config.RESTAPI.KeyFile
 	config.Etcd3.Hosts = slices.Clone(settings.DCSEndpoints)
-	config.Etcd3.Protocol, config.Etcd3.UseProxies = "https", true
-	config.Etcd3.Username, config.Etcd3.Password = "synod_patroni_"+settings.ClusterID.String(), secrets.DCS
+	// Patroni discovers the current etcd members from any endpoint it reaches, so an etcd service
+	// that moved to another node does not strand a member whose endpoint list is older.
+	config.Etcd3.Protocol, config.Etcd3.UseProxies = "https", false
 	config.Etcd3.CACert, config.Etcd3.Cert, config.Etcd3.Key = PatroniDirectory+"/dcs-ca.crt", PatroniDirectory+"/dcs-client.crt", PatroniDirectory+"/dcs-client.key"
 	config.Bootstrap.DCS.TTL, config.Bootstrap.DCS.LoopWait, config.Bootstrap.DCS.RetryTimeout = 20, 2, 3
 	config.Bootstrap.DCS.MaximumLagOnFailover, config.Bootstrap.DCS.CheckTimeline = 1<<20, true

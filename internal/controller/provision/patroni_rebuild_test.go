@@ -35,7 +35,7 @@ func rebuildPatroniMember(t *testing.T, f *patroniFixture, target postgres.Membe
 	claim, err := f.store.AcquireClaim(t.Context(), postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: f.claim.InstallationID, OperationID: admission.OperationID,
 		RecoveryGeneration: f.claim.RecoveryGeneration, OwnerID: "owner-rebuild-member", TTL: 2 * time.Minute,
-		CoordinationKey: "/lifecycle/rebuild-member", CoordinationLease: 1, CoordinationRevision: 1,
+		LeaseID: 1, LeaseRevision: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -64,6 +64,10 @@ func TestPatroniMemberRebuildReplacesFailedMember(t *testing.T) {
 		if container := step.Command.Input.GetEnsureContainer(); container != nil && step.Command.Input.ResourceId == target.ResourceID.String() {
 			stored, node = container, step.Command.Epoch.NodeId
 		}
+	}
+	etcd, err := f.store.ReadEtcdMembers(t.Context(), f.claim.InstallationID, f.claim.ClusterID)
+	if err != nil || len(etcd) != 3 {
+		t.Fatalf("etcd members: %+v %v", etcd, err)
 	}
 	plan := rebuildPatroniMember(t, f, target)
 	// Member steps, then remove the target's routes, add the fresh member's routes, replace two routers, and check six routes.
@@ -124,6 +128,15 @@ func TestPatroniMemberRebuildReplacesFailedMember(t *testing.T) {
 	for _, member := range live {
 		if member.MemberID == target.MemberID || member.State != "active" || member.Role != "patroni" {
 			t.Fatalf("member after rebuild: %+v", member)
+		}
+	}
+	// The etcd service on the target's node keeps its reservation, and no step touched it.
+	if after, err := f.store.ReadEtcdMembers(t.Context(), f.claim.InstallationID, f.claim.ClusterID); err != nil || !slices.Equal(after, etcd) {
+		t.Fatalf("etcd members after rebuild: %+v %v, want %+v", after, err, etcd)
+	}
+	for _, step := range plan.Steps {
+		if slices.ContainsFunc(etcd, func(each postgres.EtcdMember) bool { return each.ResourceID.String() == step.Command.Input.ResourceId }) {
+			t.Fatalf("rebuild step %s acts on an etcd service", step.Command.StepId)
 		}
 	}
 	var retention string
@@ -370,6 +383,17 @@ func residualMember(t *testing.T, f *patroniFixture) postgres.Member {
 // completeRebuild records every receipt with one writer and completes the operation.
 func completeRebuild(t *testing.T, f *patroniFixture, plan *agentv1.ExecutionPlan) {
 	t.Helper()
+	// A rebuild replaces a member, never the etcd service beside it.
+	before, err := f.store.ReadEtcdMembers(t.Context(), f.claim.InstallationID, f.claim.ClusterID)
+	if err != nil || len(before) != 3 {
+		t.Fatalf("etcd members before rebuild: %+v %v", before, err)
+	}
+	for _, step := range plan.Steps {
+		if slices.ContainsFunc(before, func(each postgres.EtcdMember) bool { return each.ResourceID.String() == step.Command.Input.ResourceId }) {
+			t.Fatalf("rebuild step %s acts on an etcd service", step.Command.StepId)
+		}
+	}
+
 	roles := map[string]string{plan.Steps[0].Command.StepId: "ready_primary", plan.Steps[1].Command.StepId: "ready_replica", plan.Steps[operation.MemberRebuildPrefix(plan)-1].Command.StepId: "ready_replica"}
 	recordPatroniReceiptsWith(t, f, plan.Steps, roles)
 	if err := f.store.UpdateProgress(t.Context(), f.claim, postgres.ProgressUpdate{Sequence: 1, Status: operation.Succeeded, Reason: "Fixture terminal boundary."}); err != nil {
@@ -383,6 +407,10 @@ func completeRebuild(t *testing.T, f *patroniFixture, plan *agentv1.ExecutionPla
 		if member.State != "active" {
 			t.Fatalf("member after retry: %+v", member)
 		}
+	}
+	after, err := f.store.ReadEtcdMembers(t.Context(), f.claim.InstallationID, f.claim.ClusterID)
+	if err != nil || !slices.Equal(after, before) {
+		t.Fatalf("etcd members after rebuild: %+v %v, want %+v", after, err, before)
 	}
 }
 
@@ -438,8 +466,9 @@ func TestPatroniMemberRebuildResumesResidual(t *testing.T) {
 				plan.Steps[2].Command.Input.ResourceId != stored.VolumeId || plan.Steps[3].Command.Input.ResourceId != residual.ResourceID.String() {
 				t.Fatalf("resume does not keep the residual member: start=%+v", start)
 			}
+			// Three members and the three etcd services beside them.
 			var reservations int
-			if err := f.pool.QueryRow(t.Context(), `SELECT count(*) FROM resource_allocations WHERE installation_id=$1 AND cluster_id=$2 AND released_at IS NULL`, f.claim.InstallationID, f.claim.ClusterID).Scan(&reservations); err != nil || reservations != 3 {
+			if err := f.pool.QueryRow(t.Context(), `SELECT count(*) FROM resource_allocations WHERE installation_id=$1 AND cluster_id=$2 AND released_at IS NULL`, f.claim.InstallationID, f.claim.ClusterID).Scan(&reservations); err != nil || reservations != 6 {
 				t.Fatalf("resume reserved capacity: %d %v", reservations, err)
 			}
 			completeRebuild(t, f, plan)

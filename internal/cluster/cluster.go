@@ -102,7 +102,12 @@ func (s CreateSpec) Validate() error {
 			}
 		}
 		switch s.PostgreSQL.ReplicationPolicy {
-		case "", "asynchronous", "synchronous":
+		case "", "asynchronous":
+		case "synchronous":
+			// Standalone PostgreSQL has no replica to wait for.
+			if s.PostgreSQL.Topology != "patroni" {
+				return fmt.Errorf("postgres synchronous replication needs topology patroni")
+			}
 		default:
 			return fmt.Errorf("postgres replication policy must be asynchronous or synchronous")
 		}

@@ -48,8 +48,6 @@ import (
 	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap"
 )
 
 // The PostgreSQL 17.11 images this fixture pins, by architecture. Each digest was run
@@ -114,10 +112,6 @@ func startWithAgentOptions(t *testing.T, options agentTestOptions, stepTimeout .
 	dockerHost := os.Getenv("SYNOD_TEST_DOCKER_HOST")
 	if dockerHost == "" {
 		t.Skip("set SYNOD_TEST_DOCKER_HOST for the isolated Docker fixture")
-	}
-	etcdEndpoint := os.Getenv("SYNOD_TEST_ETCD_ENDPOINT")
-	if etcdEndpoint == "" {
-		t.Skip("run scripts/test-etcd.sh")
 	}
 	requireSharedNetwork(t, dockerHost)
 	store, pool := isolatedStore(t)
@@ -222,15 +216,7 @@ func startWithAgentOptions(t *testing.T, options agentTestOptions, stepTimeout .
 	if err != nil {
 		t.Fatal(err)
 	}
-	etcd, err := clientv3.New(clientv3.Config{
-		Endpoints: []string{etcdEndpoint}, DialTimeout: 5 * time.Second,
-		Context: t.Context(), Logger: zap.NewNop(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { etcd.Close() })
-	elector, err := coordinator.New(etcd, "/synod-integration/"+uuid.NewString())
+	elector, err := coordinator.New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}

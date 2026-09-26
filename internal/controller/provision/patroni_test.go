@@ -4,26 +4,24 @@ import (
 	"crypto/sha256"
 	"errors"
 	"net/netip"
-	"os"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/sirrobot01/synod/internal/cluster"
-	"github.com/sirrobot01/synod/internal/coordinator"
 	enginepostgres "github.com/sirrobot01/synod/internal/engine/postgres"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/placement"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
-	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
 )
 
 const patroniImage = "synod-patroni@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const etcdImage = "synod-etcd@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
 // hostDomain gives one node its client address and host failure domain.
 // onHost declares a node's host domain, address, and architecture.
@@ -46,7 +44,6 @@ func hostDomain(domain, address string) func(*placement.NodePolicy) {
 type patroniFixture struct {
 	*fixture
 	planner *Planner
-	etcd    *clientv3.Client
 	ca      *pki.CA
 	nodes   map[uuid.UUID]string
 }
@@ -60,10 +57,6 @@ func newPatroniFixture(t *testing.T, domains [3][2]string) *patroniFixture {
 // newPatroniFixtureOn declares each node's architecture as well.
 func newPatroniFixtureOn(t *testing.T, domains [3][2]string, architectures [3]string) *patroniFixture {
 	t.Helper()
-	endpoint := os.Getenv("SYNOD_TEST_ETCD_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("set SYNOD_TEST_ETCD_ENDPOINT through scripts/test-etcd.sh")
-	}
 	spec := cluster.CreateSpec{SchemaVersion: 1, Name: "ha", Engine: cluster.PostgreSQL,
 		PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "patroni", FailureDomain: "host"}}
 	f := newFixtureWith(t, spec, onHost(domains[0][0], domains[0][1], architectures[0]))
@@ -77,15 +70,6 @@ func newPatroniFixtureOn(t *testing.T, domains [3][2]string, architectures [3]st
 		readyNodeWith(t, f.store, f.claim.InstallationID, node, onHost(domain[0], domain[1], architectures[index+1]))
 		nodes[node] = domain[1]
 	}
-	etcd, err := clientv3.New(clientv3.Config{Endpoints: []string{"http://" + endpoint}, DialTimeout: 5 * time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { etcd.Close() })
-	accounts, err := coordinator.NewPatroniAccounts(etcd, f.claim.InstallationID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	nativeCert, nativeKey, err := pki.CreatePatroniCA(f.claim.InstallationID, time.Now(), 365*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -94,17 +78,13 @@ func newPatroniFixtureOn(t *testing.T, domains [3][2]string, architectures [3]st
 	if err != nil {
 		t.Fatal(err)
 	}
-	etcdTrust, _, err := pki.CreateCA(uuid.New(), time.Now(), 24*time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
 	config := f.planner.config
-	config.Patroni = &PatroniConfig{Accounts: accounts, CA: ca, EtcdTrust: etcdTrust, DCSEndpoints: []string{"192.0.2.20:2379"}, Image: patroniImage}
+	config.Patroni = &PatroniConfig{CA: ca, Image: patroniImage, EtcdImage: etcdImage}
 	planner, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &patroniFixture{fixture: f, planner: planner, etcd: etcd, ca: ca, nodes: nodes}
+	return &patroniFixture{fixture: f, planner: planner, ca: ca, nodes: nodes}
 }
 
 func TestPatroniProvisionPlansThreeMembersAndCompletes(t *testing.T) {
@@ -113,12 +93,12 @@ func TestPatroniProvisionPlansThreeMembersAndCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := installedPlan(t, f.fixture)
-	if len(plan.Steps) != 30 {
-		t.Fatalf("plan has %d steps, want four per member, four route steps per member, and two route checks per member", len(plan.Steps))
+	if len(plan.Steps) != 39 {
+		t.Fatalf("plan has %d steps, want seven per member, four route steps per member, and two route checks per member", len(plan.Steps))
 	}
 	// After every member is ready, each node gets a pooler and a router, then both routes are checked.
 	for index := range 3 {
-		deploy := plan.Steps[12+4*index : 16+4*index]
+		deploy := plan.Steps[21+4*index : 25+4*index]
 		pooler, router := deploy[0].Command.Input.GetEnsureContainer().GetRoute(), deploy[2].Command.Input.GetEnsureContainer().GetRoute()
 		if pooler.GetPooler() == nil || router.GetRouter() == nil || len(router.Router.Backends) != 3 ||
 			deploy[1].Command.Input.GetStartContainer() == nil || deploy[3].Command.Input.GetStartContainer() == nil {
@@ -128,7 +108,7 @@ func TestPatroniProvisionPlansThreeMembersAndCompletes(t *testing.T) {
 			t.Fatal("routes start before every member is ready")
 		}
 		for position, role := range []string{"primary", "replica"} {
-			check := plan.Steps[24+2*index+position].Command.Input.GetCheckReadiness()
+			check := plan.Steps[33+2*index+position].Command.Input.GetCheckReadiness()
 			if check.GetPostgresRole() != role || check.Address != enginepostgres.ReadinessLoopback(netip.MustParseAddr(router.Router.Address)).Addr().String() || check.GetPostgresTls().GetServerName() != router.Router.Address {
 				t.Fatalf("member %d %s route check: %+v", index, role, check)
 			}
@@ -137,10 +117,19 @@ func TestPatroniProvisionPlansThreeMembersAndCompletes(t *testing.T) {
 	nodes := map[string]bool{}
 	var primaryReady string
 	for index := range 3 {
-		volume, container, start, ready := plan.Steps[4*index], plan.Steps[4*index+1], plan.Steps[4*index+2], plan.Steps[4*index+3]
+		volumeEtcd, containerEtcd, startEtcd := plan.Steps[5*index], plan.Steps[5*index+1], plan.Steps[5*index+2]
+		volume, container := plan.Steps[5*index+3], plan.Steps[5*index+4]
+		start, ready := plan.Steps[15+2*index], plan.Steps[15+2*index+1]
 		node := container.Command.Epoch.NodeId
 		nodes[node] = true
 		address := f.nodes[uuid.MustParse(node)]
+
+		etcdCfg := containerEtcd.Command.Input.GetEnsureContainer().GetEtcd()
+		if volumeEtcd.Command.Input.GetEnsureVolume() == nil || etcdCfg == nil || etcdCfg.Address != address ||
+			startEtcd.Command.Input.GetStartContainer() == nil {
+			t.Fatalf("member %d etcd steps: %+v %+v %+v", index, volumeEtcd, containerEtcd, startEtcd)
+		}
+
 		configuration := container.Command.Input.GetEnsureContainer()
 		native := configuration.GetPostgres().GetPatroni()
 		if volume.Command.Input.GetEnsureVolume() == nil || native == nil || native.Address != address || configuration.NetworkMode != agentv1.NetworkMode_NETWORK_MODE_HOST ||
@@ -155,7 +144,7 @@ func TestPatroniProvisionPlansThreeMembersAndCompletes(t *testing.T) {
 			}
 		}
 		sameReferences := slices.EqualFunc(container.Command.Input.Secrets, native.Credentials, func(a, b *agentv1.SecretReference) bool { return proto.Equal(a, b) })
-		if len(native.Credentials) != 8 || memberTLS != 1 || !sameReferences {
+		if len(native.Credentials) != 7 || memberTLS != 1 || !sameReferences {
 			t.Fatalf("member %d references %d credentials and %d member identities", index, len(native.Credentials), memberTLS)
 		}
 		begin := start.Command.Input.GetStartPatroniMember()
@@ -177,34 +166,24 @@ func TestPatroniProvisionPlansThreeMembersAndCompletes(t *testing.T) {
 	if len(nodes) != 3 {
 		t.Fatal("members share a node")
 	}
-	var members, credentials, databasePorts, restPorts int
+	var members, credentials, databasePorts, restPorts, dcsClientPorts, dcsPeerPorts int
 	if err := f.pool.QueryRow(t.Context(), `SELECT
  (SELECT count(*) FROM cluster_members WHERE installation_id=$1 AND cluster_id=$2 AND role='patroni'),
  (SELECT count(*) FROM cluster_credentials WHERE installation_id=$1 AND cluster_id=$2),
  (SELECT count(*) FROM allocation_ports WHERE installation_id=$1 AND cluster_id=$2 AND name='database'),
- (SELECT count(*) FROM allocation_ports WHERE installation_id=$1 AND cluster_id=$2 AND name='rest')`,
-		f.claim.InstallationID, f.claim.ClusterID).Scan(&members, &credentials, &databasePorts, &restPorts); err != nil {
+ (SELECT count(*) FROM allocation_ports WHERE installation_id=$1 AND cluster_id=$2 AND name='rest'),
+ (SELECT count(*) FROM allocation_ports WHERE installation_id=$1 AND cluster_id=$2 AND name='dcs_client'),
+ (SELECT count(*) FROM allocation_ports WHERE installation_id=$1 AND cluster_id=$2 AND name='dcs_peer')`,
+		f.claim.InstallationID, f.claim.ClusterID).Scan(&members, &credentials, &databasePorts, &restPorts, &dcsClientPorts, &dcsPeerPorts); err != nil {
 		t.Fatal(err)
 	}
-	if members != 3 || credentials != 10 || databasePorts != 3 || restPorts != 3 {
-		t.Fatalf("members=%d credentials=%d database ports=%d rest ports=%d", members, credentials, databasePorts, restPorts)
-	}
-	name, scope := f.planner.config.Patroni.Accounts.PatroniScope(f.claim.ClusterID)
-	role, err := f.etcd.Auth.RoleGet(t.Context(), name)
-	if err != nil || len(role.Perm) != 1 || string(role.Perm[0].Key) != scope {
-		t.Fatalf("DCS account role: %+v %v", role, err)
+	if members != 3 || credentials != 12 || databasePorts != 3 || restPorts != 3 || dcsClientPorts != 3 || dcsPeerPorts != 3 {
+		t.Fatalf("members=%d credentials=%d database ports=%d rest ports=%d dcs_client=%d dcs_peer=%d", members, credentials, databasePorts, restPorts, dcsClientPorts, dcsPeerPorts)
 	}
 
-	// A repeated plan after installation must not touch etcd, or it would change the
-	// password the installed plan delivers.
-	if _, err := f.etcd.Auth.UserDelete(t.Context(), name); err != nil {
-		t.Fatal(err)
-	}
+	// A repeated plan after installation must not alter the plan.
 	if err := f.planner.Plan(t.Context(), f.claim); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := f.etcd.Auth.UserGet(t.Context(), name); !errors.Is(err, rpctypes.ErrUserNotFound) {
-		t.Fatal("a repeated plan reached etcd", err)
 	}
 	if !proto.Equal(installedPlan(t, f.fixture), plan) {
 		t.Fatal("a repeated plan changed the installed plan")
@@ -234,7 +213,7 @@ func TestPatroniProvisionPlansThreeMembersAndCompletes(t *testing.T) {
 	}
 }
 
-// A refused placement leaves no credential, member, or etcd account behind.
+// A refused placement leaves no credential or member behind.
 func TestPatroniProvisionRefusesWeakPlacement(t *testing.T) {
 	for name, domains := range map[string][3][2]string{
 		"shared host domain":     {{"host-a", "192.0.2.10"}, {"host-a", "192.0.2.11"}, {"host-c", "192.0.2.12"}},
@@ -253,9 +232,8 @@ func TestPatroniProvisionRefusesWeakPlacement(t *testing.T) {
 				f.claim.InstallationID, f.claim.OperationID, f.claim.ClusterID).Scan(&planned, &credentials); err != nil {
 				t.Fatal(err)
 			}
-			name, _ := f.planner.config.Patroni.Accounts.PatroniScope(f.claim.ClusterID)
-			if _, err := f.etcd.Auth.RoleGet(t.Context(), name); planned != 0 || credentials != 0 || !errors.Is(err, rpctypes.ErrRoleNotFound) {
-				t.Fatalf("refused placement left plan=%d credentials=%d role error=%v", planned, credentials, err)
+			if planned != 0 || credentials != 0 {
+				t.Fatalf("refused placement left plan=%d credentials=%d", planned, credentials)
 			}
 		})
 	}
@@ -271,13 +249,19 @@ func recordPatroniReceipts(t *testing.T, f *patroniFixture, steps []*agentv1.Pla
 // recordPatroniReceiptsWith lets roles name the state each role-any readiness step reports.
 func recordPatroniReceiptsWith(t *testing.T, f *patroniFixture, steps []*agentv1.PlanStep, roles map[string]string) {
 	t.Helper()
-	barriers := map[string]bool{}
-	for _, step := range steps {
-		epoch := step.Command.Epoch
-		if barriers[epoch.NodeId] {
-			continue
-		}
-		barriers[epoch.NodeId] = true
+	// A claim holds a barrier on every node its plan touches and every node the cluster ever
+	// dispatched to, even when steps name fewer.
+	rows, err := f.pool.Query(t.Context(), `SELECT node_id FROM claim_barriers WHERE claim_id=$1 AND reconciled_at IS NULL`, f.claim.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range nodes {
+		epoch := &agentv1.Epoch{InstallationId: f.claim.InstallationID.String(), NodeId: node.String(), ClusterId: f.claim.ClusterID.String(),
+			RecoveryGeneration: f.claim.RecoveryGeneration.String(), ExecutionEpoch: f.claim.ExecutionEpoch}
 		report := &agentv1.BarrierResult{Epoch: epoch, AdmissionsClosed: true, Drained: true}
 		if err := f.store.RecordBarrier(t.Context(), f.claim, report); err != nil {
 			t.Fatal(err)
@@ -326,6 +310,8 @@ func recordPatroniReceiptsWith(t *testing.T, f *patroniFixture, steps []*agentv1
 			state = "patroni_member_recreated"
 		case agentv1.Postcondition_POSTCONDITION_PATRONI_LEADER:
 			state, prefix = "patroni_leader", "patroni-switchover:"
+		case agentv1.Postcondition_POSTCONDITION_ETCD_MEMBERSHIP:
+			state, prefix = "etcd_"+step.Command.Input.GetEtcdMembership().GetAction(), "etcd-membership:"
 		}
 		result := &agentv1.TerminalResult{Epoch: command.Epoch, CommandId: command.CommandId, InputHash: command.InputHash, Sequence: 1, State: "succeeded",
 			Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: prefix + command.CommandId, State: state}}}
@@ -380,6 +366,22 @@ func TestPatroniProvisionRequiresConfiguration(t *testing.T) {
 }
 
 // createdPatroni plans a Patroni create and completes it with receipts from every member.
+// etcdLast checks that the last step on each node, as last names it, acts on that node's etcd
+// service. Patroni keeps its DCS until its member and routes are down.
+func etcdLast(t *testing.T, f *patroniFixture, plan *agentv1.ExecutionPlan, last map[string]string) {
+	t.Helper()
+	etcd, err := f.store.ReadEtcdMembers(t.Context(), f.claim.InstallationID, f.claim.ClusterID)
+	if err != nil || len(etcd) != 3 {
+		t.Fatalf("etcd members: %+v %v", etcd, err)
+	}
+	for _, each := range etcd {
+		index := slices.IndexFunc(plan.Steps, func(step *agentv1.PlanStep) bool { return step.Command.StepId == last[each.NodeID.String()] })
+		if index < 0 || plan.Steps[index].Command.Input.ResourceId != each.ResourceID.String() {
+			t.Fatalf("the last step on node %s does not act on its etcd service", each.NodeID)
+		}
+	}
+}
+
 func createdPatroni(t *testing.T) *patroniFixture {
 	t.Helper()
 	f := newPatroniFixture(t, [3][2]string{{"host-a", "192.0.2.10"}, {"host-b", "192.0.2.11"}, {"host-c", "192.0.2.12"}})
@@ -419,8 +421,8 @@ func TestPatroniLifecycleStopAndDelete(t *testing.T) {
 			_, err := f.store.PreviewSetupRecovery(t.Context(), f.claim.InstallationID, f.claim.ClusterID, "integration")
 			return err
 		},
-		"replica rebuild": func() error {
-			_, err := f.store.PreviewReplicaRebuild(t.Context(), f.claim.InstallationID, f.claim.ClusterID, "integration")
+		"replica removal": func() error {
+			_, err := f.store.PreviewClusterScaleDown(t.Context(), f.claim.InstallationID, f.claim.ClusterID, "integration")
 			return err
 		},
 	} {
@@ -429,8 +431,8 @@ func TestPatroniLifecycleStopAndDelete(t *testing.T) {
 		}
 	}
 	stop := f.fixture.planFor(t, postgres.StopClusterAPIOperation)
-	if len(stop.Steps) != 9 {
-		t.Fatalf("stop plan has %d steps, want one per member and two routes per member", len(stop.Steps))
+	if len(stop.Steps) != 12 {
+		t.Fatalf("stop plan has %d steps, want two per member and two routes per member", len(stop.Steps))
 	}
 	// Members stop together. Each node's router and pooler stop after that node's previous step,
 	// because an agent runs one command of a cluster at a time.
@@ -441,14 +443,15 @@ func TestPatroniLifecycleStopAndDelete(t *testing.T) {
 		if previous, seen := last[node]; seen {
 			want = []string{previous}
 		}
-		if step.Command.Input.GetStopContainer() == nil || !slices.Equal(step.DependsOn, want) || (index < 3) != (want == nil) {
+		if step.Command.Input.GetStopContainer() == nil || !slices.Equal(step.DependsOn, want) {
 			t.Fatalf("stop step %d depends on %v, want %v", index, step.DependsOn, want)
 		}
 		last[node] = step.Command.StepId
 	}
+	etcdLast(t, f, stop, last)
 	remove := f.fixture.planFor(t, postgres.DeleteClusterAPIOperation)
-	if len(remove.Steps) != 18 {
-		t.Fatalf("delete plan has %d steps, want stop and remove per member and per route", len(remove.Steps))
+	if len(remove.Steps) != 24 {
+		t.Fatalf("delete plan has %d steps, want stop and remove per member, per etcd, and per route", len(remove.Steps))
 	}
 	// Member stops start together. Every later step on a node follows that node's previous
 	// step, and a removal follows exactly its own stop.
@@ -472,29 +475,14 @@ func TestPatroniLifecycleStopAndDelete(t *testing.T) {
 		}
 		last[node] = step.Command.StepId
 	}
+	etcdLast(t, f, remove, last)
 	recordPatroniReceipts(t, f, remove.Steps)
 	if err := f.store.UpdateProgress(t.Context(), f.claim, postgres.ProgressUpdate{Sequence: 1, Status: operation.Succeeded, Reason: "Fixture terminal boundary."}); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := f.store.ListPendingDCSCleanups(t.Context(), f.claim.InstallationID)
-	if err != nil || !slices.Equal(pending, []uuid.UUID{f.claim.ClusterID}) {
-		t.Fatalf("pending DCS cleanups=%v err=%v", pending, err)
-	}
-	accounts := f.planner.config.Patroni.Accounts
-	for range 2 {
-		if err := accounts.DeleteScope(t.Context(), f.claim.ClusterID); err != nil {
-			t.Fatal(err)
-		}
-		if err := f.store.CompleteDCSCleanup(t.Context(), f.claim.InstallationID, f.claim.ClusterID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if pending, err := f.store.ListPendingDCSCleanups(t.Context(), f.claim.InstallationID); err != nil || len(pending) != 0 {
-		t.Fatalf("completed cleanup still pending: %v %v", pending, err)
-	}
-	name, _ := accounts.PatroniScope(f.claim.ClusterID)
-	if _, err := f.etcd.Auth.UserGet(t.Context(), name); !errors.Is(err, rpctypes.ErrUserNotFound) {
-		t.Fatal("deleted Patroni cluster keeps its DCS account", err)
+	// A completed delete releases the etcd reservations with the members.
+	if etcd, err := f.store.ReadEtcdMembers(t.Context(), f.claim.InstallationID, f.claim.ClusterID); err != nil || len(etcd) != 0 {
+		t.Fatalf("etcd members after delete: %+v %v", etcd, err)
 	}
 }
 
@@ -517,19 +505,27 @@ func TestPatroniStartProvesOneWriter(t *testing.T) {
 			}
 			f.fixture.claim = claim
 			plan := installedPlanFor(t, f.fixture, claim.OperationID)
-			if len(plan.Steps) != 18 {
+			if len(plan.Steps) != 21 {
 				t.Fatalf("start plan has %d steps, want member starts and checks, route starts, and route checks", len(plan.Steps))
 			}
-			var starts []string
-			for _, step := range plan.Steps[:3] {
-				begin := step.Command.Input.GetStartPatroniMember()
-				if begin == nil || begin.AllowInitialization || len(step.DependsOn) != 0 || !proto.Equal(begin.Container, stored[step.Command.Input.ResourceId]) {
-					t.Fatalf("start step: %+v depends on %v", begin, step.DependsOn)
+			// Every etcd service starts first. Each member then waits for the etcd service on its node.
+			etcdOn := map[string]string{}
+			for _, startEtcd := range plan.Steps[:3] {
+				if startEtcd.Command.Input.GetStartContainer() == nil || len(startEtcd.DependsOn) != 0 || stored[startEtcd.Command.Input.ResourceId].GetEtcd() == nil {
+					t.Fatalf("etcd start step: %+v", startEtcd)
 				}
-				starts = append(starts, step.Command.StepId)
+				etcdOn[startEtcd.Command.Epoch.NodeId] = startEtcd.Command.StepId
+			}
+			var starts []string
+			for _, startMember := range plan.Steps[3:6] {
+				begin := startMember.Command.Input.GetStartPatroniMember()
+				if begin == nil || begin.AllowInitialization || !slices.Equal(startMember.DependsOn, []string{etcdOn[startMember.Command.Epoch.NodeId]}) || !proto.Equal(begin.Container, stored[startMember.Command.Input.ResourceId]) {
+					t.Fatalf("start step: %+v depends on %v", begin, startMember.DependsOn)
+				}
+				starts = append(starts, startMember.Command.StepId)
 			}
 			roles := map[string]string{}
-			for index, step := range plan.Steps[3:6] {
+			for index, step := range plan.Steps[6:9] {
 				check := step.Command.Input.GetCheckReadiness()
 				address := stored[step.Command.Input.ResourceId].Postgres.Patroni.Address
 				if check.GetPostgresRole() != "any" || check.Address != enginepostgres.ReadinessLoopback(netip.MustParseAddr(address)).Addr().String() || check.GetPostgresTls().GetServerName() != address || !slices.Equal(step.DependsOn, starts) {

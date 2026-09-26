@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 
 const labelPatroniSource = "io.synod.patroni-source-hash"
 const labelRouteSource = "io.synod.route-source-hash"
+const labelEtcdSource = "io.synod.etcd-source-hash"
 const patroniTmpfs = "rw,noexec,nosuid,nodev,size=4m"
 
 func (r *Runtime) preparePatroni(ctx context.Context, command *agentv1.Command, secrets runtime.Secrets) (runtime.Result, error) {
@@ -32,6 +35,11 @@ func (r *Runtime) preparePatroni(ctx context.Context, command *agentv1.Command, 
 // prepareRoute creates a pooler or router container beside a Patroni member.
 func (r *Runtime) prepareRoute(ctx context.Context, command *agentv1.Command, secrets runtime.Secrets) (runtime.Result, error) {
 	return r.settleCreate(ctx, command, r.createRoute(ctx, command, command.Input.GetEnsureContainer(), secrets))
+}
+
+// prepareEtcd creates an etcd member container beside a Patroni member.
+func (r *Runtime) prepareEtcd(ctx context.Context, command *agentv1.Command, secrets runtime.Secrets) (runtime.Result, error) {
+	return r.settleCreate(ctx, command, r.createEtcd(ctx, command, command.Input.GetEnsureContainer(), secrets))
 }
 
 // settleCreate reports a protected create. A clean refusal changed nothing. Otherwise
@@ -55,11 +63,11 @@ func (r *Runtime) settleCreate(ctx context.Context, command *agentv1.Command, mu
 // A failure after it reports outcome unknown.
 func (r *Runtime) createPatroni(ctx context.Context, command *agentv1.Command, p *agentv1.EnsureContainer, secrets runtime.Secrets) error {
 	settings, err := postgres.PatroniMemberSettings(p, command.Epoch.InstallationId, command.Epoch.ClusterId, command.Input.ResourceId)
-	if err != nil || len(secrets) != 8 {
+	if err != nil || len(secrets) != 7 {
 		return runtime.ErrConfigurationConflict
 	}
 	seen := make(map[string]bool)
-	for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_dcs", "patroni_rest"} {
+	for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_rest"} {
 		value := secrets[purpose]
 		if len(value) < 32 || len(value) > 256 || seen[string(value)] || slices.ContainsFunc(value, func(b byte) bool { return b < 33 || b > 126 }) {
 			return runtime.ErrConfigurationConflict
@@ -80,7 +88,7 @@ func (r *Runtime) createPatroni(ctx context.Context, command *agentv1.Command, p
 	}
 	files, err := postgres.PatroniFiles(settings, postgres.PatroniSecrets{
 		Superuser: string(secrets["superuser"]), Replication: string(secrets["replication"]), Rewind: string(secrets["patroni_rewind"]),
-		DCS: string(secrets["patroni_dcs"]), REST: string(secrets["patroni_rest"]), ApplicationVerifier: verifier,
+		REST: string(secrets["patroni_rest"]), ApplicationVerifier: verifier,
 	}, member, dcs, time.Now())
 	if err != nil {
 		return runtime.ErrConfigurationConflict
@@ -138,9 +146,59 @@ type protectedSource struct {
 
 var (
 	patroniSource = protectedSource{labelPatroniSource, "synod-patroni", []string{"config.json", "ca.crt", "member.crt", "member.key", "dcs-ca.crt", "dcs-client.crt", "dcs-client.key"}}
+	etcdSource    = protectedSource{labelEtcdSource, "synod-etcd", []string{"ca.crt", "server.crt", "server.key", "peer.crt", "peer.key"}}
 	poolerSource  = protectedSource{labelRouteSource, "synod-pooler", []string{"pgbouncer.ini", "userlist.txt", "ca.crt", "member.crt", "member.key", "role.json"}}
 	routerSource  = protectedSource{labelRouteSource, "synod-router", []string{"haproxy.cfg", "ca.crt", "check.pem"}}
 )
+
+// createEtcd renders the etcd TLS material and creates the container.
+func (r *Runtime) createEtcd(ctx context.Context, command *agentv1.Command, p *agentv1.EnsureContainer, secrets runtime.Secrets) error {
+	if p.Etcd == nil || len(secrets) != 1 {
+		return runtime.ErrConfigurationConflict
+	}
+	member, err := decodeTLSMaterial(secrets["patroni_member_tls"])
+	if err != nil {
+		return err
+	}
+	files := map[string][]byte{
+		"ca.crt":     bytes.Clone(member.CA),
+		"server.crt": bytes.Clone(member.Certificate),
+		"server.key": bytes.Clone(member.PrivateKey),
+		"peer.crt":   bytes.Clone(member.Certificate),
+		"peer.key":   bytes.Clone(member.PrivateKey),
+	}
+	return r.createProtected(ctx, command, p, etcdSource, files)
+}
+
+// etcdCommand returns the startup command flags for an etcd member container.
+func etcdCommand(c *agentv1.EtcdContainerConfig) []string {
+	clientURL := "https://" + net.JoinHostPort(c.Address, strconv.Itoa(int(c.ClientPort)))
+	peerURL := "https://" + net.JoinHostPort(c.Address, strconv.Itoa(int(c.PeerPort)))
+	state := c.InitialClusterState
+	if state == "" {
+		state = "new"
+	}
+	return []string{
+		"etcd",
+		"--name=" + c.Name,
+		"--data-dir=/data",
+		"--listen-client-urls=" + clientURL,
+		"--advertise-client-urls=" + clientURL,
+		"--listen-peer-urls=" + peerURL,
+		"--initial-advertise-peer-urls=" + peerURL,
+		"--initial-cluster=" + c.InitialCluster,
+		"--initial-cluster-state=" + state,
+		"--initial-cluster-token=" + c.ClusterId,
+		"--cert-file=/etc/synod-etcd/server.crt",
+		"--key-file=/etc/synod-etcd/server.key",
+		"--trusted-ca-file=/etc/synod-etcd/ca.crt",
+		"--client-cert-auth=true",
+		"--peer-cert-file=/etc/synod-etcd/peer.crt",
+		"--peer-key-file=/etc/synod-etcd/peer.key",
+		"--peer-trusted-ca-file=/etc/synod-etcd/ca.crt",
+		"--peer-client-cert-auth=true",
+	}
+}
 
 // createProtected creates the canonical container with p and copies its protected files into
 // /etc. A label pins their digest. An existing container must already hold p and the same files.

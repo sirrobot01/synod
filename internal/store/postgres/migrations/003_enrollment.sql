@@ -27,12 +27,12 @@ CREATE TABLE node_certificates (
 CREATE TABLE enrollment_tokens (
     id uuid PRIMARY KEY,
     installation_id uuid NOT NULL,
-    node_id uuid NOT NULL,
+    node_id uuid,
     actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 256),
     idempotency_key text NOT NULL CHECK (idempotency_key ~ '^[!-~]{1,128}$'),
     request_hash bytea NOT NULL CHECK (octet_length(request_hash)=32),
     token_verifier bytea NOT NULL CHECK (octet_length(token_verifier)=32),
-    ttl_seconds integer NOT NULL CHECK (ttl_seconds BETWEEN 60 AND 3600),
+    ttl_seconds integer NOT NULL CHECK (ttl_seconds BETWEEN 60 AND 604800),
     created_at timestamptz NOT NULL,
     expires_at timestamptz NOT NULL CHECK (expires_at>created_at),
     revoked_at timestamptz,
@@ -44,7 +44,7 @@ CREATE TABLE enrollment_tokens (
     UNIQUE (installation_id,actor_id,idempotency_key),
     UNIQUE (installation_id,token_verifier),
     FOREIGN KEY (installation_id,node_id,certificate_id) REFERENCES node_certificates (installation_id,node_id,id),
-    CHECK (num_nonnulls(consumed_at,enrollment_request_id,csr_hash,certificate_id) IN (0,4))
+    CHECK (num_nonnulls(consumed_at,enrollment_request_id,csr_hash,certificate_id) IN (0,4) AND (consumed_at IS NULL OR node_id IS NOT NULL))
 );
 
 -- These references require the enrollment tables created by this migration.

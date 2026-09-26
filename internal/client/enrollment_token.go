@@ -320,3 +320,14 @@ func writeEnrollmentFile(root *os.Root, directory *os.File, name string, data []
 	}
 	return nil
 }
+
+// RegisterJoinToken registers the verifier of a one-use join token that binds no node.
+// An uncertain outcome leaves at most one unused token, which expires.
+func (c *Client) RegisterJoinToken(ctx context.Context, secret string, ttlSeconds int) (EnrollmentToken, error) {
+	var result EnrollmentToken
+	err := c.request(ctx, http.MethodPost, "/v1/enrollment-tokens", enrollmentTokenRequest{Token: secret, TTLSeconds: ttlSeconds}, uuid.NewString(), http.StatusCreated, &result)
+	if err == nil && (result.ID == uuid.Nil || result.NodeID != uuid.Nil || result.ExpiresAt.IsZero()) {
+		err = &Error{Code: "invalid_response", Message: "The API returned an incomplete join token registration."}
+	}
+	return result, err
+}

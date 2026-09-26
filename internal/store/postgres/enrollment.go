@@ -40,7 +40,7 @@ type EnrollmentToken struct {
 
 // RegisterEnrollmentToken stores only the verifier of a client-generated token.
 func (s *Store) RegisterEnrollmentToken(ctx context.Context, r TokenRegistration) (EnrollmentToken, error) {
-	if r.InstallationID == uuid.Nil || r.NodeID == uuid.Nil || r.TokenVerifier == [32]byte{} || r.TTLSeconds < 60 || r.TTLSeconds > 3600 || len(r.ActorID) < 1 || len(r.ActorID) > 256 || len(r.RequestID) < 1 || len(r.RequestID) > 128 || len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 {
+	if r.InstallationID == uuid.Nil || r.TokenVerifier == [32]byte{} || r.TTLSeconds < 60 || r.TTLSeconds > 604800 || len(r.ActorID) < 1 || len(r.ActorID) > 256 || len(r.RequestID) < 1 || len(r.RequestID) > 128 || len(r.IdempotencyKey) < 1 || len(r.IdempotencyKey) > 128 {
 		return EnrollmentToken{}, &AdmissionError{Code: InvalidRequest}
 	}
 	for _, value := range []string{r.ActorID, r.RequestID, r.IdempotencyKey} {
@@ -68,13 +68,21 @@ func (s *Store) RegisterEnrollmentToken(ctx context.Context, r TokenRegistration
 	}
 	defer tx.Rollback(ctx)
 	result := EnrollmentToken{ID: tokenID, NodeID: r.NodeID}
+	var nodeIDParam *uuid.UUID
+	if r.NodeID != uuid.Nil {
+		nodeIDParam = &r.NodeID
+	}
 	err = tx.QueryRow(ctx, `INSERT INTO enrollment_tokens (id,installation_id,node_id,actor_id,idempotency_key,request_hash,token_verifier,ttl_seconds,created_at,expires_at)
   VALUES ($1,$2,$3,$4,$5,$6,$7,$8::integer,transaction_timestamp(),transaction_timestamp()+$8::integer*interval '1 second')
-  ON CONFLICT (installation_id,actor_id,idempotency_key) DO NOTHING RETURNING expires_at`, tokenID, r.InstallationID, r.NodeID, r.ActorID, r.IdempotencyKey, hash[:], r.TokenVerifier[:], r.TTLSeconds).Scan(&result.ExpiresAt)
+  ON CONFLICT (installation_id,actor_id,idempotency_key) DO NOTHING RETURNING expires_at`, tokenID, r.InstallationID, nodeIDParam, r.ActorID, r.IdempotencyKey, hash[:], r.TokenVerifier[:], r.TTLSeconds).Scan(&result.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var storedHash []byte
-		if err := tx.QueryRow(ctx, `SELECT id,node_id,expires_at,request_hash FROM enrollment_tokens WHERE installation_id=$1 AND actor_id=$2 AND idempotency_key=$3`, r.InstallationID, r.ActorID, r.IdempotencyKey).Scan(&result.ID, &result.NodeID, &result.ExpiresAt, &storedHash); err != nil {
+		var storedNodeID *uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT id,node_id,expires_at,request_hash FROM enrollment_tokens WHERE installation_id=$1 AND actor_id=$2 AND idempotency_key=$3`, r.InstallationID, r.ActorID, r.IdempotencyKey).Scan(&result.ID, &storedNodeID, &result.ExpiresAt, &storedHash); err != nil {
 			return EnrollmentToken{}, admissionError(err)
+		}
+		if storedNodeID != nil {
+			result.NodeID = *storedNodeID
 		}
 		if !bytes.Equal(storedHash, hash[:]) {
 			return EnrollmentToken{}, &AdmissionError{Code: IdempotencyConflict}
@@ -85,12 +93,14 @@ func (s *Store) RegisterEnrollmentToken(ctx context.Context, r TokenRegistration
 	if err != nil {
 		return EnrollmentToken{}, admissionError(err)
 	}
-	var enrolled bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE installation_id=$1 AND id=$2)`, r.InstallationID, r.NodeID).Scan(&enrolled); err != nil {
-		return EnrollmentToken{}, admissionError(err)
-	}
-	if enrolled {
-		return EnrollmentToken{}, &AdmissionError{Code: EnrollmentConflict}
+	if r.NodeID != uuid.Nil {
+		var enrolled bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE installation_id=$1 AND id=$2)`, r.InstallationID, r.NodeID).Scan(&enrolled); err != nil {
+			return EnrollmentToken{}, admissionError(err)
+		}
+		if enrolled {
+			return EnrollmentToken{}, &AdmissionError{Code: EnrollmentConflict}
+		}
 	}
 	auditID, err := uuid.NewRandom()
 	if err != nil {
@@ -117,12 +127,15 @@ type EnrollmentRequest struct {
 
 // EnrollmentResult is the issued certificate and its identity.
 type EnrollmentResult struct {
-	NodeID           uuid.UUID `json:"node_id"`
-	CertificateID    uuid.UUID `json:"certificate_id"`
-	CertificatePEM   string    `json:"certificate_pem"`
-	CACertificatePEM string    `json:"ca_certificate_pem"`
-	AcceptedAt       time.Time `json:"accepted_at"`
-	Replayed         bool      `json:"replayed"`
+	NodeID             uuid.UUID `json:"node_id"`
+	CertificateID      uuid.UUID `json:"certificate_id"`
+	CertificatePEM     string    `json:"certificate_pem"`
+	CACertificatePEM   string    `json:"ca_certificate_pem"`
+	AcceptedAt         time.Time `json:"accepted_at"`
+	Replayed           bool      `json:"replayed"`
+	RecoveryGeneration uuid.UUID `json:"recovery_generation,omitzero"`
+	// AgentEndpoint is the controller agent transport address. The API sets it.
+	AgentEndpoint string `json:"agent_endpoint,omitempty"`
 }
 
 // EnrollAgent authenticates the token before CSR signing and commits its result once.
@@ -137,27 +150,39 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
 		return EnrollmentResult{}, admissionError(err)
 	}
 	defer tx.Rollback(ctx)
-	var tokenID, nodeID uuid.UUID
+	var tokenID uuid.UUID
+	var tokenNodeID *uuid.UUID
 	var expiry time.Time
 	var revoked, consumed *time.Time
 	var priorRequest, certificateID *uuid.UUID
 	var storedHash []byte
 	err = tx.QueryRow(ctx, `SELECT id,node_id,expires_at,revoked_at,consumed_at,enrollment_request_id,csr_hash,certificate_id
-  FROM enrollment_tokens WHERE installation_id=$1 AND token_verifier=$2 FOR UPDATE`, r.InstallationID, r.TokenVerifier[:]).Scan(&tokenID, &nodeID, &expiry, &revoked, &consumed, &priorRequest, &storedHash, &certificateID)
+  FROM enrollment_tokens WHERE installation_id=$1 AND token_verifier=$2 FOR UPDATE`, r.InstallationID, r.TokenVerifier[:]).Scan(&tokenID, &tokenNodeID, &expiry, &revoked, &consumed, &priorRequest, &storedHash, &certificateID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return EnrollmentResult{}, &AdmissionError{Code: EnrollmentUnauthorized}
 	}
 	if err != nil {
 		return EnrollmentResult{}, admissionError(err)
 	}
-	if nodeID != r.NodeID || revoked != nil {
+	if (tokenNodeID != nil && *tokenNodeID != r.NodeID) || revoked != nil {
 		return EnrollmentResult{}, &AdmissionError{Code: EnrollmentUnauthorized}
+	}
+	nodeID := r.NodeID
+	// An agent needs the generation for its configuration. It is nil until a controller runner records one.
+	var generation uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT recovery_generation FROM installation_generations WHERE installation_id=$1`, r.InstallationID).Scan(&generation); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return EnrollmentResult{}, admissionError(err)
+	}
+	// A joining agent cannot write its configuration without the generation, so a join
+	// token stays unconsumed until a controller runner records one.
+	if tokenNodeID == nil && generation == uuid.Nil {
+		return EnrollmentResult{}, &AdmissionError{Code: DependencyUnavailable}
 	}
 	if consumed != nil {
 		if priorRequest == nil || *priorRequest != r.RequestID || !bytes.Equal(storedHash, hash[:]) || certificateID == nil {
 			return EnrollmentResult{}, &AdmissionError{Code: EnrollmentConflict}
 		}
-		result := EnrollmentResult{NodeID: nodeID, CertificateID: *certificateID, AcceptedAt: *consumed, Replayed: true}
+		result := EnrollmentResult{NodeID: nodeID, CertificateID: *certificateID, AcceptedAt: *consumed, Replayed: true, RecoveryGeneration: generation}
 		var certificateBytes, caBytes []byte
 		if err := tx.QueryRow(ctx, `SELECT certificate_pem,ca_certificate_pem FROM node_certificates WHERE installation_id=$1 AND node_id=$2 AND id=$3`, r.InstallationID, nodeID, *certificateID).Scan(&certificateBytes, &caBytes); err != nil {
 			return EnrollmentResult{}, admissionError(err)
@@ -213,7 +238,7 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, id, r.InstallationID, nodeID, certificate.SerialNumber.Text(16), derHash[:], certificatePEM, ca.CertificatePEM(), certificate.NotBefore, certificate.NotAfter); err != nil {
 		return EnrollmentResult{}, admissionError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE enrollment_tokens SET consumed_at=$1,enrollment_request_id=$2,csr_hash=$3,certificate_id=$4 WHERE id=$5`, now, r.RequestID, hash[:], id, tokenID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE enrollment_tokens SET node_id=$1,consumed_at=$2,enrollment_request_id=$3,csr_hash=$4,certificate_id=$5 WHERE id=$6`, nodeID, now, r.RequestID, hash[:], id, tokenID); err != nil {
 		return EnrollmentResult{}, admissionError(err)
 	}
 	auditID, err := uuid.NewRandom()
@@ -227,7 +252,7 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
 	if err := s.commitMetadata(ctx, tx); err != nil {
 		return EnrollmentResult{}, err
 	}
-	return EnrollmentResult{NodeID: nodeID, CertificateID: id, CertificatePEM: string(certificatePEM), CACertificatePEM: string(ca.CertificatePEM()), AcceptedAt: now}, nil
+	return EnrollmentResult{NodeID: nodeID, CertificateID: id, CertificatePEM: string(certificatePEM), CACertificatePEM: string(ca.CertificatePEM()), AcceptedAt: now, RecoveryGeneration: generation}, nil
 }
 
 // CheckAgentCertificate authorizes a verified peer against current metadata state.

@@ -75,6 +75,14 @@ func testRequest() CreateClusterRequest {
 	}
 }
 
+// redisRequest asks for a Redis cluster, the only engine with native replicas.
+func redisRequest() CreateClusterRequest {
+	request := testRequest()
+	request.Spec.Engine, request.Spec.PostgreSQL = cluster.Redis, nil
+	request.Spec.Redis = &cluster.RedisSpec{Version: "8.2.7", Topology: "standalone", Persistence: "aof"}
+	return request
+}
+
 func requireCode(t *testing.T, err error, want ErrorCode) {
 	t.Helper()
 	got, ok := errors.AsType[*AdmissionError](err)
@@ -838,6 +846,8 @@ const dropTimeout = 60 * time.Second
 func TestPostgresReplicationPolicyPersistsAndBindsReplay(t *testing.T) {
 	s := testStore(t)
 	request := testRequest()
+	// Only Patroni replicates, so only a Patroni spec can wait for a replica.
+	request.Spec.PostgreSQL.Topology, request.Spec.PostgreSQL.FailureDomain = "patroni", "host"
 	request.Spec.PostgreSQL.ReplicationPolicy = "synchronous"
 	first, err := s.CreateCluster(t.Context(), request)
 	if err != nil {

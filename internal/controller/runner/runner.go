@@ -44,9 +44,6 @@ type Config struct {
 	IdleBackoff time.Duration
 	// OutboxPage bounds one page of the pending outbox scan.
 	OutboxPage int
-	// PatroniAccounts removes the DCS scope of a deleted Patroni cluster. Nil leaves
-	// cleanup requests pending until a controller with Patroni HA configuration runs.
-	PatroniAccounts *coordinator.PatroniAccounts
 	// Keyring opens the sealed credentials a plan names. A controller without one
 	// runs plans that need no credential and refuses the ones that do.
 	Keyring *secret.Keyring
@@ -179,12 +176,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		} else if err := r.scan(ctx); err != nil && ctx.Err() == nil {
 			r.config.Logger.Warn("controller scan failed", "error", err.Error())
 		}
-		if r.config.PatroniAccounts != nil {
-			r.cleanDCS(ctx)
-			if time.Since(r.renewed) >= renewalSweep {
-				renewCertificates(ctx, r.config.Store, r.config.InstallationID, r.config.Logger, time.Now())
-				r.renewed = time.Now()
-			}
+		if time.Since(r.renewed) >= renewalSweep {
+			renewCertificates(ctx, r.config.Store, r.config.InstallationID, r.config.Logger, time.Now())
+			r.renewed = time.Now()
 		}
 		select {
 		case <-notices:
@@ -194,27 +188,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			r.wg.Wait()
 			return nil
-		}
-	}
-}
-
-// cleanDCS removes the DCS scope of each deleted Patroni cluster and records completion.
-// Deletion is idempotent, so a failure waits for the next pass and two controllers can both try.
-func (r *Runner) cleanDCS(ctx context.Context) {
-	clusters, err := r.config.Store.ListPendingDCSCleanups(ctx, r.config.InstallationID)
-	if err != nil {
-		if ctx.Err() == nil {
-			r.config.Logger.Warn("read pending Patroni DCS cleanups failed", "error", err.Error())
-		}
-		return
-	}
-	for _, cluster := range clusters {
-		if err := r.config.PatroniAccounts.DeleteScope(ctx, cluster); err != nil {
-			r.config.Logger.Warn("remove Patroni DCS scope failed", "cluster_id", cluster, "error", err.Error())
-			continue
-		}
-		if err := r.config.Store.CompleteDCSCleanup(ctx, r.config.InstallationID, cluster); err != nil {
-			r.config.Logger.Warn("record Patroni DCS cleanup failed", "cluster_id", cluster, "error", err.Error())
 		}
 	}
 }
@@ -426,8 +399,8 @@ func (r *Runner) drive(ctx context.Context, op operation.Operation) error {
 	}
 	claim, err := r.config.Store.AcquireClaim(run, postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: r.config.InstallationID, OperationID: op.ID, RecoveryGeneration: generation,
-		OwnerID: r.config.OwnerID, TTL: r.config.ClaimTTL, CoordinationKey: leader.Key,
-		CoordinationLease: leader.LeaseID, CoordinationRevision: leader.Revision,
+		OwnerID: r.config.OwnerID, TTL: r.config.ClaimTTL,
+		LeaseID: leader.LeaseID, LeaseRevision: leader.Revision,
 	})
 	if err != nil {
 		return fmt.Errorf("claim operation %s: %w", op.ID, err)

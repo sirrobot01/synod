@@ -31,8 +31,6 @@ import (
 	"github.com/sirrobot01/synod/internal/placement"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/proto"
@@ -91,18 +89,9 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-func testCoordinator(t *testing.T) *coordinator.Coordinator {
+func testCoordinator(t *testing.T, pool *pgxpool.Pool) *coordinator.Coordinator {
 	t.Helper()
-	endpoint := os.Getenv("SYNOD_TEST_ETCD_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("run scripts/test-etcd.sh")
-	}
-	client, err := clientv3.New(clientv3.Config{Endpoints: []string{endpoint}, DialTimeout: 2 * time.Second, Logger: zap.NewNop()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { client.Close() })
-	elector, err := coordinator.New(client, "/synod-test/"+uuid.NewString())
+	elector, err := coordinator.New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +106,7 @@ func newInstallation(t *testing.T) *installation {
 	if err := store.Migrate(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	elector := testCoordinator(t)
+	elector := testCoordinator(t, pool)
 	inst := &installation{store: store, pool: pool, id: uuid.New(), node: uuid.New()}
 	inst.issue(t)
 	var routed *Runner
@@ -330,7 +319,7 @@ func (i *installation) install(t *testing.T, admission postgres.Admission) *agen
 	}
 	claim, err := i.store.AcquireClaim(t.Context(), postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: i.id, OperationID: admission.OperationID, RecoveryGeneration: generation,
-		OwnerID: "installer", TTL: time.Second, CoordinationKey: "/installer", CoordinationLease: 1, CoordinationRevision: 1,
+		OwnerID: "installer", TTL: time.Second, LeaseID: 1, LeaseRevision: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -730,12 +719,16 @@ func TestRunnerKeepsTheClaimAcrossAWorkerRetry(t *testing.T) {
 // A wedged election must release its worker slot instead of holding it forever.
 func TestRunnerReleasesASlotWhenNoOwnerIsElected(t *testing.T) {
 	inst := newInstallation(t)
-	dead, err := clientv3.New(clientv3.Config{Endpoints: []string{"127.0.0.1:1"}, DialTimeout: time.Second, Logger: zap.NewNop()})
+	deadConfig, err := pgxpool.ParseConfig("postgres://synod:synod@127.0.0.1:1/synod?connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead, err := pgxpool.NewWithConfig(t.Context(), deadConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { dead.Close() })
-	elector, err := coordinator.New(dead, "/synod-test/"+uuid.NewString())
+	elector, err := coordinator.New(dead)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -877,58 +870,3 @@ func TestNewRunnerChecksInputs(t *testing.T) {
 // dropTimeout bounds one test database teardown. It exists to stop a hang, not to
 // assert how fast PostgreSQL drops a database under load.
 const dropTimeout = 60 * time.Second
-
-// The runner removes a deleted Patroni cluster's DCS scope and records completion.
-// A failed removal leaves the request pending for the next pass.
-func TestRunnerCleansPatroniDCSScope(t *testing.T) {
-	inst := newInstallation(t)
-	admission := inst.admit(t, "patroni-cleanup")
-	if _, err := inst.pool.Exec(t.Context(), `INSERT INTO patroni_dcs_cleanups (installation_id,cluster_id,requested_by_operation,requested_at)
- VALUES ($1,$2,$3,clock_timestamp())`, inst.id, admission.ClusterID, admission.OperationID); err != nil {
-		t.Fatal(err)
-	}
-	client, err := clientv3.New(clientv3.Config{Endpoints: []string{os.Getenv("SYNOD_TEST_ETCD_ENDPOINT")}, DialTimeout: 2 * time.Second, Logger: zap.NewNop()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	accounts, err := coordinator.NewPatroniAccounts(client, inst.id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := accounts.EnsureAccount(t.Context(), admission.ClusterID, strings.Repeat("p", 40)); err != nil {
-		t.Fatal(err)
-	}
-	name, scope := accounts.PatroniScope(admission.ClusterID)
-	if _, err := client.Put(t.Context(), scope+"leader", "member"); err != nil {
-		t.Fatal(err)
-	}
-	// A closed client cannot reach etcd, so the request must stay pending.
-	closed, err := clientv3.New(clientv3.Config{Endpoints: []string{os.Getenv("SYNOD_TEST_ETCD_ENDPOINT")}, DialTimeout: 2 * time.Second, Logger: zap.NewNop()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	closed.Close()
-	unreachable, err := coordinator.NewPatroniAccounts(closed, inst.id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inst.runner.config.PatroniAccounts = unreachable
-	inst.runner.cleanDCS(t.Context())
-	if inst.count(t, `SELECT count(*) FROM patroni_dcs_cleanups WHERE completed_at IS NULL`) != 1 {
-		t.Fatal("a failed DCS removal was recorded as complete")
-	}
-	inst.runner.config.PatroniAccounts = accounts
-	for range 2 {
-		inst.runner.cleanDCS(t.Context())
-	}
-	if inst.count(t, `SELECT count(*) FROM patroni_dcs_cleanups WHERE completed_at IS NOT NULL`) != 1 {
-		t.Fatal("DCS cleanup was not recorded as complete")
-	}
-	if remaining, err := client.Get(t.Context(), scope, clientv3.WithPrefix(), clientv3.WithCountOnly()); err != nil || remaining.Count != 0 {
-		t.Fatalf("DCS scope keeps keys: %v %v", remaining, err)
-	}
-	if _, err := client.Auth.UserGet(t.Context(), name); err == nil {
-		t.Fatal("DCS account survived cleanup")
-	}
-	client.Close()
-}

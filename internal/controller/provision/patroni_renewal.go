@@ -23,7 +23,7 @@ import (
 // renewCertificates issues new versions of the member and DCS certificates and recreates each
 // member container with them.
 //
-// A running cluster renews one member at a time. The two other members prove readiness first,
+// A running cluster renews one member at a time. The other members prove readiness first,
 // so the cluster keeps a writer while one member restarts. A stopped cluster recreates its
 // members without starting them.
 func (p *Planner) renewCertificates(ctx context.Context, claim operation.Claim, op operation.Operation) error {
@@ -46,7 +46,7 @@ func (p *Planner) renewCertificates(ctx context.Context, claim operation.Claim, 
 	if err != nil {
 		return err
 	}
-	if len(running) != patroniMembers {
+	if len(running) < operation.MinPatroniMembers || len(running) > operation.MaxPatroniMembers {
 		return ErrUnplannable
 	}
 	for _, each := range running {
@@ -58,32 +58,7 @@ func (p *Planner) renewCertificates(ctx context.Context, claim operation.Claim, 
 	intent := postgres.ClusterIntent{InstallationID: claim.InstallationID, ClusterID: claim.ClusterID}
 	// seal records the next version of one certificate credential.
 	seal := func(reference *agentv1.SecretReference, member uuid.UUID, material enginepostgres.PatroniTLSMaterial) (*agentv1.SecretReference, error) {
-		id, err := uuid.Parse(reference.CredentialId)
-		if err != nil {
-			return nil, err
-		}
-		latest, err := p.config.Store.ReadLatestCredentialVersion(ctx, claim.InstallationID, claim.ClusterID, id)
-		if err != nil {
-			return nil, err
-		}
-		encoded, err := json.Marshal(material)
-		if err != nil {
-			return nil, err
-		}
-		expires, err := material.Expiry()
-		if err != nil {
-			return nil, err
-		}
-		credential := postgres.Credential{CredentialID: id, MemberID: member, Version: latest + 1, Purpose: reference.Purpose, ExpiresAt: expires}
-		credential.Envelope, err = p.config.Keyring.Seal(secret.Binding{
-			InstallationID: claim.InstallationID, OwnerType: "cluster", OwnerID: claim.ClusterID,
-			CredentialID: credential.CredentialID, Version: credential.Version,
-		}, encoded)
-		if err != nil {
-			return nil, err
-		}
-		intent.Credentials = append(intent.Credentials, credential)
-		return &agentv1.SecretReference{CredentialId: reference.CredentialId, Version: credential.Version, Purpose: reference.Purpose}, nil
+		return p.sealVersion(ctx, claim, &intent, reference, member, material)
 	}
 	stored := make([]*agentv1.EnsureContainer, len(running))
 	next := make([]*agentv1.EnsureContainer, len(running))
@@ -117,9 +92,8 @@ func (p *Planner) renewCertificates(ctx context.Context, claim operation.Claim, 
 					return err
 				}
 			case postgres.PatroniDCSTLSCredential:
-				// The DCS client certificate is one credential for the cluster.
 				if dcs == nil {
-					material, err := enginepostgres.IssuePatroniDCSMaterial(native.CA, pki.PatroniIdentity{InstallationID: claim.InstallationID, ClusterID: claim.ClusterID}, native.EtcdTrust, now, patroniLeafLifetime)
+					material, err := enginepostgres.IssuePatroniDCSMaterial(native.CA, pki.PatroniIdentity{InstallationID: claim.InstallationID, ClusterID: claim.ClusterID}, native.CA.CertificatePEM(), now, patroniLeafLifetime)
 					if err != nil {
 						return err
 					}
@@ -159,46 +133,12 @@ func (p *Planner) renewCertificates(ctx context.Context, claim operation.Claim, 
 		if err != nil {
 			return err
 		}
-		var previous []string
-		for index, each := range running {
-			var peers []string
-			for other := range running {
-				if other == index {
-					continue
-				}
-				// A renewal keeps the address and port that a readiness check reads.
-				check, err := p.patroniReadiness(claim, op, application, running[other], stored[other], "any", previous)
-				if err != nil {
-					return err
-				}
-				steps, peers = append(steps, check), append(peers, check.Command.StepId)
-			}
-			epoch := epochFor(claim, each.NodeID)
-			stop, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
-				ResourceId: each.ResourceID.String(),
-				Payload:    &agentv1.CommandInput_StopContainer{StopContainer: &agentv1.StopContainer{GracePeriod: durationpb.New(p.config.StopGrace)}},
-			}, agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED, peers, agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP)
-			if err != nil {
-				return err
-			}
-			renewed, err := recreate(index, []string{stop.Command.StepId})
-			if err != nil {
-				return err
-			}
-			start, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
-				ResourceId: each.ResourceID.String(),
-				Payload:    &agentv1.CommandInput_StartPatroniMember{StartPatroniMember: &agentv1.StartPatroniMember{Container: next[index]}},
-			}, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, []string{renewed.Command.StepId}, beforeExecution)
-			if err != nil {
-				return err
-			}
-			ready, err := p.patroniReadiness(claim, op, application, each, next[index], "any", []string{start.Command.StepId})
-			if err != nil {
-				return err
-			}
-			steps = append(steps, stop, renewed, start, ready)
-			previous = []string{ready.Command.StepId}
+		blocks, err := p.recreateBlocks(claim, op, application, running, stored, next)
+		if err != nil {
+			return err
 		}
+		steps = blocks
+		previous := []string{steps[len(steps)-1].Command.StepId}
 		// A final check of every member proves one writer after the last restart. The checks form one
 		// chain, so the route steps that follow come after every check on its node.
 		for index, each := range running {
@@ -209,6 +149,38 @@ func (p *Planner) renewCertificates(ctx context.Context, claim operation.Claim, 
 			steps, previous = append(steps, check), []string{check.Command.StepId}
 		}
 	}
+	// Each etcd service renders its leaf when its container is created, so each is replaced
+	// with a renewed leaf and the same volume. One at a time keeps two of three in quorum.
+	etcd, err := p.config.Store.ReadEtcdMembers(ctx, claim.InstallationID, claim.ClusterID)
+	if err != nil {
+		return err
+	}
+	var replaced []*agentv1.PlanStep
+	for _, each := range etcd {
+		container, err := p.config.Store.ReadEtcdContainer(ctx, claim.InstallationID, claim.ClusterID, each.ResourceID)
+		if err != nil {
+			return err
+		}
+		address, err := netip.ParseAddr(container.Etcd.Address)
+		if err != nil || len(container.Etcd.Credentials) != 1 {
+			return fmt.Errorf("%w: etcd service %s stores no address or leaf", ErrUnplannable, each.ResourceID)
+		}
+		material, err := enginepostgres.IssuePatroniMemberMaterial(native.CA, pki.PatroniIdentity{InstallationID: claim.InstallationID, ClusterID: claim.ClusterID, ResourceID: each.ResourceID}, address, now, patroniLeafLifetime)
+		if err != nil {
+			return err
+		}
+		reference, err := seal(container.Etcd.Credentials[0], each.ResourceID, material)
+		if err != nil {
+			return err
+		}
+		container.Etcd.Credentials = []*agentv1.SecretReference{reference}
+		steps, err := p.routeReplace(claim, op, each.NodeID, each.ResourceID, container, found.DesiredLifecycle != cluster.DesiredStopped)
+		if err != nil {
+			return err
+		}
+		replaced = append(replaced, steps...)
+	}
+	steps = append(steps, chainAfter(steps[len(steps)-1].Command.StepId, replaced)...)
 	// Each route presents its member's certificate, so each member's pooler and router are
 	// replaced with the renewed one, one member at a time. A running cluster checks each router.
 	if routed(running) {
@@ -222,27 +194,9 @@ func (p *Planner) renewCertificates(ctx context.Context, claim operation.Claim, 
 				return err
 			}
 		}
-		start := found.DesiredLifecycle != cluster.DesiredStopped
-		var tail []*agentv1.PlanStep
-		for index, each := range routes {
-			pooler, router := p.routeConfigs(routes, index, application)
-			for _, route := range []struct {
-				kind      string
-				container *agentv1.EnsureContainer
-			}{{"pooler", pooler}, {"router", router}} {
-				replaced, err := p.routeReplace(claim, op, each.node, routeID(each.resource, route.kind), route.container, start)
-				if err != nil {
-					return err
-				}
-				tail = append(tail, replaced...)
-			}
-			if start {
-				checks, err := p.routeCheckSteps(claim, op, routes[index:index+1], application, nil)
-				if err != nil {
-					return err
-				}
-				tail = append(tail, checks...)
-			}
+		tail, err := p.replaceRoutes(claim, op, routes, application, found.DesiredLifecycle != cluster.DesiredStopped)
+		if err != nil {
+			return err
 		}
 		steps = append(steps, chainAfter(steps[len(steps)-1].Command.StepId, tail)...)
 	}
@@ -251,4 +205,113 @@ func (p *Planner) renewCertificates(ctx context.Context, claim operation.Claim, 
 		return err
 	}
 	return p.config.Store.InstallRenewalPlan(ctx, claim, plan, intent)
+}
+
+// recreateBlocks recreates each member in turn while the others keep serving. The other
+// members prove readiness, then the member stops, is recreated with its next configuration,
+// restarts without initialization, and proves readiness. The blocks form one chain.
+func (p *Planner) recreateBlocks(claim operation.Claim, op operation.Operation, application postgres.Credential, running []member, stored, next []*agentv1.EnsureContainer) ([]*agentv1.PlanStep, error) {
+	var steps []*agentv1.PlanStep
+	var previous []string
+	for index, each := range running {
+		var peers []string
+		for other := range running {
+			if other == index {
+				continue
+			}
+			// A recreate keeps the address and port that a readiness check reads.
+			check, err := p.patroniReadiness(claim, op, application, running[other], stored[other], "any", previous)
+			if err != nil {
+				return nil, err
+			}
+			steps, peers = append(steps, check), append(peers, check.Command.StepId)
+		}
+		epoch := epochFor(claim, each.NodeID)
+		stop, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
+			ResourceId: each.ResourceID.String(),
+			Payload:    &agentv1.CommandInput_StopContainer{StopContainer: &agentv1.StopContainer{GracePeriod: durationpb.New(p.config.StopGrace)}},
+		}, agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED, peers, agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP)
+		if err != nil {
+			return nil, err
+		}
+		recreated, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
+			ResourceId: each.ResourceID.String(), Secrets: next[index].Postgres.Patroni.Credentials,
+			Payload: &agentv1.CommandInput_RecreatePatroniMember{RecreatePatroniMember: &agentv1.RecreatePatroniMember{Previous: stored[index], Next: next[index]}},
+		}, agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_RECREATED, []string{stop.Command.StepId}, beforeExecution)
+		if err != nil {
+			return nil, err
+		}
+		start, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
+			ResourceId: each.ResourceID.String(),
+			Payload:    &agentv1.CommandInput_StartPatroniMember{StartPatroniMember: &agentv1.StartPatroniMember{Container: next[index]}},
+		}, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, []string{recreated.Command.StepId}, beforeExecution)
+		if err != nil {
+			return nil, err
+		}
+		ready, err := p.patroniReadiness(claim, op, application, each, next[index], "any", []string{start.Command.StepId})
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, stop, recreated, start, ready)
+		previous = []string{ready.Command.StepId}
+	}
+	return steps, nil
+}
+
+// replaceRoutes replaces each member's pooler and router, one member at a time. With start,
+// each route starts and each router's routes are checked.
+func (p *Planner) replaceRoutes(claim operation.Claim, op operation.Operation, routes []routeMember, application postgres.Credential, start bool) ([]*agentv1.PlanStep, error) {
+	var tail []*agentv1.PlanStep
+	for index, each := range routes {
+		pooler, router := p.routeConfigs(routes, index, application)
+		for _, route := range []struct {
+			kind      string
+			container *agentv1.EnsureContainer
+		}{{"pooler", pooler}, {"router", router}} {
+			replaced, err := p.routeReplace(claim, op, each.node, routeID(each.resource, route.kind), route.container, start)
+			if err != nil {
+				return nil, err
+			}
+			tail = append(tail, replaced...)
+		}
+		if start {
+			checks, err := p.routeCheckSteps(claim, op, routes[index:index+1], application, nil)
+			if err != nil {
+				return nil, err
+			}
+			tail = append(tail, checks...)
+		}
+	}
+	return tail, nil
+}
+
+// sealVersion seals material as the next version of the referenced certificate credential,
+// adds it to intent, and returns the reference to that version.
+func (p *Planner) sealVersion(ctx context.Context, claim operation.Claim, intent *postgres.ClusterIntent, reference *agentv1.SecretReference, member uuid.UUID, material enginepostgres.PatroniTLSMaterial) (*agentv1.SecretReference, error) {
+	id, err := uuid.Parse(reference.CredentialId)
+	if err != nil {
+		return nil, err
+	}
+	latest, err := p.config.Store.ReadLatestCredentialVersion(ctx, claim.InstallationID, claim.ClusterID, id)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(material)
+	if err != nil {
+		return nil, err
+	}
+	expires, err := material.Expiry()
+	if err != nil {
+		return nil, err
+	}
+	credential := postgres.Credential{CredentialID: id, MemberID: member, Version: latest + 1, Purpose: reference.Purpose, ExpiresAt: expires}
+	credential.Envelope, err = p.config.Keyring.Seal(secret.Binding{
+		InstallationID: claim.InstallationID, OwnerType: "cluster", OwnerID: claim.ClusterID,
+		CredentialID: credential.CredentialID, Version: credential.Version,
+	}, encoded)
+	if err != nil {
+		return nil, err
+	}
+	intent.Credentials = append(intent.Credentials, credential)
+	return &agentv1.SecretReference{CredentialId: reference.CredentialId, Version: credential.Version, Purpose: reference.Purpose}, nil
 }

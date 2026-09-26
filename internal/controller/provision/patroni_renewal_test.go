@@ -59,8 +59,8 @@ func versions(container *agentv1.EnsureContainer) (member, dcs int64) {
 // finalRoles marks the three final checks with one writer unless writers says otherwise.
 func finalRoles(plan *agentv1.ExecutionPlan, writers int) map[string]string {
 	roles := map[string]string{}
-	prefix := operation.RenewalPrefix(plan)
-	for index, step := range plan.Steps[prefix-3 : prefix] {
+	prefix, members := operation.RenewalPrefix(plan), operation.LeadingChecks(plan.Steps)+1
+	for index, step := range plan.Steps[prefix-members : prefix] {
 		roles[step.Command.StepId] = "ready_replica"
 		if index < writers {
 			roles[step.Command.StepId] = "ready_primary"
@@ -87,10 +87,12 @@ func TestPatroniRenewalRollsMembers(t *testing.T) {
 		t.Fatalf("expiries with a close DCS certificate: %+v %v", expiries, err)
 	}
 	plan := renewPatroni(t, f)
-	// Member steps, then for each member a pooler and router replace (four steps each) and two route checks.
-	if operation.RenewalPrefix(plan) != 21 || len(plan.Steps) != 51 {
-		t.Fatalf("running renewal has %d steps, want 21 member steps and 30 route steps", len(plan.Steps))
+	// Member steps, then each etcd service replaced with a renewed leaf (four steps each), then
+	// for each member a pooler and router replace (four steps each) and two route checks.
+	if operation.RenewalPrefix(plan) != 21 || len(plan.Steps) != 63 {
+		t.Fatalf("running renewal has %d steps, want 21 member steps, 12 etcd steps, and 30 route steps", len(plan.Steps))
 	}
+	renewedEtcd(t, plan.Steps[21:33], true)
 	renewed := map[string]bool{}
 	for block := range 3 {
 		base := 6 * block
@@ -117,7 +119,7 @@ func TestPatroniRenewalRollsMembers(t *testing.T) {
 		t.Fatal("a repeated plan changed the renewal", err)
 	}
 	var renewedCredentials int
-	if err := f.pool.QueryRow(t.Context(), `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1 AND cluster_id=$2 AND version=2 AND expires_at>clock_timestamp()`, f.claim.InstallationID, f.claim.ClusterID).Scan(&renewedCredentials); err != nil || renewedCredentials != 4 {
+	if err := f.pool.QueryRow(t.Context(), `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1 AND cluster_id=$2 AND version=2 AND expires_at>clock_timestamp()`, f.claim.InstallationID, f.claim.ClusterID).Scan(&renewedCredentials); err != nil || renewedCredentials != 7 {
 		t.Fatalf("renewed credentials=%d %v", renewedCredentials, err)
 	}
 	roles := finalRoles(plan, 1)
@@ -208,10 +210,11 @@ func TestPatroniRenewalStoppedCluster(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := renewPatroni(t, f)
-	// A stopped cluster replaces each pooler and router without starting them.
-	if operation.RenewalPrefix(plan) != 3 || len(plan.Steps) != 21 {
-		t.Fatalf("stopped renewal has %d steps, want three recreates and 18 route steps", len(plan.Steps))
+	// A stopped cluster replaces each etcd service, pooler, and router without starting them.
+	if operation.RenewalPrefix(plan) != 3 || len(plan.Steps) != 30 {
+		t.Fatalf("stopped renewal has %d steps, want three recreates, nine etcd steps, and 18 route steps", len(plan.Steps))
 	}
+	renewedEtcd(t, plan.Steps[3:12], false)
 	// The recreates form one chain, so each node's route steps follow its own recreate.
 	for index, step := range plan.Steps[:3] {
 		var want []string
@@ -300,5 +303,34 @@ func TestPatroniRenewalPlanShape(t *testing.T) {
 		if err := operation.ValidatePlan(tampered, op); err == nil {
 			t.Errorf("%s: plan accepted", name)
 		}
+	}
+}
+
+// renewedEtcd checks that each etcd service is stopped, removed, and created again with a
+// renewed leaf on its own volume, one service at a time, and started only when running.
+func renewedEtcd(t *testing.T, steps []*agentv1.PlanStep, running bool) {
+	t.Helper()
+	size := 3
+	if running {
+		size = 4
+	}
+	seen := map[string]bool{}
+	for block := range 3 {
+		each := steps[size*block : size*block+size]
+		resource := each[0].Command.Input.ResourceId
+		ensure := each[2].Command.Input.GetEnsureContainer()
+		if seen[resource] || each[0].Command.Input.GetStopContainer() == nil || each[1].Command.Input.GetRemoveContainer() == nil ||
+			ensure.GetEtcd() == nil || len(ensure.Etcd.Credentials) != 1 || ensure.Etcd.Credentials[0].Version != 2 || ensure.VolumeId == "" {
+			t.Fatalf("etcd block %d does not replace one service with a renewed leaf", block)
+		}
+		for _, step := range each {
+			if step.Command.Input.ResourceId != resource || len(step.DependsOn) != 1 {
+				t.Fatalf("etcd block %d is not one chain on one service", block)
+			}
+		}
+		if running && each[3].Command.Input.GetStartContainer() == nil {
+			t.Fatalf("etcd block %d does not start the running service", block)
+		}
+		seen[resource] = true
 	}
 }

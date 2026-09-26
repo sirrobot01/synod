@@ -42,15 +42,6 @@ func (e *Executor) readiness(ctx context.Context, command *agentv1.Command, secr
 	if settings := p.PostgresTls; settings != nil {
 		endpoint.PostgresTLS = &engine.PostgresTLS{RootCAPEM: bytes.Clone(settings.RootCaPem), ServerName: settings.ServerName}
 	}
-	if check := p.PostgresReplication; check != nil {
-		endpoint.PostgresReplication = &engine.PostgresReplicationCheck{InstallationID: command.Epoch.InstallationId, ClusterID: command.Epoch.ClusterId, ResourceID: command.Input.ResourceId, MaxReplayLagBytes: check.MaxReplayLagBytes}
-		if check.MaxMessageAge != nil {
-			endpoint.PostgresReplication.MaxMessageAge = check.MaxMessageAge.AsDuration()
-		}
-		if check.Source != nil {
-			endpoint.PostgresReplication.Source = &engine.PostgresSource{Address: check.Source.Address, Port: check.Source.Port, ResourceID: check.Source.ResourceId}
-		}
-	}
 	if check := p.RedisReplication; check != nil {
 		endpoint.RedisReplication = &engine.RedisReplicationCheck{ExpectedRole: check.ExpectedRole}
 		if check.Upstream != nil {

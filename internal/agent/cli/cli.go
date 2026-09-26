@@ -39,14 +39,12 @@ type Failure struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// Run returns an exit status. Enrollment output contains public identity only.
-func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+// Command returns the agent command tree. Enrollment output contains public identity
+// only. Report writes its failures.
+func Command() *cobra.Command {
 	var installationID, nodeID, statePath, caPath string
 	var config enrollment.Config
-	root := &cobra.Command{Use: "synod-agent", Short: "Enroll and run a protected local agent", SilenceErrors: true, SilenceUsage: true, CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true}}
-	root.SetArgs(args)
-	root.SetOut(stdout)
-	root.SetErr(stderr)
+	root := &cobra.Command{Use: "agent", Short: "Enroll and run a protected local agent", SilenceErrors: true, SilenceUsage: true}
 	group := &cobra.Command{Use: "enroll", Short: "Create or recover agent enrollment"}
 	flags := group.PersistentFlags()
 	flags.StringVar(&installationID, "installation-id", "", "Assigned installation UUID (required)")
@@ -103,7 +101,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 				if err := state.Close(); err != nil {
 					return err
 				}
-				return json.NewEncoder(stdout).Encode(Identity{InstallationID: credentials.Identity.InstallationID, NodeID: credentials.Identity.NodeID, RequestID: credentials.RequestID, CertificateID: credentials.CertificateID, AcceptedAt: credentials.AcceptedAt, ExpiresAt: credentials.Certificate.Leaf.NotAfter})
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(Identity{InstallationID: credentials.Identity.InstallationID, NodeID: credentials.Identity.NodeID, RequestID: credentials.RequestID, CertificateID: credentials.CertificateID, AcceptedAt: credentials.AcceptedAt, ExpiresAt: credentials.Certificate.Leaf.NotAfter})
 			}}
 		group.AddCommand(command)
 	}
@@ -114,10 +112,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return err
 		}
-		if err := daemon.Run(cmd.Context(), config, testBootID, stderr); err != nil {
+		if err := daemon.Run(cmd.Context(), config, testBootID, cmd.ErrOrStderr()); err != nil {
 			return err
 		}
-		return json.NewEncoder(stderr).Encode(struct {
+		return json.NewEncoder(cmd.ErrOrStderr()).Encode(struct {
 			Event string `json:"event"`
 		}{Event: "agent_stopped"})
 	}}
@@ -129,22 +127,25 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return err
 		}
-		identity, err := daemon.Initialize(cmd.Context(), config, stderr)
+		identity, err := daemon.Initialize(cmd.Context(), config, cmd.ErrOrStderr())
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(stdout).Encode(identity)
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(identity)
 	}}
 	initialize.Flags().StringVar(&configPath, "config", "", "Private agent JSON configuration file (required)")
 	journalCommand.AddCommand(initialize)
-	root.AddCommand(run, journalCommand)
-	err := root.ExecuteContext(ctx)
+	root.AddCommand(joinCommand(), run, journalCommand)
+	return root
+}
+
+// Report writes the failure for err to stderr and returns the exit status.
+func Report(err error, stderr io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	failure := failureOf(err)
 	// Cobra parse errors can contain raw argument values. Emit only fixed text.
-	_ = json.NewEncoder(stderr).Encode(failure)
+	_ = json.NewEncoder(stderr).Encode(failureOf(err))
 	return 1
 }
 

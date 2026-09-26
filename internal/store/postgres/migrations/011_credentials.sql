@@ -17,7 +17,7 @@ CREATE TABLE cluster_credentials (
  -- Member TLS belongs to one allocated member. Other purposes are cluster-wide.
  member_id uuid,
  purpose text NOT NULL CHECK (purpose IN ('superuser','application','replication',
-  'patroni_rewind','patroni_dcs','patroni_rest','patroni_member_tls','patroni_dcs_tls')),
+  'patroni_rewind','patroni_rest','patroni_member_tls','patroni_dcs_tls')),
  CHECK ((purpose='patroni_member_tls' AND member_id IS NOT NULL AND member_id<>'00000000-0000-0000-0000-000000000000')
   OR (purpose<>'patroni_member_tls' AND member_id IS NULL)),
  -- SQL and native passwords name their account. TLS material has no role name.
@@ -25,7 +25,6 @@ CREATE TABLE cluster_credentials (
  CHECK ((purpose IN ('superuser','application','replication') AND role_name ~ '^[a-z][a-z0-9_]{0,62}$')
   OR (purpose='patroni_rewind' AND role_name='synod_rewind')
   OR (purpose='patroni_rest' AND role_name='synod_patroni')
-  OR (purpose='patroni_dcs' AND role_name='synod_patroni_' || cluster_id::text)
   OR (purpose IN ('patroni_member_tls','patroni_dcs_tls') AND role_name='')),
  -- The wrapping key that sealed it. Old keys are retained for recovery.
  key_id uuid NOT NULL,

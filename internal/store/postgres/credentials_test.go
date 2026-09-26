@@ -271,7 +271,6 @@ func TestNativeCredentialIdentityAndIsolation(t *testing.T) {
 		sealed(t, ring, host, claim.ClusterID, PatroniDCSTLSCredential, "", "dcs-leaf"),
 		sealed(t, ring, host, claim.ClusterID, PatroniRewindCredential, "synod_rewind", "rewind"),
 		sealed(t, ring, host, claim.ClusterID, PatroniRESTCredential, "synod_patroni", "rest"),
-		sealed(t, ring, host, claim.ClusterID, PatroniDCSCredential, "synod_patroni_"+claim.ClusterID.String(), "dcs"),
 	}
 	credentials[0].MemberID, credentials[1].MemberID = members[0], members[1]
 	intent := ClusterIntent{InstallationID: host.id, ClusterID: claim.ClusterID, Credentials: credentials}
@@ -375,7 +374,7 @@ func TestNativeCredentialIdentityAndIsolation(t *testing.T) {
 	if err := host.store.RecordClusterIntent(t.Context(), ClusterIntent{InstallationID: host.id, ClusterID: other.ClusterID, Credentials: []Credential{foreign}}); err == nil {
 		t.Fatal("member allocated to another cluster accepted")
 	}
-	if total := host.count(t, `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1`, host.id); total != 7 {
-		t.Fatalf("rows=%d, want 7", total)
+	if total := host.count(t, `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1`, host.id); total != 6 {
+		t.Fatalf("rows=%d, want 6", total)
 	}
 }

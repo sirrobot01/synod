@@ -28,7 +28,7 @@ func TestArgumentErrorsNeverEchoInputs(t *testing.T) {
 		{"enroll", "retry", secret},
 	} {
 		var stdout, stderr bytes.Buffer
-		if Run(t.Context(), args, &stdout, &stderr) != 1 || stdout.Len() != 0 {
+		if run(t, args, &stdout, &stderr) != 1 || stdout.Len() != 0 {
 			t.Fatalf("unexpected output or status")
 		}
 		var failure Failure
@@ -84,7 +84,7 @@ func TestRetryCannotCreateAndBootstrapCannotOverwrite(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	args := []string{"enroll", "retry", "--installation-id", uuid.NewString(), "--node-id", uuid.NewString(), "--state-dir", dir}
 	var out, diagnostics bytes.Buffer
-	if Run(t.Context(), args, &out, &diagnostics) != 1 {
+	if run(t, args, &out, &diagnostics) != 1 {
 		t.Fatal("retry created state")
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -98,7 +98,7 @@ func TestRetryCannotCreateAndBootstrapCannotOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	args[1] = "bootstrap"
-	if Run(t.Context(), args, &out, &diagnostics) != 1 {
+	if run(t, args, &out, &diagnostics) != 1 {
 		t.Fatal("bootstrap accepted existing directory")
 	}
 	data, err := os.ReadFile(marker)
@@ -120,11 +120,20 @@ func TestCommandRejectsUntrustedHTTPS(t *testing.T) {
 	}
 	args := []string{"enroll", "bootstrap", "--installation-id", uuid.NewString(), "--node-id", uuid.NewString(), "--state-dir", filepath.Join(parent, "state"), "--token-file", tokenPath, "--api-url", server.URL, "--attempts", "1"}
 	var stdout, stderr bytes.Buffer
-	if Run(t.Context(), args, &stdout, &stderr) != 1 || calls.Load() != 0 || stdout.Len() != 0 {
+	if run(t, args, &stdout, &stderr) != 1 || calls.Load() != 0 || stdout.Len() != 0 {
 		t.Fatal("untrusted HTTPS accepted")
 	}
 	var failure Failure
 	if json.Unmarshal(stderr.Bytes(), &failure) != nil || failure.Code != "transport_failed" || bytes.Contains(stderr.Bytes(), []byte(secret)) {
 		t.Fatal("unsafe transport error")
 	}
+}
+
+func run(t *testing.T, args []string, stdout, stderr io.Writer) int {
+	t.Helper()
+	command := Command()
+	command.SetArgs(args)
+	command.SetOut(stdout)
+	command.SetErr(stderr)
+	return Report(command.ExecuteContext(t.Context()), stderr)
 }

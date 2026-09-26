@@ -44,12 +44,12 @@ func settleMemberRebuild(ctx context.Context, tx pgx.Tx, claim operation.Claim, 
 	if int(plan.Version) != op.PlanVersion {
 		return operation.ErrCommandConflict
 	}
-	// fresh is the index of the member volume step. A 6-step resume has no removal.
-	// Route steps of a routed cluster follow the member steps.
-	prefix := operation.MemberRebuildPrefix(&plan)
+	// peers checks every other member. fresh is the index of the member volume step. A resume
+	// has no removal. Route steps of a routed cluster follow the member steps.
+	prefix, peers := operation.MemberRebuildPrefix(&plan), operation.LeadingChecks(plan.Steps)
 	fresh := prefix - 4
-	old, created := plan.Steps[2].Command, plan.Steps[fresh+1].Command
-	resume := prefix == 6
+	old, created := plan.Steps[peers].Command, plan.Steps[fresh+1].Command
+	resume := prefix-peers == 4
 	if resume {
 		old = created
 	}
@@ -103,7 +103,8 @@ func settleMemberRebuild(ctx context.Context, tx pgx.Tx, claim operation.Claim, 
 			return err
 		}
 		// Patroni elects its primary. A rebuild that proves no writer, or two, is not running.
-		if elected != 3 || primaries != 1 {
+		// The peer checks and the fresh member's check prove every member once.
+		if elected != peers+1 || primaries != 1 {
 			return operation.ErrPostconditionUnproved
 		}
 	} else if _, _, err := checkPlanCompletions(ctx, tx, op, &agentv1.ExecutionPlan{Version: plan.Version, Steps: plan.Steps[fresh-3 : fresh]}); err != nil {
@@ -161,7 +162,7 @@ func settleMemberResume(ctx context.Context, tx pgx.Tx, claim operation.Claim, o
 	if err != nil {
 		return err
 	}
-	if elected != 3 || primaries != 1 {
+	if elected != operation.LeadingChecks(plan.Steps)+1 || primaries != 1 {
 		return operation.ErrPostconditionUnproved
 	}
 	if _, err := tx.Exec(ctx, `UPDATE cluster_members SET state='active',updated_at=clock_timestamp() WHERE installation_id=$1 AND member_id=$2`, claim.InstallationID, member); err != nil {

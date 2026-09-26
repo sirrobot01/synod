@@ -3,11 +3,9 @@ package executor
 import (
 	"errors"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync/atomic"
 	"testing"
 
 	"github.com/containerd/errdefs"
@@ -17,7 +15,6 @@ import (
 
 	"github.com/sirrobot01/synod/internal/agent/capacity"
 	"github.com/sirrobot01/synod/internal/agent/journal"
-	"github.com/sirrobot01/synod/internal/operation"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
@@ -230,70 +227,6 @@ func TestPrecheckRunsWhenMemoryCannotBeMeasured(t *testing.T) {
 	// The pool floor still refuses.
 	if err := guard(t, host, 1<<62).precheck(containerInput(0)); !errors.Is(err, capacity.ErrCapacityUnavailable) {
 		t.Fatalf("err=%v, want the pool floor to still apply", err)
-	}
-}
-
-func TestPrecheckReplicaCloneRequiresStorageHeadroom(t *testing.T) {
-	command := &agentv1.Command{Input: &agentv1.CommandInput{Payload: &agentv1.CommandInput_ClonePostgresReplica{ClonePostgresReplica: &agentv1.ClonePostgresReplica{RequiredFreeBytes: 1 << 30}}}}
-	host := pool(t, 1)
-	if err := guard(t, host, 1<<62).precheck(command); !errors.Is(err, capacity.ErrCapacityUnavailable) {
-		t.Fatalf("clone ignored storage floor: %v", err)
-	}
-	if err := guard(t, capacity.Host{}, 0).precheck(command); !errors.Is(err, capacity.ErrCapacityUnavailable) {
-		t.Fatalf("clone ignored missing pool: %v", err)
-	}
-}
-
-func TestCloneSpacePreservesTheOperatorFloor(t *testing.T) {
-	host := pool(t, 1)
-	space, err := host.Free()
-	if err != nil || space.DiskBytes < 1<<30 {
-		t.Fatalf("fixture lacks space: %+v %v", space, err)
-	}
-	command := &agentv1.Command{Input: &agentv1.CommandInput{Payload: &agentv1.CommandInput_ClonePostgresReplica{ClonePostgresReplica: &agentv1.ClonePostgresReplica{RequiredFreeBytes: space.DiskBytes / 2}}}}
-	if err := guard(t, host, 0).precheck(command); err != nil {
-		t.Fatalf("available copy space refused: %v", err)
-	}
-	if err := guard(t, host, space.DiskBytes/4*3).precheck(command); !errors.Is(err, capacity.ErrCapacityUnavailable) {
-		t.Fatalf("copy consumed floor: %v", err)
-	}
-	command.Input.GetClonePostgresReplica().RequiredFreeBytes = 1 << 50
-	if err := guard(t, host, 0).precheck(command); !errors.Is(err, capacity.ErrCapacityUnavailable) {
-		t.Fatalf("oversized copy passed: %v", err)
-	}
-	if err := guard(t, host, -1<<63).precheck(command); !errors.Is(err, capacity.ErrCapacityUnavailable) {
-		t.Fatalf("negative floor bypassed capacity: %v", err)
-	}
-}
-
-func TestCloneCapacityRefusalPrecedesDockerExecution(t *testing.T) {
-	var requests atomic.Int64
-	f := newFixture(t, func(request *http.Request, next http.RoundTripper) (*http.Response, error) {
-		requests.Add(1)
-		return next.RoundTrip(request)
-	})
-	ctx, _ := localSession(t, f.e)
-	activateLocal(t, f.e, ctx, f.epoch)
-	command := volumeCommand(t, f.epoch)
-	app, repl, admin := uuid.NewString(), uuid.NewString(), uuid.NewString()
-	command.Input.Secrets = []*agentv1.SecretReference{{CredentialId: app, Version: 1, Purpose: "application"}, {CredentialId: repl, Version: 1, Purpose: "replication"}}
-	command.Input.Payload = &agentv1.CommandInput_ClonePostgresReplica{ClonePostgresReplica: &agentv1.ClonePostgresReplica{RequiredFreeBytes: 1 << 50, Postgres: &agentv1.PostgresContainerConfig{Port: 5432, SuperuserCredentialId: admin, SuperuserCredentialVersion: 1, ApplicationCredentialId: app, ApplicationCredentialVersion: 1, ReplicationCredentialId: repl, ReplicationCredentialVersion: 1, ReplicaSource: &agentv1.PostgresReplicaSource{Address: "127.0.0.1", Port: 5432, ResourceId: uuid.NewString()}}}}
-	hash, err := operation.CommandHash(command)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command.InputHash = hash[:]
-	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}}); err != nil {
-		t.Fatal(err)
-	}
-	before := requests.Load()
-	f.e.execute(t.Context(), job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]})
-	record, err := f.e.journal.Get(command.CommandId)
-	if err != nil || record.Result == nil || record.Result.State != "failed" || record.Result.FailureCode != "capacity_unavailable" || len(record.Result.Effects) != 0 {
-		t.Fatalf("copy refusal did not settle before effects: %+v %v", record.Result, err)
-	}
-	if requests.Load() != before {
-		t.Fatal("capacity refusal contacted Docker")
 	}
 }
 

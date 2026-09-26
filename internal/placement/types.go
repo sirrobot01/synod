@@ -139,20 +139,22 @@ type Port struct {
 
 // Resource is one unit to place with the requirements a node must meet.
 type Resource struct {
-	ID               uuid.UUID         `json:"id"`
-	ReservationID    uuid.UUID         `json:"reservation_id"`
-	OwnedResourceIDs []uuid.UUID       `json:"owned_resource_ids"`
-	Kind             string            `json:"kind"`
-	Role             string            `json:"role"`
-	Engine           string            `json:"engine"`
-	Version          string            `json:"version"`
-	Architecture     string            `json:"architecture"`
-	RuntimeVersion   string            `json:"runtime_version"`
-	StorageID        string            `json:"storage_id"`
-	NodeAffinity     uuid.UUID         `json:"node_affinity"`
-	Labels           map[string]string `json:"labels"`
-	Budgets          Budgets           `json:"budgets"`
-	Ports            []Port            `json:"ports"`
+	ID               uuid.UUID   `json:"id"`
+	ReservationID    uuid.UUID   `json:"reservation_id"`
+	OwnedResourceIDs []uuid.UUID `json:"owned_resource_ids"`
+	Kind             string      `json:"kind"`
+	Role             string      `json:"role"`
+	Engine           string      `json:"engine"`
+	Version          string      `json:"version"`
+	Architecture     string      `json:"architecture"`
+	RuntimeVersion   string      `json:"runtime_version"`
+	StorageID        string      `json:"storage_id"`
+	NodeAffinity     uuid.UUID   `json:"node_affinity"`
+	// Colocate names another resource of the same request. Both resources go to one node.
+	Colocate uuid.UUID         `json:"colocate,omitzero"`
+	Labels   map[string]string `json:"labels"`
+	Budgets  Budgets           `json:"budgets"`
+	Ports    []Port            `json:"ports"`
 }
 
 // Group names resources that must spread across a failure domain.

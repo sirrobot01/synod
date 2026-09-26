@@ -34,9 +34,7 @@ func (s *Store) ReadScaleRetryPlan(ctx context.Context, claim operation.Claim) (
  JOIN history h ON h.retry_of=p.id AND p.desired_revision<h.desired_revision
  WHERE p.installation_id=$2 AND p.cluster_id=$3
  ) SELECT id,desired_revision,kind,status,plan_bytes FROM history
- WHERE plan_bytes IS NOT NULL AND (kind<>'cluster.rebuild_replica' OR EXISTS (
- SELECT 1 FROM cluster_members m WHERE m.installation_id=$2 AND m.cluster_id=$3 AND m.created_operation_id=history.id AND m.role='replica' AND m.removed_at IS NULL
- )) ORDER BY desired_revision DESC LIMIT 1`,
+ WHERE plan_bytes IS NOT NULL ORDER BY desired_revision DESC LIMIT 1`,
 		claim.OperationID, claim.InstallationID, claim.ClusterID).
 		Scan(&prior.ID, &prior.DesiredRevision, &prior.Kind, &prior.Status, &encoded)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -49,7 +47,7 @@ func (s *Store) ReadScaleRetryPlan(ctx context.Context, claim operation.Claim) (
 		return nil, nil, ErrExecutionStateTooLarge
 	}
 	plan := new(agentv1.ExecutionPlan)
-	if (prior.Kind != "cluster.scale" && prior.Kind != "cluster.rebuild_replica") || (prior.Status != operation.Failed && prior.Status != operation.Cancelled) {
+	if prior.Kind != "cluster.scale" || (prior.Status != operation.Failed && prior.Status != operation.Cancelled) {
 		return nil, nil, operation.ErrCommandConflict
 	}
 	if err := proto.Unmarshal(encoded, plan); err != nil {

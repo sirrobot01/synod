@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import ClusterActions from "./ClusterActions.svelte";
 import globalCSS from "../app.css?raw";
-import { api, Failure, type ActionPlan, type Admission, type Cluster, type ClusterMember, type ScaleDownPlan, type PostgresRecoveryPlan } from "./api";
+import { api, Failure, type ActionPlan, type Admission, type Cluster, type ClusterMember, type ScaleDownPlan, type SetupRecoveryPlan } from "./api";
 
 vi.mock("./api", async () => {
   const original = await vi.importActual<typeof import("./api")>("./api");
-  return { ...original, api: { ...original.api, planDelete: vi.fn(), actOnCluster: vi.fn(), planScaleDown: vi.fn(), scaleCluster: vi.fn(), planPostgresRecovery: vi.fn() } };
+  return { ...original, api: { ...original.api, planDelete: vi.fn(), actOnCluster: vi.fn(), planScaleDown: vi.fn(), scaleCluster: vi.fn(), planSetupRecovery: vi.fn() } };
 });
 const cluster: Cluster = {
   installation_id: "99999999-9999-4999-8999-999999999999", execution_epoch: 0, created_at: "2026-09-21T09:00:00Z", deleted_at: null,
@@ -29,7 +29,7 @@ beforeEach(() => {
   vi.mocked(api.planDelete).mockReset().mockResolvedValue(structuredClone(plan));
   vi.mocked(api.actOnCluster).mockReset().mockResolvedValue(admission);
   vi.mocked(api.planScaleDown).mockReset();
-  vi.mocked(api.planPostgresRecovery).mockReset();
+  vi.mocked(api.planSetupRecovery).mockReset();
   vi.mocked(api.scaleCluster).mockReset().mockResolvedValue(admission);
   props.onOpenOperation.mockReset();
 });
@@ -453,65 +453,49 @@ describe("cluster lifecycle actions", () => {
 });
 
 
-describe("PostgreSQL replica and recovery controls", () => {
+describe("PostgreSQL recovery controls", () => {
   const primary: ClusterMember = { id: "88888888-8888-4888-8888-888888888888", role: "primary", state: "active" };
-  const replica: ClusterMember = { id: "99999999-9999-4999-8999-999999999999", role: "replica", state: "residual" };
-  const replicated = { ...props, cluster: { ...cluster, desired_replicas: 1 }, members: [primary, replica] };
-  const actions = [
-    { button: "Remove failed replica…", confirm: "Confirm failed replica removal", action: "scale_down_failed", preview: "scale_down_failed" },
-    { button: "Rebuild replica…", confirm: "Confirm replica rebuild", action: "rebuild-replica", preview: "rebuild_replica" },
-    { button: "Recover setup…", confirm: "Confirm setup recovery", action: "recover-setup", preview: "recover_setup" },
-  ] as const;
+  const recovery = { ...props, members: [primary] };
 
-  it("adds a PostgreSQL replica and discloses synchronous commit waits", async () => {
-    render(ClusterActions, { ...props, cluster: { ...cluster, spec: { ...cluster.spec, engine: "postgres", redis: null, postgresql: { version: "17.11", topology: "standalone", replication_policy: "synchronous" } } }, members: [primary] });
-    expect(screen.getByText(/Synchronous commits wait/)).toBeTruthy();
-    await fireEvent.click(screen.getByRole("button", { name: "Add replica" }));
-    await screen.findByRole("link", { name: /Open operation/ });
-    expect(api.scaleCluster).toHaveBeenCalledWith(cluster.id, 1, 7, expect.any(String), undefined);
+  it("offers no replica controls for standalone PostgreSQL", () => {
+    render(ClusterActions, recovery);
+    expect(screen.queryByRole("button", { name: "Add replica" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove replica…" })).toBeNull();
+    expect(screen.getByText(/Use the patroni topology for replicas/)).toBeTruthy();
   });
 
-  it.each(actions)("reviews and restores the exact $action request after a lost reply", async (entry) => {
-    const review: PostgresRecoveryPlan = { ...plan, action: entry.preview, member_id: entry.action === "recover-setup" ? primary.id : replica.id,
+  it("reviews and restores the exact recover-setup request after a lost reply", async () => {
+    const review: SetupRecoveryPlan = { ...plan, action: "recover_setup", member_id: primary.id,
       resource_id: "55555555-5555-4555-8555-555555555555", retained_volumes: [plan.retained_volumes[0]!], expected_revision: 12,
-      downtime: "Verify native failure. Keep the old volume. Commits can wait." };
-    vi.mocked(api.planPostgresRecovery).mockResolvedValue(review);
-    const mutation = entry.action === "scale_down_failed" ? vi.mocked(api.scaleCluster) : vi.mocked(api.actOnCluster);
+      downtime: "Verify native failure. Keep the old volume." };
+    vi.mocked(api.planSetupRecovery).mockResolvedValue(review);
+    const mutation = vi.mocked(api.actOnCluster);
     mutation.mockRejectedValueOnce(new TypeError("lost reply")).mockResolvedValue(admission);
-    const selected = entry.action === "recover-setup" ? { ...props, members: [primary] } : replicated;
-    const view = render(ClusterActions, selected);
-    await fireEvent.click(screen.getByRole("button", { name: entry.button }));
+    const view = render(ClusterActions, recovery);
+    await fireEvent.click(screen.getByRole("button", { name: "Recover setup…" }));
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByText(review.resource_id);
     expect(within(dialog).getByText(review.member_id)).toBeTruthy();
     expect(within(dialog).getByText(review.retained_volumes[0]!)).toBeTruthy();
     expect(within(dialog).getByText(review.downtime)).toBeTruthy();
-    expect((within(dialog).getByRole("button", { name: entry.confirm }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(dialog).getByRole("button", { name: "Confirm setup recovery" }) as HTMLButtonElement).disabled).toBe(true);
     await fireEvent.input(within(dialog).getByLabelText("Cluster name confirmation"), { target: { value: "pg-core" } });
-    await fireEvent.click(within(dialog).getByRole("button", { name: entry.confirm }));
+    await fireEvent.click(within(dialog).getByRole("button", { name: "Confirm setup recovery" }));
     await waitFor(() => expect(mutation).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByText(/Outcome uncertain/)).toBeTruthy());
     const first = mutation.mock.calls[0];
-    expect(first).toEqual([cluster.id, entry.action === "scale_down_failed" ? 0 : entry.action, 12, expect.any(String), { plan_token: review.plan_token, confirm: true, data_disposition: "retain" }]);
+    expect(first).toEqual([cluster.id, "recover-setup", 12, expect.any(String), { plan_token: review.plan_token, confirm: true, data_disposition: "retain" }]);
     const saved = JSON.parse(sessionStorage.getItem(storageKey)!);
     expect(saved.plan).toEqual(review);
     view.unmount();
     // An accepted request can be replayed after its preview expires.
     saved.plan.expires_at = "2020-09-21T10:00:00Z";
     sessionStorage.setItem(storageKey, JSON.stringify(saved));
-    render(ClusterActions, selected);
+    render(ClusterActions, recovery);
     await fireEvent.click(await screen.findByRole("button", { name: "Retry same request" }));
     await screen.findByRole("link", { name: /Open operation/ });
     expect(mutation.mock.calls[1]).toEqual(first);
-    expect(api.planPostgresRecovery).toHaveBeenCalledExactlyOnceWith(cluster.id, entry.preview);
-  });
-
-  it("blocks new replica changes during replacement membership", async () => {
-    render(ClusterActions, { ...replicated, members: [primary, replica, { ...replica, id: plan.plan_token, state: "pending" }] });
-    for (const name of ["Retry replica add", "Remove replica…", "Remove failed replica…", "Rebuild replica…", "Recover setup…"]) {
-      expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
-    }
-    expect(screen.getByText(/Replacement membership is still present/)).toBeTruthy();
+    expect(api.planSetupRecovery).toHaveBeenCalledExactlyOnceWith(cluster.id);
   });
 
   it.each(["stopped", "replicas requested"])("disables setup recovery when %s", (reason) => {
@@ -522,17 +506,16 @@ describe("PostgreSQL replica and recovery controls", () => {
   it("does not offer PostgreSQL recovery for an unsupported version", () => {
     render(ClusterActions, { ...props, cluster: { ...cluster, spec: { ...cluster.spec, engine: "postgres", redis: null, postgresql: { version: "16.13", topology: "standalone" } } }, members: [primary] });
     expect(screen.queryByRole("button", { name: "Recover setup…" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Rebuild replica…" })).toBeNull();
   });
 
   it.each(["resource", "member", "action", "volumes"])("blocks a saved recovery with invalid %s", async (field) => {
-    const review = { ...plan, action: "rebuild_replica", member_id: replica.id, resource_id: primary.id, retained_volumes: [plan.retained_volumes[0]!] };
+    const review = { ...plan, action: "recover_setup", member_id: primary.id, resource_id: "55555555-5555-4555-8555-555555555555", retained_volumes: [plan.retained_volumes[0]!] };
     if (field === "resource") review.resource_id = "invalid";
     if (field === "member") review.member_id = "00000000-0000-0000-0000-000000000000";
-    if (field === "action") review.action = "recover_setup";
+    if (field === "action") review.action = "delete";
     if (field === "volumes") review.retained_volumes = [];
-    sessionStorage.setItem(storageKey, JSON.stringify({ version: 1, actorID: props.actorID, targetID: cluster.id, targetName: "pg-core", action: "rebuild-replica", expectedRevision: 7, key: "rebuild-key", dispatchID: primary.id, plan: review, confirmation: { plan_token: plan.plan_token, confirm: true, data_disposition: "retain" } }));
-    render(ClusterActions, replicated);
+    sessionStorage.setItem(storageKey, JSON.stringify({ version: 1, actorID: props.actorID, targetID: cluster.id, targetName: "pg-core", action: "recover-setup", expectedRevision: 7, key: "recovery-key", dispatchID: primary.id, plan: review, confirmation: { plan_token: plan.plan_token, confirm: true, data_disposition: "retain" } }));
+    render(ClusterActions, recovery);
     await screen.findAllByText("lifecycle_storage_unavailable");
     expect(screen.queryByRole("button", { name: "Retry same request" })).toBeNull();
     expect(api.actOnCluster).not.toHaveBeenCalled();

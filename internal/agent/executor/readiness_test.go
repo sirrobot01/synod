@@ -148,15 +148,3 @@ func TestReadinessPropagatesPostgresNativeRole(t *testing.T) {
 		}
 	}
 }
-
-func TestReadinessPropagatesPostgresReplicationIdentity(t *testing.T) {
-	capture := &readinessCapture{}
-	executor := &Executor{options: Options{Probers: map[string]engine.Prober{"postgres": capture}}}
-	command := &agentv1.Command{Epoch: &agentv1.Epoch{InstallationId: uuid.NewString(), ClusterId: uuid.NewString()}, CommandId: uuid.NewString(), DesiredRevision: 125, Input: &agentv1.CommandInput{ResourceId: uuid.NewString(), Timeout: durationpb.New(time.Second), Secrets: []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"}}, Payload: &agentv1.CommandInput_CheckReadiness{CheckReadiness: &agentv1.CheckReadiness{Engine: "postgres", PostgresRole: "replica", Address: "127.0.0.1", Port: 5432, Database: "postgres", Role: "synod_admin", PostgresReplication: &agentv1.PostgresReplicationCheck{Source: &agentv1.PostgresReplicaSource{Address: "192.0.2.1", Port: 15432, ResourceId: uuid.NewString()}, MaxReplayLagBytes: 16 << 20, MaxMessageAge: durationpb.New(60 * time.Second)}}}}}
-	result, err := executor.readiness(t.Context(), command, runtime.Secrets{"superuser": []byte("native-admin"), "application": []byte("unused-application")})
-	got := capture.endpoint.PostgresReplication
-	expected := command.Input.GetCheckReadiness().PostgresReplication
-	if err != nil || len(result.Effects) != 1 || got == nil || got.InstallationID != command.Epoch.InstallationId || got.ClusterID != command.Epoch.ClusterId || got.ResourceID != command.Input.ResourceId || got.Source == nil || got.Source.Address != expected.Source.Address || got.Source.Port != expected.Source.Port || got.Source.ResourceID != expected.Source.ResourceId || got.MaxReplayLagBytes != expected.MaxReplayLagBytes || got.MaxMessageAge != 60*time.Second || string(capture.password) != "native-admin" {
-		t.Fatalf("lost native replication contract: %+v %v", got, err)
-	}
-}

@@ -36,7 +36,7 @@ func (p *Planner) switchover(ctx context.Context, claim operation.Claim, op oper
 	if err != nil {
 		return err
 	}
-	if len(running) != patroniMembers {
+	if len(running) < operation.MinPatroniMembers || len(running) > operation.MaxPatroniMembers {
 		return ErrUnplannable
 	}
 	candidate := -1

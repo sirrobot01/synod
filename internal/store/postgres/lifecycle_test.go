@@ -223,7 +223,7 @@ func (h *placementHost) scale(t *testing.T, clusterID uuid.UUID, replicas int, e
 // A scale moves the replica count and leaves the lifecycle where it is.
 func TestScaleMovesTheReplicaCountOnly(t *testing.T) {
 	host := placementFixture(t)
-	claim := host.claimCluster(t, "cache")
+	claim := host.claimRedis(t, "cache")
 	host.finish(t, claim.OperationID)
 	admitted, err := host.scale(t, claim.ClusterID, 1, 1)
 	if err != nil {
@@ -248,7 +248,7 @@ func TestScaleMovesTheReplicaCountOnly(t *testing.T) {
 // A scale acts on a running cluster, and it must ask for more than the cluster has.
 func TestScaleRefusesWhatItCannotCarryOut(t *testing.T) {
 	host := placementFixture(t)
-	claim := host.claimCluster(t, "cache")
+	claim := host.claimRedis(t, "cache")
 	host.finish(t, claim.OperationID)
 
 	// The same count is not work.

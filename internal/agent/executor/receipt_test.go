@@ -71,7 +71,7 @@ func TestRealPostgresReceiptReplaysAfterLostCommitReply(t *testing.T) {
 	if err := store.InitializeGeneration(t.Context(), installation, generation); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := store.AcquireClaim(t.Context(), postgres.ClaimRequest{ClaimID: uuid.New(), InstallationID: installation, OperationID: admission.OperationID, RecoveryGeneration: generation, OwnerID: "task044", TTL: time.Minute, CoordinationKey: "/task044/leader", CoordinationLease: 1, CoordinationRevision: 1})
+	claim, err := store.AcquireClaim(t.Context(), postgres.ClaimRequest{ClaimID: uuid.New(), InstallationID: installation, OperationID: admission.OperationID, RecoveryGeneration: generation, OwnerID: "task044", TTL: time.Minute, LeaseID: 1, LeaseRevision: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

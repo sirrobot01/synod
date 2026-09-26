@@ -1291,7 +1291,7 @@
     "/v1/clusters/{id}/action-plans": {
       "post": {
         "operationId": "planClusterAction",
-        "description": "Preview retained-data deletion, replica removal, PostgreSQL setup recovery, replica rebuild, or Patroni member rebuild. The preview binds the actor, target, and revision for five minutes. Recovery and rebuild name the existing member, instance resource, and retained volume. A member rebuild names the member in member_id. The agent checks live failure before it removes anything.",
+        "description": "Preview retained-data deletion, Redis replica removal, PostgreSQL setup recovery, or Patroni member rebuild. The preview binds the actor, target, and revision for five minutes. Recovery and rebuild name the existing member, instance resource, and retained volume. A member rebuild names the member in member_id. The agent checks live failure before it removes anything.",
         "security": [
           {
             "adminBearer": []
@@ -2931,9 +2931,7 @@
             "enum": [
               "delete",
               "scale_down",
-              "scale_down_failed",
               "recover_setup",
-              "rebuild_replica",
               "rebuild_member"
             ]
           },
@@ -3483,9 +3481,7 @@
             "enum": [
               "delete",
               "scale_down",
-              "scale_down_failed",
               "recover_setup",
-              "rebuild_replica",
               "rebuild_member"
             ]
           },

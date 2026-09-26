@@ -2,18 +2,30 @@ package operation
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
-func TestPatroniContainerCommandBindings(t *testing.T) {
+// patroniBaseCommand is the standalone fixture plus the replication credential only Patroni binds.
+func patroniBaseCommand() *agentv1.Command {
 	command := postgresContainerCommand()
+	config := command.Input.GetEnsureContainer().Postgres
+	config.ReplicationCredentialId, config.ReplicationCredentialVersion = uuid.NewString(), 4
+	command.Input.Secrets = append(command.Input.Secrets, &agentv1.SecretReference{CredentialId: config.ReplicationCredentialId, Version: 4, Purpose: "replication"})
+	return command
+}
+
+func TestPatroniContainerCommandBindings(t *testing.T) {
+	command := patroniBaseCommand()
 	p := command.Input.GetEnsureContainer()
 	p.SecretEnv = nil
-	for _, purpose := range []string{"patroni_rewind", "patroni_dcs", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
+	for _, purpose := range []string{"patroni_rewind", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
 		command.Input.Secrets = append(command.Input.Secrets, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: purpose})
 	}
 	p.Postgres.Patroni = &agentv1.PatroniContainerConfig{RequiredFreeBytes: 1 << 30, Address: "192.0.2.10", RestPort: 8008, DcsEndpoints: []string{"192.0.2.20:2379"}, PeerNetworks: []string{"192.0.2.0/24"}, ClientNetworks: []string{"198.51.100.0/24"}, ProvisionId: uuid.NewString(), AllowInitialization: true}
@@ -33,26 +45,23 @@ func TestPatroniContainerCommandBindings(t *testing.T) {
 	for name, change := range map[string]func(*agentv1.Command){
 		"missing_copy_space":  func(c *agentv1.Command) { c.Input.GetEnsureContainer().Postgres.Patroni.RequiredFreeBytes = 0 },
 		"negative_copy_space": func(c *agentv1.Command) { c.Input.GetEnsureContainer().Postgres.Patroni.RequiredFreeBytes = -1 },
-		"missing_ref":         func(c *agentv1.Command) { c.Input.Secrets = c.Input.Secrets[:7] },
-		"changed_version":     func(c *agentv1.Command) { c.Input.Secrets[7].Version++ },
+		"missing_ref":         func(c *agentv1.Command) { c.Input.Secrets = c.Input.Secrets[:6] },
+		"changed_version":     func(c *agentv1.Command) { c.Input.Secrets[6].Version++ },
 		"duplicate_identity": func(c *agentv1.Command) {
 			n := c.Input.GetEnsureContainer().Postgres.Patroni
-			n.Credentials[7].CredentialId = n.Credentials[6].CredentialId
-			c.Input.Secrets[7].CredentialId = n.Credentials[6].CredentialId
+			n.Credentials[6].CredentialId = n.Credentials[5].CredentialId
+			c.Input.Secrets[6].CredentialId = n.Credentials[5].CredentialId
 		},
 		"duplicate_purpose": func(c *agentv1.Command) {
-			c.Input.GetEnsureContainer().Postgres.Patroni.Credentials[7].Purpose = "patroni_member_tls"
+			c.Input.GetEnsureContainer().Postgres.Patroni.Credentials[6].Purpose = "patroni_member_tls"
 		},
 		"unknown_purpose": func(c *agentv1.Command) {
-			c.Input.GetEnsureContainer().Postgres.Patroni.Credentials[7].Purpose = "arbitrary"
-			c.Input.Secrets[7].Purpose = "arbitrary"
+			c.Input.GetEnsureContainer().Postgres.Patroni.Credentials[6].Purpose = "arbitrary"
+			c.Input.Secrets[6].Purpose = "arbitrary"
 		},
-		"nil_binding": func(c *agentv1.Command) { c.Input.GetEnsureContainer().Postgres.Patroni.Credentials[7] = nil },
+		"nil_binding": func(c *agentv1.Command) { c.Input.GetEnsureContainer().Postgres.Patroni.Credentials[6] = nil },
 		"wrong_application": func(c *agentv1.Command) {
 			c.Input.GetEnsureContainer().Postgres.ApplicationCredentialId = uuid.NewString()
-		},
-		"mixed_topology": func(c *agentv1.Command) {
-			c.Input.GetEnsureContainer().Postgres.ReplicaSource = &agentv1.PostgresReplicaSource{Address: "192.0.2.30", Port: 5432, ResourceId: uuid.NewString()}
 		},
 		"secret_environment": func(c *agentv1.Command) {
 			c.Input.GetEnsureContainer().SecretEnv = []*agentv1.SecretEnv{{Name: "POSTGRES_PASSWORD", Purpose: "superuser"}}
@@ -89,8 +98,8 @@ func TestPatroniContainerCommandBindings(t *testing.T) {
 		"provision":      func(c *agentv1.Command) { c.Input.GetEnsureContainer().Postgres.Patroni.ProvisionId = uuid.NewString() },
 		"member":         func(c *agentv1.Command) { c.Input.GetEnsureContainer().Postgres.Patroni.Address = "192.0.2.11" },
 		"credential": func(c *agentv1.Command) {
-			c.Input.GetEnsureContainer().Postgres.Patroni.Credentials[7].Version++
-			c.Input.Secrets[7].Version++
+			c.Input.GetEnsureContainer().Postgres.Patroni.Credentials[6].Version++
+			c.Input.Secrets[6].Version++
 		},
 	} {
 		t.Run("hash_"+name, func(t *testing.T) {
@@ -187,8 +196,8 @@ func TestPatroniContainerCommandBindings(t *testing.T) {
 			s.CancellationBoundary = agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP
 		},
 		"stopped_claim": func(s *agentv1.PlanStep) { s.Postcondition = agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED },
-		"replica_claim": func(s *agentv1.PlanStep) {
-			s.Postcondition = agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED
+		"member_claim": func(s *agentv1.PlanStep) {
+			s.Postcondition = agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_FAILED
 		},
 	} {
 		t.Run("verify_plan_"+name, func(t *testing.T) {
@@ -221,10 +230,10 @@ func TestPatroniContainerCommandBindings(t *testing.T) {
 
 // Member proofs repeat the stored configuration, carry no secret, and prove only their own states.
 func TestPatroniMemberFailureProofs(t *testing.T) {
-	base := postgresContainerCommand()
+	base := patroniBaseCommand()
 	p := base.Input.GetEnsureContainer()
 	p.SecretEnv = nil
-	for _, purpose := range []string{"patroni_rewind", "patroni_dcs", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
+	for _, purpose := range []string{"patroni_rewind", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
 		base.Input.Secrets = append(base.Input.Secrets, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: purpose})
 	}
 	p.Postgres.Patroni = &agentv1.PatroniContainerConfig{RequiredFreeBytes: 1 << 30, Address: "192.0.2.10", RestPort: 8008, DcsEndpoints: []string{"192.0.2.20:2379"}, PeerNetworks: []string{"192.0.2.0/24"}, ClientNetworks: []string{"198.51.100.0/24"}, ProvisionId: uuid.NewString(), AllowInitialization: true}
@@ -287,12 +296,13 @@ func TestPatroniMemberFailureProofs(t *testing.T) {
 	}
 }
 
-// A recreate may only move the two certificate credentials to higher versions.
+// A recreate may only move the two certificate credentials to higher versions and append peer
+// networks for an added member.
 func TestPatroniRecreateValidation(t *testing.T) {
-	base := postgresContainerCommand()
+	base := patroniBaseCommand()
 	p := base.Input.GetEnsureContainer()
 	p.SecretEnv = nil
-	for _, purpose := range []string{"patroni_rewind", "patroni_dcs", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
+	for _, purpose := range []string{"patroni_rewind", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
 		base.Input.Secrets = append(base.Input.Secrets, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: purpose})
 	}
 	p.Postgres.Patroni = &agentv1.PatroniContainerConfig{RequiredFreeBytes: 1 << 30, Address: "192.0.2.10", RestPort: 8008, DcsEndpoints: []string{"192.0.2.20:2379"}, PeerNetworks: []string{"192.0.2.0/24"}, ClientNetworks: []string{"198.51.100.0/24"}, ProvisionId: uuid.NewString(), AllowInitialization: true}
@@ -315,7 +325,9 @@ func TestPatroniRecreateValidation(t *testing.T) {
 		return recreate
 	}
 	both := renew(renew(p, "patroni_member_tls", 2), "patroni_dcs_tls", 3)
-	for name, next := range map[string]*agentv1.EnsureContainer{"member certificate": renew(p, "patroni_member_tls", 2), "both certificates": both} {
+	grown := renew(p, "patroni_member_tls", 2)
+	grown.Postgres.Patroni.PeerNetworks = append(grown.Postgres.Patroni.PeerNetworks, "192.0.2.13/32")
+	for name, next := range map[string]*agentv1.EnsureContainer{"member certificate": renew(p, "patroni_member_tls", 2), "both certificates": both, "added peer": grown} {
 		if _, err := CommandHash(command(p, next)); err != nil {
 			t.Errorf("%s renewal refused: %v", name, err)
 		}
@@ -325,9 +337,18 @@ func TestPatroniRecreateValidation(t *testing.T) {
 	identity := renew(p, "patroni_member_tls", 2)
 	identity.Postgres.Patroni.Credentials[3].CredentialId = uuid.NewString()
 	lower := renew(p, "patroni_member_tls", 2)
+	dropped := renew(p, "patroni_member_tls", 2)
+	dropped.Postgres.Patroni.PeerNetworks = []string{"192.0.2.13/32"}
+	prepended := renew(p, "patroni_member_tls", 2)
+	prepended.Postgres.Patroni.PeerNetworks = append([]string{"192.0.2.13/32"}, prepended.Postgres.Patroni.PeerNetworks...)
+	peersOnly := proto.Clone(p).(*agentv1.EnsureContainer)
+	peersOnly.Postgres.Patroni.PeerNetworks = append(peersOnly.Postgres.Patroni.PeerNetworks, "192.0.2.13/32")
 	for name, invalid := range map[string]*agentv1.Command{
+		"replaced peers":        command(p, dropped),
+		"prepended peer":        command(p, prepended),
+		"peers without a leaf":  command(p, peersOnly),
 		"no change":             command(p, p),
-		"another purpose":       command(p, renew(p, "patroni_dcs", 2)),
+		"another purpose":       command(p, renew(p, "patroni_rest", 2)),
 		"lower version":         command(lower, p),
 		"changed provision":     command(p, moved),
 		"changed credential ID": command(p, identity),
@@ -344,5 +365,68 @@ func TestPatroniRecreateValidation(t *testing.T) {
 	}
 	if PatroniMemberContainer(command(p, both).Input) != both {
 		t.Fatal("the recreate member container is not next")
+	}
+}
+
+func TestEtcdContainerCommandBindings(t *testing.T) {
+	ref := &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: "patroni_member_tls"}
+	command := &agentv1.Command{
+		Epoch:       &agentv1.Epoch{InstallationId: uuid.NewString(), NodeId: uuid.NewString(), ClusterId: uuid.NewString(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1},
+		OperationId: uuid.NewString(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1,
+		Input: &agentv1.CommandInput{
+			ResourceId: uuid.NewString(), PayloadVersion: 1, Timeout: durationpb.New(time.Minute),
+			Secrets: []*agentv1.SecretReference{ref},
+			Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
+				ImageDigest: "synod-etcd@sha256:" + strings.Repeat("a", 64),
+				Engine:      "postgres", VolumeId: uuid.NewString(), NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST,
+				Etcd: &agentv1.EtcdContainerConfig{
+					Name: "etcd-1", Address: "192.0.2.10", ClientPort: 2379, PeerPort: 2380,
+					InitialCluster: "etcd-1=https://192.0.2.10:2380", InitialClusterState: "new",
+					ClusterId: uuid.NewString(), Credentials: []*agentv1.SecretReference{ref},
+				},
+			}},
+		},
+	}
+	hash, err := CommandHash(command)
+	if err != nil {
+		t.Fatal("valid etcd command rejected:", err)
+	}
+	command.InputHash = hash[:]
+	op := Operation{ID: uuid.MustParse(command.OperationId), InstallationID: uuid.MustParse(command.Epoch.InstallationId), ClusterID: uuid.MustParse(command.Epoch.ClusterId), DesiredRevision: 1, Kind: "cluster.create"}
+	plan := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{{Command: command, MaxAttempts: 1, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS}}}
+	if err := ValidatePlan(plan, op); err != nil {
+		t.Fatal("valid etcd plan rejected:", err)
+	}
+}
+
+// An etcd membership change names a canonical local member, one known action, and only the
+// member leaf. Only a new learner carries a peer URL.
+func TestEtcdMembershipValidation(t *testing.T) {
+	leaf := []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "patroni_member_tls"}}
+	valid := []*agentv1.EtcdMembership{
+		{Address: "192.0.2.10", ClientPort: 2379, Action: "add_learner", Name: "etcd-new", PeerUrl: "https://192.0.2.13:2380"},
+		{Address: "192.0.2.10", ClientPort: 2379, Action: "promote", Name: "etcd-new"},
+		{Address: "192.0.2.10", ClientPort: 2379, Action: "remove", Name: "etcd-0"},
+	}
+	for _, p := range valid {
+		if err := validateEtcdMembership(p, leaf); err != nil {
+			t.Errorf("%s refused: %v", p.Action, err)
+		}
+	}
+	for name, p := range map[string]*agentv1.EtcdMembership{
+		"loopback":         {Address: "127.0.0.1", ClientPort: 2379, Action: "remove", Name: "etcd-0"},
+		"no port":          {Address: "192.0.2.10", Action: "remove", Name: "etcd-0"},
+		"no name":          {Address: "192.0.2.10", ClientPort: 2379, Action: "remove"},
+		"unknown action":   {Address: "192.0.2.10", ClientPort: 2379, Action: "grow", Name: "etcd-0"},
+		"plain peer":       {Address: "192.0.2.10", ClientPort: 2379, Action: "add_learner", Name: "etcd-new", PeerUrl: "http://192.0.2.13:2380"},
+		"named peer":       {Address: "192.0.2.10", ClientPort: 2379, Action: "add_learner", Name: "etcd-new", PeerUrl: "https://etcd.example:2380"},
+		"peer on a remove": {Address: "192.0.2.10", ClientPort: 2379, Action: "remove", Name: "etcd-0", PeerUrl: "https://192.0.2.13:2380"},
+	} {
+		if err := validateEtcdMembership(p, leaf); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	if err := validateEtcdMembership(valid[2], append(leaf, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: "patroni_rest"})); err == nil {
+		t.Error("a second secret was accepted")
 	}
 }

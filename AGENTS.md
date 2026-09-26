@@ -1,10 +1,65 @@
 # Contributor Instructions
 
+These instructions apply to every agent and every model that works on this repository.
+Read the whole file before you change anything.
+
+## Start here
+
+The plan lives only in the main checkout, at these absolute paths.
+It is not tracked by Git, so a worktree or a clone does not contain it.
+Read it from these paths even when you work in a worktree.
+
+| Path | Purpose |
+| --- | --- |
+| `/Users/mukhtarakere/cools/synod/tmp/docs/00-product-brief.md` | Product direction. It wins over every other document. |
+| `/Users/mukhtarakere/cools/synod/tmp/tasks/HANDOFF.md` | Current state, next tasks, and open decisions. |
+| `/Users/mukhtarakere/cools/synod/tmp/tasks/BOARD.md` | Generated task summary. Run `refresh_board.py` first. |
+| `/Users/mukhtarakere/cools/synod/tmp/tasks/items/TASK-NNN.md` | The source of truth for one task. |
+| `/Users/mukhtarakere/cools/synod/tmp/tasks/HOSTS.md` | The real Linux hosts for end-to-end proof. |
+| `/Users/mukhtarakere/cools/synod/tmp/docs/README.md` | Index of the older specifications. |
+
+Never create a `tmp/` plan inside a worktree. Never copy the plan into Git.
+If these paths do not exist, stop and ask the user for them.
+
+## Direction
+
+Synod pools a home-lab user's mixed devices and runs any container on them.
+Devices can be amd64 or arm64, and some are only online part of the time.
+Mixed architectures are mandatory. No default mode may require matching devices.
+Apps run in three tiers: databases (tier 1), single-writer apps such as Sonarr (tier 2), and parallel apps (tier 3).
+Before you deepen engine-specific or database-only code, check that the work serves this direction.
+If a task pulls away from the brief, stop and ask the user.
+Rewriting, re-engineering, and moving code are allowed. Staying on course matters most.
+
+## Keep going
+
+Do not ask the user what to do next when the plan answers it.
+After you finish a task, take the next one from the handoff or the board and start it.
+Do not ask "Should I start TASK-NNN now?". Start it.
+Ask the user only for a real decision: a product or design choice that the brief and the task file leave open, a conflict with the brief, an action that is destructive or visible outside this machine, or a claim that looks abandoned.
+When you ask, give your recommendation, and continue with other unblocked work while you wait.
+
+## Parallel work
+
+Several agents, on different models, can work at the same time.
+Follow these rules so that no two agents collide.
+
+1. Take one task that is `ready`, or that the user names. Work on one task at a time.
+2. Claim it before you change code. In the task file, set `Status` to `in_progress`, set `Claimed by` to your agent and model name, and set `Worktree` and `Base revision`.
+3. Do not take a task that another agent claims. Ask the user when a claim looks abandoned.
+4. Create your worktree from `main`: `git worktree add /Users/mukhtarakere/cools/synod-worktrees/TASK-NNN -b task/NNN main`.
+5. Change code only in your worktree. Change plan files only at the main checkout paths above.
+6. Change only the paths that your task file lists. Record a scope change in the task file before you make it.
+7. Shared contracts are proto files, migrations, `go.mod`, API shapes, and shared domain types. Before you change one, check the board for another `in_progress` task that changes it. If one exists, stop and ask the user.
+8. Before a merge, rebase on `main` and run the task's checks again in your worktree.
+9. Merge from the main checkout with `git merge --ff-only task/NNN`. Then remove the worktree and the branch.
+10. When you stop, record the completed work and the exact next action in the task file. Clear `Claimed by` if you will not continue.
+
 ## Code
 
 Follow the language's standard practices.
 For Go, prefer early returns, small interfaces, and ordinary error values.
-Use the Modern Go Guidelines skill when it is available.
+Use the Modern Go Guidelines skill or tool when it is available.
 Use established libraries when they simplify implementation or maintenance.
 Cobra is the selected CLI command library. Chi is permitted for API routing.
 Use the standard library when it fits the requirement.
@@ -15,17 +70,7 @@ Do not comment a declaration whose name already states what it does.
 Do not restate the code in prose and do not narrate an implementation line by line.
 Create a helper only when necessary.
 Use the standard library directly when it provides the required function.
-
-## Local task workflow
-
-When the local development workspace is available, read `tmp/tasks/README.md`.
-Read the current task and the specifications required by `tmp/docs/23-contributor-contract.md`.
-Update the task record when you start work and when you stop.
-Record the current state and the exact next action.
-Change one task at a time.
-If local specifications are absent, ask the user for the required contract.
-Do not infer missing orchestration behaviour.
-Keep all files under tmp ignored by Git.
+Run `gofmt` on every Go file you change.
 
 ## Pre-release schema and contracts
 
@@ -38,26 +83,43 @@ An ALTER is correct only when it adds a reference to an object that a later migr
 Record that reason in the migration.
 Change a persisted format, a protocol message, or an API shape in place.
 Delete a field that no longer serves the design. Do not deprecate it.
+Regenerate protobuf code with `task proto`. Check that an unchanged `.proto` produces no diff first.
 
 A changed migration fails the checksum check on an existing database.
-That is expected. Drop the development database and apply the migrations again.
+That is expected. Drop the development database with `task dev:reset` and apply the migrations again.
 Never write a data-preserving migration for development data.
 
 This section ends at the v0.1 release.
-After that release, `tmp/docs/27-protocols-versioning.md` governs every schema and contract change.
 
-## Validation and records
+## Validation
 
 Test meaningful success and failure behaviour at the appropriate boundary.
 Use real dependencies for critical transaction and orchestration tests.
+
+- Run tests with `-race -p 1`. Without `-p 1`, packages compete for Docker and fail on timing.
+- Before a commit, run only the affected packages. Run the full suite only after a major change.
+- Give tests their dependencies with the fixture scripts. Each script starts a disposable container on a free port:
+  `SYNOD_TEST_DOCKER_HOST=unix://<docker socket> ./scripts/test-etcd.sh ./scripts/test-postgres.sh go test -race -p 1 -count=1 <packages>`.
+- For heavy Docker packages (`internal/runtime/docker`, `internal/engine/postgres`), use `-run` to select the tests you touched.
+- Never change the tree while a `go test` run is in flight. Never use `git stash` to get a baseline. Use a separate worktree at the base revision.
+- A failure that also happens on the base revision is not yours. Record it in the task file and in the handoff.
+- Known flaky tests: `TestRunnerReleasesASlotWhenNoOwnerIsElected` in `internal/controller/runner`, and the enrollment tests in `internal/api` under heavy load. Run a flaky test again alone before you draw a conclusion.
+- For web changes, run `npx svelte-check`, `npx vitest run`, and `npm run build` in `web/`. The `dist` output is committed.
+- Some behaviour needs real Linux hosts: host networking, `/proc`, and mTLS between machines. Read `HOSTS.md` before you use them.
+
+## Records
+
+Write the record in the task file before you stop work.
 Record changed behaviour, files, contracts, test commands, results, and remaining limits.
-Write that record in the task file before you stop work.
-Do not mark a milestone complete before review and integrated validation.
+Do not mark a check passed before it finishes.
+Do not mark a task done before its checks pass on the integrated result.
+If a done task missed a file in its own scope, reopen that task. Do not fix it inside your current task.
 
 ## Commits
 
-Commit each completed milestone with a short imperative message.
-Stage only the files that belong to that milestone.
+Commit each completed task or milestone with a short imperative message.
+Stage only the files that belong to that task.
+Commit or push only when the task's checks pass.
 
 ## Technical documentation
 

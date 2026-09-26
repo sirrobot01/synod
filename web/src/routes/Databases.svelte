@@ -52,7 +52,6 @@
   let name = $state("");
   let engine = $state<"postgres" | "redis">("postgres");
   let version = $state("17.11");
-  let replicationPolicy = $state<"asynchronous" | "synchronous">("asynchronous");
   let persistence = $state<"none" | "rdb" | "aof" | "rdb+aof">("rdb");
   let busy = $state(false);
   let failure = $state<APIError | null>(null);
@@ -102,7 +101,7 @@
     failure = null;
     const spec =
       engine === "postgres"
-        ? { schema_version: 1, name: name.trim(), engine, postgresql: { version: version.trim(), topology: admitted, replication_policy: replicationPolicy }, redis: null }
+        ? { schema_version: 1, name: name.trim(), engine, postgresql: { version: version.trim(), topology: admitted }, redis: null }
         : { schema_version: 1, name: name.trim(), engine, postgresql: null, redis: { version: version.trim(), topology: admitted, persistence } };
     try {
       admission = await api.createCluster(spec, key);
@@ -173,7 +172,7 @@
             </div>
             <div class="cell stack">
               <span>{cluster.spec.engine === "postgres" ? "PostgreSQL" : "Redis"} {configured.version}</span>
-              {#if cluster.spec.engine === "redis"}<span class="note">Persistence: {cluster.spec.redis.persistence}</span>{:else}<span class="note">Replication: {cluster.spec.postgresql.replication_policy || "asynchronous"}</span>{/if}
+              {#if cluster.spec.engine === "redis"}<span class="note">Persistence: {cluster.spec.redis.persistence}</span>{:else}<span class="note">Topology: {cluster.spec.postgresql.topology}</span>{/if}
             </div>
             <div class="cell">{configured.topology}</div>
             <div class="cell note">Health and observation time unavailable</div>
@@ -279,23 +278,6 @@
               offer from, so this stays a field. Gap: <span class="mono">{gaps.versions}</span>.
             </span>
           </div>
-          {#if engine === "postgres"}
-            <div class="field">
-              <label for="replication-policy" class="label">Replication policy</label>
-              <select id="replication-policy" bind:value={replicationPolicy} onchange={edited}>
-                <option value="asynchronous">Asynchronous</option>
-                <option value="synchronous">Synchronous (one replica)</option>
-              </select>
-              <span class="hint">
-                {#if replicationPolicy === "synchronous"}
-                  Commits wait for one replica. This cluster starts without replicas; add one before writing.
-                  This policy currently requires PostgreSQL 17.11.
-                {:else}
-                  Commits do not wait for replicas. Recent writes can be lost if the primary is lost.
-                {/if}
-              </span>
-            </div>
-          {/if}
           {#if engine === "redis"}
             <div class="field">
               <label for="persistence" class="label">Persistence</label>

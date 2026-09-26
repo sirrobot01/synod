@@ -146,7 +146,7 @@ func (r Request) Validate() error {
 	}
 	resources, reservations, owned := make(map[uuid.UUID]bool), make(map[uuid.UUID]bool), make(map[uuid.UUID]bool)
 	for _, resource := range r.Resources {
-		if resource.ID == uuid.Nil || resource.ReservationID == uuid.Nil || resources[resource.ID] || reservations[resource.ReservationID] || len(resource.OwnedResourceIDs) == 0 || len(resource.OwnedResourceIDs) > 32 || !slices.Contains(resource.OwnedResourceIDs, resource.ID) || len(resource.Ports) > 32 || !validLabels(resource.Labels) || (resource.Kind != "instance" && resource.Kind != "service" && resource.Kind != "backup") || (resource.Engine != "postgres" && resource.Engine != "redis") || !validText(resource.Version) || (resource.Architecture != "arm64" && resource.Architecture != "amd64") || !validText(resource.RuntimeVersion) || !validText(resource.StorageID) {
+		if resource.ID == uuid.Nil || resource.ReservationID == uuid.Nil || resources[resource.ID] || reservations[resource.ReservationID] || len(resource.OwnedResourceIDs) == 0 || len(resource.OwnedResourceIDs) > 32 || !slices.Contains(resource.OwnedResourceIDs, resource.ID) || len(resource.Ports) > 32 || !validLabels(resource.Labels) || (resource.Kind != "instance" && resource.Kind != "service" && resource.Kind != "backup") || (resource.Engine != "postgres" && resource.Engine != "redis") || !validText(resource.Version) || (resource.Architecture != "arm64" && resource.Architecture != "amd64") || (resource.RuntimeVersion != "" && !validText(resource.RuntimeVersion)) || (resource.StorageID != "" && !validText(resource.StorageID)) {
 			return ErrInvalid
 		}
 		resources[resource.ID], reservations[resource.ReservationID] = true, true
@@ -155,10 +155,14 @@ func (r Request) Validate() error {
 			return ErrInvalid
 		}
 		// An instance is a member of the cluster, so it names which member it is.
-		// Nothing else is a member, so nothing else carries a role.
 		// A Patroni member has no Synod-declared role, because Patroni elects its primary.
 		// It only exists in an HA placement that spreads it from its peers.
-		if (resource.Kind == "instance") != (resource.Role == "primary" || resource.Role == "replica" || resource.Role == "patroni") || (resource.Role == "patroni" && r.Profile != "ha") {
+		// The only other role is etcd: a service beside one Patroni member.
+		if (resource.Kind == "instance") != (resource.Role == "primary" || resource.Role == "replica" || resource.Role == "patroni") || (resource.Role == "patroni" && r.Profile != "ha") ||
+			(resource.Kind != "instance" && resource.Role != "" && (resource.Role != "etcd" || resource.Kind != "service" || r.Profile != "ha")) {
+			return ErrInvalid
+		}
+		if resource.Colocate != uuid.Nil && (resource.Colocate == resource.ID || !slices.ContainsFunc(r.Resources, func(other Resource) bool { return other.ID == resource.Colocate })) {
 			return ErrInvalid
 		}
 		if resource.Kind == "instance" && (resource.Budgets.Workload.CPUMillis == 0 || resource.Budgets.Workload.MemoryBytes == 0 || resource.Budgets.Workload.DiskBytes == 0) {

@@ -93,14 +93,12 @@ func TestEveryPostconditionCanBeProved(t *testing.T) {
 		agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED:        "running",
 		agentv1.Postcondition_POSTCONDITION_ENGINE_READY:               "ready",
 		agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED:   "setup_recovered",
-		agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_PREPARED:  "replica_prepared",
-		agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_CLONED:    "replica_cloned",
-		agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED:    "replica_refused",
 		agentv1.Postcondition_POSTCONDITION_PATRONI_START_FAILED:       "patroni_storage_attempt_failed",
 		agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_NOT_SERVING: "patroni_member_not_serving",
 		agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_FAILED:      "patroni_member_storage_failed",
 		agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_RECREATED:   "patroni_member_recreated",
 		agentv1.Postcondition_POSTCONDITION_PATRONI_LEADER:             "patroni_leader",
+		agentv1.Postcondition_POSTCONDITION_ETCD_MEMBERSHIP:            "etcd_remove",
 	} {
 		t.Run(postcondition.String(), func(t *testing.T) {
 			step := planStep(t, op, node, uuid.NewString(), postcondition)
@@ -113,6 +111,10 @@ func TestEveryPostconditionCanBeProved(t *testing.T) {
 			if postcondition == agentv1.Postcondition_POSTCONDITION_PATRONI_LEADER {
 				native = "patroni-switchover:" + step.Command.CommandId
 			}
+			// An etcd membership change proves the state of its action.
+			if postcondition == agentv1.Postcondition_POSTCONDITION_ETCD_MEMBERSHIP {
+				native = "etcd-membership:" + step.Command.CommandId
+			}
 			if err := operation.CheckStepEffects(step, []*agentv1.Effect{{
 				CommandId: step.Command.CommandId, ResourceId: step.Command.Input.ResourceId,
 				NativeOperationId: native, State: state,
@@ -123,7 +125,7 @@ func TestEveryPostconditionCanBeProved(t *testing.T) {
 	}
 	// Every postcondition in the enum is covered above, so a new one added without a
 	// rule here fails this test rather than a four-minute replay loop in production.
-	highest := agentv1.Postcondition_POSTCONDITION_PATRONI_LEADER
+	highest := agentv1.Postcondition_POSTCONDITION_ETCD_MEMBERSHIP
 	if _, known := agentv1.Postcondition_name[int32(highest)+1]; known {
 		t.Fatal("a postcondition was added to the protocol without a rule that proves it")
 	}

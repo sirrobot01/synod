@@ -66,8 +66,7 @@ func TestPostgresReadinessForAnyRole(t *testing.T) {
 		t.Fatal("valid role-any readiness refused", err)
 	}
 	for name, change := range map[string]func(*agentv1.CheckReadiness){
-		"without TLS":      func(p *agentv1.CheckReadiness) { p.PostgresTls = nil },
-		"with replication": func(p *agentv1.CheckReadiness) { p.PostgresReplication = &agentv1.PostgresReplicationCheck{} },
+		"without TLS": func(p *agentv1.CheckReadiness) { p.PostgresTls = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := proto.Clone(command).(*agentv1.Command)

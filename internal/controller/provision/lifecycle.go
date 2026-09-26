@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/cluster"
@@ -18,16 +17,15 @@ import (
 
 // The operation kinds this planner produces plans for.
 const (
-	createKind         = "cluster.create"
-	stopKind           = "cluster.stop"
-	startKind          = "cluster.start"
-	deleteKind         = "cluster.delete"
-	scaleKind          = "cluster.scale"
-	recoverSetupKind   = "cluster.recover_setup"
-	rebuildReplicaKind = "cluster.rebuild_replica"
-	rebuildMemberKind  = "cluster.rebuild_member"
-	renewKind          = "cluster.renew_certificates"
-	switchoverKind     = "cluster.switchover"
+	createKind        = "cluster.create"
+	stopKind          = "cluster.stop"
+	startKind         = "cluster.start"
+	deleteKind        = "cluster.delete"
+	scaleKind         = "cluster.scale"
+	recoverSetupKind  = "cluster.recover_setup"
+	rebuildMemberKind = "cluster.rebuild_member"
+	renewKind         = "cluster.renew_certificates"
+	switchoverKind    = "cluster.switchover"
 )
 
 var (
@@ -48,8 +46,6 @@ func (p *Planner) Plan(ctx context.Context, claim operation.Claim) error {
 	case createKind:
 		_, err := p.provision(ctx, claim)
 		return err
-	case rebuildReplicaKind:
-		return p.rebuildReplica(ctx, claim, op)
 	case rebuildMemberKind:
 		return p.rebuildMember(ctx, claim, op)
 	case renewKind:
@@ -99,18 +95,29 @@ func (p *Planner) lifecycle(ctx context.Context, claim operation.Claim, op opera
 	if err != nil {
 		return err
 	}
-	// Routes stop and leave with their members.
-	if together && (op.Kind == stopKind || op.Kind == deleteKind) && routed(running) {
-		// Each node's route steps follow that node's last member step.
-		last := map[uuid.UUID]string{}
-		for _, step := range steps {
-			last[uuid.MustParse(step.Command.Epoch.NodeId)] = step.Command.StepId
+	// Routes, then etcd services, stop and leave with their members. Patroni keeps its DCS
+	// until its members are down.
+	if together && (op.Kind == stopKind || op.Kind == deleteKind) {
+		// Each node's steps follow that node's last step so far.
+		last := func() map[uuid.UUID]string {
+			found := map[uuid.UUID]string{}
+			for _, step := range steps {
+				found[uuid.MustParse(step.Command.Epoch.NodeId)] = step.Command.StepId
+			}
+			return found
 		}
-		routes, err := p.routeStopSteps(claim, op, running, op.Kind == deleteKind, last)
+		if routed(running) {
+			routes, err := p.routeStopSteps(claim, op, running, op.Kind == deleteKind, last())
+			if err != nil {
+				return err
+			}
+			steps = append(steps, routes...)
+		}
+		etcd, err := p.etcdStopSteps(ctx, claim, op, op.Kind == deleteKind, last())
 		if err != nil {
 			return err
 		}
-		steps = append(steps, routes...)
+		steps = append(steps, etcd...)
 	}
 	plan := &agentv1.ExecutionPlan{Version: 1, Steps: steps}
 	if err := operation.ValidatePlan(plan, op); err != nil {
@@ -195,7 +202,8 @@ func (p *Planner) stopSteps(claim operation.Claim, op operation.Operation, runni
 		if len(steps) > 0 && !together {
 			dependsOn = []string{steps[len(steps)-1].Command.StepId}
 		}
-		stop, err := p.step(claim, epochFor(claim, each.NodeID), op.DesiredRevision, &agentv1.CommandInput{
+		epoch := epochFor(claim, each.NodeID)
+		stop, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
 			ResourceId: each.ResourceID.String(),
 			Payload: &agentv1.CommandInput_StopContainer{StopContainer: &agentv1.StopContainer{
 				GracePeriod: durationpb.New(p.config.StopGrace),
@@ -217,38 +225,8 @@ func (p *Planner) startSteps(ctx context.Context, claim operation.Claim, op oper
 	purpose := postgres.ApplicationCredential
 	database := defaultDatabase
 	var upstream *agentv1.RedisUpstream
-	var pgSource *agentv1.PostgresReplicaSource
-	var admin postgres.Credential
-	if found.Spec.Engine == cluster.PostgreSQL {
-		slices.SortStableFunc(running, func(a, b member) int { return cmp.Compare(a.Role, b.Role) })
-		var primary member
-		for _, each := range running {
-			switch each.Role {
-			case "primary":
-				if primary.MemberID != uuid.Nil {
-					return nil, fmt.Errorf("%w: more than one PostgreSQL primary", ErrUnplannable)
-				}
-				primary = each
-			case "replica":
-			default:
-				return nil, fmt.Errorf("%w: unknown PostgreSQL member role %q", ErrUnplannable, each.Role)
-			}
-		}
-		if primary.MemberID == uuid.Nil {
-			return nil, fmt.Errorf("%w: no PostgreSQL primary", ErrNoWorkload)
-		}
-		if len(running) > 1 {
-			peer, err := p.peer(ctx, claim, primary)
-			if err != nil {
-				return nil, err
-			}
-			pgSource = &agentv1.PostgresReplicaSource{Address: peer.Address, Port: peer.Port, ResourceId: primary.ResourceID.String()}
-		}
-		var err error
-		admin, err = p.config.Store.ReadClusterCredential(ctx, claim.InstallationID, claim.ClusterID, postgres.SuperuserCredential)
-		if err != nil {
-			return nil, err
-		}
+	if found.Spec.Engine == cluster.PostgreSQL && (len(running) != 1 || running[0].Role != "primary") {
+		return nil, fmt.Errorf("%w: standalone PostgreSQL runs one primary", ErrUnplannable)
 	}
 	if found.Spec.Engine == cluster.Redis {
 		purpose = postgres.SuperuserCredential
@@ -302,26 +280,6 @@ func (p *Planner) startSteps(ctx context.Context, claim operation.Claim, op oper
 			return nil, err
 		}
 		steps = append(steps, start)
-		if found.Spec.Engine == cluster.PostgreSQL && op.Kind != recoverSetupKind {
-			replication := &agentv1.PostgresReplicationCheck{}
-			if each.Role == "replica" {
-				replication.Source = pgSource
-				replication.MaxReplayLagBytes = 16 << 20
-				replication.MaxMessageAge = durationpb.New(30 * time.Second)
-			}
-			native, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
-				ResourceId: each.ResourceID.String(),
-				Secrets:    []*agentv1.SecretReference{{CredentialId: admin.CredentialID.String(), Version: admin.Version, Purpose: admin.Purpose}},
-				Payload: &agentv1.CommandInput_CheckReadiness{CheckReadiness: &agentv1.CheckReadiness{
-					Address: p.config.EndpointAddress, Port: uint32(each.Port), Database: "postgres", Role: admin.RoleName,
-					Engine: string(cluster.PostgreSQL), PostgresRole: each.Role, PostgresReplication: replication,
-				}},
-			}, agentv1.Postcondition_POSTCONDITION_ENGINE_READY, []string{start.Command.StepId}, beforeExecution)
-			if err != nil {
-				return nil, err
-			}
-			steps = append(steps, native)
-		}
 		ready, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
 			ResourceId: each.ResourceID.String(),
 			Secrets: []*agentv1.SecretReference{{
@@ -380,11 +338,19 @@ func (p *Planner) scale(ctx context.Context, claim operation.Claim, op operation
 	if err != nil {
 		return err
 	}
-	if found.Spec.Engine != cluster.Redis && found.Spec.Engine != cluster.PostgreSQL {
-		return fmt.Errorf("%w: %s does not scale", ErrUnplannable, found.Spec.Engine)
+	if found.Spec.PostgreSQL != nil && found.Spec.PostgreSQL.Topology == "patroni" {
+		running, err := p.members(ctx, claim)
+		if err != nil {
+			return err
+		}
+		if found.DesiredReplicas+1 < len(running) {
+			return p.removePatroniMember(ctx, claim, op, found, running)
+		}
+		return p.addPatroniMember(ctx, claim, op, found)
 	}
-	if found.Spec.Engine == cluster.PostgreSQL && (found.Spec.PostgreSQL == nil || found.Spec.PostgreSQL.Version != "17.11" || found.Spec.PostgreSQL.Topology != "standalone") {
-		return fmt.Errorf("%w: PostgreSQL replica creation requires version 17.11", ErrUnplannable)
+	// Only Redis runs native replicas. PostgreSQL replicas need the patroni topology.
+	if found.Spec.Engine != cluster.Redis {
+		return fmt.Errorf("%w: %s does not scale", ErrUnplannable, found.Spec.Engine)
 	}
 	// A replica copies the primary's dataset. Without persistence a restart loses it
 	// on both members, so replication would hand back an empty cluster.
@@ -414,11 +380,7 @@ func (p *Planner) scale(ctx context.Context, claim operation.Claim, op operation
 		return fmt.Errorf("%w: the cluster has no primary to replicate", ErrNoWorkload)
 	}
 	if op.RetryOf != nil && found.DesiredReplicas > 0 {
-		if found.Spec.Engine == cluster.PostgreSQL {
-			if planned, err := p.retryPostgresReplica(ctx, claim, op, primary, running); err != nil || planned {
-				return err
-			}
-		} else if planned, err := p.retryReplica(ctx, claim, op, running); err != nil || planned {
+		if planned, err := p.retryReplica(ctx, claim, op, running); err != nil || planned {
 			return err
 		}
 	}
@@ -430,7 +392,7 @@ func (p *Planner) scale(ctx context.Context, claim operation.Claim, op operation
 		}
 		return p.addReplica(ctx, claim, found, primary, upstream, nil)
 	case found.DesiredReplicas < replicas:
-		return p.removeReplica(ctx, claim, op, found, running)
+		return p.removeReplica(ctx, claim, op, running)
 	}
 	return fmt.Errorf("%w: the cluster already runs %d replicas", ErrUnplannable, replicas)
 }
@@ -455,10 +417,13 @@ func (p *Planner) peer(ctx context.Context, claim operation.Claim, primary membe
 //
 // The volume is left alone. Specification 33 retains data on a removal, and an operator
 // who wants the storage gone asks for a purge, which is a separate decision.
-func (p *Planner) removeReplica(ctx context.Context, claim operation.Claim, op operation.Operation, found cluster.Cluster, running []member) error {
-	planned, failed, err := p.config.Store.ReadReplicaActionTarget(ctx, claim.InstallationID, claim.OperationID)
+func (p *Planner) removeReplica(ctx context.Context, claim operation.Claim, op operation.Operation, running []member) error {
+	planned, action, err := p.config.Store.ReadReplicaActionTarget(ctx, claim.InstallationID, claim.OperationID)
 	if err != nil {
 		return err
+	}
+	if action != "scale_down" {
+		return fmt.Errorf("%w: operation reviewed %s, not a replica removal", ErrUnplannable, action)
 	}
 	var target, primary member
 	for _, each := range running {
@@ -486,64 +451,35 @@ func (p *Planner) removeReplica(ctx context.Context, claim operation.Claim, op o
 			return err
 		}
 	}
-	steps, err := p.replicaRemovalSteps(ctx, claim, op, found, target, primary, failed)
+	steps, err := p.replicaRemovalSteps(ctx, claim, op, target, primary)
 	if err != nil {
 		return err
 	}
 	return p.config.Store.InstallPlan(ctx, claim, &agentv1.ExecutionPlan{Version: 1, Steps: steps})
 }
 
-func (p *Planner) replicaRemovalSteps(ctx context.Context, claim operation.Claim, op operation.Operation, found cluster.Cluster, target, primary member, failed bool) ([]*agentv1.PlanStep, error) {
+// replicaRemovalSteps proves the target is the replica of the primary, then stops and removes it.
+func (p *Planner) replicaRemovalSteps(ctx context.Context, claim operation.Claim, op operation.Operation, target, primary member) ([]*agentv1.PlanStep, error) {
 	epoch := epochFor(claim, target.NodeID)
-	var check *agentv1.PlanStep
-	if failed {
-		if found.Spec.Engine != cluster.PostgreSQL || found.Spec.PostgreSQL == nil || found.Spec.PostgreSQL.Topology != "standalone" || found.Spec.PostgreSQL.Version != "17.11" {
-			return nil, ErrUnplannable
-		}
-		config, cloneID, err := p.config.Store.ReadPostgresReplicaClone(ctx, claim, target.MemberID)
-		if err != nil {
-			return nil, err
-		}
-		if config.Port != uint32(target.Port) || config.ReplicaSource == nil || config.ReplicaSource.ResourceId != primary.ResourceID.String() {
-			return nil, ErrUnplannable
-		}
-		check, err = p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
-			ResourceId: target.ResourceID.String(),
-			Payload:    &agentv1.CommandInput_VerifyPostgresReplicaFailure{VerifyPostgresReplicaFailure: &agentv1.VerifyPostgresReplicaFailure{Postgres: config, CloneCommandId: cloneID.String()}},
-		}, agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED, nil, agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		upstream, err := p.peer(ctx, claim, primary)
-		if err != nil {
-			return nil, err
-		}
-		admin, err := p.config.Store.ReadClusterCredential(ctx, claim.InstallationID, claim.ClusterID, postgres.SuperuserCredential)
-		if err != nil {
-			return nil, err
-		}
-		readiness := &agentv1.CheckReadiness{
+	upstream, err := p.peer(ctx, claim, primary)
+	if err != nil {
+		return nil, err
+	}
+	admin, err := p.config.Store.ReadClusterCredential(ctx, claim.InstallationID, claim.ClusterID, postgres.SuperuserCredential)
+	if err != nil {
+		return nil, err
+	}
+	check, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
+		ResourceId: target.ResourceID.String(),
+		Secrets:    []*agentv1.SecretReference{{CredentialId: admin.CredentialID.String(), Version: admin.Version, Purpose: admin.Purpose}},
+		Payload: &agentv1.CommandInput_CheckReadiness{CheckReadiness: &agentv1.CheckReadiness{
 			Address: p.config.EndpointAddress, Port: uint32(target.Port), Database: "0", Role: admin.RoleName,
 			Engine: string(cluster.Redis), RedisReplication: replicationCheck(upstream),
-		}
-		if found.Spec.Engine == cluster.PostgreSQL {
-			readiness.Database, readiness.Engine, readiness.PostgresRole = "postgres", string(cluster.PostgreSQL), "replica"
-			readiness.RedisReplication = nil
-			readiness.PostgresReplication = &agentv1.PostgresReplicationCheck{
-				Source:            &agentv1.PostgresReplicaSource{Address: upstream.Address, Port: upstream.Port, ResourceId: primary.ResourceID.String()},
-				MaxReplayLagBytes: 16 << 20, MaxMessageAge: durationpb.New(30 * time.Second),
-			}
-		}
-		check, err = p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
-			ResourceId: target.ResourceID.String(),
-			Secrets:    []*agentv1.SecretReference{{CredentialId: admin.CredentialID.String(), Version: admin.Version, Purpose: admin.Purpose}},
-			Payload:    &agentv1.CommandInput_CheckReadiness{CheckReadiness: readiness},
-		}, agentv1.Postcondition_POSTCONDITION_ENGINE_READY, nil,
-			agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION)
-		if err != nil {
-			return nil, err
-		}
+		}},
+	}, agentv1.Postcondition_POSTCONDITION_ENGINE_READY, nil,
+		agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION)
+	if err != nil {
+		return nil, err
 	}
 
 	stop, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{

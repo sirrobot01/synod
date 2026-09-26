@@ -60,7 +60,7 @@ func TestPatroniSwitchover(t *testing.T) {
 	claim, err := f.store.AcquireClaim(t.Context(), postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: f.claim.InstallationID, OperationID: admission.OperationID,
 		RecoveryGeneration: f.claim.RecoveryGeneration, OwnerID: "owner-switchover", TTL: 2 * time.Minute,
-		CoordinationKey: "/lifecycle/switchover", CoordinationLease: 1, CoordinationRevision: 1,
+		LeaseID: 1, LeaseRevision: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestPatroniSwitchoverCompletes(t *testing.T) {
 	claim, err := f.store.AcquireClaim(t.Context(), postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: f.claim.InstallationID, OperationID: admission.OperationID,
 		RecoveryGeneration: f.claim.RecoveryGeneration, OwnerID: "owner-switchover", TTL: 2 * time.Minute,
-		CoordinationKey: "/lifecycle/switchover", CoordinationLease: 1, CoordinationRevision: 1,
+		LeaseID: 1, LeaseRevision: 1,
 	})
 	if err != nil {
 		t.Fatal(err)

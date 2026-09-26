@@ -388,21 +388,22 @@ describe("stored PostgreSQL replication policy", () => {
 });
 
 describe("PostgreSQL recovery requests", () => {
-  it.each(["scale_down_failed", "recover_setup", "rebuild_replica"] as const)("binds the %s preview to a member, resource, and volume", async (action) => {
-    const recovery = { ...plan, action, member_id: other, resource_id: token };
+  it("binds the setup recovery preview to a member, resource, and volume", async () => {
+    const recovery = { ...plan, action: "recover_setup", member_id: other, resource_id: token };
     respond(recovery);
-    expect(await api.planPostgresRecovery(id, action)).toEqual(recovery);
-    expect(fetchMock.mock.calls[0]).toEqual([`/v1/clusters/${id}/action-plans`, expect.objectContaining({ method: "POST", body: JSON.stringify({ action }) })]);
+    expect(await api.planSetupRecovery(id)).toEqual(recovery);
+    expect(fetchMock.mock.calls[0]).toEqual([`/v1/clusters/${id}/action-plans`, expect.objectContaining({ method: "POST", body: JSON.stringify({ action: "recover_setup" }) })]);
   });
 
-  it.each([{ member_id: zero }, { resource_id: undefined }, { resource_id: zero }, { cluster_id: other }, { action: "recover_setup" },
+  it.each([{ member_id: zero }, { resource_id: undefined }, { resource_id: zero }, { cluster_id: other }, { action: "delete" },
     { retained_volumes: [] }, { retained_volumes: [other, token] }, { retained_volumes: [zero] }, { expected_revision: 0 }, { cluster_name: "" },
-    { data_disposition: "purge" }, { expires_at: "2099-02-31T10:00:00Z" }])("rejects malformed rebuild review %j", async (change) => {
-    respond({ ...plan, action: "rebuild_replica", member_id: other, resource_id: token, ...change });
-    await expect(api.planPostgresRecovery(id, "rebuild_replica")).rejects.toMatchObject({ detail: { code: "invalid_response" } });
+    { data_disposition: "purge" }, { expires_at: "2099-02-31T10:00:00Z" }])("rejects malformed setup recovery review %j", async (change) => {
+    respond({ ...plan, action: "recover_setup", member_id: other, resource_id: token, ...change });
+    await expect(api.planSetupRecovery(id)).rejects.toMatchObject({ detail: { code: "invalid_response" } });
   });
 
-  it.each(["recover-setup", "rebuild-replica"] as const)("requires confirmation and preserves a lost %s reply", async (action) => {
+  it("requires confirmation and preserves a lost recover-setup reply", async () => {
+    const action = "recover-setup";
     await expect(api.actOnCluster(id, action, 4, "recovery-key")).rejects.toMatchObject({ detail: { code: "invalid_request" } });
     expect(fetchMock).not.toHaveBeenCalled();
     fetchMock.mockRejectedValueOnce(new Error("lost reply"));

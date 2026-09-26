@@ -30,6 +30,11 @@ func TestReplicaRetryAdmissionLinksOnlyTerminalAdds(t *testing.T) {
 					ClusterID: created.ClusterID, ExpectedRevision: 1, Replicas: new(1)}
 				request.Identity.APIOperation, request.Identity.IdempotencyKey = ScaleClusterAPIOperation, uuid.NewString()
 				first, err := s.AdmitClusterAction(t.Context(), request)
+				// Standalone PostgreSQL has no replicas. Only Patroni has members to add.
+				if engine == cluster.PostgreSQL {
+					requireCode(t, err, UnsupportedSpec)
+					return
+				}
 				if err != nil {
 					t.Fatal(err)
 				}

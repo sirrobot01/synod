@@ -20,15 +20,14 @@ import (
 
 // ClaimRequest asks for durable ownership of one operation.
 type ClaimRequest struct {
-	ClaimID              uuid.UUID
-	InstallationID       uuid.UUID
-	OperationID          uuid.UUID
-	RecoveryGeneration   uuid.UUID
-	OwnerID              string
-	TTL                  time.Duration
-	CoordinationKey      string
-	CoordinationLease    int64
-	CoordinationRevision int64
+	ClaimID            uuid.UUID
+	InstallationID     uuid.UUID
+	OperationID        uuid.UUID
+	RecoveryGeneration uuid.UUID
+	OwnerID            string
+	TTL                time.Duration
+	LeaseID            int64
+	LeaseRevision      int64
 }
 
 // InitializeGeneration is idempotent. Ordinary claims cannot rotate a generation.
@@ -57,7 +56,7 @@ func (s *Store) InitializeGeneration(ctx context.Context, installationID, genera
 // AcquireClaim uses a caller-generated claim ID to resolve an uncertain commit.
 // Verify the etcd proof before this call and before activation or dispatch.
 func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Claim, error) {
-	if r.ClaimID == uuid.Nil || r.InstallationID == uuid.Nil || r.OperationID == uuid.Nil || r.RecoveryGeneration == uuid.Nil || r.OwnerID == "" || len(r.OwnerID) > 256 || r.TTL < time.Second || r.TTL > 5*time.Minute || r.CoordinationKey == "" || r.CoordinationLease == 0 || r.CoordinationRevision < 1 {
+	if r.ClaimID == uuid.Nil || r.InstallationID == uuid.Nil || r.OperationID == uuid.Nil || r.RecoveryGeneration == uuid.Nil || r.OwnerID == "" || len(r.OwnerID) > 256 || r.TTL < time.Second || r.TTL > 5*time.Minute || r.LeaseID == 0 || r.LeaseRevision < 1 {
 		return operation.Claim{}, &AdmissionError{Code: InvalidRequest}
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -85,12 +84,11 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 	var oldExpiry *time.Time
 	var status operation.Status
 	var plan []byte
-	var oldKey *string
 	var oldLease, oldRevision *int64
-	err = tx.QueryRow(ctx, `SELECT c.id,c.execution_epoch,o.claim_id,o.owner_id,o.claim_expires_at,o.status,o.plan_bytes,o.claim_active,o.coordination_key,o.coordination_lease,o.coordination_revision,o.recovery_generation
+	err = tx.QueryRow(ctx, `SELECT c.id,c.execution_epoch,o.claim_id,o.owner_id,o.claim_expires_at,o.status,o.plan_bytes,o.claim_active,o.lease_id,o.lease_revision,o.recovery_generation
 		FROM operations o JOIN clusters c ON c.id=o.cluster_id AND c.installation_id=o.installation_id
 		WHERE o.id=$1 AND o.installation_id=$2 FOR UPDATE OF o`, r.OperationID, r.InstallationID).
-		Scan(&result.ClusterID, &result.ExecutionEpoch, &oldClaim, &oldOwner, &oldExpiry, &status, &plan, &result.Active, &oldKey, &oldLease, &oldRevision, &oldGeneration)
+		Scan(&result.ClusterID, &result.ExecutionEpoch, &oldClaim, &oldOwner, &oldExpiry, &status, &plan, &result.Active, &oldLease, &oldRevision, &oldGeneration)
 	if err != nil {
 		return operation.Claim{}, admissionError(err)
 	}
@@ -107,7 +105,7 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 	result.OwnerID = r.OwnerID
 	result.RecoveryGeneration = generation
 	if oldClaim != nil && *oldClaim == r.ClaimID {
-		if oldGeneration == nil || *oldGeneration != generation || oldOwner == nil || *oldOwner != r.OwnerID || oldExpiry == nil || !oldExpiry.After(now) || oldKey == nil || *oldKey != r.CoordinationKey || oldLease == nil || *oldLease != r.CoordinationLease || oldRevision == nil || *oldRevision != r.CoordinationRevision {
+		if oldGeneration == nil || *oldGeneration != generation || oldOwner == nil || *oldOwner != r.OwnerID || oldExpiry == nil || !oldExpiry.After(now) || oldLease == nil || *oldLease != r.LeaseID || oldRevision == nil || *oldRevision != r.LeaseRevision {
 			return operation.Claim{}, operation.ErrStaleOwner
 		}
 		result.ExpiresAt = *oldExpiry
@@ -118,8 +116,8 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 		result.ExecutionEpoch++
 		result.Active = false
 		result.ExpiresAt = now.Add(r.TTL)
-		if _, err := tx.Exec(ctx, `INSERT INTO execution_claims (claim_id,installation_id,cluster_id,operation_id,execution_epoch,recovery_generation,owner_id,coordination_key,coordination_lease,coordination_revision)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, r.ClaimID, r.InstallationID, result.ClusterID, r.OperationID, result.ExecutionEpoch, generation, r.OwnerID, r.CoordinationKey, r.CoordinationLease, r.CoordinationRevision); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO execution_claims (claim_id,installation_id,cluster_id,operation_id,execution_epoch,recovery_generation,owner_id,lease_id,lease_revision)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, r.ClaimID, r.InstallationID, result.ClusterID, r.OperationID, result.ExecutionEpoch, generation, r.OwnerID, r.LeaseID, r.LeaseRevision); err != nil {
 			if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "23505" && pgErr.ConstraintName == "execution_claims_pkey" {
 				return operation.Claim{}, operation.ErrStaleOwner
 			}
@@ -129,8 +127,8 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 			return operation.Claim{}, admissionError(err)
 		}
 		if _, err := tx.Exec(ctx, `UPDATE operations SET claim_id=$1,owner_id=$2,execution_epoch=$3,claim_expires_at=$4,recovery_generation=$5,claim_active=false,
-			coordination_key=$6,coordination_lease=$7,coordination_revision=$8,updated_at=clock_timestamp() WHERE id=$9`,
-			r.ClaimID, r.OwnerID, result.ExecutionEpoch, result.ExpiresAt, generation, r.CoordinationKey, r.CoordinationLease, r.CoordinationRevision, r.OperationID); err != nil {
+			lease_id=$6,lease_revision=$7,updated_at=clock_timestamp() WHERE id=$8`,
+			r.ClaimID, r.OwnerID, result.ExecutionEpoch, result.ExpiresAt, generation, r.LeaseID, r.LeaseRevision, r.OperationID); err != nil {
 			return operation.Claim{}, admissionError(err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO claim_barriers (claim_id,installation_id,cluster_id,operation_id,node_id,execution_epoch,recovery_generation)
@@ -283,7 +281,7 @@ func validateInstalledPlan(claim operation.Claim, plan *agentv1.ExecutionPlan) (
 	stepIDs := make([]string, 0, len(plan.Steps))
 	commandIDs := make([]string, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
-		if step == nil || step.Command == nil || step.MaxAttempts < 1 || step.MaxAttempts > 10 || step.CancellationBoundary < agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION || step.CancellationBoundary > agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP || step.Postcondition < agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS || step.Postcondition > agentv1.Postcondition_POSTCONDITION_PATRONI_LEADER {
+		if step == nil || step.Command == nil || step.MaxAttempts < 1 || step.MaxAttempts > 10 || step.CancellationBoundary < agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION || step.CancellationBoundary > agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP || step.Postcondition < agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS || step.Postcondition > agentv1.Postcondition_POSTCONDITION_ETCD_MEMBERSHIP {
 			return nil, &AdmissionError{Code: InvalidRequest}
 		}
 		command := step.Command
@@ -696,13 +694,13 @@ func (s *Store) UpdateProgress(ctx context.Context, claim operation.Claim, updat
 	}
 	terminal := update.Status == operation.Succeeded || update.Status == operation.Failed || update.Status == operation.Cancelled
 	if update.Status == operation.Failed || update.Status == operation.Cancelled {
-		if err := settleReplicaRebuild(ctx, tx, claim, plan, false); err != nil {
-			return err
-		}
 		if err := settleMemberRebuild(ctx, tx, claim, plan, false); err != nil {
 			return err
 		}
 		if err := settleRenewal(ctx, tx, claim, plan, false); err != nil {
+			return err
+		}
+		if err := settlePatroniScale(ctx, tx, claim, plan); err != nil {
 			return err
 		}
 		if _, _, _, err := lockClaim(ctx, tx, claim); err != nil {
@@ -710,8 +708,8 @@ func (s *Store) UpdateProgress(ctx context.Context, claim operation.Claim, updat
 		}
 		if _, err := tx.Exec(ctx, `UPDATE cluster_members SET state='residual',updated_at=clock_timestamp()
  WHERE installation_id=$1 AND cluster_id=$2 AND state='pending' AND removed_at IS NULL
- AND ((role='replica' AND EXISTS (SELECT 1 FROM operations WHERE id=$3 AND kind IN ('cluster.scale','cluster.rebuild_replica')))
- OR (role='patroni' AND created_operation_id=$3 AND EXISTS (SELECT 1 FROM operations WHERE id=$3 AND kind='cluster.rebuild_member')))`,
+ AND ((role='replica' AND EXISTS (SELECT 1 FROM operations WHERE id=$3 AND kind='cluster.scale'))
+ OR (role='patroni' AND created_operation_id=$3 AND EXISTS (SELECT 1 FROM operations WHERE id=$3 AND kind IN ('cluster.rebuild_member','cluster.scale'))))`,
 			claim.InstallationID, claim.ClusterID, claim.OperationID); err != nil {
 			return admissionError(err)
 		}

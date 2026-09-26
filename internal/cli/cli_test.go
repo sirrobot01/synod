@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +32,7 @@ import (
 	"github.com/sirrobot01/synod/internal/engine"
 	postgresengine "github.com/sirrobot01/synod/internal/engine/postgres"
 	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
+	"github.com/sirrobot01/synod/internal/jointoken"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 )
@@ -478,6 +481,103 @@ func TestNodeApproveRefusesAMalformedDeclaration(t *testing.T) {
 				t.Fatal("a malformed declaration was sent to the API")
 			}
 		})
+	}
+}
+
+// Approval with only the node ID sends no facts, so the API takes the measured ones.
+func TestNodeApproveNeedsOnlyTheNodeID(t *testing.T) {
+	var body []byte
+	var path string
+	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		body, _ = io.ReadAll(r.Body)
+		json.NewEncoder(w).Encode(map[string]any{"node_id": uuid.New(), "revision": 1})
+	}))
+	node := uuid.NewString()
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(t.Context(), append(flags, "node", "approve", node), &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if path != "/v1/nodes/"+node+"/placement-policy" || sent["architecture"] != "" || sent["engines"] != nil {
+		t.Fatalf("%s body=%s, want the node route and no declared facts", path, body)
+	}
+}
+
+// A join token names the API the CLI used and pins the API CA the CLI trusts.
+func TestNodeJoinTokenPinsTheAPICA(t *testing.T) {
+	installation := client.Installation{InstallationID: uuid.New(), RecoveryGeneration: uuid.New()}
+	var registered map[string]any
+	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/installation":
+			json.NewEncoder(w).Encode(installation)
+		case "POST /v1/enrollment-tokens":
+			json.NewDecoder(r.Body).Decode(&registered)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(client.EnrollmentToken{ID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)})
+		default:
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+		}
+	}))
+	var stdout, stderr bytes.Buffer
+	var result cli.Result
+	if code := cli.Run(t.Context(), append(flags, "node", "join-token", "--ttl", "1h"), &stdout, &stderr); code != 0 || json.Unmarshal(stdout.Bytes(), &result) != nil {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	token, err := jointoken.Decode(result.JoinToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caData, err := os.ReadFile(flags[slices.Index(flags, "--ca-file")+1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(caData)
+	origin, _ := url.Parse(flags[slices.Index(flags, "--api-url")+1])
+	if token.Address != origin.Host || token.InstallationID != installation.InstallationID || token.Fingerprint != jointoken.Fingerprint(block.Bytes) {
+		t.Fatalf("token=%+v, want the API origin, installation, and API CA pin", token)
+	}
+	if registered["token"] != token.Secret || registered["node_id"] != uuid.Nil.String() || registered["ttl_seconds"] != float64(3600) {
+		t.Fatalf("registration=%v, want the token secret with no node", registered)
+	}
+}
+
+// A Patroni removal previews the named member, stops for confirmation, and then sends the
+// reviewed plan with the smaller count.
+func TestScaleRemovesANamedMember(t *testing.T) {
+	id, member, token := uuid.New(), uuid.New(), uuid.New()
+	var previewed map[string]any
+	var scaled map[string]any
+	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v1/clusters/" + id.String() + "/action-plans":
+			json.NewDecoder(r.Body).Decode(&previewed)
+			json.NewEncoder(w).Encode(cluster.ActionPlan{PlanToken: token, ClusterID: id, ClusterName: "ha", ExpectedRevision: 4, Action: "scale_down",
+				DataDisposition: "retain", MemberID: member, Downtime: "The member leaves.", ExpiresAt: time.Now().Add(time.Minute)})
+		case "POST /v1/clusters/" + id.String() + "/actions/scale":
+			json.NewDecoder(r.Body).Decode(&scaled)
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(client.Admission{ClusterID: id, OperationID: uuid.New()})
+		default:
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+		}
+	}))
+	args := append(flags, "db", "scale", id.String(), "--replicas", "2", "--member", member.String(), "--expected-revision", "4")
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(t.Context(), args, &stdout, &stderr); code == 0 || scaled != nil || previewed["member_id"] != member.String() {
+		t.Fatalf("unconfirmed removal: code=%d preview=%v scale=%v stderr=%s", code, previewed, scaled, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := cli.Run(t.Context(), append(args, "--yes"), &stdout, &stderr); code != 0 {
+		t.Fatalf("confirmed removal: code=%d stderr=%s", code, stderr.String())
+	}
+	if scaled["replicas"] != float64(2) || scaled["plan_token"] != token.String() || scaled["confirm"] != true {
+		t.Fatalf("scale body=%v, want the reviewed plan and two replicas", scaled)
 	}
 }
 

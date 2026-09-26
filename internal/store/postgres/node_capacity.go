@@ -247,3 +247,23 @@ func (s *Store) ReadNodePlacementPolicy(ctx context.Context, installationID, nod
 	}
 	return policy, nil
 }
+
+// ReadNodeCapacityReport answers the latest capacity report an agent sent.
+func (s *Store) ReadNodeCapacityReport(ctx context.Context, installationID, nodeID uuid.UUID) (*placement.CapacityReport, error) {
+	if installationID == uuid.Nil || nodeID == uuid.Nil {
+		return nil, &AdmissionError{Code: InvalidRequest}
+	}
+	var reportBytes []byte
+	err := s.pool.QueryRow(ctx, `SELECT report_bytes FROM node_capacity WHERE installation_id=$1 AND node_id=$2`, installationID, nodeID).Scan(&reportBytes)
+	if errors.Is(err, pgx.ErrNoRows) || len(reportBytes) == 0 {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, admissionError(err)
+	}
+	var report placement.CapacityReport
+	if err := json.Unmarshal(reportBytes, &report); err != nil {
+		return nil, &AdmissionError{Code: DependencyUnavailable, Cause: err}
+	}
+	return &report, nil
+}

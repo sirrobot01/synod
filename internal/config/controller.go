@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/spf13/pflag"
 )
 
 // Controller holds the resolved controller settings.
@@ -32,28 +32,15 @@ type Controller struct {
 	TLSKeyFile         string `json:"tls_key_file"`
 	CACertFile         string `json:"ca_cert_file"`
 	CAKeyFile          string `json:"ca_key_file"`
-	EtcdEndpoints      string `json:"etcd_endpoints"`
-	EtcdCAFile         string `json:"etcd_ca_file"`
-	EtcdTLSCertFile    string `json:"etcd_tls_cert_file"`
-	EtcdTLSKeyFile     string `json:"etcd_tls_key_file"`
-	EtcdUsername       string `json:"etcd_username"`
-	EtcdPasswordFile   string `json:"etcd_password_file"`
-	EtcdAllowPlaintext bool   `json:"etcd_allow_plaintext,omitzero"`
 	PublicOrigin       string `json:"public_origin"`
-	EtcdPrefix         string `json:"etcd_prefix"`
-	// The Patroni DCS admin account creates and deletes one etcd account for each
-	// Patroni cluster. It needs the root role. Without it, Patroni HA is unavailable.
-	PatroniDCSAdminUsername     string `json:"patroni_dcs_admin_username"`
-	PatroniDCSAdminPasswordFile string `json:"patroni_dcs_admin_password_file"`
-	// The native Patroni CA signs member and DCS client certificates. Patroni HA needs
-	// it together with the DCS admin account.
+	// The native Patroni CA signs member, peer, and DCS client certificates.
 	PatroniCACertFile string `json:"patroni_ca_cert_file"`
 	PatroniCAKeyFile  string `json:"patroni_ca_key_file"`
-	// PatroniDCSEndpoints are the etcd host:port pairs that Patroni members reach.
 	// PatroniImage is the name@sha256 digest of the member image. With more than one placement
 	// architecture, it is an image index that covers each one.
-	PatroniDCSEndpoints string `json:"patroni_dcs_endpoints"`
-	PatroniImage        string `json:"patroni_image"`
+	PatroniImage string `json:"patroni_image"`
+	// EtcdImage is the name@sha256 digest of the etcd member image.
+	EtcdImage string `json:"etcd_image"`
 	LogLevel            string `json:"log_level"`
 	// SecretKeyFile holds the base64 of one 32-byte wrapping key, and SecretKeyID
 	// names it. A controller without both seals nothing, so it admits clusters and
@@ -75,23 +62,22 @@ type Controller struct {
 	EngineEndpointLastPort  int `json:"engine_endpoint_last_port"`
 }
 
-// LoadController resolves settings from flags, the environment, and a JSON file.
-// A flag overrides an environment variable, which overrides the file.
-func LoadController(args []string, output io.Writer) (Controller, error) {
-	config := Controller{Listen: "127.0.0.1:8443", ActorID: "bootstrap-admin", EtcdPrefix: "/synod", LogLevel: "info"}
-	override := config
-	flags := flag.NewFlagSet("synodd", flag.ContinueOnError)
-	flags.SetOutput(output)
+// BindController registers the controller flags on flags. The returned function
+// resolves the settings after flags are parsed. A flag overrides an environment
+// variable, which overrides the JSON file.
+func BindController(flags *pflag.FlagSet) func() (Controller, error) {
+	defaults := Controller{Listen: "127.0.0.1:8443", ActorID: "bootstrap-admin", LogLevel: "info"}
+	override := defaults
 	path := flags.String("config", os.Getenv("SYNOD_CONFIG"), "JSON configuration file")
 	flags.StringVar(&override.AgentListen, "agent-listen", "", "optional authenticated agent gRPC listen address")
 	flags.StringVar(&override.AgentTLSCertFile, "agent-tls-cert-file", "", "controller identity certificate for agent transport")
 	flags.StringVar(&override.AgentTLSKeyFile, "agent-tls-key-file", "", "protected controller identity private key")
 	flags.StringVar(&override.AgentCAFile, "agent-ca-file", "", "installation CA trust bundle for agent transport")
 	flags.StringVar(&override.InstallationID, "installation-id", "", "stable installation UUID")
-	flags.StringVar(&override.Listen, "listen", config.Listen, "HTTPS listen address")
+	flags.StringVar(&override.Listen, "listen", defaults.Listen, "HTTPS listen address")
 	flags.StringVar(&override.DatabaseURL, "database-url", "", "metadata PostgreSQL URL")
 	flags.StringVar(&override.AdminTokenFile, "admin-token-file", "", "protected administrator token file")
-	flags.StringVar(&override.ActorID, "actor-id", config.ActorID, "administrator audit identity")
+	flags.StringVar(&override.ActorID, "actor-id", defaults.ActorID, "administrator audit identity")
 	flags.StringVar(&override.TLSCertFile, "tls-cert-file", "", "API TLS certificate file")
 	flags.StringVar(&override.TLSKeyFile, "tls-key-file", "", "API TLS private key file")
 	flags.StringVar(&override.CACertFile, "ca-cert-file", "", "installation enrollment CA certificate file")
@@ -103,30 +89,20 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 	flags.StringVar(&override.PlacementStorageID, "placement-storage-id", "", "storage pool identifier the nodes declare")
 	flags.IntVar(&override.EngineEndpointFirstPort, "engine-endpoint-first-port", 0, "lowest host port an engine may publish on (default 5432)")
 	flags.IntVar(&override.EngineEndpointLastPort, "engine-endpoint-last-port", 0, "highest host port an engine may publish on (default 5531)")
-	flags.StringVar(&override.EtcdEndpoints, "etcd-endpoints", "", "comma-separated etcd endpoints that elect one cluster owner")
-	flags.StringVar(&override.EtcdCAFile, "etcd-ca-file", "", "CA trust bundle for coordination TLS")
-	flags.StringVar(&override.EtcdTLSCertFile, "etcd-tls-cert-file", "", "optional coordination client certificate")
-	flags.StringVar(&override.EtcdTLSKeyFile, "etcd-tls-key-file", "", "protected coordination client private key")
-	flags.StringVar(&override.EtcdUsername, "etcd-username", "", "coordination account with access to this installation prefix")
-	flags.StringVar(&override.EtcdPasswordFile, "etcd-password-file", "", "protected coordination account password file")
-	flags.BoolVar(&override.EtcdAllowPlaintext, "etcd-allow-plaintext", false, "allow unauthenticated plaintext coordination for development")
 	flags.StringVar(&override.PublicOrigin, "public-origin", "", "browser origin of this API, such as https://synod.example.com")
-	flags.StringVar(&override.EtcdPrefix, "etcd-prefix", config.EtcdPrefix, "absolute etcd key prefix for elections")
-	flags.StringVar(&override.PatroniDCSAdminUsername, "patroni-dcs-admin-username", "", "etcd root account that creates per-cluster Patroni accounts")
-	flags.StringVar(&override.PatroniDCSAdminPasswordFile, "patroni-dcs-admin-password-file", "", "protected Patroni DCS admin password file")
 	flags.StringVar(&override.PatroniCACertFile, "patroni-ca-cert-file", "", "native Patroni CA certificate")
 	flags.StringVar(&override.PatroniCAKeyFile, "patroni-ca-key-file", "", "protected native Patroni CA private key")
-	flags.StringVar(&override.PatroniDCSEndpoints, "patroni-dcs-endpoints", "", "comma-separated etcd host:port pairs that Patroni members reach")
 	flags.StringVar(&override.PatroniImage, "patroni-image", "", "Patroni member image as name@sha256:digest; an image index for every placement architecture")
-	flags.StringVar(&override.LogLevel, "log-level", config.LogLevel, "debug, info, warn, or error")
-	if err := flags.Parse(args); err != nil {
-		return Controller{}, err
+	flags.StringVar(&override.EtcdImage, "etcd-image", "", "etcd member image as name@sha256:digest; an image index for every placement architecture")
+	flags.StringVar(&override.LogLevel, "log-level", defaults.LogLevel, "debug, info, warn, or error")
+	return func() (Controller, error) {
+		return loadController(flags, *path, defaults, override)
 	}
-	if flags.NArg() != 0 {
-		return Controller{}, errors.New("unexpected controller arguments")
-	}
-	if *path != "" {
-		file, err := os.Open(*path)
+}
+
+func loadController(flags *pflag.FlagSet, path string, config, override Controller) (Controller, error) {
+	if path != "" {
+		file, err := os.Open(path)
 		if err != nil {
 			return Controller{}, fmt.Errorf("open controller configuration: %w", err)
 		}
@@ -172,20 +148,11 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 		{"SYNOD_TLS_KEY_FILE", &config.TLSKeyFile},
 		{"SYNOD_CA_CERT_FILE", &config.CACertFile},
 		{"SYNOD_CA_KEY_FILE", &config.CAKeyFile},
-		{"SYNOD_ETCD_ENDPOINTS", &config.EtcdEndpoints},
-		{"SYNOD_ETCD_CA_FILE", &config.EtcdCAFile},
-		{"SYNOD_ETCD_TLS_CERT_FILE", &config.EtcdTLSCertFile},
-		{"SYNOD_ETCD_TLS_KEY_FILE", &config.EtcdTLSKeyFile},
-		{"SYNOD_ETCD_USERNAME", &config.EtcdUsername},
-		{"SYNOD_ETCD_PASSWORD_FILE", &config.EtcdPasswordFile},
 		{"SYNOD_PUBLIC_ORIGIN", &config.PublicOrigin},
-		{"SYNOD_ETCD_PREFIX", &config.EtcdPrefix},
-		{"SYNOD_PATRONI_DCS_ADMIN_USERNAME", &config.PatroniDCSAdminUsername},
-		{"SYNOD_PATRONI_DCS_ADMIN_PASSWORD_FILE", &config.PatroniDCSAdminPasswordFile},
 		{"SYNOD_PATRONI_CA_CERT_FILE", &config.PatroniCACertFile},
 		{"SYNOD_PATRONI_CA_KEY_FILE", &config.PatroniCAKeyFile},
-		{"SYNOD_PATRONI_DCS_ENDPOINTS", &config.PatroniDCSEndpoints},
 		{"SYNOD_PATRONI_IMAGE", &config.PatroniImage},
+		{"SYNOD_ETCD_IMAGE", &config.EtcdImage},
 		{"SYNOD_LOG_LEVEL", &config.LogLevel},
 		{"SYNOD_SECRET_KEY_FILE", &config.SecretKeyFile},
 		{"SYNOD_SECRET_KEY_ID", &config.SecretKeyID},
@@ -212,14 +179,7 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 			*field.value = number
 		}
 	}
-	if value, present := os.LookupEnv("SYNOD_ETCD_ALLOW_PLAINTEXT"); present {
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return Controller{}, errors.New("SYNOD_ETCD_ALLOW_PLAINTEXT must be a boolean")
-		}
-		config.EtcdAllowPlaintext = parsed
-	}
-	flags.Visit(func(value *flag.Flag) {
+	flags.Visit(func(value *pflag.Flag) {
 		switch value.Name {
 		case "agent-listen":
 			config.AgentListen = override.AgentListen
@@ -261,36 +221,16 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 			config.SecretKeyID = override.SecretKeyID
 		case "ca-key-file":
 			config.CAKeyFile = override.CAKeyFile
-		case "etcd-endpoints":
-			config.EtcdEndpoints = override.EtcdEndpoints
-		case "etcd-ca-file":
-			config.EtcdCAFile = override.EtcdCAFile
-		case "etcd-tls-cert-file":
-			config.EtcdTLSCertFile = override.EtcdTLSCertFile
-		case "etcd-tls-key-file":
-			config.EtcdTLSKeyFile = override.EtcdTLSKeyFile
-		case "etcd-username":
-			config.EtcdUsername = override.EtcdUsername
-		case "etcd-password-file":
-			config.EtcdPasswordFile = override.EtcdPasswordFile
-		case "etcd-allow-plaintext":
-			config.EtcdAllowPlaintext = override.EtcdAllowPlaintext
 		case "public-origin":
 			config.PublicOrigin = override.PublicOrigin
-		case "etcd-prefix":
-			config.EtcdPrefix = override.EtcdPrefix
-		case "patroni-dcs-admin-username":
-			config.PatroniDCSAdminUsername = override.PatroniDCSAdminUsername
-		case "patroni-dcs-admin-password-file":
-			config.PatroniDCSAdminPasswordFile = override.PatroniDCSAdminPasswordFile
 		case "patroni-ca-cert-file":
 			config.PatroniCACertFile = override.PatroniCACertFile
 		case "patroni-ca-key-file":
 			config.PatroniCAKeyFile = override.PatroniCAKeyFile
-		case "patroni-dcs-endpoints":
-			config.PatroniDCSEndpoints = override.PatroniDCSEndpoints
 		case "patroni-image":
 			config.PatroniImage = override.PatroniImage
+		case "etcd-image":
+			config.EtcdImage = override.EtcdImage
 		case "log-level":
 			config.LogLevel = override.LogLevel
 		}
@@ -327,17 +267,13 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 			return Controller{}, errors.New("secret_key_id must be a nonzero UUID")
 		}
 	}
-	// A controller that can provision must say what it places onto. Guessing would
-	// produce a profile that silently matches no node in the fleet.
-	if config.SecretKeyFile != "" {
-		// Each cluster stays on one of these, because PostgreSQL replication needs one architecture.
+	// Placement shape is read from node records. An operator may declare
+	// placement_architecture to constrain or order architecture preference.
+	if config.PlacementArchitecture != "" {
 		architectures := strings.Split(config.PlacementArchitecture, ",")
 		if len(architectures) > 2 || slices.ContainsFunc(architectures, func(value string) bool { return value != "amd64" && value != "arm64" }) ||
 			(len(architectures) == 2 && architectures[0] == architectures[1]) {
-			return Controller{}, errors.New("placement_architecture must be amd64, arm64, or both separated by a comma when provisioning is configured")
-		}
-		if config.PlacementRuntimeVersion == "" || config.PlacementStorageID == "" {
-			return Controller{}, errors.New("placement_runtime_version and placement_storage_id are required when provisioning is configured")
+			return Controller{}, errors.New("placement_architecture must be amd64, arm64, or both separated by a comma")
 		}
 	}
 	if config.EngineEndpointFirstPort == 0 {
@@ -373,77 +309,14 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 			return Controller{}, errors.New("agent_listen port must be between 0 and 65535")
 		}
 	}
-	if config.EtcdEndpoints != "" {
-		if config.AgentListen == "" {
-			return Controller{}, errors.New("etcd_endpoints requires agent_listen, because a worker dispatches over the agent transport")
-		}
-		endpoints := strings.Split(config.EtcdEndpoints, ",")
-		if len(endpoints) > 8 {
-			return Controller{}, errors.New("etcd_endpoints permits at most eight endpoints")
-		}
-		seen := make(map[string]bool)
-		for _, endpoint := range endpoints {
-			endpoint = strings.TrimSpace(endpoint)
-			host, port, err := net.SplitHostPort(endpoint)
-			number, parseErr := strconv.ParseUint(port, 10, 16)
-			if err != nil || parseErr != nil || number == 0 || host == "" || len(endpoint) > 320 || endpoint != net.JoinHostPort(host, port) {
-				return Controller{}, errors.New("etcd_endpoints requires bounded plain host and port pairs without credentials")
-			}
-			if address := net.ParseIP(host); address != nil {
-				if !address.IsGlobalUnicast() && !address.IsLoopback() {
-					return Controller{}, errors.New("etcd_endpoints requires unicast addresses")
-				}
-				host = address.String()
-			} else {
-				host = strings.ToLower(strings.TrimSuffix(host, "."))
-				if len(host) > 253 {
-					return Controller{}, errors.New("etcd_endpoints requires bounded DNS names")
-				}
-				for label := range strings.SplitSeq(host, ".") {
-					if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' || strings.ContainsFunc(label, func(r rune) bool {
-						return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-')
-					}) {
-						return Controller{}, errors.New("etcd_endpoints requires valid DNS names or IP addresses")
-					}
-				}
-			}
-			canonical := net.JoinHostPort(host, strconv.FormatUint(number, 10))
-			if seen[canonical] {
-				return Controller{}, errors.New("etcd_endpoints must be distinct")
-			}
-			seen[canonical] = true
-		}
-		if config.EtcdAllowPlaintext {
-			if config.EtcdCAFile != "" || config.EtcdTLSCertFile != "" || config.EtcdTLSKeyFile != "" || config.EtcdUsername != "" || config.EtcdPasswordFile != "" {
-				return Controller{}, errors.New("etcd_allow_plaintext cannot include TLS or authentication settings")
-			}
-		} else {
-			if config.EtcdCAFile == "" || config.EtcdUsername == "" || config.EtcdPasswordFile == "" {
-				return Controller{}, errors.New("coordination requires etcd_ca_file, etcd_username, and etcd_password_file; development plaintext requires etcd_allow_plaintext")
-			}
-			if (config.EtcdTLSCertFile == "") != (config.EtcdTLSKeyFile == "") {
-				return Controller{}, errors.New("etcd_tls_cert_file and etcd_tls_key_file must be supplied together")
-			}
-			if len(config.EtcdUsername) > 128 || strings.ContainsAny(config.EtcdUsername, ":/@\\") || strings.ContainsFunc(config.EtcdUsername, func(r rune) bool { return r < '!' || r > '~' }) {
-				return Controller{}, errors.New("etcd_username must be a bounded account name without credentials")
-			}
-		}
-		// The prefix only matters to an election, so an unused value never blocks startup.
-		if !strings.HasPrefix(config.EtcdPrefix, "/") || strings.HasSuffix(config.EtcdPrefix, "/") || strings.Contains(config.EtcdPrefix, "//") {
-			return Controller{}, errors.New("etcd_prefix must be an absolute key prefix without a trailing slash")
+	patroniFields := 0
+	for _, value := range []string{config.PatroniCACertFile, config.PatroniCAKeyFile, config.PatroniImage, config.EtcdImage} {
+		if value != "" {
+			patroniFields++
 		}
 	}
-	if (config.PatroniDCSAdminUsername == "") != (config.PatroniDCSAdminPasswordFile == "") {
-		return Controller{}, errors.New("patroni_dcs_admin_username and patroni_dcs_admin_password_file must be supplied together")
-	}
-	if (config.PatroniCACertFile == "") != (config.PatroniCAKeyFile == "") {
-		return Controller{}, errors.New("patroni_ca_cert_file and patroni_ca_key_file must be supplied together")
-	}
-	if (config.PatroniCACertFile == "") != (config.PatroniDCSAdminUsername == "") {
-		return Controller{}, errors.New("patroni HA requires both the Patroni CA files and the Patroni DCS admin account")
-	}
-	if (config.PatroniDCSEndpoints == "" || config.PatroniImage == "") != (config.PatroniDCSAdminUsername == "") {
-		return Controller{}, errors.New("patroni HA requires patroni_dcs_endpoints and patroni_image with the Patroni DCS admin account")
+	if patroniFields != 0 && patroniFields != 4 {
+		return Controller{}, errors.New("patroni HA requires patroni_ca_cert_file, patroni_ca_key_file, patroni_image, and etcd_image together")
 	}
 	if config.PatroniImage != "" {
 		name, digest, found := strings.Cut(config.PatroniImage, "@sha256:")
@@ -451,28 +324,14 @@ func LoadController(args []string, output io.Writer) (Controller, error) {
 			return Controller{}, errors.New("patroni_image must be name@sha256 followed by 64 lowercase hex digits")
 		}
 	}
-	if config.PatroniDCSEndpoints != "" {
-		for endpoint := range strings.SplitSeq(config.PatroniDCSEndpoints, ",") {
-			host, port, err := net.SplitHostPort(endpoint)
-			number, parseErr := strconv.ParseUint(port, 10, 16)
-			if err != nil || parseErr != nil || number == 0 || host == "" || endpoint != net.JoinHostPort(host, port) {
-				return Controller{}, errors.New("patroni_dcs_endpoints must be comma-separated host:port pairs")
-			}
+	if config.EtcdImage != "" {
+		name, digest, found := strings.Cut(config.EtcdImage, "@sha256:")
+		if !found || name == "" || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" || strings.ContainsFunc(name, func(r rune) bool { return r < '!' || r > '~' }) {
+			return Controller{}, errors.New("etcd_image must be name@sha256 followed by 64 lowercase hex digits")
 		}
-	}
-	if config.PatroniDCSAdminUsername != "" {
-		if config.EtcdEndpoints == "" || config.EtcdAllowPlaintext {
-			return Controller{}, errors.New("patroni DCS administration requires secure etcd coordination")
+		if config.AgentListen == "" {
+			return Controller{}, errors.New("patroni HA requires agent_listen, because a worker dispatches over the agent transport")
 		}
-		if len(config.PatroniDCSAdminUsername) > 128 || strings.ContainsAny(config.PatroniDCSAdminUsername, ":/@\\") || strings.ContainsFunc(config.PatroniDCSAdminUsername, func(r rune) bool { return r < '!' || r > '~' }) {
-			return Controller{}, errors.New("patroni_dcs_admin_username must be a bounded account name without credentials")
-		}
-		if config.PatroniDCSAdminUsername == config.EtcdUsername {
-			return Controller{}, errors.New("patroni_dcs_admin_username must differ from etcd_username")
-		}
-	}
-	if config.EtcdEndpoints == "" && (config.EtcdAllowPlaintext || config.EtcdCAFile != "" || config.EtcdTLSCertFile != "" || config.EtcdTLSKeyFile != "" || config.EtcdUsername != "" || config.EtcdPasswordFile != "") {
-		return Controller{}, errors.New("coordination security settings require etcd_endpoints")
 	}
 	if config.PublicOrigin != "" {
 		origin, err := url.Parse(config.PublicOrigin)

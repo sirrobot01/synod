@@ -3,23 +3,22 @@ package cli
 import (
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/client"
 	"github.com/spf13/cobra"
 )
 
-func newEnrollmentTokenCommand(settings *client.Config, result *Result, executed *bool) *cobra.Command {
+func newEnrollmentTokenCommand(app *app) *cobra.Command {
 	var options client.EnrollmentTokenOptions
 	var node string
 	var ttl time.Duration
 	group := &cobra.Command{Use: "enrollment-token", Short: "Register a token for one agent node"}
 	command := &cobra.Command{Use: "register", Short: "Save and register a token; retry with the same request directory", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			*executed = true
+			app.ran = true
 			if cmd.Flags().Changed("node-id") {
-				value, err := uuid.Parse(node)
-				if err != nil || value == uuid.Nil {
-					return &client.Error{Code: "invalid_request", Message: "Use a nonzero node UUID."}
+				value, err := parseID(node, "Use a nonzero node UUID.")
+				if err != nil {
+					return err
 				}
 				options.NodeID = value
 			}
@@ -29,14 +28,14 @@ func newEnrollmentTokenCommand(settings *client.Config, result *Result, executed
 				}
 				options.TTLSeconds = int(ttl / time.Second)
 			}
-			api, err := client.New(*settings)
+			api, err := client.New(app.settings)
 			if err != nil {
 				return err
 			}
 			defer api.Close()
 			value, err := api.RegisterEnrollmentToken(cmd.Context(), options)
 			if err == nil {
-				result.EnrollmentToken = &value
+				app.result.EnrollmentToken = &value
 			}
 			return err
 		}}

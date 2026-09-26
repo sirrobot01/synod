@@ -66,8 +66,8 @@ func TestExecutableRecoversCommittedEnrollment(t *testing.T) {
 	if err := store.Migrate(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	binary := filepath.Join(t.TempDir(), "synod-agent")
-	build := exec.CommandContext(t.Context(), "go", "build", "-race", "-o", binary, "../../../cmd/synod-agent")
+	binary := filepath.Join(t.TempDir(), "synod")
+	build := exec.CommandContext(t.Context(), "go", "build", "-race", "-o", binary, "../../../cmd/synod")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v %s", err, output)
 	}
@@ -155,7 +155,7 @@ func TestExecutableRecoversCommittedEnrollment(t *testing.T) {
 	remote := []string{"--api-url", https.URL, "--token-file", tokenPath, "--ca-file", caPath, "--attempts", "1"}
 	run := func(mode string, extra []string) ([]byte, []byte, error) {
 		t.Helper()
-		args := append([]string{"enroll", mode}, common...)
+		args := append([]string{"agent", "enroll", mode}, common...)
 		args = append(args, extra...)
 		command := exec.CommandContext(t.Context(), binary, args...)
 		var stdout, stderr bytes.Buffer

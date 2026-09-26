@@ -31,7 +31,8 @@ func TestScaleRetryReadChecksDispatchAndResultIdentity(t *testing.T) {
 			if _, err := s.pool.Exec(t.Context(), `UPDATE operations SET kind='cluster.scale',status='failed',claim_active=false WHERE id=$1`, claim.OperationID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.pool.Exec(t.Context(), `UPDATE clusters SET desired_replicas=1 WHERE id=$1`, claim.ClusterID); err != nil {
+			// Only Redis scales. These read checks do not depend on the engine.
+			if _, err := s.pool.Exec(t.Context(), `UPDATE clusters SET desired_replicas=1,engine='redis',spec=spec-'postgresql'||'{"engine":"redis","redis":{"version":"8.2.7","topology":"standalone","persistence":"aof"}}' WHERE id=$1`, claim.ClusterID); err != nil {
 				t.Fatal(err)
 			}
 			admitted, err := s.AdmitClusterAction(t.Context(), ClusterActionRequest{Identity: RequestIdentity{InstallationID: claim.InstallationID, ActorID: "retry-test", APIOperation: ScaleClusterAPIOperation, IdempotencyKey: uuid.NewString()}, RequestID: uuid.NewString(), ClusterID: claim.ClusterID, ExpectedRevision: 1, Replicas: new(1)})

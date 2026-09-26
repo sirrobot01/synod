@@ -104,7 +104,7 @@ func (r *Runtime) inspectInventoryContainer(ctx context.Context, clusterID, reso
 	}
 	effect.Active, effect.OutcomeUnknown, effect.State = false, false, string(item.Container.State.Status)
 	phase, phaseErr := postgresPhase(item.Container)
-	if phaseErr == nil && (phase == "bootstrap_ready" || phase == "bootstrap_failed" || phase == "bootstrap_recovered" || phase == "replica_prepared" || phase == "replica_cloned") {
+	if phaseErr == nil && (phase == "bootstrap_ready" || phase == "bootstrap_failed" || phase == "bootstrap_recovered") {
 		detail, err := r.containerChanges(ctx, item.Container)
 		if err != nil || detail != "" {
 			phase, phaseErr = "bootstrap_unknown", runtime.ErrOutcomeUnknown

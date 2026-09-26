@@ -141,7 +141,7 @@ func TestSetupRecoveryCompletionNeedsAllFourReceipts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err := h.store.AcquireClaim(t.Context(), ClaimRequest{ClaimID: uuid.New(), InstallationID: h.id, OperationID: admission.OperationID, RecoveryGeneration: h.generation, OwnerID: "recovery-owner", TTL: time.Minute, CoordinationKey: "/recovery", CoordinationLease: 1, CoordinationRevision: 1})
+	claim, err := h.store.AcquireClaim(t.Context(), ClaimRequest{ClaimID: uuid.New(), InstallationID: h.id, OperationID: admission.OperationID, RecoveryGeneration: h.generation, OwnerID: "recovery-owner", TTL: time.Minute, LeaseID: 1, LeaseRevision: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

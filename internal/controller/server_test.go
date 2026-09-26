@@ -1,4 +1,4 @@
-package main
+package controller
 
 import (
 	"context"
@@ -227,9 +227,10 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() {
-		done <- run(ctx, []string{"--listen", "127.0.0.1:0", "--database-url", databaseURL.String(), "--installation-id", installation.String(), "--ca-cert-file", caCertPath, "--ca-key-file", caKeyPath, "--agent-listen", "127.0.0.1:0", "--agent-tls-cert-file", agentCertPath, "--agent-tls-key-file", agentKeyPath, "--agent-ca-file", caCertPath, "--admin-token-file", tokenPath, "--tls-cert-file", certPath, "--tls-key-file", keyPath, "--secret-key-file", wrappingKeyPath, "--secret-key-id", wrappingKeyID.String(), "--placement-architecture", "arm64", "--placement-runtime-version", "27.1.1", "--placement-storage-id", "fixture"}, log)
-	}()
+	command := Command()
+	command.SetArgs([]string{"--listen", "127.0.0.1:0", "--database-url", databaseURL.String(), "--installation-id", installation.String(), "--ca-cert-file", caCertPath, "--ca-key-file", caKeyPath, "--agent-listen", "127.0.0.1:0", "--agent-tls-cert-file", agentCertPath, "--agent-tls-key-file", agentKeyPath, "--agent-ca-file", caCertPath, "--admin-token-file", tokenPath, "--tls-cert-file", certPath, "--tls-key-file", keyPath, "--secret-key-file", wrappingKeyPath, "--secret-key-id", wrappingKeyID.String(), "--placement-architecture", "arm64", "--placement-runtime-version", "27.1.1", "--placement-storage-id", "fixture"})
+	command.SetErr(log)
+	go func() { done <- command.ExecuteContext(ctx) }()
 	var address, agentAddress string
 	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
@@ -445,5 +446,14 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	}
 	if strings.Contains(string(logs), token) || strings.Contains(string(logs), dsn) || strings.Contains(string(logs), password) || strings.Contains(string(logs), base64.StdEncoding.EncodeToString(wrappingKey)) {
 		t.Fatal("startup logs exposed credentials")
+	}
+}
+
+func TestServerRefusesPositionalArgumentsWithoutRepeatingThem(t *testing.T) {
+	command := Command()
+	command.SetArgs([]string{"private-value"})
+	err := command.ExecuteContext(t.Context())
+	if err == nil || strings.Contains(err.Error(), "private-value") {
+		t.Fatalf("error = %v; want a refusal that does not repeat the argument", err)
 	}
 }

@@ -39,7 +39,6 @@ import (
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
@@ -140,50 +139,11 @@ func TestRealDockerPatroniStartAndRestart(t *testing.T) {
 	if _, err := api.ContainerStart(ctx, dcsContainer.ID, client.ContainerStartOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	dcsInspect, err := api.ContainerInspect(ctx, dcsContainer.ID, client.ContainerInspectOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding := dcsInspect.Container.NetworkSettings.Ports[dcsPort][0]
-	pair, err := tls.X509KeyPair(materials[0].Certificate, materials[0].PrivateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dcs, err := clientv3.New(clientv3.Config{Endpoints: []string{"https://" + net.JoinHostPort(binding.HostIP.String(), binding.HostPort)}, DialTimeout: 5 * time.Second, TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{pair}, ServerName: addresses[0].String()}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer dcs.Close()
 	secrets := runtime.Secrets{}
-	refs := make([]*agentv1.SecretReference, 0, 8)
-	for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_dcs", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
+	refs := make([]*agentv1.SecretReference, 0, 7)
+	for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
 		refs = append(refs, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: purpose})
 		secrets[purpose] = []byte(uuid.NewString())
-	}
-	dcsUser := "synod_patroni_" + clusterID.String()
-	dcsContext, cancelDCS := context.WithTimeout(ctx, 30*time.Second)
-	defer cancelDCS()
-	if _, err := dcs.Auth.UserAdd(dcsContext, "root", uuid.NewString()); err != nil {
-		t.Fatal("fixture root setup", err)
-	}
-	if _, err := dcs.Auth.UserGrantRole(dcsContext, "root", "root"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dcs.Auth.UserAdd(dcsContext, dcsUser, string(secrets["patroni_dcs"])); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dcs.Auth.RoleAdd(dcsContext, dcsUser); err != nil {
-		t.Fatal(err)
-	}
-	prefix := "/synod-patroni/" + r.options.InstallationID.String() + "/" + clusterID.String() + "/"
-	if _, err := dcs.Auth.RoleGrantPermission(dcsContext, dcsUser, prefix, clientv3.GetPrefixRangeEnd(prefix), clientv3.PermissionType(clientv3.PermReadWrite)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dcs.Auth.UserGrantRole(dcsContext, dcsUser, dcsUser); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dcs.Auth.AuthEnable(dcsContext); err != nil {
-		t.Fatal(err)
 	}
 	secrets["patroni_dcs_tls"], err = json.Marshal(materials[0])
 	if err != nil {

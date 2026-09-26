@@ -28,38 +28,25 @@ func planStep(t *testing.T, op operation.Operation, nodeID, resourceID string, p
 		input.Payload = &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: resourceID}}
 	case agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS:
 		input.Payload = &agentv1.CommandInput_EnsureNetwork{EnsureNetwork: &agentv1.EnsureNetwork{NetworkId: resourceID}}
-	case agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED, agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_CLONED, agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED:
-		admin, application, replication := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	case agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED:
+		admin, application := uuid.NewString(), uuid.NewString()
 		input.Secrets = []*agentv1.SecretReference{
 			{CredentialId: admin, Version: 1, Purpose: "superuser"},
 			{CredentialId: application, Version: 1, Purpose: "application"},
-			{CredentialId: replication, Version: 1, Purpose: "replication"},
 		}
 		input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
 			ImageDigest: testImageDigest, Engine: "postgres", VolumeId: uuid.NewString(), NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST,
 			Postgres: &agentv1.PostgresContainerConfig{Port: 15432,
 				SuperuserCredentialId: admin, SuperuserCredentialVersion: 1,
-				ApplicationCredentialId: application, ApplicationCredentialVersion: 1, ReplicationCredentialId: replication, ReplicationCredentialVersion: 1},
-			SecretEnv: []*agentv1.SecretEnv{{Name: "POSTGRES_PASSWORD", Purpose: "superuser"}, {Name: "SYNOD_APP_VERIFIER", Purpose: "application"}, {Name: "SYNOD_REPL_VERIFIER", Purpose: "replication"}},
+				ApplicationCredentialId: application, ApplicationCredentialVersion: 1},
+			SecretEnv: []*agentv1.SecretEnv{{Name: "POSTGRES_PASSWORD", Purpose: "superuser"}, {Name: "SYNOD_APP_VERIFIER", Purpose: "application"}},
 		}}
 		if postcondition == agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED {
 			input.Payload = &agentv1.CommandInput_RecoverPostgresSetup{RecoverPostgresSetup: &agentv1.RecoverPostgresSetup{Postgres: input.GetEnsureContainer().Postgres}}
 		}
-		if postcondition == agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_CLONED {
-			config := input.GetEnsureContainer().Postgres
-			config.ReplicaSource = &agentv1.PostgresReplicaSource{Address: "127.0.0.1", Port: 5432, ResourceId: uuid.NewString()}
-			input.Secrets = input.Secrets[1:]
-			input.Payload = &agentv1.CommandInput_ClonePostgresReplica{ClonePostgresReplica: &agentv1.ClonePostgresReplica{RequiredFreeBytes: 1 << 30, Postgres: config}}
-		}
-		if postcondition == agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_FAILED {
-			config := input.GetEnsureContainer().Postgres
-			config.ReplicaSource = &agentv1.PostgresReplicaSource{Address: "127.0.0.1", Port: 5432, ResourceId: uuid.NewString()}
-			input.Secrets = nil
-			input.Payload = &agentv1.CommandInput_VerifyPostgresReplicaFailure{VerifyPostgresReplicaFailure: &agentv1.VerifyPostgresReplicaFailure{Postgres: config, CloneCommandId: uuid.NewString()}}
-		}
 	case agentv1.Postcondition_POSTCONDITION_PATRONI_START_FAILED, agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_NOT_SERVING, agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_FAILED, agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_RECREATED:
 		var refs []*agentv1.SecretReference
-		for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_dcs", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
+		for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_rest", "patroni_dcs_tls", "patroni_member_tls"} {
 			refs = append(refs, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: purpose})
 		}
 		member := &agentv1.EnsureContainer{
@@ -85,8 +72,9 @@ func planStep(t *testing.T, op operation.Operation, nodeID, resourceID string, p
 	case agentv1.Postcondition_POSTCONDITION_PATRONI_LEADER:
 		input.Secrets = []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "patroni_rest"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "patroni_member_tls"}}
 		input.Payload = &agentv1.CommandInput_SwitchoverPatroni{SwitchoverPatroni: &agentv1.SwitchoverPatroni{Address: "192.0.2.10", RestPort: 8008}}
-	case agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_PREPARED:
-		input.Payload = &agentv1.CommandInput_PreparePostgresReplica{PreparePostgresReplica: &agentv1.PreparePostgresReplica{}}
+	case agentv1.Postcondition_POSTCONDITION_ETCD_MEMBERSHIP:
+		input.Secrets = []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "patroni_member_tls"}}
+		input.Payload = &agentv1.CommandInput_EtcdMembership{EtcdMembership: &agentv1.EtcdMembership{Address: "192.0.2.10", ClientPort: 2379, Action: "remove", Name: "etcd-0"}}
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING:
 		input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED:
@@ -507,37 +495,5 @@ func TestValidatePlanBindsARemovalToItsBoundary(t *testing.T) {
 	steps := []*agentv1.PlanStep{stop, removal}
 	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps}, op); !errors.Is(err, operation.ErrUnsupportedPlan) {
 		t.Fatalf("err=%v, want a removal with a safe-stop boundary refused", err)
-	}
-}
-
-func TestReplicaCloneRequiresPreparedDependency(t *testing.T) {
-	op, node, resource := testOperation(), uuid.NewString(), uuid.NewString()
-	prepared := planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_PREPARED)
-	cloned := planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_POSTGRES_REPLICA_CLONED, prepared.Command.StepId)
-	valid := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{prepared, cloned}}
-	if err := operation.ValidatePlan(valid, op); err != nil {
-		t.Fatal(err)
-	}
-	for name, change := range map[string]func(*agentv1.ExecutionPlan){
-		"missing preparation": func(p *agentv1.ExecutionPlan) { p.Steps = p.Steps[1:]; p.Steps[0].DependsOn = nil },
-		"unordered clone":     func(p *agentv1.ExecutionPlan) { p.Steps[1].DependsOn = nil },
-		"other target": func(p *agentv1.ExecutionPlan) {
-			p.Steps[1].Command.Input.ResourceId = uuid.NewString()
-			rehash(t, p.Steps[1].Command)
-		},
-		"unsafe cancel": func(p *agentv1.ExecutionPlan) {
-			p.Steps[1].CancellationBoundary = agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP
-		},
-		"running postcondition": func(p *agentv1.ExecutionPlan) {
-			p.Steps[1].Postcondition = agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			p := proto.Clone(valid).(*agentv1.ExecutionPlan)
-			change(p)
-			if !errors.Is(operation.ValidatePlan(p, op), operation.ErrUnsupportedPlan) {
-				t.Fatal("accepted unsafe clone plan")
-			}
-		})
 	}
 }

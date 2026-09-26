@@ -31,8 +31,6 @@ import (
 	"github.com/sirrobot01/synod/internal/placement"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -43,19 +41,10 @@ type staticAuthority struct{}
 
 func (staticAuthority) Verify(context.Context) error { return nil }
 
-// testLeadership elects this test as the owner of one cluster in the real etcd fixture.
-func testLeadership(t *testing.T, installation, clusterID uuid.UUID) *coordinator.Leadership {
+// testLeadership elects this test as the owner of one cluster.
+func testLeadership(t *testing.T, pool *pgxpool.Pool, installation, clusterID uuid.UUID) *coordinator.Leadership {
 	t.Helper()
-	endpoint := os.Getenv("SYNOD_TEST_ETCD_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("run scripts/test-etcd.sh")
-	}
-	client, err := clientv3.New(clientv3.Config{Endpoints: []string{endpoint}, DialTimeout: 2 * time.Second, Logger: zap.NewNop()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { client.Close() })
-	elector, err := coordinator.New(client, "/synod-test/"+uuid.NewString())
+	elector, err := coordinator.New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +52,7 @@ func testLeadership(t *testing.T, installation, clusterID uuid.UUID) *coordinato
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { leader.Close(context.Background()) })
 	return leader
 }
 
@@ -146,9 +136,10 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 	if err := store.InitializeGeneration(t.Context(), installation, generation); err != nil {
 		t.Fatal(err)
 	}
+	leader := testLeadership(t, pool, installation, admission.ClusterID)
 	claim, err := store.AcquireClaim(t.Context(), postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: installation, OperationID: admission.OperationID, RecoveryGeneration: generation,
-		OwnerID: "owner-1", TTL: 2 * time.Minute, CoordinationKey: "/worker/leader", CoordinationLease: 1, CoordinationRevision: 1,
+		OwnerID: leader.OwnerID, TTL: 2 * time.Minute, LeaseID: leader.LeaseID, LeaseRevision: leader.Revision,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +160,7 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &harness{store: store, pool: pool, leader: testLeadership(t, installation, claim.ClusterID), claim: claim, plan: plan, node: node, received: make(chan *agentv1.ControllerMessage, 32)}
+	h := &harness{store: store, pool: pool, leader: leader, claim: claim, plan: plan, node: node, received: make(chan *agentv1.ControllerMessage, 32)}
 	h.transport = h.serve(t, installation, node)
 
 	allocation := placement.Allocation{
@@ -985,7 +976,7 @@ func TestWorkerFailsWhenDeliveryAttemptsRunOut(t *testing.T) {
 	}
 }
 
-// A revoked etcd lease ends the run. PostgreSQL ownership alone is not enough.
+// A revoked cluster lease ends the run. Operation claim ownership alone is not enough.
 func TestWorkerStopsWithoutElectedAuthority(t *testing.T) {
 	h := newHarness(t, agentScript{drained: true, admit: true}.answer)
 	if err := h.leader.Close(t.Context()); err != nil {
@@ -1059,7 +1050,7 @@ func TestWorkerStopsAfterClaimTakeover(t *testing.T) {
 	}
 	if _, err := h.store.AcquireClaim(t.Context(), postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: h.claim.InstallationID, OperationID: h.claim.OperationID, RecoveryGeneration: h.claim.RecoveryGeneration,
-		OwnerID: "owner-2", TTL: time.Minute, CoordinationKey: "/worker/leader", CoordinationLease: 2, CoordinationRevision: 2,
+		OwnerID: "owner-2", TTL: time.Minute, LeaseID: 2, LeaseRevision: 2,
 	}); err != nil {
 		t.Fatal(err)
 	}

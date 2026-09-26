@@ -390,3 +390,51 @@ func TestTokenRegistrationAuditRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A join token binds no node until an agent enrolls with the node ID it chose.
+func TestJoinTokenBindsTheFirstEnrolledNode(t *testing.T) {
+	s, r, request, ca := enrollmentFixture(t)
+	r.NodeID = uuid.Nil
+	r.TTLSeconds = 7 * 24 * 3600
+	token, err := s.RegisterEnrollmentToken(t.Context(), r)
+	if err != nil || token.NodeID != uuid.Nil {
+		t.Fatalf("join token registration: %+v %v", token, err)
+	}
+	_, err = s.EnrollAgent(t.Context(), request, ca)
+	requireCode(t, err, DependencyUnavailable)
+	generation := uuid.New()
+	if err := s.InitializeGeneration(t.Context(), r.InstallationID, generation); err != nil {
+		t.Fatal(err)
+	}
+	enrolled, err := s.EnrollAgent(t.Context(), request, ca)
+	if err != nil || enrolled.NodeID != request.NodeID || enrolled.RecoveryGeneration != generation {
+		t.Fatalf("enrollment: %+v %v", enrolled, err)
+	}
+	var bound uuid.UUID
+	if err := s.pool.QueryRow(t.Context(), `SELECT node_id FROM enrollment_tokens WHERE id=$1`, token.ID).Scan(&bound); err != nil || bound != request.NodeID {
+		t.Fatalf("token node=%s err=%v, want %s", bound, err, request.NodeID)
+	}
+	replay, err := s.EnrollAgent(t.Context(), request, ca)
+	if err != nil || !replay.Replayed || replay.CertificateID != enrolled.CertificateID || replay.RecoveryGeneration != generation {
+		t.Fatalf("replay: %+v %v", replay, err)
+	}
+	// The consumed token now belongs to the first node.
+	other := request
+	other.NodeID, other.RequestID = uuid.New(), uuid.New()
+	_, err = s.EnrollAgent(t.Context(), other, ca)
+	requireCode(t, err, EnrollmentUnauthorized)
+
+	// A second join token cannot take over an enrolled node.
+	second := r
+	second.IdempotencyKey, second.RequestID = uuid.NewString(), uuid.NewString()
+	raw := make([]byte, 32)
+	rand.Read(raw)
+	second.TokenVerifier = sha256.Sum256([]byte(base64.RawURLEncoding.EncodeToString(raw)))
+	if _, err := s.RegisterEnrollmentToken(t.Context(), second); err != nil {
+		t.Fatal(err)
+	}
+	takeover := request
+	takeover.TokenVerifier, takeover.RequestID = second.TokenVerifier, uuid.New()
+	_, err = s.EnrollAgent(t.Context(), takeover, ca)
+	requireCode(t, err, EnrollmentConflict)
+}

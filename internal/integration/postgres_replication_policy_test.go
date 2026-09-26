@@ -145,7 +145,7 @@ func TestPublicPostgresSynchronousPolicyWaitsForReplica(t *testing.T) {
 	if err := replica.QueryRow(t.Context(), `SELECT sum(value)::int FROM synchronous_rows`).Scan(&value); err != nil || value != 138 {
 		t.Fatalf("copied acknowledged data: %d %v", value, err)
 	}
-	preview, err := apiClient.PlanScaleDown(t.Context(), created.ClusterID)
+	preview, err := apiClient.PlanScaleDown(t.Context(), created.ClusterID, uuid.Nil)
 	if err != nil || !strings.Contains(preview.Downtime, "Commits wait") {
 		t.Fatalf("removal hid write availability: %+v %v", preview, err)
 	}

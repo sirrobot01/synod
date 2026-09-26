@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { api, detail, Failure, type ActionConfirmation, type ActionPlan, type Admission, type Cluster, type ClusterAction, type ClusterMember, type ScaleDownPlan, type PostgresRecoveryPlan } from "./api";
+  import { api, detail, Failure, type ActionConfirmation, type ActionPlan, type Admission, type Cluster, type ClusterAction, type ClusterMember, type ScaleDownPlan, type SetupRecoveryPlan } from "./api";
   import { errorView, type APIError } from "./state";
   import { follow, path } from "./router.svelte";
   import Dialog from "./ui/Dialog.svelte";
@@ -16,15 +16,13 @@
     onRefresh?: () => void;
   } = $props();
 
-  type Mutation = ClusterAction | "scale_up" | "scale_down" | "scale_down_failed";
-  type Preview = ActionPlan | ScaleDownPlan | PostgresRecoveryPlan;
+  type Mutation = ClusterAction | "scale_up" | "scale_down";
+  type Preview = ActionPlan | ScaleDownPlan | SetupRecoveryPlan;
   type ReviewedAction = Exclude<Mutation, "start" | "stop" | "scale_up">;
   const reviews = {
     delete: { action: "delete", label: "cluster deletion", confirm: "Confirm delete" },
     scale_down: { action: "scale_down", label: "replica removal", confirm: "Confirm replica removal" },
-    scale_down_failed: { action: "scale_down_failed", label: "failed replica removal", confirm: "Confirm failed replica removal" },
     "recover-setup": { action: "recover_setup", label: "setup recovery", confirm: "Confirm setup recovery" },
-    "rebuild-replica": { action: "rebuild_replica", label: "replica rebuild", confirm: "Confirm replica rebuild" },
   } as const;
 
   interface Attempt {
@@ -59,14 +57,14 @@
   let sending = $derived(Boolean(inFlight[storageKey]));
   let unresolved = $derived(current && attempt !== null && !attempt.admission);
   let canCreate = $derived(current && !blocked && !sending && !unresolved && cluster?.id === id && Number.isSafeInteger(cluster.desired_revision) && cluster.desired_revision > 0 && cluster.desired_lifecycle !== "deleted");
-  let postgres = $derived(cluster?.spec.engine === "postgres" && cluster.spec.postgresql.version === "17.11" && cluster.spec.postgresql.topology === "standalone");
+  let standalonePostgres = $derived(cluster?.spec.engine === "postgres" && cluster.spec.postgresql.version === "17.11" && cluster.spec.postgresql.topology === "standalone");
   let replicas = $derived(members?.filter((member) => member.role === "replica") ?? []);
-  let canScale = $derived(canCreate && cluster !== null && (postgres || (cluster?.spec.engine === "redis" && cluster.spec.redis.persistence !== "none")) && replicas.length <= 1 &&
+  let canScale = $derived(canCreate && cluster !== null && cluster?.spec.engine === "redis" && cluster.spec.redis.persistence !== "none" && replicas.length <= 1 &&
     cluster.desired_lifecycle === "running" && members !== null && [0, 1].includes(cluster.desired_replicas));
   let residualReplica = $derived(members?.some((member) => member.role === "replica" && member.state === "residual") ?? false);
   let canAdd = $derived(canScale && (cluster?.desired_replicas === 0 || residualReplica));
   let canRemove = $derived(canScale && members?.some((member) => member.role === "replica"));
-  let canRecover = $derived(canCreate && postgres && cluster?.desired_replicas === 0 && cluster.desired_lifecycle === "running" && members?.length === 1 && replicas.length === 0);
+  let canRecover = $derived(canCreate && standalonePostgres && cluster?.desired_replicas === 0 && cluster.desired_lifecycle === "running" && members?.length === 1 && replicas.length === 0);
   let shownPlan = $derived(unresolved && attempt?.plan ? attempt.plan : plan);
 
   // Stored attempts contain request identity only. A missing admission always
@@ -77,7 +75,7 @@
     if (Object.keys(record).some((key) => !["version", "actorID", "targetID", "targetName", "action", "expectedRevision", "key", "confirmation", "plan", "admission", "dispatchID"].includes(key))) return false;
     if (record.version !== 1 || record.actorID !== actor || record.targetID !== target ||
       typeof record.targetName !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(record.targetName) ||
-      !["start", "stop", "delete", "scale_up", "scale_down", "scale_down_failed", "recover-setup", "rebuild-replica"].includes(record.action) ||
+      !["start", "stop", "delete", "scale_up", "scale_down", "recover-setup"].includes(record.action) ||
       !Number.isSafeInteger(record.expectedRevision) || record.expectedRevision <= 0 ||
       typeof record.key !== "string" || !/^[!-~]{1,128}$/.test(record.key)) return false;
     if (record.action in reviews) {
@@ -86,7 +84,7 @@
       if (record.action === "scale_down" && (!preview || preview.action !== "scale_down" || typeof preview.member_id !== "string")) return false;
       if (record.action === "delete" && preview && ("member_id" in preview || "resource_id" in preview)) return false;
       if (record.action === "scale_down" && preview && "resource_id" in preview) return false;
-      if (["scale_down_failed", "recover-setup", "rebuild-replica"].includes(record.action) &&
+      if (record.action === "recover-setup" &&
         (!preview || !("member_id" in preview) || !("resource_id" in preview) || preview.retained_volumes?.length !== 1)) return false;
       if (!preview || !confirmation ||
         Object.keys(preview).some((key) => !["cluster_id", "cluster_name", "action", "expected_revision", "plan_token", "data_disposition", "retained_volumes", "downtime", "expires_at", "member_id", "resource_id"].includes(key)) ||
@@ -154,8 +152,7 @@
   }
 
   async function preview(action: ReviewedAction) {
-    if (!canCreate || (["scale_down", "scale_down_failed", "rebuild-replica"].includes(action) && !canRemove) ||
-      (action === "recover-setup" && !canRecover) || (["scale_down_failed", "rebuild-replica"].includes(action) && !postgres)) return;
+    if (!canCreate || (action === "scale_down" && !canRemove) || (action === "recover-setup" && !canRecover)) return;
     dialogAction = action;
     const key = storageKey;
     const target = id;
@@ -167,7 +164,7 @@
     previewLoading = true;
     try {
       const result = action === "delete" ? await api.planDelete(target) : action === "scale_down" ? await api.planScaleDown(target) :
-        await api.planPostgresRecovery(target, reviews[action].action);
+        await api.planSetupRecovery(target);
       if (storageKey !== key || generation !== previewGeneration) return;
       plan = result;
     } catch (error) {
@@ -187,8 +184,8 @@
   }
 
   function begin(action: Mutation) {
-    if (!canCreate || !cluster || (action === "scale_up" && !canAdd) || (["scale_down", "scale_down_failed", "rebuild-replica"].includes(action) && !canRemove) ||
-      (action === "recover-setup" && !canRecover) || (["scale_down_failed", "rebuild-replica"].includes(action) && !postgres)) return;
+    if (!canCreate || !cluster || (action === "scale_up" && !canAdd) || (action === "scale_down" && !canRemove) ||
+      (action === "recover-setup" && !canRecover)) return;
     const reviewed = action in reviews;
     if (reviewed && (!plan || plan.action !== reviews[action as ReviewedAction].action || typedName !== plan.cluster_name)) return;
     if (reviewed && plan && Date.parse(plan.expires_at) <= Date.now()) {
@@ -242,7 +239,7 @@
     failure = null;
     inFlight[key] = true;
     try {
-      const admission = request.action === "scale_up" || request.action === "scale_down" || request.action === "scale_down_failed"
+      const admission = request.action === "scale_up" || request.action === "scale_down"
         ? await api.scaleCluster(request.targetID, request.action === "scale_up" ? 1 : 0, request.expectedRevision, request.key, request.confirmation)
         : await api.actOnCluster(request.targetID, request.action, request.expectedRevision, request.key, request.confirmation);
       const accepted = { ...request, admission };
@@ -295,20 +292,16 @@
     <button type="button" disabled={!canCreate || previewLoading} onclick={() => begin("start")}>Start</button>
     <button type="button" disabled={!canCreate || previewLoading} onclick={() => begin("stop")}>Stop</button>
     <button type="button" class="danger" disabled={blocked || !current || (!canCreate && !(unresolved && attempt?.action === "delete"))} onclick={() => openPlan("delete")}>Delete…</button>
-    {#if postgres || cluster?.spec.engine === "redis" || (unresolved && (attempt?.action === "scale_up" || attempt?.action === "scale_down" || attempt?.action === "scale_down_failed"))}
+    {#if cluster?.spec.engine === "redis" || (unresolved && (attempt?.action === "scale_up" || attempt?.action === "scale_down"))}
       <button type="button" disabled={!canAdd || previewLoading} onclick={() => begin("scale_up")}>{residualReplica ? "Retry replica add" : "Add replica"}</button>
       <button type="button" class="danger" disabled={blocked || !current || (!canRemove && !(unresolved && attempt?.action === "scale_down"))} onclick={() => openPlan("scale_down")}>Remove replica…</button>
     {/if}
-    {#if postgres || (unresolved && attempt && ["scale_down_failed", "recover-setup", "rebuild-replica"].includes(attempt.action))}
-      <button type="button" class="danger" disabled={blocked || !current || (!canRemove && !(unresolved && attempt?.action === "scale_down_failed"))} onclick={() => openPlan("scale_down_failed")}>Remove failed replica…</button>
-      <button type="button" class="danger" disabled={blocked || !current || (!canRemove && !(unresolved && attempt?.action === "rebuild-replica"))} onclick={() => openPlan("rebuild-replica")}>Rebuild replica…</button>
+    {#if standalonePostgres || (unresolved && attempt?.action === "recover-setup")}
       <button type="button" disabled={blocked || !current || (!canRecover && !(unresolved && attempt?.action === "recover-setup"))} onclick={() => openPlan("recover-setup")}>Recover setup…</button>
     {/if}
   </div>
-  {#if postgres}
-    <p class="scale-note">Desired replicas: {cluster?.desired_replicas}. PostgreSQL 17.11 supports zero or one streaming replica. This mode has no automatic failover. Recovery actions verify native failure before they run.</p>
-    {#if cluster?.spec.postgresql?.replication_policy === "synchronous"}<p class="scale-note">Synchronous commits wait while no synchronous replica is connected.</p>{/if}
-    {#if replicas.length > 1}<p class="scale-note">Replacement membership is still present. Open the operation before requesting another replica action.</p>{/if}
+  {#if standalonePostgres}
+    <p class="scale-note">Standalone PostgreSQL runs one node. Use the patroni topology for replicas and automatic failover. Setup recovery verifies native failure before it runs.</p>
   {/if}
   {#if cluster?.spec.engine === "redis"}
     <p class="scale-note">Desired replicas: {cluster.desired_replicas}. The supported range is zero to one with RDB, AOF, or combined persistence. Scaling requires a running desired state. This mode has no automatic failover.</p>
@@ -360,7 +353,7 @@
         {#if shownPlan.retained_volumes.length}
           <ul class="mono">{#each shownPlan.retained_volumes as volume}<li>{volume}</li>{/each}</ul>
         {:else}<p>No recorded volumes.</p>{/if}
-        <p>{shownPlan.action === "delete" ? "Deletion stops cluster service." : shownPlan.action === "recover_setup" ? "Recovery checks the existing setup and restarts the member." : shownPlan.action === "rebuild_replica" ? "Rebuild replaces the failed replica with a fresh copy. The old volume remains." : "Removal stops the named replica. The primary remains."} These volumes are retained. This action does not purge data.</p>
+        <p>{shownPlan.action === "delete" ? "Deletion stops cluster service." : shownPlan.action === "recover_setup" ? "Recovery checks the existing setup and restarts the member." : "Removal stops the named replica. The primary remains."} These volumes are retained. This action does not purge data.</p>
       </section>
       {#if unresolved && attempt}
         <p>The original confirmation is saved. A retry uses this exact plan, revision, and request key, even after the preview expires.</p>

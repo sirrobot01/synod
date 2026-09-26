@@ -55,7 +55,10 @@ type Server struct {
 	assets fs.FS
 	// PublicOrigin is the browser origin of this API. Set it before serving requests.
 	// An empty value makes a cookie request rely on Sec-Fetch-Site alone.
-	PublicOrigin   string
+	PublicOrigin string
+	// AgentListen is the controller agent transport listen address. Enrollment
+	// returns it to the agent. An unspecified host becomes the host the agent dialed.
+	AgentListen    string
 	store          *postgres.Store
 	admin          *auth.AdminToken
 	installationID uuid.UUID
@@ -128,7 +131,6 @@ func NewServer(store *postgres.Store, admin *auth.AdminToken, installationID uui
 				admin.Post("/clusters/{id}/actions/stop", server.clusterAction(postgres.StopClusterAPIOperation))
 				admin.Post("/clusters/{id}/actions/start", server.clusterAction(postgres.StartClusterAPIOperation))
 				admin.Post("/clusters/{id}/actions/recover-setup", server.clusterAction(postgres.RecoverSetupAPIOperation))
-				admin.Post("/clusters/{id}/actions/rebuild-replica", server.clusterAction(postgres.RebuildReplicaAPIOperation))
 				admin.Post("/clusters/{id}/actions/rebuild-member", server.clusterAction(postgres.RebuildMemberAPIOperation))
 				admin.Post("/clusters/{id}/actions/renew-certificates", server.clusterAction(postgres.RenewCertificatesAPIOperation))
 				admin.Post("/clusters/{id}/actions/switchover", server.clusterAction(postgres.SwitchoverAPIOperation))

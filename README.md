@@ -24,7 +24,7 @@ the direct form.
 
 | Command | Action |
 | --- | --- |
-| `task build` | Build the three binaries into `dist/` |
+| `task build` | Build the `synod` binary into `dist/` |
 | `task build:web` | Build the browser application into `internal/web/dist` |
 | `task check` | Vet the Go code and type-check the browser application |
 | `task test` | Run the Go tests that need no dependency |
@@ -63,7 +63,7 @@ the directory.
 
 This development command starts no worker. Worker dispatch needs the agent transport,
 etcd, a credential wrapping key, and an approved node.
-Use `synodd bootstrap --dir DIRECTORY` to create installation material.
+Use `synod server init --dir DIRECTORY` to create installation material.
 Use `task dev:etcd` to start a local etcd node.
 
 Run `task dev:reset` after you change a migration. AGENTS.md requires a dropped
@@ -109,7 +109,8 @@ The API-only development command leaves operations pending.
 The development version catalog contains PostgreSQL 17.11 and 18.6, and Redis 8.2.7.
 These versions are local test candidates. They are not a qualified release matrix.
 
-Build the controller with `go build -o dist/synodd ./cmd/synodd`.
+Build Synod with `go build -o dist/synod ./cmd/synod`.
+One binary holds the CLI, the controller (`synod server`), and the agent (`synod agent`).
 Create a metadata PostgreSQL database before startup.
 Use one stable installation UUID for all controllers in that installation.
 Keep that UUID with the installation recovery records.
@@ -126,12 +127,12 @@ export SYNOD_DATABASE_URL='postgres://synod@localhost/synod?sslmode=verify-full'
 export SYNOD_ADMIN_TOKEN_FILE='/path/to/admin.token'
 export SYNOD_TLS_CERT_FILE='/path/to/api.crt'
 export SYNOD_TLS_KEY_FILE='/path/to/api.key'
-./dist/synodd
+./dist/synod server
 ```
 
 The default API address is `127.0.0.1:8443`.
 Use `--listen` to change it.
-Use `--help` to list the settings.
+Use `synod server --help` to list the settings.
 Explicit flags override environment variables.
 Environment variables override a JSON file supplied with `--config` or `SYNOD_CONFIG`.
 The JSON keys use the names shown in [the controller configuration](internal/config/controller.go).
@@ -236,9 +237,12 @@ A second controller waits for the election and takes over after the claim expire
 Shutdown stops management dispatch. It never stops native work that an agent accepted.
 
 The controller produces standalone PostgreSQL and Redis plans when it has a credential
-wrapping key and a complete placement profile. The approved node must match that profile.
-Use `--secret-key-file`, `--secret-key-id`, and the `--placement-*` flags to configure them.
+wrapping key. Use `--secret-key-file` and `--secret-key-id` to configure it.
+Placement reads the node shape from the approved node records.
+The `--placement-*` flags are optional. Use them only to limit placement.
 `--placement-architecture` accepts `amd64`, `arm64`, or both separated by a comma, in preference order.
+The default is `amd64,arm64`.
+`--placement-runtime-version` and `--placement-storage-id` limit placement to nodes that report those values.
 Each cluster stays on nodes of one architecture, because PostgreSQL replication needs one architecture.
 With both architectures, set the Patroni image to an image index digest that covers both.
 Use `--engine-endpoint-first-port` and `--engine-endpoint-last-port` to set the reserved port range.
@@ -247,6 +251,30 @@ New Redis clusters have separate admin, application, and replication credentials
 The replication role can only run the native replication handshake commands and PING.
 The compact Redis profile supports one native replica with RDB, AOF, or combined persistence.
 It does not provide automatic failover.
+Standalone PostgreSQL is one node and has no replicas.
+Use the patroni topology for PostgreSQL replicas and automatic failover.
+A Patroni cluster starts with three members: one primary and two replicas.
+Use `synod db scale CLUSTER_ID --replicas N` to add one member. N is 3 or 4.
+Each scale adds one member. The new member needs a host that no member uses.
+The scale restarts each current member in turn, so that it admits the new member.
+The cluster keeps a writer during the scale. Then the new member copies the data from the primary.
+The per-cluster etcd stays on its three hosts.
+If a scale fails, the new member stays residual. Find it with `synod db members`. Then run `synod db rebuild-member` for it.
+To remove a member, name it with `--member` and set N to one less than now:
+
+```sh
+synod db scale CLUSTER_ID --replicas 2 --member MEMBER_ID
+```
+
+The command shows the removal plan. Review it, then run the command again with `--yes`.
+A cluster keeps at least three members.
+The removal proves that the member is a replica before it stops the member. To remove the leader, run a switchover first.
+The member's volume stays retained.
+The per-cluster etcd has three members on three member hosts.
+When the removed member's host runs one of them, that etcd member moves first to a kept member's host that runs none.
+The new etcd member joins as a learner and votes only when it is in sync. Then the old etcd member leaves.
+The member's host and every etcd host must be reachable. A lost host is not supported yet.
+If a removal fails, run the same command again. It continues the etcd move with the etcd member it already placed.
 
 ```sh
 synod db scale CLUSTER_ID --replicas 1 --wait
@@ -266,7 +294,50 @@ That request returns the original operation.
 Use `synod db scale CLUSTER_ID --replicas 0` to preview replica removal.
 Review the plan before you confirm it. Removal retains the replica volume.
 
+## Join a node
+
+`synod server init` prints a join token when it can reach the metadata database.
+A join token enrolls one node. It is valid for seven days.
+To get a token for another node, run this command:
+
+```sh
+synod node join-token --ttl 24h
+```
+
+The command needs `SYNOD_CA_FILE` or `--ca-file`. The join token pins that API CA.
+
+On the new node, run this command:
+
+```sh
+synod agent join TOKEN
+```
+
+The command does these steps:
+1. It verifies the API CA against the fingerprint in the token.
+2. It enrolls the node and keeps the node ID in `node-id`.
+3. It initializes the agent journal.
+4. It writes `agent.json` and `synod-agent.service`.
+
+The default directory is `/var/lib/synod/agent`. Use `--dir` to change it.
+Use `--storage-path` and `--storage-id` to name the storage pool.
+If the command stops before it writes `agent.json`, run it again with the same token and directory.
+The controller must run before a node can join, because the agent needs the recovery generation.
+
+Start the agent. Then approve the node:
+
+```sh
+synod node approve NODE_ID
+```
+
+Approval takes the architecture, runtime version, storage ID, and headroom from the facts that the agent measured.
+The default headroom is one tenth of each measured resource.
+The node can run all engine versions that the controller serves.
+Use the flags of `synod node approve` to change a value.
+If the agent has not reported its facts, approval fails with `node_facts_unavailable`.
+
 ## Agent configuration
+
+`synod agent join` writes this file. You can also write it yourself.
 
 An agent reads one JSON file. Give it with `--config`.
 The file must belong to the agent user. It must have no group or other permission.
@@ -290,10 +361,10 @@ Without `storage_id`, the agent cannot report capacity, so it refuses to start.
 
 `synod installation get` shows `installation_id` and `recovery_generation`.
 The recovery generation can change after controller recovery. Read it when you write a new configuration.
-It is available after a controller with etcd and the agent transport starts.
+It is available after a controller with the agent transport starts.
 
-Run `synod-agent journal init --config FILE` once after enrollment.
-Then run `synod-agent run --config FILE`.
+Run `synod agent journal init --config FILE` once after enrollment.
+Then run `synod agent run --config FILE`.
 
 A journal or inventory refusal prints its cause in the `detail` field of the error.
 Other errors print fixed text only, because an argument error can repeat raw input.

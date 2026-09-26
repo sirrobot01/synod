@@ -61,11 +61,17 @@ func TestCreateSpecV1Representation(t *testing.T) {
 }
 
 func TestPostgresReplicationPolicyValidation(t *testing.T) {
-	for _, policy := range []string{"", "asynchronous", "synchronous", "automatic", "sync", "SYNCHRONOUS"} {
-		spec := CreateSpec{SchemaVersion: 1, Name: "db", Engine: PostgreSQL, PostgreSQL: &PostgreSQLSpec{Version: "17.11", Topology: "standalone", ReplicationPolicy: policy}}
-		valid := policy == "" || policy == "asynchronous" || policy == "synchronous"
-		if err := spec.Validate(); (err == nil) != valid {
-			t.Fatalf("policy %q: %v", policy, err)
+	for _, topology := range []string{"standalone", "patroni"} {
+		for _, policy := range []string{"", "asynchronous", "synchronous", "automatic", "sync", "SYNCHRONOUS"} {
+			spec := CreateSpec{SchemaVersion: 1, Name: "db", Engine: PostgreSQL, PostgreSQL: &PostgreSQLSpec{Version: "17.11", Topology: topology, ReplicationPolicy: policy}}
+			if topology == "patroni" {
+				spec.PostgreSQL.FailureDomain = "host"
+			}
+			// Standalone PostgreSQL has no replica to wait for.
+			valid := policy == "" || policy == "asynchronous" || (policy == "synchronous" && topology == "patroni")
+			if err := spec.Validate(); (err == nil) != valid {
+				t.Fatalf("%s policy %q: %v", topology, policy, err)
+			}
 		}
 	}
 }

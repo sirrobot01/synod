@@ -53,12 +53,8 @@ func (Engine) Probe(ctx context.Context, endpoint engine.Endpoint, password []by
 			return observed
 		}
 	}
-	if endpoint.PostgresRole != "primary" && endpoint.PostgresRole != "replica" && (endpoint.PostgresRole != "any" || endpoint.PostgresTLS == nil || endpoint.PostgresReplication != nil) {
+	if endpoint.PostgresRole != "primary" && endpoint.PostgresRole != "replica" && (endpoint.PostgresRole != "any" || endpoint.PostgresTLS == nil) {
 		observed.Reachable = engine.Probe{State: engine.ProbeFailed, Reason: reasonRoleInvalid}
-		return observed
-	}
-	if !validReplicationCheck(endpoint) {
-		observed.Reachable = engine.Probe{State: engine.ProbeFailed, Reason: reasonReplicationInvalid}
 		return observed
 	}
 	if endpoint.Address == "" || endpoint.Port == 0 || endpoint.Database == "" || endpoint.Role == "" {
@@ -171,12 +167,6 @@ func (Engine) Probe(ctx context.Context, endpoint engine.Endpoint, password []by
 	if readOnly != recovery {
 		observed.Ready = engine.Probe{State: engine.ProbeFailed, Reason: reasonReadOnlyMismatch}
 		return observed
-	}
-	if endpoint.PostgresReplication != nil {
-		observed.Ready = probeReplication(session, conn2, endpoint, observed.Postgres)
-		if observed.Ready.State != engine.ProbePassed {
-			return observed
-		}
 	}
 	observed.Endpoint = engine.Probe{State: engine.ProbePassed}
 	return observed

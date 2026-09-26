@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -165,7 +164,7 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 			}
 			dcsKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: dcsKeyDER})
 			dcsMaterial := PatroniTLSMaterial{CA: caPEM, Certificate: dcsCert, PrivateKey: dcsKeyPEM}
-			secrets := PatroniSecrets{Superuser: uuid.NewString(), Replication: uuid.NewString(), Rewind: uuid.NewString(), DCS: uuid.NewString(), REST: uuid.NewString()}
+			secrets := PatroniSecrets{Superuser: uuid.NewString(), Replication: uuid.NewString(), Rewind: uuid.NewString(), REST: uuid.NewString()}
 
 			applicationID, applicationPassword := uuid.New(), uuid.NewString()
 			salt := []byte("native-test-salt")
@@ -298,31 +297,6 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer dcs.Close()
-			ctx, cancel := context.WithTimeout(testCtx, 30*time.Second)
-			defer cancel()
-			if _, err := dcs.Auth.UserAdd(ctx, "root", uuid.NewString()); err != nil {
-				t.Fatalf("DCS root setup: %v; %s", err, f.docker(t, "logs", "--tail", "30", names[0]))
-			}
-			if _, err := dcs.Auth.UserGrantRole(ctx, "root", "root"); err != nil {
-				t.Fatal(err)
-			}
-			dcsUser := "synod_patroni_" + clusterID.String()
-			if _, err := dcs.Auth.UserAdd(ctx, dcsUser, secrets.DCS); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := dcs.Auth.RoleAdd(ctx, dcsUser); err != nil {
-				t.Fatal(err)
-			}
-			keyPrefix := "/synod-patroni/" + installation.String() + "/" + clusterID.String() + "/"
-			if _, err := dcs.Auth.RoleGrantPermission(ctx, dcsUser, keyPrefix, clientv3.GetPrefixRangeEnd(keyPrefix), clientv3.PermissionType(clientv3.PermReadWrite)); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := dcs.Auth.UserGrantRole(ctx, dcsUser, dcsUser); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := dcs.Auth.AuthEnable(ctx); err != nil {
-				t.Fatal(err)
-			}
 			rest := make([]string, 3)
 			database := make([]*pgx.ConnConfig, 3)
 			publishedREST := func(index int) string {
@@ -347,19 +321,6 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 			transport := &http.Transport{DialContext: dial, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{clientPair}}}
 			defer transport.CloseIdleConnections()
 			httpClient := &http.Client{Transport: transport, Timeout: 2 * time.Second}
-			authBody, err := json.Marshal(map[string]string{"name": dcsUser, "password": secrets.DCS})
-			if err != nil {
-				t.Fatal(err)
-			}
-			authResponse, err := httpClient.Post("https://"+dcsAddress+"/v3/auth/authenticate", "application/json", bytes.NewReader(authBody))
-			if err != nil {
-				t.Fatal("DCS gateway authentication", err)
-			}
-			authResult, err := io.ReadAll(io.LimitReader(authResponse.Body, 4096))
-			authResponse.Body.Close()
-			if err != nil || authResponse.StatusCode != http.StatusOK {
-				t.Fatalf("DCS gateway authentication HTTP %d: %s; %v", authResponse.StatusCode, strings.ReplaceAll(string(authResult), secrets.DCS, "[redacted]"), err)
-			}
 			for index := 1; index < 3; index++ {
 				rest[index] = publishedREST(index)
 				endpoint := strings.TrimSpace(f.docker(t, "port", names[index], "5432/tcp"))
@@ -412,7 +373,7 @@ func TestPatroniNativeTLSReplicationAndFailover(t *testing.T) {
 					}
 					if time.Now().After(deadline) || err != nil && strings.TrimSpace(f.docker(t, "inspect", "--format", "{{.State.Status}}", names[index])) == "exited" {
 						output := f.docker(t, "logs", "--tail", "120", names[index])
-						for _, secret := range []string{secrets.Superuser, secrets.Replication, secrets.Rewind, secrets.DCS, secrets.REST, secrets.ApplicationVerifier, applicationPassword} {
+						for _, secret := range []string{secrets.Superuser, secrets.Replication, secrets.Rewind, secrets.REST, secrets.ApplicationVerifier, applicationPassword} {
 							output = strings.ReplaceAll(output, secret, "[redacted]")
 						}
 						t.Fatalf("member %d did not reach %s HTTP %d (last %d, %v): %s", index, role, status, lastStatus, err, output)
@@ -507,7 +468,7 @@ for name in os.listdir('/proc'):
 			waitRole(1, "primary", 200)
 			for _, index := range []int{1, 2} {
 				metadata := f.docker(t, "inspect", "--format", "{{json .Config}}", names[index])
-				for _, secret := range []string{secrets.Superuser, secrets.Replication, secrets.Rewind, secrets.DCS, secrets.REST, secrets.ApplicationVerifier, applicationPassword} {
+				for _, secret := range []string{secrets.Superuser, secrets.Replication, secrets.Rewind, secrets.REST, secrets.ApplicationVerifier, applicationPassword} {
 					if strings.Contains(metadata, secret) {
 						t.Fatal("native secret entered Docker configuration metadata")
 					}
@@ -1128,7 +1089,7 @@ for name in os.listdir('/proc'):
 						time.Sleep(100 * time.Millisecond)
 					}
 					output := f.docker(t, "logs", "--tail", "8", name)
-					for _, secret := range []string{secrets.Superuser, secrets.Replication, secrets.Rewind, secrets.DCS, secrets.REST, secrets.ApplicationVerifier, applicationPassword} {
+					for _, secret := range []string{secrets.Superuser, secrets.Replication, secrets.Rewind, secrets.REST, secrets.ApplicationVerifier, applicationPassword} {
 						output = strings.ReplaceAll(output, secret, "[redacted]")
 					}
 					if !strings.Contains(output, "Synod Patroni storage guard: "+reason) {
@@ -1296,7 +1257,7 @@ func TestPatroniProtectedConfigurationRefusals(t *testing.T) {
 		}
 	})
 	settings := PatroniSettings{RequiredFreeBytes: 1 << 30, InstallationID: uuid.New(), ClusterID: uuid.New(), ResourceID: uuid.New(), VolumeID: uuid.New(), ProvisionID: uuid.New(), ApplicationCredentialID: uuid.New(), ApplicationCredentialVersion: 1, Address: netip.MustParseAddr("192.0.2.10"), DatabasePort: 5432, RESTPort: 8008, DCSEndpoints: []string{"192.0.2.20:2379"}, PeerNetworks: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, ClientNetworks: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}}
-	secrets := PatroniSecrets{Superuser: uuid.NewString(), Replication: uuid.NewString(), Rewind: uuid.NewString(), DCS: uuid.NewString(), REST: uuid.NewString(), ApplicationVerifier: "SCRAM-SHA-256$4096:AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+	secrets := PatroniSecrets{Superuser: uuid.NewString(), Replication: uuid.NewString(), Rewind: uuid.NewString(), REST: uuid.NewString(), ApplicationVerifier: "SCRAM-SHA-256$4096:AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
 	config, err := RenderPatroni(settings, secrets)
 	if err != nil {
 		t.Fatal(err)

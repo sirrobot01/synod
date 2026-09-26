@@ -13,17 +13,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/operation"
 )
 
 // The lifecycle actions this version admits.
 const (
-	StopClusterAPIOperation    = "clusters.stop.v1"
-	StartClusterAPIOperation   = "clusters.start.v1"
-	DeleteClusterAPIOperation  = "clusters.delete.v1"
-	ScaleClusterAPIOperation   = "clusters.scale.v1"
-	RecoverSetupAPIOperation   = "clusters.recover_setup.v1"
-	RebuildReplicaAPIOperation = "clusters.rebuild_replica.v1"
-	RebuildMemberAPIOperation  = "clusters.rebuild_member.v1"
+	StopClusterAPIOperation   = "clusters.stop.v1"
+	StartClusterAPIOperation  = "clusters.start.v1"
+	DeleteClusterAPIOperation = "clusters.delete.v1"
+	ScaleClusterAPIOperation  = "clusters.scale.v1"
+	RecoverSetupAPIOperation  = "clusters.recover_setup.v1"
+	RebuildMemberAPIOperation = "clusters.rebuild_member.v1"
 	// RenewCertificatesAPIOperation renews the native certificates of a Patroni cluster.
 	// The controller admits it on its own before expiry. An operator can also ask for it.
 	RenewCertificatesAPIOperation = "clusters.renew_certificates.v1"
@@ -76,9 +76,9 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return Admission{}, err
 	}
-	confirmed := request.Identity.APIOperation == DeleteClusterAPIOperation || request.Identity.APIOperation == RecoverSetupAPIOperation || request.Identity.APIOperation == RebuildReplicaAPIOperation ||
+	confirmed := request.Identity.APIOperation == DeleteClusterAPIOperation || request.Identity.APIOperation == RecoverSetupAPIOperation ||
 		request.Identity.APIOperation == RebuildMemberAPIOperation ||
-		(request.Identity.APIOperation == ScaleClusterAPIOperation && request.Replicas != nil && *request.Replicas == 0)
+		(request.Identity.APIOperation == ScaleClusterAPIOperation && request.Replicas != nil && (*request.Replicas == 0 || request.Confirmation != nil))
 	if confirmed {
 		if request.Confirmation == nil || request.Confirmation.PlanToken == uuid.Nil || !request.Confirmation.Confirm || request.Confirmation.DataDisposition != "retain" {
 			return Admission{}, &AdmissionError{Code: InvalidRequest}
@@ -92,10 +92,10 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 	var current string
 	var replicas int
 	var deleted *string
-	var topology string
-	if err := tx.QueryRow(ctx, `SELECT desired_revision,desired_lifecycle,desired_replicas,deleted_at::text,COALESCE(spec->'postgresql'->>'topology','') FROM clusters
+	var engine, topology string
+	if err := tx.QueryRow(ctx, `SELECT desired_revision,desired_lifecycle,desired_replicas,deleted_at::text,engine,COALESCE(spec->'postgresql'->>'topology','') FROM clusters
  WHERE installation_id=$1 AND id=$2 FOR UPDATE`,
-		request.Identity.InstallationID, request.ClusterID).Scan(&revision, &current, &replicas, &deleted, &topology); err != nil {
+		request.Identity.InstallationID, request.ClusterID).Scan(&revision, &current, &replicas, &deleted, &engine, &topology); err != nil {
 		return Admission{}, admissionError(err)
 	}
 	operationID, err := uuid.NewRandom()
@@ -125,15 +125,42 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 	if request.ExpectedRevision != revision {
 		return Admission{}, &AdmissionError{Code: RevisionConflict}
 	}
-	// Patroni fixes its members and elects its own primary. Replica actions and setup
-	// recovery are standalone workflows. A member rebuild is a Patroni workflow.
+	// Patroni elects its own primary. Setup recovery is a standalone workflow. A member rebuild
+	// is a Patroni workflow. Redis scales one native replica. Patroni scales its members.
 	patroniAction := request.Identity.APIOperation == StopClusterAPIOperation || request.Identity.APIOperation == StartClusterAPIOperation ||
 		request.Identity.APIOperation == DeleteClusterAPIOperation || request.Identity.APIOperation == RebuildMemberAPIOperation ||
-		request.Identity.APIOperation == RenewCertificatesAPIOperation || request.Identity.APIOperation == SwitchoverAPIOperation
+		request.Identity.APIOperation == RenewCertificatesAPIOperation || request.Identity.APIOperation == SwitchoverAPIOperation ||
+		request.Identity.APIOperation == ScaleClusterAPIOperation
 	patroniOnly := request.Identity.APIOperation == RebuildMemberAPIOperation || request.Identity.APIOperation == RenewCertificatesAPIOperation ||
 		request.Identity.APIOperation == SwitchoverAPIOperation
-	if (topology == "patroni" && !patroniAction) || (topology != "patroni" && patroniOnly) {
+	if (topology == "patroni" && !patroniAction) || (topology != "patroni" && patroniOnly) ||
+		(request.Identity.APIOperation == ScaleClusterAPIOperation && engine != string(cluster.Redis) && topology != "patroni") ||
+		(request.Identity.APIOperation == ScaleClusterAPIOperation && engine == string(cluster.Redis) && *request.Replicas > 1) {
 		return Admission{}, &AdmissionError{Code: UnsupportedSpec}
+	}
+	// A Redis removal takes its one replica with a reviewed plan. An add carries no plan.
+	if request.Identity.APIOperation == ScaleClusterAPIOperation && engine == string(cluster.Redis) && (*request.Replicas == 0) != (request.Confirmation != nil) {
+		return Admission{}, &AdmissionError{Code: InvalidRequest}
+	}
+	// A Patroni scale adds or removes one member of a cluster whose members are all active. It
+	// counts from the live members, so a scale that failed can be asked for again. A removal
+	// takes the member of a reviewed plan.
+	if request.Identity.APIOperation == ScaleClusterAPIOperation && topology == "patroni" {
+		var members, active int
+		if err := tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE role='patroni' AND state='active')
+ FROM cluster_members WHERE installation_id=$1 AND cluster_id=$2 AND removed_at IS NULL`, identity.InstallationID, request.ClusterID).Scan(&members, &active); err != nil {
+			return Admission{}, admissionError(err)
+		}
+		remove := *request.Replicas+1 == members-1
+		if *request.Replicas+1 != members+1 && !remove || *request.Replicas < operation.MinPatroniMembers-1 {
+			return Admission{}, &AdmissionError{Code: UnsupportedSpec}
+		}
+		if remove != (request.Confirmation != nil) {
+			return Admission{}, &AdmissionError{Code: InvalidRequest}
+		}
+		if active != members {
+			return Admission{}, &AdmissionError{Code: OperationConflict}
+		}
 	}
 	// A residual Patroni member may hold incomplete storage. Stop and start would act on it
 	// with the plan of a whole member, so it must be rebuilt first. Delete stays available.
@@ -146,7 +173,7 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
  FROM cluster_members WHERE installation_id=$1 AND cluster_id=$2 AND removed_at IS NULL`, identity.InstallationID, request.ClusterID, request.MemberID).Scan(&members, &active, &named); err != nil {
 			return Admission{}, admissionError(err)
 		}
-		if members != 3 || active != 3 {
+		if members < operation.MinPatroniMembers || active != members {
 			return Admission{}, &AdmissionError{Code: OperationConflict}
 		}
 		if request.Identity.APIOperation == SwitchoverAPIOperation && !named {
@@ -162,7 +189,7 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 			return Admission{}, &AdmissionError{Code: OperationConflict}
 		}
 	}
-	if request.Identity.APIOperation == ScaleClusterAPIOperation || request.Identity.APIOperation == RebuildReplicaAPIOperation || request.Identity.APIOperation == RebuildMemberAPIOperation ||
+	if request.Identity.APIOperation == ScaleClusterAPIOperation || request.Identity.APIOperation == RebuildMemberAPIOperation ||
 		request.Identity.APIOperation == SwitchoverAPIOperation {
 		// A scale acts on a running cluster. Scaling a stopped one would plan work for
 		// an engine that is not there.
@@ -178,30 +205,18 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 		return Admission{}, &AdmissionError{Code: OperationConflict}
 	}
 	var retryOf *uuid.UUID
-	if request.Identity.APIOperation == ScaleClusterAPIOperation && *request.Replicas == replicas {
+	// A Redis scale to the count it already asks for retries the failed add or removal.
+	if request.Identity.APIOperation == ScaleClusterAPIOperation && engine == string(cluster.Redis) && *request.Replicas == replicas {
 		err := tx.QueryRow(ctx, `SELECT o.id FROM operations o
  JOIN clusters c ON c.installation_id=o.installation_id AND c.id=o.cluster_id
  WHERE o.installation_id=$1 AND o.cluster_id=$2 AND o.desired_revision=$3
- AND (o.kind='cluster.scale' OR ($4=1 AND o.kind='cluster.rebuild_replica')) AND o.status IN ('failed','cancelled') AND c.engine IN ('redis','postgres')
+ AND o.kind='cluster.scale' AND o.status IN ('failed','cancelled') AND c.engine='redis'
  AND ($4=1 OR EXISTS(SELECT 1 FROM cluster_members m WHERE m.installation_id=c.installation_id AND m.cluster_id=c.id AND m.role='replica' AND m.removed_at IS NULL))`,
 			identity.InstallationID, request.ClusterID, revision, replicas).Scan(&retryOf)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Admission{}, &AdmissionError{Code: InvalidRequest}
 		}
 		if err != nil {
-			return Admission{}, admissionError(err)
-		}
-	}
-	if request.Identity.APIOperation == RebuildReplicaAPIOperation {
-		var live int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM cluster_members WHERE installation_id=$1 AND cluster_id=$2 AND role='replica' AND removed_at IS NULL`, identity.InstallationID, request.ClusterID).Scan(&live); err != nil {
-			return Admission{}, admissionError(err)
-		}
-		if live != 1 {
-			return Admission{}, &AdmissionError{Code: OperationConflict}
-		}
-		err := tx.QueryRow(ctx, `SELECT id FROM operations WHERE installation_id=$1 AND cluster_id=$2 AND desired_revision=$3 AND kind='cluster.rebuild_replica' AND status IN ('failed','cancelled')`, identity.InstallationID, request.ClusterID, revision).Scan(&retryOf)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return Admission{}, admissionError(err)
 		}
 	}
@@ -215,9 +230,6 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 		if request.Identity.APIOperation == RecoverSetupAPIOperation {
 			action = "recover_setup"
 		}
-		if request.Identity.APIOperation == RebuildReplicaAPIOperation {
-			action = "rebuild_replica"
-		}
 		if request.Identity.APIOperation == RebuildMemberAPIOperation {
 			action = "rebuild_member"
 		}
@@ -225,7 +237,7 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 		var member, resource *uuid.UUID
 		err := tx.QueryRow(ctx, `SELECT retained_volumes,member_id,resource_id,action FROM cluster_action_plans
  WHERE plan_token=$1 AND installation_id=$2 AND actor_id=$3 AND cluster_id=$4
- AND expected_revision=$5 AND (action=$6 OR ($6='scale_down' AND action='scale_down_failed')) AND data_disposition='retain' AND expires_at>clock_timestamp()`,
+ AND expected_revision=$5 AND action=$6 AND data_disposition='retain' AND expires_at>clock_timestamp()`,
 			request.Confirmation.PlanToken, identity.InstallationID, identity.ActorID, request.ClusterID, revision, action).Scan(&planned, &member, &resource, &action)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Admission{}, &AdmissionError{Code: InvalidRequest}
@@ -237,18 +249,32 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 		if err != nil {
 			return Admission{}, err
 		}
-		if action == "scale_down" || action == "scale_down_failed" || action == "rebuild_replica" {
-			// The plan named one member. It must still be a live replica, so a review
-			// of a membership that has since moved cannot authorize this removal.
+		if action == "scale_down" {
+			// The plan named one member. It must still be a live replica, or an active Patroni
+			// member that may leave, so a review of a membership that has since moved cannot
+			// authorize this removal.
 			var targetResource uuid.UUID
-			err := tx.QueryRow(ctx, `SELECT resource_id FROM cluster_members
+			if topology == "patroni" {
+				if member == nil {
+					return Admission{}, &AdmissionError{Code: OperationConflict}
+				}
+				targetResource, err = patroniRemovalTarget(ctx, tx, identity.InstallationID, request.ClusterID, *member)
+				if refused, ok := errors.AsType[*AdmissionError](err); ok && refused.Code == NotFound {
+					return Admission{}, &AdmissionError{Code: OperationConflict}
+				}
+				if err != nil {
+					return Admission{}, err
+				}
+			} else {
+				err := tx.QueryRow(ctx, `SELECT resource_id FROM cluster_members
  WHERE installation_id=$1 AND cluster_id=$2 AND member_id=$3 AND role='replica' AND removed_at IS NULL`,
-				identity.InstallationID, request.ClusterID, member).Scan(&targetResource)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return Admission{}, &AdmissionError{Code: OperationConflict}
-			}
-			if err != nil {
-				return Admission{}, admissionError(err)
+					identity.InstallationID, request.ClusterID, member).Scan(&targetResource)
+				if errors.Is(err, pgx.ErrNoRows) {
+					return Admission{}, &AdmissionError{Code: OperationConflict}
+				}
+				if err != nil {
+					return Admission{}, admissionError(err)
+				}
 			}
 			owned, err := memberVolumeIDs(ctx, tx, identity.InstallationID, request.ClusterID, targetResource)
 			if err != nil {
@@ -256,18 +282,6 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 			}
 			if !slices.Equal(planned, owned) {
 				return Admission{}, &AdmissionError{Code: OperationConflict}
-			}
-			if action == "scale_down_failed" || action == "rebuild_replica" {
-				var supported bool
-				if err := tx.QueryRow(ctx, `SELECT engine='postgres' AND spec->'postgresql'->>'topology'='standalone' AND spec->'postgresql'->>'version'='17.11' FROM clusters WHERE installation_id=$1 AND id=$2`, identity.InstallationID, request.ClusterID).Scan(&supported); err != nil {
-					return Admission{}, admissionError(err)
-				}
-				if !supported {
-					return Admission{}, &AdmissionError{Code: UnsupportedSpec}
-				}
-				if resource == nil || *resource != targetResource {
-					return Admission{}, &AdmissionError{Code: OperationConflict}
-				}
 			}
 		} else if action == "rebuild_member" {
 			// The reviewed member must still be a rebuild target with the same storage.
@@ -310,9 +324,6 @@ func (s *Store) AdmitClusterAction(ctx context.Context, request ClusterActionReq
 		desired = &moved
 	}
 	desiredReplicas := request.Replicas
-	if request.Identity.APIOperation == RebuildReplicaAPIOperation {
-		desiredReplicas = new(1)
-	}
 	if _, err := tx.Exec(ctx, `UPDATE clusters SET desired_revision=$1,
  desired_lifecycle=COALESCE($2,desired_lifecycle),
  desired_replicas=COALESCE($3,desired_replicas),
@@ -384,8 +395,6 @@ func actionOf(apiOperation string) (lifecycle cluster.DesiredLifecycle, kind str
 		return cluster.DesiredDeleted, "cluster.delete", nil
 	case RecoverSetupAPIOperation:
 		return cluster.DesiredRunning, "cluster.recover_setup", nil
-	case RebuildReplicaAPIOperation:
-		return "", "cluster.rebuild_replica", nil
 	case RebuildMemberAPIOperation:
 		return "", "cluster.rebuild_member", nil
 	case RenewCertificatesAPIOperation:
@@ -425,11 +434,11 @@ func validActionRequest(request ClusterActionRequest) error {
 		!printableWithin(identity.IdempotencyKey, 128) || !printableWithin(request.RequestID, 128) {
 		return &AdmissionError{Code: InvalidRequest}
 	}
-	// Only a scale carries a replica count, and this slice supports none or one.
+	// Only a scale carries a replica count. Admission checks the range of each engine.
 	if (identity.APIOperation == ScaleClusterAPIOperation) != (request.Replicas != nil) {
 		return &AdmissionError{Code: InvalidRequest}
 	}
-	if request.Replicas != nil && (*request.Replicas < 0 || *request.Replicas > 1) {
+	if request.Replicas != nil && (*request.Replicas < 0 || *request.Replicas > operation.MaxPatroniMembers-1) {
 		return &AdmissionError{Code: InvalidRequest}
 	}
 	// Only a switchover names a member, and it must name one.

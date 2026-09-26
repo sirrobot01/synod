@@ -22,7 +22,6 @@ const (
 	ApplicationCredential      = "application"
 	ReplicationCredential      = "replication"
 	PatroniRewindCredential    = "patroni_rewind"
-	PatroniDCSCredential       = "patroni_dcs"
 	PatroniRESTCredential      = "patroni_rest"
 	PatroniMemberTLSCredential = "patroni_member_tls"
 	PatroniDCSTLSCredential    = "patroni_dcs_tls"
@@ -213,7 +212,7 @@ func (s *Store) ReadClusterDatabases(ctx context.Context, installationID, cluste
 
 func validPurpose(purpose string) bool {
 	switch purpose {
-	case PatroniRewindCredential, PatroniDCSCredential, PatroniRESTCredential, PatroniMemberTLSCredential, PatroniDCSTLSCredential:
+	case PatroniRewindCredential, PatroniRESTCredential, PatroniMemberTLSCredential, PatroniDCSTLSCredential:
 		return true
 	}
 	return validSQLPurpose(purpose)
@@ -254,8 +253,6 @@ func (c ClusterIntent) validate() error {
 			validRole = credential.RoleName == "synod_rewind"
 		case PatroniRESTCredential:
 			validRole = credential.RoleName == "synod_patroni"
-		case PatroniDCSCredential:
-			validRole = credential.RoleName == "synod_patroni_"+c.ClusterID.String()
 		case PatroniMemberTLSCredential, PatroniDCSTLSCredential:
 			validRole = credential.RoleName == ""
 		}

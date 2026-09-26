@@ -33,9 +33,16 @@ func (f *fixture) act(t *testing.T, apiOperation string) operation.Claim {
 		},
 		RequestID: uuid.NewString(), ClusterID: f.claim.ClusterID, ExpectedRevision: found.DesiredRevision,
 	}
+	// A Redis scale asks for its one replica, and a retry asks again. A Patroni scale adds a member.
 	if apiOperation == postgres.ScaleClusterAPIOperation {
-		request.Replicas = new(int)
-		*request.Replicas = 1
+		request.Replicas = new(1)
+		if found.Spec.PostgreSQL != nil && found.Spec.PostgreSQL.Topology == "patroni" {
+			members, err := f.store.ReadClusterMembers(t.Context(), f.claim.InstallationID, f.claim.ClusterID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Replicas = new(len(members))
+		}
 	}
 	if apiOperation == postgres.DeleteClusterAPIOperation {
 		plan, err := f.store.PreviewClusterDelete(t.Context(), f.claim.InstallationID, f.claim.ClusterID, "integration")
@@ -44,12 +51,8 @@ func (f *fixture) act(t *testing.T, apiOperation string) operation.Claim {
 		}
 		request.Confirmation = &cluster.ActionConfirmation{PlanToken: plan.PlanToken, Confirm: true, DataDisposition: "retain"}
 	}
-	if apiOperation == postgres.RecoverSetupAPIOperation || apiOperation == postgres.RebuildReplicaAPIOperation {
-		preview := f.store.PreviewSetupRecovery
-		if apiOperation == postgres.RebuildReplicaAPIOperation {
-			preview = f.store.PreviewReplicaRebuild
-		}
-		plan, err := preview(t.Context(), f.claim.InstallationID, f.claim.ClusterID, "integration")
+	if apiOperation == postgres.RecoverSetupAPIOperation {
+		plan, err := f.store.PreviewSetupRecovery(t.Context(), f.claim.InstallationID, f.claim.ClusterID, "integration")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +65,7 @@ func (f *fixture) act(t *testing.T, apiOperation string) operation.Claim {
 	claim, err := f.store.AcquireClaim(t.Context(), postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: f.claim.InstallationID, OperationID: admission.OperationID,
 		RecoveryGeneration: f.claim.RecoveryGeneration, OwnerID: "owner-" + apiOperation, TTL: 2 * time.Minute,
-		CoordinationKey: "/lifecycle/" + apiOperation, CoordinationLease: 1, CoordinationRevision: 1,
+		LeaseID: 1, LeaseRevision: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -117,17 +120,10 @@ func TestStopPlanOnlyStops(t *testing.T) {
 func TestStartPlanProvesTheEngineAnswers(t *testing.T) {
 	f := provisioned(t)
 	plan := f.planFor(t, postgres.StartClusterAPIOperation)
-	if len(plan.Steps) != 3 {
-		t.Fatalf("steps=%d, want start, native identity, and application readiness", len(plan.Steps))
+	if len(plan.Steps) != 2 {
+		t.Fatalf("steps=%d, want start and application readiness", len(plan.Steps))
 	}
-	start, native, ready := plan.Steps[0], plan.Steps[1], plan.Steps[2]
-	check := native.Command.Input.GetCheckReadiness()
-	if check.PostgresReplication == nil || check.PostgresReplication.Source != nil || check.PostgresRole != "primary" || check.Role != "synod_admin" || len(native.Command.Input.Secrets) != 1 || native.Command.Input.Secrets[0].Purpose != postgres.SuperuserCredential {
-		t.Fatal("start omitted the protected native identity check")
-	}
-	if len(native.DependsOn) != 1 || native.DependsOn[0] != start.Command.StepId {
-		t.Fatal("native identity check can run before start")
-	}
+	start, ready := plan.Steps[0], plan.Steps[1]
 	if ready.Command.Input.GetCheckReadiness().PostgresRole != "primary" {
 		t.Fatal("start omitted the native primary check")
 	}
@@ -138,8 +134,8 @@ func TestStartPlanProvesTheEngineAnswers(t *testing.T) {
 		ready.Postcondition != agentv1.Postcondition_POSTCONDITION_ENGINE_READY {
 		t.Fatal("a start does not end by checking the engine answers")
 	}
-	if len(ready.DependsOn) != 1 || ready.DependsOn[0] != native.Command.StepId {
-		t.Fatalf("application readiness depends on %v, want native identity", ready.DependsOn)
+	if len(ready.DependsOn) != 1 || ready.DependsOn[0] != start.Command.StepId {
+		t.Fatalf("application readiness depends on %v, want start", ready.DependsOn)
 	}
 	// It connects with the credential this installation recorded, by reference.
 	if len(ready.Command.Input.Secrets) != 1 || ready.Command.Input.Secrets[0].Purpose != postgres.ApplicationCredential {
@@ -283,7 +279,7 @@ func (f *fixture) scaleDown(t *testing.T, plan cluster.ActionPlan) operation.Cla
 	claim, err := f.store.AcquireClaim(t.Context(), postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: f.claim.InstallationID, OperationID: admission.OperationID,
 		RecoveryGeneration: f.claim.RecoveryGeneration, OwnerID: "scale-down", TTL: 2 * time.Minute,
-		CoordinationKey: "/scale/down", CoordinationLease: 1, CoordinationRevision: 1,
+		LeaseID: 1, LeaseRevision: 1,
 	})
 	if err != nil {
 		t.Fatal(err)

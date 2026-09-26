@@ -146,7 +146,7 @@ func (r *Runtime) checkPatroniStartStorage(ctx context.Context, command *agentv1
 	if attempt.Identity != expected || attempt.Method != "init" && attempt.Method != "clone" {
 		return runtime.ErrConfigurationConflict
 	}
-	version, err := r.postgresReplicaRecord(ctx, item.ID, postgres.PatroniDataDirectory+"/PG_VERSION")
+	version, err := r.containerRecord(ctx, item.ID, postgres.PatroniDataDirectory+"/PG_VERSION")
 	if errdefs.IsNotFound(err) {
 		return r.missingPatroniStorage(ctx, item.ID)
 	}

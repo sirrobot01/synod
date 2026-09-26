@@ -66,15 +66,8 @@ func (s *Store) InstallRenewalPlan(ctx context.Context, claim operation.Claim, p
 		return err
 	}
 	for _, credential := range intent.Credentials {
-		// A renewal version continues a credential this cluster already holds for the same scope.
-		var prior bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cluster_credentials WHERE installation_id=$1 AND cluster_id=$2 AND credential_id=$3 AND version=$4 AND purpose=$5
- AND member_id IS NOT DISTINCT FROM NULLIF($6::uuid,'00000000-0000-0000-0000-000000000000'))`,
-			claim.InstallationID, claim.ClusterID, credential.CredentialID, credential.Version-1, credential.Purpose, credential.MemberID).Scan(&prior); err != nil {
-			return admissionError(err)
-		}
-		if !prior {
-			return ErrCredentialConflict
+		if err := priorVersion(ctx, tx, claim, credential); err != nil {
+			return err
 		}
 	}
 	if err := recordClusterIntentTx(ctx, tx, intent, true); err != nil {
@@ -100,6 +93,44 @@ func planReferences(plan *agentv1.ExecutionPlan, credential Credential) bool {
 		}
 	}
 	return false
+}
+
+// priorVersion requires that a renewed credential version continues a credential this cluster
+// already holds for the same purpose and member.
+func priorVersion(ctx context.Context, tx pgx.Tx, claim operation.Claim, credential Credential) error {
+	var prior bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cluster_credentials WHERE installation_id=$1 AND cluster_id=$2 AND credential_id=$3 AND version=$4 AND purpose=$5
+ AND member_id IS NOT DISTINCT FROM NULLIF($6::uuid,'00000000-0000-0000-0000-000000000000'))`,
+		claim.InstallationID, claim.ClusterID, credential.CredentialID, credential.Version-1, credential.Purpose, credential.MemberID).Scan(&prior); err != nil {
+		return admissionError(err)
+	}
+	if !prior {
+		return ErrCredentialConflict
+	}
+	return nil
+}
+
+// recordRecreated points each member whose recreate step completed at this operation's plan,
+// which holds the member's new configuration, even when a later step failed. A member without
+// that proof keeps its prior configuration. Success needs the proof for every recreate step.
+func recordRecreated(ctx context.Context, tx pgx.Tx, claim operation.Claim, op operation.Operation, plan *agentv1.ExecutionPlan, succeeded bool) error {
+	for _, step := range plan.Steps {
+		if step.Command.Input.GetRecreatePatroniMember() == nil {
+			continue
+		}
+		_, _, err := checkPlanCompletions(ctx, tx, op, &agentv1.ExecutionPlan{Version: plan.Version, Steps: []*agentv1.PlanStep{step}})
+		if errors.Is(err, operation.ErrBarrierPending) && !succeeded {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE cluster_members SET container_operation_id=$1,updated_at=clock_timestamp() WHERE installation_id=$2 AND cluster_id=$3 AND resource_id=$4 AND removed_at IS NULL`,
+			claim.OperationID, claim.InstallationID, claim.ClusterID, step.Command.Input.ResourceId); err != nil {
+			return admissionError(err)
+		}
+	}
+	return nil
 }
 
 // settleRenewal records which members run their renewed containers at a terminal boundary.
@@ -140,32 +171,20 @@ func settleRenewal(ctx context.Context, tx pgx.Tx, claim operation.Claim, encode
 		if _, _, err := checkPlanCompletions(ctx, tx, op, &plan); err != nil {
 			return err
 		}
-		// The final member checks end the member steps. Route steps of a routed cluster follow them.
-		if prefix := operation.RenewalPrefix(&plan); prefix > patroniMembers {
-			elected, primaries, err := checkPlanCompletions(ctx, tx, op, &agentv1.ExecutionPlan{Version: plan.Version, Steps: plan.Steps[prefix-patroniMembers : prefix]})
+		// A running renewal ends its member steps with a final check of every member. Route steps
+		// of a routed cluster follow them. A stopped renewal only recreates.
+		if prefix, members := operation.RenewalPrefix(&plan), operation.LeadingChecks(plan.Steps)+1; members > 1 {
+			elected, primaries, err := checkPlanCompletions(ctx, tx, op, &agentv1.ExecutionPlan{Version: plan.Version, Steps: plan.Steps[prefix-members : prefix]})
 			if err != nil {
 				return err
 			}
-			if elected != patroniMembers || primaries != 1 {
+			if elected != members || primaries != 1 {
 				return operation.ErrPostconditionUnproved
 			}
 		}
 	}
-	for _, step := range plan.Steps {
-		if step.Command.Input.GetRecreatePatroniMember() == nil {
-			continue
-		}
-		_, _, err := checkPlanCompletions(ctx, tx, op, &agentv1.ExecutionPlan{Version: plan.Version, Steps: []*agentv1.PlanStep{step}})
-		if errors.Is(err, operation.ErrBarrierPending) && !succeeded {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE cluster_members SET container_operation_id=$1,updated_at=clock_timestamp() WHERE installation_id=$2 AND cluster_id=$3 AND resource_id=$4 AND removed_at IS NULL`,
-			claim.OperationID, claim.InstallationID, claim.ClusterID, step.Command.Input.ResourceId); err != nil {
-			return admissionError(err)
-		}
+	if err := recordRecreated(ctx, tx, claim, op, &plan, succeeded); err != nil {
+		return err
 	}
 	if succeeded {
 		if _, err := tx.Exec(ctx, `UPDATE clusters SET observed_revision=$1,observed_lifecycle=$2,updated_at=clock_timestamp() WHERE installation_id=$3 AND id=$4`, op.DesiredRevision, lifecycle, claim.InstallationID, claim.ClusterID); err != nil {
@@ -174,9 +193,6 @@ func settleRenewal(ctx context.Context, tx pgx.Tx, claim operation.Claim, encode
 	}
 	return nil
 }
-
-// patroniMembers is the fixed member count of a Patroni cluster.
-const patroniMembers = 3
 
 // CertificateExpiry is the earliest certificate expiry that a Patroni cluster's members use.
 type CertificateExpiry struct {

@@ -57,7 +57,7 @@ func TestPatroniTLSMaterial(t *testing.T) {
 	}
 	member, dcs := issue(nil), issue(nil)
 	settings := PatroniSettings{RequiredFreeBytes: 1 << 30, InstallationID: uuid.New(), ClusterID: uuid.New(), ResourceID: uuid.New(), VolumeID: uuid.New(), ProvisionID: uuid.New(), ApplicationCredentialID: uuid.New(), ApplicationCredentialVersion: 1, Address: netip.MustParseAddr("192.0.2.10"), DatabasePort: 5432, RESTPort: 8008, DCSEndpoints: []string{"192.0.2.20:2379"}, PeerNetworks: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, ClientNetworks: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}}
-	secrets := PatroniSecrets{Superuser: uuid.NewString(), Replication: uuid.NewString(), Rewind: uuid.NewString(), DCS: uuid.NewString(), REST: uuid.NewString(), ApplicationVerifier: "SCRAM-SHA-256$4096:AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+	secrets := PatroniSecrets{Superuser: uuid.NewString(), Replication: uuid.NewString(), Rewind: uuid.NewString(), REST: uuid.NewString(), ApplicationVerifier: "SCRAM-SHA-256$4096:AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
 	files, err := PatroniFiles(settings, secrets, member, dcs, now)
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +204,7 @@ func TestIssuePatroniMaterial(t *testing.T) {
 	}
 	address := netip.MustParseAddr("192.0.2.10")
 	settings := PatroniSettings{RequiredFreeBytes: 1 << 30, InstallationID: installation, ClusterID: cluster, ResourceID: resource, VolumeID: uuid.New(), ProvisionID: uuid.New(), ApplicationCredentialID: uuid.New(), ApplicationCredentialVersion: 1, Address: address, DatabasePort: 5432, RESTPort: 8008, DCSEndpoints: []string{"192.0.2.20:2379"}, PeerNetworks: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, ClientNetworks: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}}
-	secrets := PatroniSecrets{Superuser: uuid.NewString(), Replication: uuid.NewString(), Rewind: uuid.NewString(), DCS: uuid.NewString(), REST: uuid.NewString(), ApplicationVerifier: "SCRAM-SHA-256$4096:AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+	secrets := PatroniSecrets{Superuser: uuid.NewString(), Replication: uuid.NewString(), Rewind: uuid.NewString(), REST: uuid.NewString(), ApplicationVerifier: "SCRAM-SHA-256$4096:AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
 	member, err := IssuePatroniMemberMaterial(native, pki.PatroniIdentity{InstallationID: installation, ClusterID: cluster, ResourceID: resource}, address, now, time.Hour)
 	if err != nil {
 		t.Fatal(err)

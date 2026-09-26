@@ -47,17 +47,17 @@ func postgresStorageFixture(t *testing.T, r *Runtime, api *client.Client, cluste
 			t.Fatal(err)
 		}
 	}
-	adminID, appID, replicationID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	adminID, appID := uuid.NewString(), uuid.NewString()
 	command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{
-		ResourceId: uuid.NewString(), Secrets: []*agentv1.SecretReference{{CredentialId: adminID, Version: 1, Purpose: "superuser"}, {CredentialId: appID, Version: 1, Purpose: "application"}, {CredentialId: replicationID, Version: 1, Purpose: "replication"}},
+		ResourceId: uuid.NewString(), Secrets: []*agentv1.SecretReference{{CredentialId: adminID, Version: 1, Purpose: "superuser"}, {CredentialId: appID, Version: 1, Purpose: "application"}},
 		Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
 			ImageDigest: image, Engine: "postgres", VolumeId: volumeID, NetworkId: networkID,
 			NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 128 << 20, CpuMillis: 1000,
-			Postgres:  &agentv1.PostgresContainerConfig{Port: 5432, SuperuserCredentialId: adminID, SuperuserCredentialVersion: 1, ApplicationCredentialId: appID, ApplicationCredentialVersion: 1, ReplicationCredentialId: replicationID, ReplicationCredentialVersion: 1},
-			SecretEnv: []*agentv1.SecretEnv{{Name: "POSTGRES_PASSWORD", Purpose: "superuser"}, {Name: "SYNOD_APP_VERIFIER", Purpose: "application"}, {Name: "SYNOD_REPL_VERIFIER", Purpose: "replication"}},
+			Postgres:  &agentv1.PostgresContainerConfig{Port: 5432, SuperuserCredentialId: adminID, SuperuserCredentialVersion: 1, ApplicationCredentialId: appID, ApplicationCredentialVersion: 1},
+			SecretEnv: []*agentv1.SecretEnv{{Name: "POSTGRES_PASSWORD", Purpose: "superuser"}, {Name: "SYNOD_APP_VERIFIER", Purpose: "application"}},
 		}},
 	})
-	secrets := runtime.Secrets{"superuser": []byte(uuid.NewString()), "application": []byte(uuid.NewString()), "replication": []byte(uuid.NewString())}
+	secrets := runtime.Secrets{"superuser": []byte(uuid.NewString()), "application": []byte(uuid.NewString())}
 	if len(material) > 0 {
 		secrets = material[0]
 	}

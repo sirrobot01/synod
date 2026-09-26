@@ -188,7 +188,7 @@ func (r *Runtime) checkPatroniCancelledBootstrap(ctx context.Context, command *a
 	if !moved.Stat.Mode.IsDir() || moved.Stat.LinkTarget != "" {
 		return runtime.ErrConfigurationConflict
 	}
-	version, err := r.postgresReplicaRecord(ctx, containerID, failed+"/PG_VERSION")
+	version, err := r.containerRecord(ctx, containerID, failed+"/PG_VERSION")
 	if errdefs.IsNotFound(err) {
 		return runtime.ErrConfigurationConflict
 	}

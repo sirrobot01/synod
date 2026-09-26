@@ -7,7 +7,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/client"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -49,45 +48,45 @@ func readPassword(file string, prompt string, stderr io.Writer) (string, error) 
 }
 
 // newUserCommand administers operator accounts.
-func newUserCommand(api **client.Client, result *Result, prepare func(*cobra.Command, []string) error, stderr io.Writer) *cobra.Command {
+func newUserCommand(app *app) *cobra.Command {
 	var passwordFile string
-	group := &cobra.Command{Use: "user", Short: "Administer operator accounts", PersistentPreRunE: prepare}
+	group := &cobra.Command{Use: "user", Short: "Administer operator accounts", PersistentPreRunE: app.connect}
 	group.PersistentFlags().StringVar(&passwordFile, "password-file", "", "Private file holding the password; otherwise prompt")
 
 	create := &cobra.Command{Use: "create USERNAME", Short: "Create one operator account", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			password, err := readPassword(passwordFile, "New password: ", stderr)
+			password, err := readPassword(passwordFile, "New password: ", app.stderr)
 			if err != nil {
 				return err
 			}
-			user, err := (*api).CreateUser(cmd.Context(), strings.ToLower(args[0]), password)
+			user, err := app.api.CreateUser(cmd.Context(), strings.ToLower(args[0]), password)
 			if err != nil {
 				return err
 			}
-			result.User = &user
+			app.result.User = &user
 			return nil
 		}}
 
 	setPassword := &cobra.Command{Use: "set-password ID", Short: "Replace one password and end its other sessions", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id, err := uuid.Parse(args[0])
-			if err != nil || id == uuid.Nil {
-				return &client.Error{Code: "invalid_request", Message: "Use a valid user ID."}
-			}
-			password, err := readPassword(passwordFile, "New password: ", stderr)
+			id, err := parseID(args[0], "Use a valid user ID.")
 			if err != nil {
 				return err
 			}
-			return (*api).SetUserPassword(cmd.Context(), id, password)
+			password, err := readPassword(passwordFile, "New password: ", app.stderr)
+			if err != nil {
+				return err
+			}
+			return app.api.SetUserPassword(cmd.Context(), id, password)
 		}}
 
 	disable := &cobra.Command{Use: "disable ID", Short: "Stop sign-ins and end every live session", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id, err := uuid.Parse(args[0])
-			if err != nil || id == uuid.Nil {
-				return &client.Error{Code: "invalid_request", Message: "Use a valid user ID."}
+			id, err := parseID(args[0], "Use a valid user ID.")
+			if err != nil {
+				return err
 			}
-			return (*api).DisableUser(cmd.Context(), id)
+			return app.api.DisableUser(cmd.Context(), id)
 		}}
 
 	group.AddCommand(create, setPassword, disable)
@@ -95,9 +94,9 @@ func newUserCommand(api **client.Client, result *Result, prepare func(*cobra.Com
 }
 
 // newTokenCommand administers API tokens for automation.
-func newTokenCommand(api **client.Client, result *Result, prepare func(*cobra.Command, []string) error) *cobra.Command {
+func newTokenCommand(app *app) *cobra.Command {
 	var actorID, expires string
-	group := &cobra.Command{Use: "token", Short: "Administer API tokens", PersistentPreRunE: prepare}
+	group := &cobra.Command{Use: "token", Short: "Administer API tokens", PersistentPreRunE: app.connect}
 
 	create := &cobra.Command{Use: "create NAME", Short: "Mint one token; its secret is shown once", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -109,11 +108,11 @@ func newTokenCommand(api **client.Client, result *Result, prepare func(*cobra.Co
 				}
 				deadline = &parsed
 			}
-			token, err := (*api).CreateAPIToken(cmd.Context(), args[0], actorID, deadline)
+			token, err := app.api.CreateAPIToken(cmd.Context(), args[0], actorID, deadline)
 			if err != nil {
 				return err
 			}
-			result.Token = &token
+			app.result.Token = &token
 			return nil
 		}}
 	create.Flags().StringVar(&actorID, "actor-id", "", "Audit identity that the token acts as; defaults to the caller")
@@ -121,21 +120,21 @@ func newTokenCommand(api **client.Client, result *Result, prepare func(*cobra.Co
 
 	list := &cobra.Command{Use: "list", Short: "Read every token without its secret", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tokens, err := (*api).ListAPITokens(cmd.Context())
+			tokens, err := app.api.ListAPITokens(cmd.Context())
 			if err != nil {
 				return err
 			}
-			result.Tokens = tokens
+			app.result.Tokens = tokens
 			return nil
 		}}
 
 	revoke := &cobra.Command{Use: "revoke ID", Short: "End one token", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id, err := uuid.Parse(args[0])
-			if err != nil || id == uuid.Nil {
-				return &client.Error{Code: "invalid_request", Message: "Use a valid token ID."}
+			id, err := parseID(args[0], "Use a valid token ID.")
+			if err != nil {
+				return err
 			}
-			return (*api).RevokeAPIToken(cmd.Context(), id)
+			return app.api.RevokeAPIToken(cmd.Context(), id)
 		}}
 
 	group.AddCommand(create, list, revoke)

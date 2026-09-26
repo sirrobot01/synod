@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -137,6 +139,12 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 			}
 			break
 		}
+		if p.Etcd != nil {
+			if err := validateEtcdContainer(p, command.Input.Secrets); err != nil {
+				return [32]byte{}, err
+			}
+			break
+		}
 		if p.Engine == "redis" && p.Redis == nil {
 			return [32]byte{}, fmt.Errorf("redis container settings are required")
 		}
@@ -158,19 +166,10 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 					return [32]byte{}, err
 				}
 			} else {
-				passwordName, passwordPurpose := "POSTGRES_PASSWORD", "superuser"
-				if config.ReplicaSource != nil {
-					if config.ReplicaSource.ResourceId == command.Input.ResourceId {
-						return [32]byte{}, fmt.Errorf("postgres replica source equals target")
-					}
-					passwordName, passwordPurpose = "SYNOD_REPL_PASSWORD", "replication"
-				}
-				if len(p.SecretEnv) != 3 || !slices.ContainsFunc(p.SecretEnv, func(env *agentv1.SecretEnv) bool {
-					return env != nil && env.Name == passwordName && env.Purpose == passwordPurpose
+				if len(p.SecretEnv) != 2 || !slices.ContainsFunc(p.SecretEnv, func(env *agentv1.SecretEnv) bool {
+					return env != nil && env.Name == "POSTGRES_PASSWORD" && env.Purpose == "superuser"
 				}) || !slices.ContainsFunc(p.SecretEnv, func(env *agentv1.SecretEnv) bool {
 					return env != nil && env.Name == "SYNOD_APP_VERIFIER" && env.Purpose == "application"
-				}) || !slices.ContainsFunc(p.SecretEnv, func(env *agentv1.SecretEnv) bool {
-					return env != nil && env.Name == "SYNOD_REPL_VERIFIER" && env.Purpose == "replication"
 				}) {
 					return [32]byte{}, fmt.Errorf("postgres credential environment is invalid")
 				}
@@ -204,32 +203,10 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 			}
 		}
 	case *agentv1.CommandInput_RecoverPostgresSetup:
-		if payload.RecoverPostgresSetup == nil || payload.RecoverPostgresSetup.Postgres == nil || payload.RecoverPostgresSetup.Postgres.ReplicaSource != nil || payload.RecoverPostgresSetup.Postgres.Patroni != nil {
+		if payload.RecoverPostgresSetup == nil || payload.RecoverPostgresSetup.Postgres == nil || payload.RecoverPostgresSetup.Postgres.Patroni != nil {
 			return [32]byte{}, fmt.Errorf("postgres recovery input is absent")
 		}
 		if err := validatePostgresConfiguration(payload.RecoverPostgresSetup.Postgres, command.Input.Secrets); err != nil {
-			return [32]byte{}, err
-		}
-	case *agentv1.CommandInput_PreparePostgresReplica:
-		if payload.PreparePostgresReplica == nil || len(command.Input.Secrets) != 0 {
-			return [32]byte{}, fmt.Errorf("postgres replica preparation input is invalid")
-		}
-	case *agentv1.CommandInput_ClonePostgresReplica:
-		p := payload.ClonePostgresReplica
-		if p == nil || p.Postgres == nil || p.Postgres.ReplicaSource == nil || p.Postgres.ReplicaSource.ResourceId == command.Input.ResourceId || p.RequiredFreeBytes < 1 || p.RequiredFreeBytes > 1<<50 {
-			return [32]byte{}, fmt.Errorf("postgres clone input is invalid")
-		}
-		if err := validatePostgresConfiguration(p.Postgres, command.Input.Secrets); err != nil {
-			return [32]byte{}, err
-		}
-	case *agentv1.CommandInput_VerifyPostgresReplicaClone:
-		p := payload.VerifyPostgresReplicaClone
-		if err := validatePostgresCloneVerification(command, p.GetPostgres(), p.GetCloneCommandId()); err != nil {
-			return [32]byte{}, err
-		}
-	case *agentv1.CommandInput_VerifyPostgresReplicaFailure:
-		p := payload.VerifyPostgresReplicaFailure
-		if err := validatePostgresCloneVerification(command, p.GetPostgres(), p.GetCloneCommandId()); err != nil {
 			return [32]byte{}, err
 		}
 	case *agentv1.CommandInput_StartPatroniMember, *agentv1.CommandInput_VerifyPatroniStartFailure,
@@ -251,6 +228,10 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 		}
 	case *agentv1.CommandInput_SwitchoverPatroni:
 		if err := validateSwitchover(payload.SwitchoverPatroni, command.Input.Secrets); err != nil {
+			return [32]byte{}, err
+		}
+	case *agentv1.CommandInput_EtcdMembership:
+		if err := validateEtcdMembership(payload.EtcdMembership, command.Input.Secrets); err != nil {
 			return [32]byte{}, err
 		}
 	case *agentv1.CommandInput_StartContainer:
@@ -285,8 +266,8 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 			return [32]byte{}, fmt.Errorf("postgres readiness requires its native role only")
 		}
 		// Role any serves Patroni, whose members elect their own roles over TLS.
-		if p.PostgresRole == "any" && (p.PostgresTls == nil || p.PostgresReplication != nil) {
-			return [32]byte{}, fmt.Errorf("postgres readiness for any role requires TLS and no replication check")
+		if p.PostgresRole == "any" && p.PostgresTls == nil {
+			return [32]byte{}, fmt.Errorf("postgres readiness for any role requires TLS")
 		}
 		address, err := netip.ParseAddr(p.Address)
 		if err != nil || !address.IsLoopback() {
@@ -298,26 +279,6 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 			}
 			if _, err := postgresengine.ReadinessTLSConfig(settings.RootCaPem, settings.ServerName); err != nil {
 				return [32]byte{}, err
-			}
-		}
-		if check := p.PostgresReplication; check != nil {
-			if p.Engine != "postgres" || p.Database != "postgres" || p.Role != "synod_admin" || p.RedisReplication != nil || len(command.Input.Secrets) != 1 || command.Input.Secrets[0].Purpose != "superuser" {
-				return [32]byte{}, fmt.Errorf("postgres replication check requires the admin credential")
-			}
-			if p.PostgresRole == "primary" {
-				if check.Source != nil || check.MaxReplayLagBytes != 0 || check.MaxMessageAge != nil {
-					return [32]byte{}, fmt.Errorf("primary identity check has replica settings")
-				}
-			} else {
-				source := check.Source
-				if source == nil || source.Port == 0 || source.Port > 65535 || source.ResourceId == command.Input.ResourceId || check.MaxReplayLagBytes < 1 || check.MaxReplayLagBytes > 1<<30 || check.MaxMessageAge == nil || check.MaxMessageAge.CheckValid() != nil || check.MaxMessageAge.AsDuration() < time.Second || check.MaxMessageAge.AsDuration() > 120*time.Second {
-					return [32]byte{}, fmt.Errorf("postgres replication check is invalid")
-				}
-				address, err := netip.ParseAddr(source.Address)
-				id, idErr := uuid.Parse(source.ResourceId)
-				if err != nil || address.String() != source.Address || address.Zone() != "" || (!address.IsGlobalUnicast() && !address.IsLoopback()) || idErr != nil || id == uuid.Nil || id.String() != source.ResourceId {
-					return [32]byte{}, fmt.Errorf("postgres replication source is invalid")
-				}
 			}
 		}
 		if replication := p.RedisReplication; replication != nil {
@@ -406,9 +367,9 @@ type Claim struct {
 var renewedPurposes = []string{"patroni_member_tls", "patroni_dcs_tls"}
 
 // validatePatroniRecreate allows a recreate to change only the versions of the two
-// certificate credentials. Each keeps its credential ID and moves to a higher version.
-// The command carries the next credential references, and both configurations must be
-// valid member configurations on their own.
+// certificate credentials and to append peer networks for an added member. Each credential
+// keeps its ID and moves to a higher version. The command carries the next credential
+// references, and both configurations must be valid member configurations on their own.
 func validatePatroniRecreate(command *agentv1.Command) error {
 	p := command.Input.GetRecreatePatroniMember()
 	previous, next := p.GetPrevious(), p.GetNext()
@@ -435,6 +396,11 @@ func validatePatroniRecreate(command *agentv1.Command) error {
 	}
 	unchanged := proto.Clone(next).(*agentv1.EnsureContainer)
 	unchanged.Postgres.Patroni.Credentials = before
+	peers := previous.Postgres.Patroni.PeerNetworks
+	if len(unchanged.Postgres.Patroni.PeerNetworks) < len(peers) || !slices.Equal(unchanged.Postgres.Patroni.PeerNetworks[:len(peers)], peers) {
+		return fmt.Errorf("Patroni recreate removes or reorders peer networks")
+	}
+	unchanged.Postgres.Patroni.PeerNetworks = peers
 	if renewed == 0 || !proto.Equal(unchanged, previous) {
 		return fmt.Errorf("Patroni recreate changes more than certificate versions")
 	}
@@ -468,6 +434,38 @@ func validateSwitchover(p *agentv1.SwitchoverPatroni, secrets []*agentv1.SecretR
 	return nil
 }
 
+// validateEtcdMembership checks an etcd membership change. The agent dials the local etcd
+// member on its canonical unicast address with that member's leaf and nothing else. A new
+// learner names an HTTPS peer URL on a canonical unicast address. The other actions name no URL.
+func validateEtcdMembership(p *agentv1.EtcdMembership, secrets []*agentv1.SecretReference) error {
+	address, err := netip.ParseAddr(p.GetAddress())
+	if err != nil || address.String() != p.Address || address.Zone() != "" || !address.IsGlobalUnicast() || p.ClientPort == 0 || p.ClientPort > 65535 ||
+		p.Name == "" || len(p.Name) > 128 || strings.ContainsFunc(p.Name, func(r rune) bool { return r < '!' || r > '~' }) {
+		return fmt.Errorf("etcd membership target is invalid")
+	}
+	switch p.Action {
+	case "add_learner":
+		peer, err := url.Parse(p.PeerUrl)
+		if err != nil || peer.Scheme != "https" || peer.User != nil || peer.Path != "" || peer.RawQuery != "" || peer.Fragment != "" {
+			return fmt.Errorf("etcd learner peer URL is invalid")
+		}
+		host, err := netip.ParseAddrPort(peer.Host)
+		if err != nil || !host.Addr().IsGlobalUnicast() || host.Addr().Zone() != "" || host.Port() == 0 || peer.Host != host.String() {
+			return fmt.Errorf("etcd learner peer URL is invalid")
+		}
+	case "promote", "remove":
+		if p.PeerUrl != "" {
+			return fmt.Errorf("etcd %s names no peer URL", p.Action)
+		}
+	default:
+		return fmt.Errorf("etcd membership action is invalid")
+	}
+	if len(secrets) != 1 || secrets[0].Purpose != "patroni_member_tls" {
+		return fmt.Errorf("etcd membership credentials are invalid")
+	}
+	return nil
+}
+
 // validateRouteContainer checks a pooler or router beside a Patroni member. It runs on host
 // networking with no volume and no environment. Its secrets are exactly the credentials its
 // kind needs, and the command carries the same references.
@@ -488,6 +486,38 @@ func validateRouteContainer(p *agentv1.EnsureContainer, secrets []*agentv1.Secre
 		if !slices.ContainsFunc(credentials, func(reference *agentv1.SecretReference) bool { return reference.GetPurpose() == purpose }) {
 			return fmt.Errorf("route container needs a %s credential", purpose)
 		}
+	}
+	return nil
+}
+
+// validateEtcdContainer checks an etcd member beside a Patroni member. It runs on host
+// networking with an isolated volume and no environment. It requires patroni_member_tls.
+func validateEtcdContainer(p *agentv1.EnsureContainer, secrets []*agentv1.SecretReference) error {
+	if p.Engine != "postgres" || p.Postgres != nil || p.Redis != nil || p.Route != nil || p.VolumeId == "" || p.NetworkId != "" ||
+		p.NetworkMode != agentv1.NetworkMode_NETWORK_MODE_HOST || len(p.Ports) != 0 || len(p.SecretEnv) != 0 || len(p.PlainEnv) != 0 {
+		return fmt.Errorf("etcd container shape is invalid")
+	}
+	volumeID, err := uuid.Parse(p.VolumeId)
+	if err != nil || volumeID == uuid.Nil {
+		return fmt.Errorf("etcd container volume reference is invalid")
+	}
+	c := p.Etcd
+	if c == nil || c.Name == "" || c.InitialCluster == "" {
+		return fmt.Errorf("etcd container configuration is incomplete")
+	}
+	if c.InitialClusterState != "" && c.InitialClusterState != "new" && c.InitialClusterState != "existing" {
+		return fmt.Errorf("etcd initial cluster state is invalid")
+	}
+	clusterID, err := uuid.Parse(c.ClusterId)
+	if err != nil || clusterID == uuid.Nil {
+		return fmt.Errorf("etcd cluster identity is invalid")
+	}
+	address, err := netip.ParseAddr(c.Address)
+	if err != nil || !address.IsGlobalUnicast() || address.Zone() != "" || c.ClientPort == 0 || c.ClientPort > 65535 || c.PeerPort == 0 || c.PeerPort > 65535 || c.ClientPort == c.PeerPort {
+		return fmt.Errorf("etcd container endpoints are invalid")
+	}
+	if len(c.Credentials) != 1 || len(secrets) != 1 || !proto.Equal(c.Credentials[0], secrets[0]) || c.Credentials[0].Purpose != "patroni_member_tls" {
+		return fmt.Errorf("etcd container credentials are invalid")
 	}
 	return nil
 }

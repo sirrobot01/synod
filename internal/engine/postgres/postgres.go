@@ -28,8 +28,9 @@ func (Engine) Validate(spec cluster.CreateSpec) error {
 	if spec.Redis != nil {
 		return fmt.Errorf("%w: a postgres spec carries redis settings", engine.ErrUnsupportedCombination)
 	}
-	if spec.PostgreSQL.ReplicationPolicy == "synchronous" && spec.PostgreSQL.Version != "17.11" {
-		return fmt.Errorf("%w: synchronous replication requires PostgreSQL 17.11", engine.ErrUnsupportedCombination)
+	// Standalone PostgreSQL has no replicas, so only Patroni can wait for one.
+	if spec.PostgreSQL.ReplicationPolicy == "synchronous" && spec.PostgreSQL.Topology != "patroni" {
+		return fmt.Errorf("%w: synchronous replication requires the patroni topology", engine.ErrUnsupportedCombination)
 	}
 	return nil
 }
@@ -59,7 +60,7 @@ func (Engine) Advertised() []engine.Capabilities {
 		found := engine.Capabilities{
 			Combination: engine.Combination{Engine: cluster.PostgreSQL, Version: version, Topology: "standalone"},
 			Status:      engine.RequiredPending,
-			// Streaming replicas do not provide native failover. PITR needs pgBackRest.
+			// Standalone is one node. Replicas need the patroni topology. PITR needs pgBackRest.
 			Replicas:           engine.Replicas{Minimum: 0, Maximum: 0},
 			NativeFailover:     false,
 			Sharding:           false,
@@ -73,9 +74,6 @@ func (Engine) Advertised() []engine.Capabilities {
 			UpgradePairs:       nil,
 			EndpointType:       "direct",
 			TLS:                false,
-		}
-		if version == "17.11" {
-			found.Replicas.Maximum = 1
 		}
 		all = append(all, found)
 	}

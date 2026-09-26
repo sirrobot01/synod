@@ -24,7 +24,7 @@ import (
 // rebuildMember replaces the reviewed Patroni member with a fresh one on the same node, or
 // resumes a residual member that a failed rebuild left.
 //
-// The two other members must prove readiness first, so the cluster keeps a writer. An
+// The other members must prove readiness first, so the cluster keeps a writer. An
 // active target must prove that it does not serve and that its storage cannot restart
 // before it is removed. A residual target is resumed when its latest start never ran or
 // reached running. Otherwise it must prove its failure before it is removed. The fresh
@@ -50,11 +50,11 @@ func (p *Planner) rebuildMember(ctx context.Context, claim operation.Claim, op o
 	if err != nil {
 		return err
 	}
-	reviewed, failed, err := p.config.Store.ReadReplicaActionTarget(ctx, claim.InstallationID, claim.OperationID)
+	reviewed, action, err := p.config.Store.ReadReplicaActionTarget(ctx, claim.InstallationID, claim.OperationID)
 	if err != nil {
 		return err
 	}
-	if !failed || len(running) != patroniMembers {
+	if action != "rebuild_member" || len(running) < operation.MinPatroniMembers || len(running) > operation.MaxPatroniMembers {
 		return ErrUnplannable
 	}
 	var target member
@@ -225,8 +225,8 @@ func (p *Planner) rebuildMember(ctx context.Context, claim operation.Claim, op o
 	}
 	steps = append(steps, stop, storageFailed, remove)
 
-	// The fresh member stays on the target's node and host domain. The two others keep
-	// their reservations, and the group keeps all three on distinct hosts.
+	// The fresh member stays on the target's node and host domain. The others keep
+	// their reservations, and the group keeps every member on a distinct host.
 	capabilities, err := p.config.Catalog.Resolve(found.Spec)
 	if err != nil {
 		return err
@@ -240,7 +240,9 @@ func (p *Planner) rebuildMember(ctx context.Context, claim operation.Claim, op o
 	request := p.patroniRequest(claim, found, capabilities.Combination, fresh, architecture)
 	request.DesiredRevision = op.DesiredRevision
 	request.Resources[0].NodeAffinity = target.NodeID
-	request.Groups[0].Members = append(request.Groups[0].Members, others[0].ResourceID, others[1].ResourceID)
+	for _, each := range others {
+		request.Groups[0].Members = append(request.Groups[0].Members, each.ResourceID)
+	}
 	decision, snapshot, err := p.config.Decider.Decide(ctx, request)
 	if err != nil {
 		return err
@@ -284,6 +286,9 @@ func (p *Planner) rebuildMember(ctx context.Context, claim operation.Claim, op o
 	configuration.Postgres.Port = uint32(created.database)
 	patroni := configuration.Postgres.Patroni
 	patroni.RestPort, patroni.ProvisionId, patroni.AllowInitialization = uint32(created.rest), uuid.NewString(), true
+	if patroni.DcsEndpoints, err = p.dcsEndpoints(ctx, claim, patroni.DcsEndpoints); err != nil {
+		return err
+	}
 	replaced := false
 	for index, reference := range patroni.Credentials {
 		if reference.Purpose == postgres.PatroniMemberTLSCredential {

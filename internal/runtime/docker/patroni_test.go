@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -76,7 +77,7 @@ func TestRealDockerPatroniPreparation(t *testing.T) {
 			}
 			var refs []*agentv1.SecretReference
 			secrets := runtime.Secrets{}
-			for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_dcs", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
+			for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
 				refs = append(refs, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: purpose})
 				secrets[purpose] = []byte(uuid.NewString())
 			}
@@ -277,5 +278,40 @@ func TestRealDockerPatroniPreparation(t *testing.T) {
 				t.Fatal("owned remove", err)
 			}
 		})
+	}
+}
+
+func TestEtcdCommandShape(t *testing.T) {
+	cmd := etcdCommand(&agentv1.EtcdContainerConfig{
+		Name:                "node-1",
+		ClusterId:           "cluster-123",
+		Address:             "192.0.2.10",
+		ClientPort:          2379,
+		PeerPort:            2380,
+		InitialCluster:      "node-1=https://192.0.2.10:2380",
+		InitialClusterState: "new",
+	})
+	expected := []string{
+		"etcd",
+		"--name=node-1",
+		"--data-dir=/data",
+		"--listen-client-urls=https://192.0.2.10:2379",
+		"--advertise-client-urls=https://192.0.2.10:2379",
+		"--listen-peer-urls=https://192.0.2.10:2380",
+		"--initial-advertise-peer-urls=https://192.0.2.10:2380",
+		"--initial-cluster=node-1=https://192.0.2.10:2380",
+		"--initial-cluster-state=new",
+		"--initial-cluster-token=cluster-123",
+		"--cert-file=/etc/synod-etcd/server.crt",
+		"--key-file=/etc/synod-etcd/server.key",
+		"--trusted-ca-file=/etc/synod-etcd/ca.crt",
+		"--client-cert-auth=true",
+		"--peer-cert-file=/etc/synod-etcd/peer.crt",
+		"--peer-key-file=/etc/synod-etcd/peer.key",
+		"--peer-trusted-ca-file=/etc/synod-etcd/ca.crt",
+		"--peer-client-cert-auth=true",
+	}
+	if !slices.Equal(cmd, expected) {
+		t.Fatalf("unexpected etcd cmd: %v", cmd)
 	}
 }

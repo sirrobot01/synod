@@ -187,8 +187,8 @@ func (p *Planner) routeStopSteps(claim operation.Claim, op operation.Operation, 
 	return steps, nil
 }
 
-// routeReplace stops, removes, creates, and optionally starts one route container. A missing
-// container counts as stopped and absent, so a replace also creates a route that never existed.
+// routeReplace stops, removes, creates, and optionally starts one route or etcd container. A
+// missing container counts as stopped and absent, so a replace also creates a route that never existed.
 func (p *Planner) routeReplace(claim operation.Claim, op operation.Operation, node, id uuid.UUID, container *agentv1.EnsureContainer, start bool) ([]*agentv1.PlanStep, error) {
 	type action struct {
 		input         *agentv1.CommandInput
@@ -202,7 +202,11 @@ func (p *Planner) routeReplace(claim operation.Claim, op operation.Operation, no
 			agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT, beforeExecution},
 	}
 	if container != nil {
-		actions = append(actions, action{&agentv1.CommandInput{ResourceId: id.String(), Secrets: container.Route.Credentials, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: container}},
+		secrets := container.GetRoute().GetCredentials()
+		if container.Etcd != nil {
+			secrets = container.Etcd.Credentials
+		}
+		actions = append(actions, action{&agentv1.CommandInput{ResourceId: id.String(), Secrets: secrets, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: container}},
 			agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, beforeExecution})
 		if start {
 			actions = append(actions, action{&agentv1.CommandInput{ResourceId: id.String(), Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}},

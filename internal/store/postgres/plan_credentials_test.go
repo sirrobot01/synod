@@ -16,15 +16,15 @@ import (
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
-// nativePlacementIntent binds a typed preparation plan to eight sealed Store test values.
+// nativePlacementIntent binds a typed preparation plan to seven sealed Store test values.
 func nativePlacementIntent(t *testing.T, host *placementHost, claim operation.Claim, request *placement.Request, plan *agentv1.ExecutionPlan) ClusterIntent {
 	t.Helper()
 	ring := keyring(t)
 	intent := ClusterIntent{InstallationID: host.id, ClusterID: claim.ClusterID, Databases: []Database{{Name: "app", OwnerRole: "synod_app"}}}
 	for _, pair := range []struct{ purpose, role string }{
 		{SuperuserCredential, "synod_admin"}, {ApplicationCredential, "synod_app"}, {ReplicationCredential, "synod_repl"},
-		{PatroniRewindCredential, "synod_rewind"}, {PatroniDCSCredential, "synod_patroni_" + claim.ClusterID.String()},
-		{PatroniRESTCredential, "synod_patroni"}, {PatroniMemberTLSCredential, ""}, {PatroniDCSTLSCredential, ""},
+		{PatroniRewindCredential, "synod_rewind"}, {PatroniRESTCredential, "synod_patroni"},
+		{PatroniMemberTLSCredential, ""}, {PatroniDCSTLSCredential, ""},
 	} {
 		credential := sealed(t, ring, host, claim.ClusterID, pair.purpose, pair.role, "sealed-store-test-"+pair.purpose)
 		if pair.purpose == PatroniMemberTLSCredential {
@@ -107,7 +107,7 @@ func TestNativePlacementIntentCommitsAtomicallyAndRecoversLostReply(t *testing.T
 	if err != nil || len(record.CredentialIntentHash) != 32 || len(record.Allocations) != 1 {
 		t.Fatal("lost commit not readable", err)
 	}
-	if total := host.count(t, `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1`, host.id); total != 8 {
+	if total := host.count(t, `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1`, host.id); total != 7 {
 		t.Fatalf("credentials=%d", total)
 	}
 	replay, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, &intent)
@@ -120,7 +120,7 @@ func TestNativePlacementIntentCommitsAtomicallyAndRecoversLostReply(t *testing.T
 	for name, change := range map[string]func(*ClusterIntent){
 		"ciphertext":         func(i *ClusterIntent) { i.Credentials[0].Envelope.Sealed = []byte("different sealed bytes") },
 		"database":           func(i *ClusterIntent) { i.Databases = []Database{{Name: "other_app", OwnerRole: "synod_app"}} },
-		"omitted credential": func(i *ClusterIntent) { i.Credentials = i.Credentials[:7] },
+		"omitted credential": func(i *ClusterIntent) { i.Credentials = i.Credentials[:6] },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := intent
@@ -132,13 +132,13 @@ func TestNativePlacementIntentCommitsAtomicallyAndRecoversLostReply(t *testing.T
 		})
 	}
 	// Recovery checks existing evidence. It must not restore a deleted secret row.
-	if _, err := host.store.pool.Exec(t.Context(), `DELETE FROM cluster_credentials WHERE credential_id=$1`, intent.Credentials[7].CredentialID); err != nil {
+	if _, err := host.store.pool.Exec(t.Context(), `DELETE FROM cluster_credentials WHERE credential_id=$1`, intent.Credentials[6].CredentialID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, &intent); !errors.Is(err, ErrCredentialConflict) {
 		t.Fatal("replay repaired missing secret evidence", err)
 	}
-	if total := host.count(t, `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1`, host.id); total != 7 {
+	if total := host.count(t, `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1`, host.id); total != 6 {
 		t.Fatal("replay wrote a missing credential")
 	}
 }
@@ -153,7 +153,7 @@ func TestNativePlacementIntentRefusalsRollback(t *testing.T) {
 			priorCredentials, priorPlans := 0, 0
 			switch fault {
 			case "missing reference":
-				intent.Credentials = intent.Credentials[:7]
+				intent.Credentials = intent.Credentials[:6]
 			case "wrong member":
 				plan.Steps[0].Command.Input.ResourceId = uuid.NewString()
 				hash, err := operation.CommandHash(plan.Steps[0].Command)
@@ -172,7 +172,7 @@ func TestNativePlacementIntentRefusalsRollback(t *testing.T) {
 				request.Resources[0].Engine = "redis"
 				request.Resources[0].Version = "8.2.7"
 			case "outside placement":
-				intent.Credentials[6].MemberID = uuid.New()
+				intent.Credentials[5].MemberID = uuid.New()
 			case "stale claim":
 				claim.OwnerID = "stale"
 			case "active claim":
@@ -240,7 +240,7 @@ func TestNativePlacementIntentAddsMemberAfterPriorDispatch(t *testing.T) {
 	nextIntent := nativePlacementIntent(t, host, second, &nextRequest, nextPlan)
 	nextCommand := nextPlan.Steps[0].Command
 	for i, reference := range nextCommand.Input.Secrets {
-		if i != 6 {
+		if i != 5 {
 			reference.CredentialId = intent.Credentials[i].CredentialID.String()
 		}
 	}
@@ -248,7 +248,7 @@ func TestNativePlacementIntentAddsMemberAfterPriorDispatch(t *testing.T) {
 	config.SuperuserCredentialId = intent.Credentials[0].CredentialID.String()
 	config.ApplicationCredentialId = intent.Credentials[1].CredentialID.String()
 	config.ReplicationCredentialId = intent.Credentials[2].CredentialID.String()
-	nextIntent.Credentials = []Credential{nextIntent.Credentials[6]}
+	nextIntent.Credentials = []Credential{nextIntent.Credentials[5]}
 	nextIntent.Databases = nil
 	hash, err := operation.CommandHash(nextCommand)
 	if err != nil {
@@ -261,8 +261,8 @@ func TestNativePlacementIntentAddsMemberAfterPriorDispatch(t *testing.T) {
 	if _, err := host.store.InstallPlacementPlan(t.Context(), second, nextRequest, nextDecision, nextPlan, &nextIntent); err != nil {
 		t.Fatal("later atomic member intent refused", err)
 	}
-	if total := host.count(t, `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1`, host.id); total != 9 {
-		t.Fatalf("credentials=%d, want 9", total)
+	if total := host.count(t, `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1`, host.id); total != 8 {
+		t.Fatalf("credentials=%d, want 8", total)
 	}
 	if total := host.count(t, `SELECT count(*) FROM resource_allocations WHERE installation_id=$1`, host.id); total != 2 {
 		t.Fatalf("allocations=%d, want 2", total)

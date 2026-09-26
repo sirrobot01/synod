@@ -2,24 +2,22 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"slices"
 
-	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/client"
 	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/spf13/cobra"
 )
 
-func newEndpointCommand(api **client.Client, result *Result, prepare func(*cobra.Command, []string) error, stderr io.Writer) *cobra.Command {
-	group := &cobra.Command{Use: "endpoint", Short: "Inspect database connection metadata", PersistentPreRunE: prepare}
+func newEndpointCommand(app *app) *cobra.Command {
+	group := &cobra.Command{Use: "endpoint", Short: "Inspect database connection metadata", PersistentPreRunE: app.connect}
 	group.AddCommand(&cobra.Command{Use: "get CLUSTER_ID", Short: "Read reserved direct addresses and stored lifecycle observations", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id, err := uuid.Parse(args[0])
-			if err != nil || id == uuid.Nil {
-				return &client.Error{Code: "invalid_request", Message: "Use a nonzero cluster UUID."}
+			id, err := parseID(args[0], "Use a nonzero cluster UUID.")
+			if err != nil {
+				return err
 			}
-			value, err := (*api).GetEndpoints(cmd.Context(), id)
+			value, err := app.api.GetEndpoints(cmd.Context(), id)
 			if err != nil {
 				return err
 			}
@@ -28,45 +26,45 @@ func newEndpointCommand(api **client.Client, result *Result, prepare func(*cobra
 			if slices.ContainsFunc(value.Endpoints, func(endpoint cluster.Endpoint) bool { return endpoint.TLSMode != "verify-full" }) {
 				message = "Warning: this standalone profile uses plaintext database traffic. Database TLS is disabled. " + message
 			}
-			if _, err := fmt.Fprintln(stderr, message); err != nil {
+			if _, err := fmt.Fprintln(app.stderr, message); err != nil {
 				return &client.Error{Code: "local_error", Message: "Display the database traffic warning failed."}
 			}
-			result.EndpointInspection = &value
+			app.result.EndpointInspection = &value
 			return nil
 		}})
 	return group
 }
 
-func newCredentialCommand(api **client.Client, result *Result, prepare func(*cobra.Command, []string) error, stderr io.Writer) *cobra.Command {
-	group := &cobra.Command{Use: "credential", Short: "Inspect metadata or explicitly reveal a database credential", PersistentPreRunE: prepare}
+func newCredentialCommand(app *app) *cobra.Command {
+	group := &cobra.Command{Use: "credential", Short: "Inspect metadata or explicitly reveal a database credential", PersistentPreRunE: app.connect}
 	group.AddCommand(&cobra.Command{Use: "list CLUSTER_ID", Short: "Read credential purposes, usernames, and versions without passwords", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id, err := uuid.Parse(args[0])
-			if err != nil || id == uuid.Nil {
-				return &client.Error{Code: "invalid_request", Message: "Use a nonzero cluster UUID."}
+			id, err := parseID(args[0], "Use a nonzero cluster UUID.")
+			if err != nil {
+				return err
 			}
-			value, err := (*api).ListCredentials(cmd.Context(), id)
+			value, err := app.api.ListCredentials(cmd.Context(), id)
 			if err == nil {
-				result.CredentialInspection = &value
+				app.result.CredentialInspection = &value
 			}
 			return err
 		}})
 	var purpose string
 	reveal := &cobra.Command{Use: "reveal CLUSTER_ID", Short: "Reveal one database password through audited administrator access", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id, err := uuid.Parse(args[0])
-			if err != nil || id == uuid.Nil {
-				return &client.Error{Code: "invalid_request", Message: "Use a nonzero cluster UUID."}
+			id, err := parseID(args[0], "Use a nonzero cluster UUID.")
+			if err != nil {
+				return err
 			}
 			if !cmd.Flags().Changed("purpose") || (purpose != "application" && purpose != "superuser" && purpose != "replication") {
 				return &client.Error{Code: "invalid_request", Message: "Set --purpose to application, superuser, or replication."}
 			}
-			if _, err := fmt.Fprintln(stderr, "The JSON result will contain a database password. Protect stdout. Use a private terminal or a file readable only by its owner. Do not send this output to logs or shared files."); err != nil {
+			if _, err := fmt.Fprintln(app.stderr, "The JSON result will contain a database password. Protect stdout. Use a private terminal or a file readable only by its owner. Do not send this output to logs or shared files."); err != nil {
 				return &client.Error{Code: "local_error", Message: "Display protected-output guidance failed. No credential reveal request was sent."}
 			}
-			value, err := (*api).RevealCredential(cmd.Context(), id, purpose)
+			value, err := app.api.RevealCredential(cmd.Context(), id, purpose)
 			if err == nil {
-				result.RevealedCredential = &value
+				app.result.RevealedCredential = &value
 			}
 			return err
 		}}

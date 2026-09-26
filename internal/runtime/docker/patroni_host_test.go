@@ -4,8 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
@@ -20,14 +18,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
-	"github.com/sirrobot01/synod/internal/coordinator"
 	"github.com/sirrobot01/synod/internal/engine"
 	"github.com/sirrobot01/synod/internal/engine/postgres"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -107,47 +103,11 @@ func TestRealDockerPatroniHostNetwork(t *testing.T) {
 	if _, err := api.ContainerStart(ctx, dcs.ID, client.ContainerStartOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	roots := x509.NewCertPool()
-	roots.AppendCertsFromPEM(nativeCert)
-	pair, err := tls.X509KeyPair(dcsMaterial.Certificate, dcsMaterial.PrivateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	etcdTLS := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{pair}, ServerName: address.String()}
-	bootstrap, err := clientv3.New(clientv3.Config{Endpoints: []string{"https://" + etcdEndpoint}, DialTimeout: 5 * time.Second, TLS: etcdTLS})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer bootstrap.Close()
-	rootPassword := uuid.NewString()
-	setup, stop := context.WithTimeout(ctx, 30*time.Second)
-	defer stop()
-	if _, err := bootstrap.Auth.UserAdd(setup, "root", rootPassword); err != nil {
-		t.Fatal("DCS root setup", err)
-	}
-	if _, err := bootstrap.Auth.UserGrantRole(setup, "root", "root"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := bootstrap.Auth.AuthEnable(setup); err != nil {
-		t.Fatal(err)
-	}
-	admin, err := clientv3.New(clientv3.Config{Endpoints: []string{"https://" + etcdEndpoint}, DialTimeout: 5 * time.Second, TLS: etcdTLS, Username: "root", Password: rootPassword})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close()
-	accounts, err := coordinator.NewPatroniAccounts(admin, installation)
-	if err != nil {
-		t.Fatal(err)
-	}
 	secrets := runtime.Secrets{}
-	refs := make([]*agentv1.SecretReference, 0, 8)
-	for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_dcs", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
+	refs := make([]*agentv1.SecretReference, 0, 7)
+	for _, purpose := range []string{"superuser", "application", "replication", "patroni_rewind", "patroni_rest", "patroni_member_tls", "patroni_dcs_tls"} {
 		refs = append(refs, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: purpose})
 		secrets[purpose] = []byte(uuid.NewString())
-	}
-	if err := accounts.EnsureAccount(setup, clusterID, string(secrets["patroni_dcs"])); err != nil {
-		t.Fatal("Patroni DCS account", err)
 	}
 	resourceID := uuid.NewString()
 	member, err := postgres.IssuePatroniMemberMaterial(native, pki.PatroniIdentity{InstallationID: installation, ClusterID: clusterID, ResourceID: uuid.MustParse(resourceID)}, address, now, time.Hour)

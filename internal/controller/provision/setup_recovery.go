@@ -21,18 +21,14 @@ func (p *Planner) recoverSetupSteps(ctx context.Context, claim operation.Claim, 
 	if err != nil {
 		return nil, err
 	}
-	replication, err := p.config.Store.ReadClusterCredential(ctx, claim.InstallationID, claim.ClusterID, postgres.ReplicationCredential)
-	if err != nil {
-		return nil, err
-	}
-	if admin.RoleName != "synod_admin" || app.RoleName != "synod_app" || replication.RoleName != "synod_repl" {
+	if admin.RoleName != "synod_admin" || app.RoleName != "synod_app" {
 		return nil, ErrUnplannable
 	}
 	each := members[0]
 	recovery, err := p.step(claim, epochFor(claim, each.NodeID), op.DesiredRevision, &agentv1.CommandInput{
 		ResourceId: each.ResourceID.String(),
-		Secrets:    []*agentv1.SecretReference{{CredentialId: admin.CredentialID.String(), Version: admin.Version, Purpose: admin.Purpose}, {CredentialId: app.CredentialID.String(), Version: app.Version, Purpose: app.Purpose}, {CredentialId: replication.CredentialID.String(), Version: replication.Version, Purpose: replication.Purpose}},
-		Payload:    &agentv1.CommandInput_RecoverPostgresSetup{RecoverPostgresSetup: &agentv1.RecoverPostgresSetup{Postgres: &agentv1.PostgresContainerConfig{SynchronousReplication: found.Spec.PostgreSQL.ReplicationPolicy == "synchronous", Port: uint32(each.Port), SuperuserCredentialId: admin.CredentialID.String(), SuperuserCredentialVersion: admin.Version, ApplicationCredentialId: app.CredentialID.String(), ApplicationCredentialVersion: app.Version, ReplicationCredentialId: replication.CredentialID.String(), ReplicationCredentialVersion: replication.Version}}},
+		Secrets:    []*agentv1.SecretReference{{CredentialId: admin.CredentialID.String(), Version: admin.Version, Purpose: admin.Purpose}, {CredentialId: app.CredentialID.String(), Version: app.Version, Purpose: app.Purpose}},
+		Payload:    &agentv1.CommandInput_RecoverPostgresSetup{RecoverPostgresSetup: &agentv1.RecoverPostgresSetup{Postgres: &agentv1.PostgresContainerConfig{Port: uint32(each.Port), SuperuserCredentialId: admin.CredentialID.String(), SuperuserCredentialVersion: admin.Version, ApplicationCredentialId: app.CredentialID.String(), ApplicationCredentialVersion: app.Version}}},
 	}, agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED, nil, agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION)
 	if err != nil {
 		return nil, err

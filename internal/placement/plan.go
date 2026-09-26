@@ -180,7 +180,23 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 	if prior, exists := p.existing[resource.ID]; exists && prior.NodeID != node.ID {
 		return candidate{}, false
 	}
-	if policy.Architecture != resource.Architecture || report.Architecture != resource.Architecture || policy.RuntimeVersion != resource.RuntimeVersion || report.RuntimeVersion != resource.RuntimeVersion || policy.StorageID != resource.StorageID || report.StorageID != resource.StorageID || !slices.Contains(policy.Engines, EngineVersion{resource.Engine, resource.Version}) {
+	// Colocated resources share a node, whichever of the two is placed first.
+	for _, other := range p.request.Resources {
+		if other.ID != resource.Colocate && other.Colocate != resource.ID {
+			continue
+		}
+		if assignment, exists := p.assigned[other.ID]; exists && assignment.NodeID != node.ID {
+			return candidate{}, false
+		}
+	}
+	if policy.Architecture != resource.Architecture || report.Architecture != resource.Architecture || !slices.Contains(policy.Engines, EngineVersion{resource.Engine, resource.Version}) {
+		return candidate{}, false
+	}
+	// An empty runtime version or storage ID in the request accepts any node value.
+	if resource.RuntimeVersion != "" && (policy.RuntimeVersion != resource.RuntimeVersion || report.RuntimeVersion != resource.RuntimeVersion) {
+		return candidate{}, false
+	}
+	if resource.StorageID != "" && (policy.StorageID != resource.StorageID || report.StorageID != resource.StorageID) {
 		return candidate{}, false
 	}
 	for key, value := range resource.Labels {

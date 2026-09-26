@@ -36,10 +36,20 @@ func placementFixture(t *testing.T) *placementHost {
 	return host
 }
 
-// claimCluster admits one cluster and takes its operation claim.
+// claimCluster admits one PostgreSQL cluster and takes its operation claim.
 func (h *placementHost) claimCluster(t *testing.T, name string) operation.Claim {
 	t.Helper()
-	request := testRequest()
+	return h.claim(t, name, testRequest())
+}
+
+// claimRedis admits one Redis cluster and takes its operation claim.
+func (h *placementHost) claimRedis(t *testing.T, name string) operation.Claim {
+	t.Helper()
+	return h.claim(t, name, redisRequest())
+}
+
+func (h *placementHost) claim(t *testing.T, name string, request CreateClusterRequest) operation.Claim {
+	t.Helper()
 	request.Identity.InstallationID = h.id
 	request.Spec.Name = name
 	admission, err := h.store.CreateCluster(t.Context(), request)
@@ -48,7 +58,7 @@ func (h *placementHost) claimCluster(t *testing.T, name string) operation.Claim 
 	}
 	claim, err := h.store.AcquireClaim(t.Context(), ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: h.id, OperationID: admission.OperationID, RecoveryGeneration: h.generation,
-		OwnerID: "owner-" + name, TTL: 2 * time.Minute, CoordinationKey: "/placement/" + name, CoordinationLease: 1, CoordinationRevision: 1,
+		OwnerID: "owner-" + name, TTL: 2 * time.Minute, LeaseID: 1, LeaseRevision: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +82,7 @@ func (h *placementHost) reclaim(t *testing.T, previous operation.Claim, status s
 	}
 	claim, err := h.store.AcquireClaim(t.Context(), ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: h.id, OperationID: next, RecoveryGeneration: h.generation,
-		OwnerID: "owner-next", TTL: 2 * time.Minute, CoordinationKey: "/placement/next", CoordinationLease: 1, CoordinationRevision: 1,
+		OwnerID: "owner-next", TTL: 2 * time.Minute, LeaseID: 1, LeaseRevision: 1,
 	})
 	if err != nil {
 		t.Fatal(err)

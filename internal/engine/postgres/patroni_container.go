@@ -12,7 +12,7 @@ import (
 // PatroniMemberSettings binds typed container input to the command's owned native member.
 func PatroniMemberSettings(input *agentv1.EnsureContainer, installation, cluster, resource string) (PatroniSettings, error) {
 	var settings PatroniSettings
-	if input == nil || input.Engine != "postgres" || input.Postgres == nil || input.Postgres.Patroni == nil || input.Postgres.ReplicaSource != nil {
+	if input == nil || input.Engine != "postgres" || input.Postgres == nil || input.Postgres.Patroni == nil {
 		return settings, errors.New("Patroni container configuration is invalid")
 	}
 	config, native := input.Postgres, input.Postgres.Patroni

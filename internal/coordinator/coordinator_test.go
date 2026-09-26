@@ -4,31 +4,58 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sirrobot01/synod/internal/store/postgres"
 )
 
-func testClient(t *testing.T) *clientv3.Client {
+func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	endpoint := os.Getenv("SYNOD_TEST_ETCD_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("set SYNOD_TEST_ETCD_ENDPOINT or run the task-011 fixture")
+	databaseURL := os.Getenv("SYNOD_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("run scripts/test-postgres.sh")
 	}
-	client, err := clientv3.New(clientv3.Config{Endpoints: []string{endpoint}, DialTimeout: time.Second, Logger: zap.NewNop()})
+	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { client.Close() })
-	return client
+	admin, err := pgx.Connect(t.Context(), databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "synod_test_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	if _, err := admin.Exec(t.Context(), "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Database = name
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := postgres.New(pool)
+	if err := store.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
+			t.Error(err)
+		}
+		admin.Close(ctx)
+	})
+	return pool
 }
 
 func TestLeadershipRenewalAndRevocation(t *testing.T) {
-	client := testClient(t)
-	coord, err := New(client, "/task-011/"+uuid.NewString())
+	pool := testPool(t)
+	coord, err := New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +63,7 @@ func TestLeadershipRenewalAndRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leader.Key == "" || leader.LeaseID == 0 || leader.Revision < 1 {
+	if leader.LeaseID == 0 || leader.Revision < 1 {
 		t.Fatalf("leadership evidence: %+v", leader)
 	}
 	if err := leader.Verify(t.Context()); err != nil {
@@ -66,14 +93,12 @@ func TestLeadershipRenewalAndRevocation(t *testing.T) {
 }
 
 func TestDisconnectedOwnerAndContender(t *testing.T) {
-	firstClient := testClient(t)
-	secondClient := testClient(t)
-	prefix := "/task-011/" + uuid.NewString()
-	firstCoordinator, err := New(firstClient, prefix)
+	pool := testPool(t)
+	firstCoordinator, err := New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondCoordinator, err := New(secondClient, prefix)
+	secondCoordinator, err := New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,37 +118,21 @@ func TestDisconnectedOwnerAndContender(t *testing.T) {
 		leader, err := secondCoordinator.Campaign(ctx, installation, clusterID, "second", 3)
 		result <- outcome{leader, err}
 	}()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		keys, err := secondClient.Get(ctx, prefix, clientv3.WithPrefix())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(keys.Kvs) == 2 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal("contender did not join election")
-		case <-ticker.C:
-		}
-	}
 	select {
-	case result := <-result:
-		t.Fatalf("contender bypassed live leader: %v", result.err)
-	default:
+	case res := <-result:
+		t.Fatalf("contender bypassed live leader: %v", res.err)
+	case <-time.After(200 * time.Millisecond):
 	}
-	if err := firstClient.Close(); err != nil {
+	if err := first.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case <-first.Done:
 	case <-ctx.Done():
-		t.Fatal("disconnected lease did not signal loss")
+		t.Fatal("closed lease did not signal loss")
 	}
 	if err := first.Verify(ctx); !errors.Is(err, ErrNotLeader) {
-		t.Fatalf("disconnected owner verified: %v", err)
+		t.Fatalf("closed owner verified: %v", err)
 	}
 	select {
 	case next := <-result:
@@ -132,23 +141,24 @@ func TestDisconnectedOwnerAndContender(t *testing.T) {
 		}
 		defer next.leader.Close(t.Context())
 		if next.leader.Revision <= first.Revision || next.leader.LeaseID == first.LeaseID {
-			t.Fatal("takeover reused lease evidence")
+			t.Fatalf("takeover reused lease evidence: rev=%d vs %d, lease=%d vs %d", next.leader.Revision, first.Revision, next.leader.LeaseID, first.LeaseID)
 		}
 		if err := next.leader.Verify(ctx); err != nil {
 			t.Fatal(err)
 		}
 	case <-ctx.Done():
-		t.Fatal("lease expiry did not admit contender")
+		t.Fatal("lease release did not admit contender")
 	}
 }
 
 func TestAuthorityValueAndUnavailableClient(t *testing.T) {
-	client := testClient(t)
-	coord, err := New(client, "/task-011/"+uuid.NewString())
+	pool := testPool(t)
+	coord, err := New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	leader, err := coord.Campaign(t.Context(), uuid.New(), uuid.New(), "owner", 3)
+	installationID, clusterID := uuid.New(), uuid.New()
+	leader, err := coord.Campaign(t.Context(), installationID, clusterID, "owner", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +168,7 @@ func TestAuthorityValueAndUnavailableClient(t *testing.T) {
 	if err := leader.Verify(ctx); err == nil {
 		t.Fatal("unavailable verification succeeded")
 	}
-	if _, err := client.Put(t.Context(), leader.Key, "different-owner", clientv3.WithLease(clientv3.LeaseID(leader.LeaseID))); err != nil {
+	if _, err := pool.Exec(t.Context(), `UPDATE cluster_leases SET owner_id = 'different-owner' WHERE installation_id = $1 AND cluster_id = $2`, installationID, clusterID); err != nil {
 		t.Fatal(err)
 	}
 	if err := leader.Verify(t.Context()); !errors.Is(err, ErrNotLeader) {

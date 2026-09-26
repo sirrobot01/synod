@@ -22,27 +22,18 @@ import (
 )
 
 type bootstrapFixture struct {
-	host, name, address, password, verifier  string
-	replicationPassword, replicationVerifier string
-	config                                   *agentv1.PostgresContainerConfig
-	command                                  []string
+	host, name, address, password, verifier string
+	config                                  *agentv1.PostgresContainerConfig
+	command                                 []string
 }
 
-func bootstrapContainer(t *testing.T, injectedStartup string, replicationPassword ...string) *bootstrapFixture {
-	t.Helper()
-	return bootstrapContainerWithPolicy(t, injectedStartup, false, replicationPassword...)
-}
-
-func bootstrapContainerWithPolicy(t *testing.T, injectedStartup string, synchronous bool, replicationPassword ...string) *bootstrapFixture {
+func bootstrapContainer(t *testing.T, injectedStartup string) *bootstrapFixture {
 	t.Helper()
 	host := os.Getenv("SYNOD_TEST_DOCKER_HOST")
 	if host == "" {
 		t.Skip("set SYNOD_TEST_DOCKER_HOST for the isolated PostgreSQL startup fixture")
 	}
-	f := &bootstrapFixture{host: host, name: "synod-bootstrap-" + uuid.NewString(), password: "application-test-" + uuid.NewString(), replicationPassword: "replication-test-" + uuid.NewString()}
-	if len(replicationPassword) != 0 {
-		f.replicationPassword = replicationPassword[0]
-	}
+	f := &bootstrapFixture{host: host, name: "synod-bootstrap-" + uuid.NewString(), password: "application-test-" + uuid.NewString()}
 	arch := strings.TrimSpace(f.docker(t, "info", "--format", "{{.Architecture}}"))
 	image := ""
 	switch arch {
@@ -53,26 +44,21 @@ func bootstrapContainerWithPolicy(t *testing.T, injectedStartup string, synchron
 	default:
 		t.Fatalf("unqualified PostgreSQL fixture architecture %q", arch)
 	}
-	for _, item := range []struct {
-		password string
-		verifier *string
-	}{{f.password, &f.verifier}, {f.replicationPassword, &f.replicationVerifier}} {
-		salt := []byte("native-test-salt")
-		salted, err := pbkdf2.Key(sha256.New, item.password, salt, 4096, 32)
-		if err != nil {
-			t.Fatal(err)
-		}
-		clientKey := hmac.New(sha256.New, salted)
-		clientKey.Write([]byte("Client Key"))
-		storedKey := sha256.Sum256(clientKey.Sum(nil))
-		serverKey := hmac.New(sha256.New, salted)
-		serverKey.Write([]byte("Server Key"))
-		*item.verifier = "SCRAM-SHA-256$4096:" + base64.StdEncoding.EncodeToString(salt) + "$" + base64.StdEncoding.EncodeToString(storedKey[:]) + ":" + base64.StdEncoding.EncodeToString(serverKey.Sum(nil))
+	salt := []byte("native-test-salt")
+	salted, err := pbkdf2.Key(sha256.New, f.password, salt, 4096, 32)
+	if err != nil {
+		t.Fatal(err)
 	}
-	f.config = &agentv1.PostgresContainerConfig{SynchronousReplication: synchronous, Port: 5432, SuperuserCredentialId: uuid.NewString(), SuperuserCredentialVersion: 1, ApplicationCredentialId: uuid.NewString(), ApplicationCredentialVersion: 1, ReplicationCredentialId: uuid.NewString(), ReplicationCredentialVersion: 1}
+	clientKey := hmac.New(sha256.New, salted)
+	clientKey.Write([]byte("Client Key"))
+	storedKey := sha256.Sum256(clientKey.Sum(nil))
+	serverKey := hmac.New(sha256.New, salted)
+	serverKey.Write([]byte("Server Key"))
+	f.verifier = "SCRAM-SHA-256$4096:" + base64.StdEncoding.EncodeToString(salt) + "$" + base64.StdEncoding.EncodeToString(storedKey[:]) + ":" + base64.StdEncoding.EncodeToString(serverKey.Sum(nil))
+	f.config = &agentv1.PostgresContainerConfig{Port: 5432, SuperuserCredentialId: uuid.NewString(), SuperuserCredentialVersion: 1, ApplicationCredentialId: uuid.NewString(), ApplicationCredentialVersion: 1}
 	args := []string{"--host", host, "run", "--detach", "--name", f.name, "--label", "io.synod.fixture=postgres-bootstrap",
 		"--publish", "127.0.0.1::5432", "--tmpfs", ConfigDirectory + ":rw,noexec,nosuid,nodev,size=1m",
-		"--env", "POSTGRES_PASSWORD", "--env", "SYNOD_APP_VERIFIER", "--env", "SYNOD_REPL_VERIFIER", image}
+		"--env", "POSTGRES_PASSWORD", "--env", "SYNOD_APP_VERIFIER", image}
 	startup := ContainerCommand(f.config, uuid.NewString(), uuid.NewString(), uuid.NewString())
 	f.command = startup
 	if injectedStartup != "" {
@@ -80,7 +66,7 @@ func bootstrapContainerWithPolicy(t *testing.T, injectedStartup string, synchron
 	}
 	args = append(args, startup...)
 	command := exec.CommandContext(t.Context(), "docker", args...)
-	command.Env = append(os.Environ(), "POSTGRES_PASSWORD=admin-fixture-password", "SYNOD_APP_VERIFIER="+f.verifier, "SYNOD_REPL_VERIFIER="+f.replicationVerifier)
+	command.Env = append(os.Environ(), "POSTGRES_PASSWORD=admin-fixture-password", "SYNOD_APP_VERIFIER="+f.verifier)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("start bootstrap fixture: %v (%d output bytes)", err, len(output))
 	}
@@ -206,11 +192,11 @@ func TestPostgresBootstrapCreatesLeastPrivilegeApplicationAndPreservesRestart(t 
 		t.Fatal("restart did not preserve application data")
 	}
 	logs := f.docker(t, "logs", f.name)
-	if strings.Contains(logs, f.password) || strings.Contains(logs, f.verifier) || strings.Contains(logs, f.replicationPassword) || strings.Contains(logs, f.replicationVerifier) || strings.Contains(logs, "admin-fixture-password") {
+	if strings.Contains(logs, f.password) || strings.Contains(logs, f.verifier) || strings.Contains(logs, "admin-fixture-password") {
 		t.Fatal("container logs disclosed credential material")
 	}
 	process := f.docker(t, "exec", "--user", "postgres", f.name, "sh", "-c", "tr '\\0' '\\n' < /proc/1/environ")
-	if strings.Contains(process, "POSTGRES_PASSWORD=") || strings.Contains(process, "SYNOD_APP_VERIFIER=") || strings.Contains(process, "SYNOD_REPL_VERIFIER=") {
+	if strings.Contains(process, "POSTGRES_PASSWORD=") || strings.Contains(process, "SYNOD_APP_VERIFIER=") {
 		t.Fatal("final PostgreSQL process retained startup secrets")
 	}
 }
@@ -257,7 +243,7 @@ func TestPostgresBootstrapResumesPreparedReceipt(t *testing.T) {
 	f := bootstrapContainer(t, "")
 	// Restore the exact durable state before the separate CREATE DATABASE phase.
 	f.adminSQL(t, `DROP DATABASE app`)
-	f.adminSQL(t, `BEGIN; ALTER ROLE synod_app NOLOGIN; ALTER ROLE synod_repl NOLOGIN; UPDATE synod_control.bootstrap SET phase='prepared',database_oid=NULL; COMMIT`)
+	f.adminSQL(t, `BEGIN; ALTER ROLE synod_app NOLOGIN; UPDATE synod_control.bootstrap SET phase='prepared',database_oid=NULL; COMMIT`)
 	f.docker(t, "restart", "--time", "10", f.name)
 	f.waitPhase(t, "ready")
 	conn := f.connect(t)

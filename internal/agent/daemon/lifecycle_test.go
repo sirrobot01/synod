@@ -207,8 +207,8 @@ func TestExecutableLifecycleWithDocker(t *testing.T) {
 	}
 	binary := os.Getenv("SYNOD_TEST_AGENT_BINARY")
 	if binary == "" {
-		binary = filepath.Join(parent, "synod-agent")
-		command := exec.CommandContext(ctx, "go", "build", "-race", "-o", binary, "../../../cmd/synod-agent")
+		binary = filepath.Join(parent, "synod")
+		command := exec.CommandContext(ctx, "go", "build", "-race", "-o", binary, "../../../cmd/synod")
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("build: %v %s", err, output)
 		}
@@ -233,12 +233,13 @@ func TestExecutableLifecycleWithDocker(t *testing.T) {
 	})
 	invoke := func(args ...string) ([]byte, []byte, error) {
 		t.Helper()
-		command := exec.CommandContext(ctx, binary, args...)
+		command := exec.CommandContext(ctx, binary, append([]string{"agent"}, args...)...)
 		var stdout, stderr bytes.Buffer
 		command.Stdout = &stdout
 		command.Stderr = &stderr
 		err := command.Run()
-		if bytes.Contains(stderr.Bytes(), []byte(token)) || bytes.Contains(stdout.Bytes(), []byte("PRIVATE KEY")) || bytes.Contains(stderr.Bytes(), []byte(parent)) {
+		// A journal or inventory refusal names its path in detail. Nothing else may.
+		if bytes.Contains(stderr.Bytes(), []byte(token)) || bytes.Contains(stdout.Bytes(), []byte("PRIVATE KEY")) || (bytes.Contains(stderr.Bytes(), []byte(parent)) && !bytes.Contains(stderr.Bytes(), []byte(`"detail":`))) {
 			t.Fatalf("unredacted executable output: %s", stderr.Bytes())
 		}
 		return stdout.Bytes(), stderr.Bytes(), err
@@ -308,7 +309,7 @@ func TestExecutableLifecycleWithDocker(t *testing.T) {
 		}
 	})
 	for cycle := range 2 {
-		command := exec.CommandContext(ctx, binary, runArgs...)
+		command := exec.CommandContext(ctx, binary, append([]string{"agent"}, runArgs...)...)
 		var out, diagnostics bytes.Buffer
 		command.Stdout = &out
 		command.Stderr = &diagnostics

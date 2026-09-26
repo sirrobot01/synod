@@ -102,7 +102,7 @@ export interface Admission {
   replayed: boolean;
 }
 
-export type ClusterAction = "start" | "stop" | "delete" | "recover-setup" | "rebuild-replica";
+export type ClusterAction = "start" | "stop" | "delete" | "recover-setup";
 export type CredentialPurpose = "application" | "superuser" | "replication";
 
 export interface ActionPlan {
@@ -128,8 +128,8 @@ export interface ScaleDownPlan extends Omit<ActionPlan, "action"> {
   member_id: string;
 }
 
-export interface PostgresRecoveryPlan extends Omit<ActionPlan, "action"> {
-  action: "scale_down_failed" | "recover_setup" | "rebuild_replica";
+export interface SetupRecoveryPlan extends Omit<ActionPlan, "action"> {
+  action: "recover_setup";
   member_id: string;
   resource_id: string;
 }
@@ -414,8 +414,9 @@ export const api = {
       expected_revision: value.expected_revision, data_disposition: "retain", retained_volumes: [...value.retained_volumes],
       downtime: value.downtime, expires_at: value.expires_at };
   },
-  async planPostgresRecovery(id: string, action: PostgresRecoveryPlan["action"]): Promise<PostgresRecoveryPlan> {
-    if (!uuid(id) || !["scale_down_failed", "recover_setup", "rebuild_replica"].includes(action)) throw safeFailure(0, "invalid_request", "metadata");
+  async planSetupRecovery(id: string): Promise<SetupRecoveryPlan> {
+    if (!uuid(id)) throw safeFailure(0, "invalid_request", "metadata");
+    const action = "recover_setup";
     const value = await call<unknown>("POST", `/v1/clusters/${id}/action-plans`, { action }, undefined, { flow: "metadata", status: 200 });
     if (!object(value) || value.cluster_id !== id || !uuid(value.plan_token) || !uuid(value.member_id) || !uuid(value.resource_id) ||
       typeof value.cluster_name !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(value.cluster_name) ||
@@ -454,8 +455,8 @@ export const api = {
       downtime: value.downtime, expires_at: value.expires_at };
   },
   async actOnCluster(id: string, action: ClusterAction, expectedRevision: number, key: string, confirmation?: ActionConfirmation): Promise<Admission> {
-    if (!uuid(id) || !["start", "stop", "delete", "recover-setup", "rebuild-replica"].includes(action) || !positive(expectedRevision) || !/^[!-~]{1,128}$/.test(key) ||
-      (["delete", "recover-setup", "rebuild-replica"].includes(action) ? !confirmation || !uuid(confirmation.plan_token) || confirmation.confirm !== true || confirmation.data_disposition !== "retain" : confirmation !== undefined)) {
+    if (!uuid(id) || !["start", "stop", "delete", "recover-setup"].includes(action) || !positive(expectedRevision) || !/^[!-~]{1,128}$/.test(key) ||
+      (["delete", "recover-setup"].includes(action) ? !confirmation || !uuid(confirmation.plan_token) || confirmation.confirm !== true || confirmation.data_disposition !== "retain" : confirmation !== undefined)) {
       throw safeFailure(0, "invalid_request", "mutation");
     }
     const body = confirmation ? { plan_token: confirmation.plan_token, confirm: true, data_disposition: "retain" } : {};

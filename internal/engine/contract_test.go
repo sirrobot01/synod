@@ -273,15 +273,15 @@ func TestRedisReplicaLimitsMatchPersistence(t *testing.T) {
 	}
 }
 
-func TestPostgresReplicationPolicyRequiresImplementedVersion(t *testing.T) {
-	for _, version := range []string{"17.11", "18.6"} {
-		spec := cluster.CreateSpec{SchemaVersion: 1, Name: "db", Engine: cluster.PostgreSQL, PostgreSQL: &cluster.PostgreSQLSpec{Version: version, Topology: "standalone", ReplicationPolicy: "synchronous"}}
+func TestPostgresSynchronousPolicyRequiresPatroni(t *testing.T) {
+	for _, topology := range []string{"standalone", "patroni"} {
+		spec := cluster.CreateSpec{SchemaVersion: 1, Name: "db", Engine: cluster.PostgreSQL, PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: topology, ReplicationPolicy: "synchronous"}}
 		_, err := postgres.New().Resolve(spec)
-		if version == "17.11" && err != nil {
+		if topology == "patroni" && err != nil {
 			t.Fatal(err)
 		}
-		if version != "17.11" && !errors.Is(err, engine.ErrUnsupportedCombination) {
-			t.Fatalf("unimplemented policy accepted: %v", err)
+		if topology == "standalone" && !errors.Is(err, engine.ErrUnsupportedCombination) {
+			t.Fatalf("standalone synchronous policy accepted: %v", err)
 		}
 	}
 }
@@ -294,15 +294,12 @@ func TestPostgresReplicaLimitsMatchImplementedVersion(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			maximum := 0
-			if version == "17.11" {
-				maximum = 1
-			}
-			if found.Replicas.Minimum != 0 || found.Replicas.Maximum != maximum {
-				t.Fatalf("replica limits %+v, want 0..%d", found.Replicas, maximum)
+			// Standalone is one node. Replicas need the patroni topology.
+			if found.Replicas.Minimum != 0 || found.Replicas.Maximum != 0 {
+				t.Fatalf("replica limits %+v, want none", found.Replicas)
 			}
 			if found.Status != engine.RequiredPending || found.NativeFailover || found.ProxyRouting || found.TLS || len(found.UpgradePairs) != 0 {
-				t.Fatal("streaming replicas claimed unqualified HA or routing")
+				t.Fatal("standalone claimed unqualified HA or routing")
 			}
 		})
 	}

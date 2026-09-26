@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/placement"
 )
 
@@ -199,7 +200,7 @@ func inspectPatroniEndpoints(ctx context.Context, tx pgx.Tx, installationID uuid
 	if err != nil {
 		return cluster.EndpointInspection{}, admissionError(err)
 	}
-	if len(members) != 3 {
+	if len(members) < operation.MinPatroniMembers {
 		found.UnavailableReason = "members_incomplete"
 		return found, nil
 	}

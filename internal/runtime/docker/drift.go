@@ -265,7 +265,7 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 	case len(host.PortBindings) != len(stored.Ports):
 		return driftPorts, nil
 	}
-	if stored.Redis != nil || stored.Postgres != nil || stored.Route != nil {
+	if stored.Redis != nil || stored.Postgres != nil || stored.Route != nil || stored.Etcd != nil {
 		image, err := r.api.ImageInspect(ctx, stored.ImageDigest)
 		if err != nil {
 			return "", &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
@@ -283,7 +283,7 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 			}
 			target = postgres.DataDirectory
 			tmpfs = map[string]string{postgres.ConfigDirectory: postgresTmpfs}
-			health := postgresHealthcheck(stored.Postgres.ReplicaSource != nil)
+			health := postgresHealthcheck()
 			if stored.Postgres.Patroni != nil {
 				if _, err := postgres.PatroniMemberSettings(&stored, item.Config.Labels[labelInstallation], item.Config.Labels[labelCluster], item.Config.Labels[labelResource]); err != nil {
 					return driftEngineConfig, nil
@@ -300,6 +300,12 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 		} else if stored.Route != nil {
 			expectedCommand, tmpfs = routeShape(stored.Route)
 			if err := r.inspectSource(ctx, item, routeSource(stored.Route)); err != nil || item.Config.StopSignal != image.Config.StopSignal {
+				return driftEngineConfig, nil
+			}
+		} else if stored.Etcd != nil {
+			expectedCommand = etcdCommand(stored.Etcd)
+			tmpfs = map[string]string{"/run/synod-etcd": "rw,noexec,nosuid,nodev,size=4m"}
+			if err := r.inspectSource(ctx, item, etcdSource); err != nil || item.Config.StopSignal != image.Config.StopSignal {
 				return driftEngineConfig, nil
 			}
 		} else {

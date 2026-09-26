@@ -28,7 +28,7 @@ func completionPlan(t *testing.T, claim operation.Claim, node, resource uuid.UUI
 	if kind == "delete" {
 		conditions = []agentv1.Postcondition{agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED, agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT}
 	}
-	app, admin, replication := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	app, admin := uuid.NewString(), uuid.NewString()
 	if kind == "recover_setup" {
 		conditions = []agentv1.Postcondition{agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED, agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, agentv1.Postcondition_POSTCONDITION_ENGINE_READY}
 	}
@@ -38,8 +38,8 @@ func completionPlan(t *testing.T, claim operation.Claim, node, resource uuid.UUI
 		input := &agentv1.CommandInput{ResourceId: resource.String(), PayloadVersion: 1, Timeout: durationpb.New(time.Minute)}
 		switch condition {
 		case agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED:
-			input.Payload = &agentv1.CommandInput_RecoverPostgresSetup{RecoverPostgresSetup: &agentv1.RecoverPostgresSetup{Postgres: &agentv1.PostgresContainerConfig{Port: 15432, SuperuserCredentialId: admin, SuperuserCredentialVersion: 1, ApplicationCredentialId: app, ApplicationCredentialVersion: 1, ReplicationCredentialId: replication, ReplicationCredentialVersion: 1}}}
-			input.Secrets = []*agentv1.SecretReference{{CredentialId: admin, Version: 1, Purpose: "superuser"}, {CredentialId: app, Version: 1, Purpose: "application"}, {CredentialId: replication, Version: 1, Purpose: "replication"}}
+			input.Payload = &agentv1.CommandInput_RecoverPostgresSetup{RecoverPostgresSetup: &agentv1.RecoverPostgresSetup{Postgres: &agentv1.PostgresContainerConfig{Port: 15432, SuperuserCredentialId: admin, SuperuserCredentialVersion: 1, ApplicationCredentialId: app, ApplicationCredentialVersion: 1}}}
+			input.Secrets = []*agentv1.SecretReference{{CredentialId: admin, Version: 1, Purpose: "superuser"}, {CredentialId: app, Version: 1, Purpose: "application"}}
 
 		case agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING:
 			input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}
@@ -137,7 +137,7 @@ func TestLifecycleCompletionCommitsObservedStateAndDeleteTogether(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
-				claim, err = s.AcquireClaim(t.Context(), ClaimRequest{ClaimID: uuid.New(), InstallationID: host.id, OperationID: admission.OperationID, RecoveryGeneration: host.generation, OwnerID: "complete-" + action, TTL: time.Minute, CoordinationKey: "/completion/" + action, CoordinationLease: 1, CoordinationRevision: 1})
+				claim, err = s.AcquireClaim(t.Context(), ClaimRequest{ClaimID: uuid.New(), InstallationID: host.id, OperationID: admission.OperationID, RecoveryGeneration: host.generation, OwnerID: "complete-" + action, TTL: time.Minute, LeaseID: 1, LeaseRevision: 1})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -195,10 +195,6 @@ func TestLifecycleCompletionCommitsObservedStateAndDeleteTogether(t *testing.T) 
 	}
 	if host.count(t, `SELECT count(*) FROM cluster_tombstone_nodes WHERE acknowledged_at IS NOT NULL`) != 1 {
 		t.Fatal("native absence did not acknowledge the node")
-	}
-	// Only a Patroni cluster has a DCS scope to remove.
-	if host.count(t, `SELECT count(*) FROM patroni_dcs_cleanups`) != 0 {
-		t.Fatal("a standalone delete requested Patroni DCS cleanup")
 	}
 	for _, table := range []string{"resource_allocations", "allocation_ports"} {
 		if host.count(t, `SELECT count(*) FROM `+table+` WHERE released_at IS NULL`) != 0 {
@@ -439,7 +435,7 @@ func TestLifecycleDeleteRollsBackAllMetadataOnReleaseFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err := s.AcquireClaim(t.Context(), ClaimRequest{ClaimID: uuid.New(), InstallationID: host.id, OperationID: admission.OperationID, RecoveryGeneration: host.generation, OwnerID: "delete-owner", TTL: time.Minute, CoordinationKey: "/delete/atomic", CoordinationLease: 1, CoordinationRevision: 1})
+	claim, err := s.AcquireClaim(t.Context(), ClaimRequest{ClaimID: uuid.New(), InstallationID: host.id, OperationID: admission.OperationID, RecoveryGeneration: host.generation, OwnerID: "delete-owner", TTL: time.Minute, LeaseID: 1, LeaseRevision: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +568,7 @@ func TestLifecycleCompletionRejectsReadinessAfterStopOrDelete(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			claim, err := s.AcquireClaim(t.Context(), ClaimRequest{ClaimID: uuid.New(), InstallationID: host.id, OperationID: admission.OperationID, RecoveryGeneration: host.generation, OwnerID: "later-observation", TTL: time.Minute, CoordinationKey: "/completion/observe", CoordinationLease: 1, CoordinationRevision: 1})
+			claim, err := s.AcquireClaim(t.Context(), ClaimRequest{ClaimID: uuid.New(), InstallationID: host.id, OperationID: admission.OperationID, RecoveryGeneration: host.generation, OwnerID: "later-observation", TTL: time.Minute, LeaseID: 1, LeaseRevision: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -628,7 +624,7 @@ func TestLifecycleCompletionAcceptsCheckedReceiptsFromPreviousEpoch(t *testing.T
 	if _, err := s.pool.Exec(t.Context(), `UPDATE operations SET claim_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, original.OperationID); err != nil {
 		t.Fatal(err)
 	}
-	takeover, err := s.AcquireClaim(t.Context(), ClaimRequest{ClaimID: uuid.New(), InstallationID: host.id, OperationID: original.OperationID, RecoveryGeneration: host.generation, OwnerID: "historical-proof-owner", TTL: time.Minute, CoordinationKey: "/completion/historical", CoordinationLease: 2, CoordinationRevision: 2})
+	takeover, err := s.AcquireClaim(t.Context(), ClaimRequest{ClaimID: uuid.New(), InstallationID: host.id, OperationID: original.OperationID, RecoveryGeneration: host.generation, OwnerID: "historical-proof-owner", TTL: time.Minute, LeaseID: 2, LeaseRevision: 2})
 	if err != nil {
 		t.Fatal(err)
 	}

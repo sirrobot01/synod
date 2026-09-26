@@ -41,12 +41,13 @@ type Image struct {
 	Digest       string
 }
 
-// Profile is the node shape this installation places onto. A cluster spec names none
-// of it and placement requires it to match a node's policy, so it is configuration
-// rather than a guess taken from whichever nodes happen to be up.
+// Profile narrows the node shape this installation places onto. Placement reads the
+// shape from approved node records, so every field is optional. An empty runtime
+// version or storage ID accepts any node value.
 //
-// Architectures lists the node architectures in preference order. A cluster uses one of
-// them, because PostgreSQL physical replication needs the same architecture on every member.
+// Architectures lists the node architectures in preference order, amd64 then arm64 by
+// default. A cluster uses one of them, because PostgreSQL physical replication needs
+// the same architecture on every member.
 type Profile struct {
 	Architectures  []string
 	RuntimeVersion string
@@ -85,8 +86,11 @@ func New(config Config) (*Planner, error) {
 	if config.Store == nil || config.Decider == nil || config.Catalog == nil || config.Keyring == nil {
 		return nil, errors.New("provision planner requires a store, a decider, a catalog, and a keyring")
 	}
-	if len(config.Profile.Architectures) == 0 || slices.Contains(config.Profile.Architectures, "") || config.Profile.RuntimeVersion == "" || config.Profile.StorageID == "" {
-		return nil, errors.New("provision planner requires a complete node profile")
+	if len(config.Profile.Architectures) == 0 {
+		config.Profile.Architectures = []string{"amd64", "arm64"}
+	}
+	if slices.Contains(config.Profile.Architectures, "") {
+		return nil, errors.New("provision planner requires nonempty profile architectures")
 	}
 	if len(config.Images) == 0 {
 		return nil, errors.New("provision planner requires at least one pinned image")
@@ -112,8 +116,8 @@ func New(config Config) (*Planner, error) {
 	if !config.Budget.Valid() || config.Budget.CPUMillis == 0 || config.Budget.MemoryBytes == 0 || config.Budget.DiskBytes == 0 {
 		return nil, errors.New("provision planner requires a complete budget")
 	}
-	if native := config.Patroni; native != nil && (native.Accounts == nil || native.CA == nil || len(native.EtcdTrust) == 0 || len(native.DCSEndpoints) == 0 || native.Image == "") {
-		return nil, errors.New("Patroni planning requires DCS accounts, the native CA, etcd trust, DCS endpoints, and an image")
+	if native := config.Patroni; native != nil && (native.CA == nil || native.Image == "" || native.EtcdImage == "") {
+		return nil, errors.New("Patroni planning requires the native CA, a Patroni image, and an etcd image")
 	}
 	return &Planner{config: config}, nil
 }
@@ -252,7 +256,7 @@ func (p *Planner) plan(claim operation.Claim, found cluster.Cluster, r resources
 	if err != nil {
 		return nil, err
 	}
-	if len(intent.Credentials) != 3 || intent.Credentials[0].Purpose != postgres.SuperuserCredential || intent.Credentials[1].Purpose != postgres.ApplicationCredential {
+	if len(intent.Credentials) < 2 || intent.Credentials[0].Purpose != postgres.SuperuserCredential || intent.Credentials[1].Purpose != postgres.ApplicationCredential {
 		return nil, errors.New("the recorded intent does not contain the required credentials")
 	}
 	superuser, application := intent.Credentials[0], intent.Credentials[1]
@@ -260,13 +264,6 @@ func (p *Planner) plan(claim operation.Claim, found cluster.Cluster, r resources
 		{CredentialId: superuser.CredentialID.String(), Version: superuser.Version, Purpose: superuser.Purpose},
 		{CredentialId: application.CredentialID.String(), Version: application.Version, Purpose: application.Purpose},
 	}
-	replication := intent.Credentials[2]
-	if replication.Purpose != postgres.ReplicationCredential {
-		return nil, errors.New("the recorded intent does not contain the replication credential")
-	}
-	credentials = append(credentials, &agentv1.SecretReference{
-		CredentialId: replication.CredentialID.String(), Version: replication.Version, Purpose: replication.Purpose,
-	})
 	configuration := &agentv1.EnsureContainer{
 		ImageDigest: digest, Engine: string(found.Spec.Engine), VolumeId: r.volume.String(),
 		NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST,
@@ -274,11 +271,17 @@ func (p *Planner) plan(claim operation.Claim, found cluster.Cluster, r resources
 		SecretEnv: []*agentv1.SecretEnv{
 			{Name: "POSTGRES_PASSWORD", Purpose: superuser.Purpose},
 			{Name: "SYNOD_APP_VERIFIER", Purpose: application.Purpose},
-			{Name: "SYNOD_REPL_VERIFIER", Purpose: replication.Purpose},
 		},
 	}
 	probeCredential, database := application, defaultDatabase
 	if found.Spec.Engine == cluster.Redis {
+		if len(intent.Credentials) != 3 || intent.Credentials[2].Purpose != postgres.ReplicationCredential {
+			return nil, errors.New("the recorded intent does not contain the replication credential")
+		}
+		replication := intent.Credentials[2]
+		credentials = append(credentials, &agentv1.SecretReference{
+			CredentialId: replication.CredentialID.String(), Version: replication.Version, Purpose: replication.Purpose,
+		})
 		configuration.SecretEnv = []*agentv1.SecretEnv{
 			{Name: "REDIS_ADMIN_PASSWORD", Purpose: superuser.Purpose},
 			{Name: "REDIS_APP_PASSWORD", Purpose: application.Purpose},
@@ -301,12 +304,13 @@ func (p *Planner) plan(claim operation.Claim, found cluster.Cluster, r resources
 			probeCredential = superuser
 		}
 	} else {
+		if len(intent.Credentials) != 2 {
+			return nil, errors.New("standalone PostgreSQL records only its superuser and application credentials")
+		}
 		configuration.Postgres = &agentv1.PostgresContainerConfig{
-			SynchronousReplication: found.Spec.PostgreSQL.ReplicationPolicy == "synchronous",
-			Port:                   uint32(port),
-			SuperuserCredentialId:  superuser.CredentialID.String(), SuperuserCredentialVersion: superuser.Version,
+			Port:                  uint32(port),
+			SuperuserCredentialId: superuser.CredentialID.String(), SuperuserCredentialVersion: superuser.Version,
 			ApplicationCredentialId: application.CredentialID.String(), ApplicationCredentialVersion: application.Version,
-			ReplicationCredentialId: replication.CredentialID.String(), ReplicationCredentialVersion: replication.Version,
 		}
 	}
 	container, err := p.step(claim, epoch, found.DesiredRevision, &agentv1.CommandInput{
@@ -388,7 +392,11 @@ func (p *Planner) step(claim operation.Claim, epoch *agentv1.Epoch, revision int
 // engine differently and collide with what the first attempt recorded.
 func (p *Planner) intent(ctx context.Context, found cluster.Cluster) (postgres.ClusterIntent, error) {
 	intent := postgres.ClusterIntent{InstallationID: found.InstallationID, ClusterID: found.ID}
-	purposes := []string{postgres.SuperuserCredential, postgres.ApplicationCredential, postgres.ReplicationCredential}
+	purposes := []string{postgres.SuperuserCredential, postgres.ApplicationCredential}
+	// Redis replicas authenticate with their own credential. Standalone PostgreSQL has no replicas.
+	if found.Spec.Engine == cluster.Redis {
+		purposes = append(purposes, postgres.ReplicationCredential)
+	}
 	for _, purpose := range purposes {
 		existing, err := p.config.Store.ReadClusterCredential(ctx, found.InstallationID, found.ID, purpose)
 		if err == nil {
@@ -524,13 +532,6 @@ func (p *Planner) addReplica(ctx context.Context, claim operation.Claim, found c
 	request := p.request(claim, found, capabilities.Combination, added, architecture)
 	request.Resources[0].Role = "replica"
 	diskBytes := p.config.Budget.DiskBytes
-	if found.Spec.Engine == cluster.PostgreSQL {
-		if diskBytes < 1 || diskBytes > (1<<50)/3 {
-			return fmt.Errorf("%w: PostgreSQL clone capacity exceeds its supported bound", ErrUnplannable)
-		}
-		request.Resources[0].Budgets.Backup = &placement.Vector{DiskBytes: 2 * diskBytes}
-		diskBytes *= 3
-	}
 	decision, _, err := p.config.Decider.Decide(ctx, request)
 	if err != nil {
 		return err
@@ -542,12 +543,7 @@ func (p *Planner) addReplica(ctx context.Context, claim operation.Claim, found c
 	if len(bound) != 1 {
 		return fmt.Errorf("%w: placement bound %d ports", placement.ErrUnsatisfied, len(bound))
 	}
-	var plan *agentv1.ExecutionPlan
-	if found.Spec.Engine == cluster.PostgreSQL {
-		plan, err = p.postgresReplicaPlan(claim, found, added, nodeID, bound[0].Number, digest, intent, primary, upstream, diskBytes)
-	} else {
-		plan, err = p.plan(claim, found, added, nodeID, bound[0].Number, digest, intent, upstream)
-	}
+	plan, err := p.plan(claim, found, added, nodeID, bound[0].Number, digest, intent, upstream)
 	if err != nil {
 		return err
 	}

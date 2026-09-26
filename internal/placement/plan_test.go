@@ -92,6 +92,82 @@ func TestDeterministicPlacementAndHardFilters(t *testing.T) {
 	}
 }
 
+// A colocated service lands on its partner's node, and nothing else can pull it apart.
+func TestColocatedServiceSharesItsPartnersNode(t *testing.T) {
+	request, snapshot := fixture()
+	partner := request.Resources[0]
+	service := Resource{ID: uuid.New(), ReservationID: uuid.New(), Kind: "service", Role: "etcd", Engine: "postgres", Version: "17.11", Architecture: "arm64", Colocate: partner.ID, Budgets: Budgets{Workload: new(Vector{100, 100, 100}), Supporting: new(Vector{}), Backup: new(Vector{})}}
+	service.OwnedResourceIDs = []uuid.UUID{service.ID}
+	peer := partner
+	peer.ID, peer.ReservationID = uuid.New(), uuid.New()
+	peer.OwnedResourceIDs = []uuid.UUID{peer.ID}
+	request.Profile = "ha"
+	request.Groups = []Group{{ID: "patroni", DomainKey: "rack", Members: []uuid.UUID{partner.ID, peer.ID}}}
+	request.Resources[0].Role, peer.Role = "patroni", "patroni"
+	request.Resources = append(request.Resources, service, peer)
+	decision, err := Plan(request, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := map[uuid.UUID]uuid.UUID{}
+	for _, assignment := range decision.Assignments {
+		nodes[assignment.ResourceID] = assignment.NodeID
+	}
+	if nodes[service.ID] != nodes[partner.ID] {
+		t.Fatalf("service on %s, partner on %s", nodes[service.ID], nodes[partner.ID])
+	}
+	if err := CheckDecision(request, snapshot, decision); err != nil {
+		t.Fatal(err)
+	}
+	// A decision that splits the pair is refused.
+	for index := range decision.Assignments {
+		if decision.Assignments[index].ResourceID != service.ID {
+			continue
+		}
+		for _, node := range snapshot.Nodes {
+			if node.ID != nodes[partner.ID] {
+				decision.Assignments[index].NodeID = node.ID
+				decision.Assignments[index].PolicyRevision, decision.Assignments[index].ProbeRevision = node.Policy.Revision, node.Probe.Revision
+				break
+			}
+		}
+	}
+	if err := CheckDecision(request, snapshot, decision); err == nil {
+		t.Fatal("a split pair passed the check")
+	}
+	for name, change := range map[string]func(*Request){
+		"self":       func(r *Request) { r.Resources[1].Colocate = r.Resources[1].ID },
+		"unknown":    func(r *Request) { r.Resources[1].Colocate = uuid.New() },
+		"etcd role":  func(r *Request) { r.Resources[1].Kind = "backup" },
+		"compact":    func(r *Request) { r.Profile, r.Groups, r.Resources[0].Role = "compact", nil, "primary" },
+		"other role": func(r *Request) { r.Resources[1].Role = "router" },
+	} {
+		changed := request
+		changed.Resources = slices.Clone(request.Resources)
+		change(&changed)
+		if _, err := Plan(changed, snapshot); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: %v, want invalid", name, err)
+		}
+	}
+}
+
+// A request without a runtime version or storage ID takes a node whatever it reports.
+func TestEmptyRuntimeAndStorageAcceptAnyNode(t *testing.T) {
+	request, snapshot := fixture()
+	request.Resources[0].RuntimeVersion, request.Resources[0].StorageID = "", ""
+	snapshot.Nodes = snapshot.Nodes[:1]
+	node := &snapshot.Nodes[0]
+	node.Policy.RuntimeVersion, node.Report.RuntimeVersion = "docker-28.0.0", "docker-28.0.0"
+	node.Policy.StorageID, node.Report.StorageID = "fast-nvme", "fast-nvme"
+	decision, err := Plan(request, snapshot)
+	if err != nil || decision.Assignments[0].NodeID != node.ID {
+		t.Fatalf("Plan=%v, %v; want node %s", decision, err, node.ID)
+	}
+	if err := CheckDecision(request, snapshot, decision); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReservationAccountingAndStatefulReuse(t *testing.T) {
 	request, snapshot := fixture()
 	snapshot.Nodes = snapshot.Nodes[:1]

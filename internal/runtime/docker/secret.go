@@ -48,20 +48,13 @@ func secretEnvironment(imageEnv []string, p *agentv1.EnsureContainer, secrets ru
 				}
 			}
 		}
-		if p.Postgres != nil && wanted.Name == "SYNOD_REPL_PASSWORD" && (len(material) > 1024 || slices.ContainsFunc(material, func(b byte) bool { return b < ' ' || b > '~' })) {
-			return nil, runtime.ErrConfigurationConflict
-		}
-		if p.Postgres != nil && (wanted.Name == "SYNOD_APP_VERIFIER" || wanted.Name == "SYNOD_REPL_VERIFIER") {
+		if p.Postgres != nil && wanted.Name == "SYNOD_APP_VERIFIER" {
 			for _, value := range material {
 				if value < ' ' || value > '~' {
 					return nil, runtime.ErrConfigurationConflict
 				}
 			}
-			identity, version, purpose := p.Postgres.ApplicationCredentialId, p.Postgres.ApplicationCredentialVersion, "application"
-			if wanted.Name == "SYNOD_REPL_VERIFIER" {
-				identity, version, purpose = p.Postgres.ReplicationCredentialId, p.Postgres.ReplicationCredentialVersion, "replication"
-			}
-			verifier, err := postgresVerifier(material, identity, version, purpose)
+			verifier, err := postgresVerifier(material, p.Postgres.ApplicationCredentialId, p.Postgres.ApplicationCredentialVersion, "application")
 			if err != nil {
 				return nil, err
 			}

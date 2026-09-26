@@ -204,8 +204,10 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 			return PlacementRecord{}, err
 		}
 		for _, credential := range intent.Credentials {
-			if credential.MemberID != uuid.Nil && !slices.ContainsFunc(request.Resources, func(resource placement.Resource) bool {
-				return resource.ID == credential.MemberID && resource.Kind == "instance" && resource.Engine == "postgres"
+			// A new version of a member's credential belongs to a member this request does not
+			// place. The transaction proves its prior version instead.
+			if credential.MemberID != uuid.Nil && credential.Version == 1 && !slices.ContainsFunc(request.Resources, func(resource placement.Resource) bool {
+				return resource.ID == credential.MemberID && (resource.Kind == "instance" || resource.Role == "etcd") && resource.Engine == "postgres"
 			}) {
 				return PlacementRecord{}, ErrCredentialConflict
 			}
@@ -317,6 +319,13 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 		return PlacementRecord{}, err
 	}
 	if intent != nil {
+		for _, credential := range intent.Credentials {
+			if credential.Version > 1 {
+				if err := priorVersion(ctx, tx, claim, credential); err != nil {
+					return PlacementRecord{}, err
+				}
+			}
+		}
 		if err := recordClusterIntentTx(ctx, tx, *intent, true); err != nil {
 			return PlacementRecord{}, err
 		}

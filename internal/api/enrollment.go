@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"strings"
 
@@ -109,6 +110,15 @@ func (s *Server) enrollAgent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.storeError(w, r, err)
 		return
+	}
+	if host, port, err := net.SplitHostPort(s.AgentListen); err == nil {
+		if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+			host = r.Host
+			if dialed, _, err := net.SplitHostPort(r.Host); err == nil {
+				host = dialed
+			}
+		}
+		result.AgentEndpoint = net.JoinHostPort(host, port)
 	}
 	w.WriteHeader(http.StatusCreated)
 	if err := json.NewEncoder(w).Encode(result); err != nil {

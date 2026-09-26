@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/operation"
 )
 
 // PreviewClusterDelete records an actor-bound plan without changing the cluster.
@@ -86,20 +87,6 @@ func retainedVolumeIDs(ctx context.Context, tx pgx.Tx, installationID, clusterID
 // plan names the exact member, and the confirmation must carry the same token, so a
 // review of one member can never authorize removing another.
 func (s *Store) PreviewClusterScaleDown(ctx context.Context, installationID, clusterID uuid.UUID, actorID string) (cluster.ActionPlan, error) {
-	return s.previewReplicaChange(ctx, installationID, clusterID, actorID, "scale_down")
-}
-
-// PreviewFailedReplicaRemoval requires native failure proof before removal can run.
-func (s *Store) PreviewFailedReplicaRemoval(ctx context.Context, installationID, clusterID uuid.UUID, actorID string) (cluster.ActionPlan, error) {
-	return s.previewReplicaChange(ctx, installationID, clusterID, actorID, "scale_down_failed")
-}
-
-// PreviewReplicaRebuild binds a failed replica and its retained data before replacement.
-func (s *Store) PreviewReplicaRebuild(ctx context.Context, installationID, clusterID uuid.UUID, actorID string) (cluster.ActionPlan, error) {
-	return s.previewReplicaChange(ctx, installationID, clusterID, actorID, "rebuild_replica")
-}
-
-func (s *Store) previewReplicaChange(ctx context.Context, installationID, clusterID uuid.UUID, actorID string, action string) (cluster.ActionPlan, error) {
 	if installationID == uuid.Nil || clusterID == uuid.Nil || len(actorID) < 1 || len(actorID) > 256 || !utf8.ValidString(actorID) || strings.ContainsRune(actorID, 0) {
 		return cluster.ActionPlan{}, &AdmissionError{Code: InvalidRequest}
 	}
@@ -111,10 +98,10 @@ func (s *Store) previewReplicaChange(ctx context.Context, installationID, cluste
 	plan := cluster.ActionPlan{PlanToken: uuid.New(), ClusterID: clusterID, Action: "scale_down", DataDisposition: "retain",
 		Downtime: "The replica stops serving. The primary keeps serving and the replica's data volume remains retained."}
 	var deleted bool
-	var lifecycle, engine, topology, version, replicationPolicy string
-	if err := tx.QueryRow(ctx, `SELECT name,desired_revision,desired_lifecycle,(deleted_at IS NOT NULL OR desired_lifecycle='deleted'),engine,COALESCE(spec->'postgresql'->>'topology',''),COALESCE(spec->'postgresql'->>'version',''),COALESCE(spec->'postgresql'->>'replication_policy','')
+	var lifecycle, engine string
+	if err := tx.QueryRow(ctx, `SELECT name,desired_revision,desired_lifecycle,(deleted_at IS NOT NULL OR desired_lifecycle='deleted'),engine
  FROM clusters WHERE installation_id=$1 AND id=$2 FOR UPDATE`, installationID, clusterID).
-		Scan(&plan.ClusterName, &plan.ExpectedRevision, &lifecycle, &deleted, &engine, &topology, &version, &replicationPolicy); err != nil {
+		Scan(&plan.ClusterName, &plan.ExpectedRevision, &lifecycle, &deleted, &engine); err != nil {
 		return cluster.ActionPlan{}, admissionError(err)
 	}
 	if deleted {
@@ -123,25 +110,9 @@ func (s *Store) previewReplicaChange(ctx context.Context, installationID, cluste
 	if lifecycle != string(cluster.DesiredRunning) {
 		return cluster.ActionPlan{}, &AdmissionError{Code: OperationConflict}
 	}
-	if action != "scale_down" {
-		if engine != "postgres" || topology != "standalone" || version != "17.11" {
-			return cluster.ActionPlan{}, &AdmissionError{Code: UnsupportedSpec}
-		}
-		plan.Action = action
-		plan.Downtime = "Remove the replica only after native failure is proved. Keep its data volume. A later replacement uses a new volume. The primary keeps serving."
-	}
-	if action == "rebuild_replica" {
-		var replicas int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM cluster_members WHERE installation_id=$1 AND cluster_id=$2 AND role='replica' AND removed_at IS NULL`, installationID, clusterID).Scan(&replicas); err != nil {
-			return cluster.ActionPlan{}, admissionError(err)
-		}
-		if replicas != 1 {
-			return cluster.ActionPlan{}, &AdmissionError{Code: OperationConflict}
-		}
-		plan.Downtime = "Prove native replica failure, remove its container, and create a fresh copy from the primary. Keep the old volume. Reserve extra capacity for the new member and volume. The primary keeps serving reads."
-	}
-	if replicationPolicy == "synchronous" {
-		plan.Downtime += " The primary keeps serving reads. Commits wait while no synchronous replica is connected."
+	// Only Redis runs native replicas.
+	if engine != "redis" {
+		return cluster.ActionPlan{}, &AdmissionError{Code: UnsupportedSpec}
 	}
 	var active bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE installation_id=$1 AND cluster_id=$2 AND status IN ('pending','running','waiting','cancelling'))`, installationID, clusterID).Scan(&active); err != nil {
@@ -166,16 +137,11 @@ func (s *Store) previewReplicaChange(ctx context.Context, installationID, cluste
 	if err != nil {
 		return cluster.ActionPlan{}, err
 	}
-	var plannedResource *uuid.UUID
-	if action != "scale_down" {
-		plan.ResourceID = resource
-		plannedResource = &resource
-	}
 	if err := tx.QueryRow(ctx, `INSERT INTO cluster_action_plans
  (plan_token,installation_id,actor_id,cluster_id,cluster_name,expected_revision,action,data_disposition,retained_volumes,downtime,member_id,resource_id,created_at,expires_at)
  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,statement_timestamp(),statement_timestamp()+interval '5 minutes') RETURNING expires_at`,
 		plan.PlanToken, installationID, actorID, clusterID, plan.ClusterName, plan.ExpectedRevision, plan.Action,
-		plan.DataDisposition, plan.RetainedVolumes, plan.Downtime, plan.MemberID, plannedResource).Scan(&plan.ExpiresAt); err != nil {
+		plan.DataDisposition, plan.RetainedVolumes, plan.Downtime, plan.MemberID, nil).Scan(&plan.ExpiresAt); err != nil {
 		return cluster.ActionPlan{}, admissionError(err)
 	}
 	if err := s.commitMetadata(ctx, tx); err != nil {
@@ -207,6 +173,103 @@ func memberVolumeIDs(ctx context.Context, tx pgx.Tx, installationID, clusterID, 
 		return nil, admissionError(rows.Err())
 	}
 	return found, nil
+}
+
+// PreviewMemberRemoval binds one named Patroni member and its retained data before a scale
+// removes it. Patroni elects its primary, so the operator names the member. The plan proves
+// the member is a replica before it removes anything.
+func (s *Store) PreviewMemberRemoval(ctx context.Context, installationID, clusterID, memberID uuid.UUID, actorID string) (cluster.ActionPlan, error) {
+	if installationID == uuid.Nil || clusterID == uuid.Nil || memberID == uuid.Nil || len(actorID) < 1 || len(actorID) > 256 || !utf8.ValidString(actorID) || strings.ContainsRune(actorID, 0) {
+		return cluster.ActionPlan{}, &AdmissionError{Code: InvalidRequest}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return cluster.ActionPlan{}, admissionError(err)
+	}
+	defer tx.Rollback(ctx)
+	plan := cluster.ActionPlan{PlanToken: uuid.New(), ClusterID: clusterID, Action: "scale_down", DataDisposition: "retain", MemberID: memberID,
+		Downtime: "The member proves it is a replica, stops, and leaves the cluster. The other members keep serving. Its data volume remains retained."}
+	var deleted bool
+	var lifecycle, topology string
+	if err := tx.QueryRow(ctx, `SELECT name,desired_revision,desired_lifecycle,(deleted_at IS NOT NULL OR desired_lifecycle='deleted'),COALESCE(spec->'postgresql'->>'topology','')
+ FROM clusters WHERE installation_id=$1 AND id=$2 FOR UPDATE`, installationID, clusterID).
+		Scan(&plan.ClusterName, &plan.ExpectedRevision, &lifecycle, &deleted, &topology); err != nil {
+		return cluster.ActionPlan{}, admissionError(err)
+	}
+	if deleted {
+		return cluster.ActionPlan{}, &AdmissionError{Code: NotFound}
+	}
+	if topology != "patroni" {
+		return cluster.ActionPlan{}, &AdmissionError{Code: UnsupportedSpec}
+	}
+	if lifecycle != string(cluster.DesiredRunning) {
+		return cluster.ActionPlan{}, &AdmissionError{Code: OperationConflict}
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE installation_id=$1 AND cluster_id=$2 AND status IN ('pending','running','waiting','cancelling'))`, installationID, clusterID).Scan(&active); err != nil {
+		return cluster.ActionPlan{}, admissionError(err)
+	}
+	if active {
+		return cluster.ActionPlan{}, &AdmissionError{Code: OperationConflict}
+	}
+	resource, err := patroniRemovalTarget(ctx, tx, installationID, clusterID, memberID)
+	if err != nil {
+		return cluster.ActionPlan{}, err
+	}
+	if plan.RetainedVolumes, err = memberVolumeIDs(ctx, tx, installationID, clusterID, resource); err != nil {
+		return cluster.ActionPlan{}, err
+	}
+	if err := tx.QueryRow(ctx, `INSERT INTO cluster_action_plans
+ (plan_token,installation_id,actor_id,cluster_id,cluster_name,expected_revision,action,data_disposition,retained_volumes,downtime,member_id,resource_id,created_at,expires_at)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,statement_timestamp(),statement_timestamp()+interval '5 minutes') RETURNING expires_at`,
+		plan.PlanToken, installationID, actorID, clusterID, plan.ClusterName, plan.ExpectedRevision, plan.Action,
+		plan.DataDisposition, plan.RetainedVolumes, plan.Downtime, plan.MemberID, nil).Scan(&plan.ExpiresAt); err != nil {
+		return cluster.ActionPlan{}, admissionError(err)
+	}
+	if err := s.commitMetadata(ctx, tx); err != nil {
+		return cluster.ActionPlan{}, err
+	}
+	return plan, nil
+}
+
+// patroniRemovalTarget answers the resource of a Patroni member that a removal may take: an
+// active member of a cluster above the minimum size whose members are all active. When the
+// member's node holds an etcd service, that service moves to a kept member's node that holds
+// none, or an unfinished move resumes. Without either, the member cannot leave.
+func patroniRemovalTarget(ctx context.Context, tx pgx.Tx, installationID, clusterID, memberID uuid.UUID) (uuid.UUID, error) {
+	var members, active int
+	var resource *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE role='patroni' AND state='active'),
+ (SELECT resource_id FROM cluster_members WHERE installation_id=$1 AND cluster_id=$2 AND member_id=$3 AND role='patroni' AND state='active' AND removed_at IS NULL)
+ FROM cluster_members WHERE installation_id=$1 AND cluster_id=$2 AND removed_at IS NULL`, installationID, clusterID, memberID).Scan(&members, &active, &resource); err != nil {
+		return uuid.Nil, admissionError(err)
+	}
+	if resource == nil {
+		return uuid.Nil, &AdmissionError{Code: NotFound}
+	}
+	if members <= operation.MinPatroniMembers || active != members {
+		return uuid.Nil, &AdmissionError{Code: OperationConflict}
+	}
+	// live counts the etcd services. onTarget reports one on the member's node. free counts the
+	// kept members' nodes that hold none.
+	var live, free int
+	var onTarget bool
+	if err := tx.QueryRow(ctx, `WITH etcd AS (SELECT a.node_id FROM etcd_members e
+ JOIN resource_allocations a ON a.installation_id=e.installation_id AND a.cluster_id=e.cluster_id AND a.resource_id=e.resource_id AND a.released_at IS NULL
+ WHERE e.installation_id=$1 AND e.cluster_id=$2),
+ kept AS (SELECT a.node_id FROM cluster_members m
+ JOIN resource_allocations a ON a.installation_id=m.installation_id AND a.cluster_id=m.cluster_id AND a.resource_id=m.resource_id AND a.released_at IS NULL
+ WHERE m.installation_id=$1 AND m.cluster_id=$2 AND m.removed_at IS NULL AND m.resource_id<>$3)
+ SELECT (SELECT count(*) FROM etcd),
+ (SELECT count(*) FROM kept WHERE node_id NOT IN (SELECT node_id FROM etcd)),
+ EXISTS(SELECT 1 FROM etcd JOIN resource_allocations t ON t.node_id=etcd.node_id
+ WHERE t.installation_id=$1 AND t.cluster_id=$2 AND t.resource_id=$3 AND t.released_at IS NULL)`, installationID, clusterID, *resource).Scan(&live, &free, &onTarget); err != nil {
+		return uuid.Nil, admissionError(err)
+	}
+	if onTarget && live <= 3 && free == 0 {
+		return uuid.Nil, &AdmissionError{Code: OperationConflict}
+	}
+	return *resource, nil
 }
 
 // PreviewMemberRebuild binds one named Patroni member and its retained data before replacement.
@@ -316,7 +379,7 @@ func patroniRebuildTarget(ctx context.Context, tx pgx.Tx, installationID, cluste
 	if err := rows.Err(); err != nil {
 		return uuid.Nil, false, admissionError(err)
 	}
-	if active+residual != 3 || residual > 1 {
+	if active+residual < operation.MinPatroniMembers || active+residual > operation.MaxPatroniMembers || residual > 1 {
 		return uuid.Nil, false, &AdmissionError{Code: OperationConflict}
 	}
 	if target == uuid.Nil {

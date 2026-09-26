@@ -1,9 +1,11 @@
 package api
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
@@ -12,8 +14,8 @@ import (
 	"github.com/sirrobot01/synod/internal/store/postgres"
 )
 
-// policyRequest is what an operator declares about one node. Nothing can infer it
-// from the host, and the planner refuses a node with no policy.
+// policyRequest is what an operator declares about one node. Omitted facts default
+// to the node's measured report, and the planner refuses a node with no policy.
 type policyRequest struct {
 	Architecture   string                `json:"architecture"`
 	RuntimeVersion string                `json:"runtime_version"`
@@ -56,6 +58,25 @@ func (s *Server) putNodePlacementPolicy(w http.ResponseWriter, r *http.Request) 
 	if !s.decodeJSON(w, r, &body) {
 		return
 	}
+	// Omitted facts default to what the agent measured, so approval needs only the node ID.
+	if body.Architecture == "" || body.RuntimeVersion == "" || body.StorageID == "" || body.Headroom == (policyVector{}) {
+		report, err := s.store.ReadNodeCapacityReport(r.Context(), s.installationID, nodeID)
+		if err != nil {
+			s.storeError(w, r, err)
+			return
+		}
+		if report == nil {
+			s.writeError(w, r, http.StatusConflict, "node_facts_unavailable", "The node has not reported measured facts. Start its agent, or declare architecture, runtime version, storage ID, and headroom.", uuid.Nil)
+			return
+		}
+		body.Architecture = cmp.Or(body.Architecture, report.Architecture)
+		body.RuntimeVersion = cmp.Or(body.RuntimeVersion, report.RuntimeVersion)
+		body.StorageID = cmp.Or(body.StorageID, report.StorageID)
+		// The default reserves a tenth of each measured resource.
+		body.Headroom.CPUMillis = cmp.Or(body.Headroom.CPUMillis, max(report.Capacity.CPUMillis/10, 1))
+		body.Headroom.MemoryBytes = cmp.Or(body.Headroom.MemoryBytes, max(report.Capacity.MemoryBytes/10, 1))
+		body.Headroom.DiskBytes = cmp.Or(body.Headroom.DiskBytes, max(report.Capacity.DiskBytes/10, 1))
+	}
 	policy := placement.NodePolicy{
 		InstallationID: s.installationID, NodeID: nodeID,
 		Architecture: body.Architecture, RuntimeVersion: body.RuntimeVersion, StorageID: body.StorageID,
@@ -68,6 +89,15 @@ func (s *Server) putNodePlacementPolicy(w http.ResponseWriter, r *http.Request) 
 	}
 	for _, declared := range body.Engines {
 		policy.Engines = append(policy.Engines, placement.EngineVersion{Engine: declared.Engine, Version: declared.Version})
+	}
+	// Omitted engines default to every engine version this server serves.
+	if len(policy.Engines) == 0 && s.catalog != nil {
+		for _, advertised := range s.catalog.Advertised() {
+			served := placement.EngineVersion{Engine: string(advertised.Combination.Engine), Version: advertised.Combination.Version}
+			if !slices.Contains(policy.Engines, served) {
+				policy.Engines = append(policy.Engines, served)
+			}
+		}
 	}
 	// Approving an unserved combination makes a node a candidate for work nothing
 	// can plan.
