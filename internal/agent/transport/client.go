@@ -47,6 +47,10 @@ type Config struct {
 	Handle func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error)
 	// Observations returns an in-memory snapshot. It must not block on I/O.
 	Observations func() []*agentv1.Observation
+	// Replicas returns the tier 2 replica state for heartbeats. It must not block on I/O.
+	Replicas func() []*agentv1.ReplicaStatus
+	// WriterClock returns CLOCK_BOOTTIME nanoseconds, or zero when unavailable.
+	WriterClock func() uint64
 }
 
 type connection struct {
@@ -203,9 +207,12 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 	// out of here is a bare false, so without this the reason for a session that
 	// will not start is lost at the one place it is known.
 	var cause error
+	// failed names the type of the controller message whose handler ended the
+	// session. The handler error itself can carry private detail and is not logged.
+	var failed string
 	defer func() {
 		if parent.Err() == nil && c.config.Logger != nil {
-			c.config.Logger.Warn("agent_stream_ended", "session_id", sessionID, "reason", failure, "error", cause)
+			c.config.Logger.Warn("agent_stream_ended", "session_id", sessionID, "reason", failure, "message", failed, "error", cause)
 		}
 	}()
 	deadline := time.AfterFunc(c.config.HandshakeTimeout, cancel)
@@ -287,6 +294,7 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 		c.mu.Unlock()
 	}()
 	done := make(chan string, 2)
+	handled := make(chan string, 1)
 	// One writer owns stream.Send. Heartbeats bypass the reliable queue only when
 	// selected; queued terminal results are never dropped to make room for metrics.
 	go func() {
@@ -303,6 +311,16 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 			case <-tick.C:
 				sequence++
 				message = &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Heartbeat{Heartbeat: &agentv1.Heartbeat{Sequence: sequence, ObservedAt: timestamppb.Now()}}}
+				if c.config.WriterClock != nil {
+					message.GetHeartbeat().WriterClockNanos = c.config.WriterClock()
+				}
+				if c.config.Replicas != nil {
+					heartbeat := message.GetHeartbeat()
+					// Replica state is small. If it cannot fit, send the heartbeat without it.
+					if heartbeat.Replicas = c.config.Replicas(); proto.Size(message) > active.maxBytes {
+						heartbeat.Replicas = nil
+					}
+				}
 				if c.config.Observations != nil {
 					heartbeat := message.GetHeartbeat()
 					observations := c.config.Observations()
@@ -360,6 +378,7 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 				case message.GetSession() != nil:
 					reason = "session_installation_failed"
 				}
+				handled <- fmt.Sprintf("%T", message.Message)
 				done <- reason
 				return
 			}
@@ -391,6 +410,10 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 	case failure = <-done:
 	case <-expiry.C:
 		failure = "controller_certificate_expired"
+	}
+	select {
+	case failed = <-handled:
+	default:
 	}
 	return true
 }

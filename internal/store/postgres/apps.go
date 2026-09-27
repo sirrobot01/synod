@@ -170,17 +170,26 @@ func (s *Store) SaveAppCopies(ctx context.Context, installationID, appID uuid.UU
 	return tx.Commit(ctx)
 }
 
-// GetAppCopies returns all allocated copies for an app.
+// GetAppCopies returns the desired copies of an app.
 func (s *Store) GetAppCopies(ctx context.Context, installationID, appID uuid.UUID) ([]app.Copy, error) {
+	return s.readAppCopies(ctx, installationID, appID, false)
+}
+
+// GetAllAppCopies includes retired copies that still own data and reservations.
+func (s *Store) GetAllAppCopies(ctx context.Context, installationID, appID uuid.UUID) ([]app.Copy, error) {
+	return s.readAppCopies(ctx, installationID, appID, true)
+}
+
+func (s *Store) readAppCopies(ctx context.Context, installationID, appID uuid.UUID, retired bool) ([]app.Copy, error) {
 	if installationID == uuid.Nil || appID == uuid.Nil {
 		return nil, &AdmissionError{Code: InvalidRequest}
 	}
 	rows, err := s.pool.Query(ctx, `SELECT c.id,c.app_id,c.node_id,c.copy_index,c.host_port,c.observed_state,c.created_at,c.updated_at,
  CASE WHEN c.observed_session_id=p.session_id AND c.observed_at>clock_timestamp()-interval '20 seconds'
- AND p.last_seen_at>clock_timestamp()-interval '20 seconds' AND NOT p.recovery_required AND n.revoked_at IS NULL THEN c.health ELSE 'unknown' END,c.observed_at
+ AND p.last_seen_at>clock_timestamp()-interval '20 seconds' AND NOT p.recovery_required AND n.revoked_at IS NULL THEN c.health ELSE 'unknown' END,c.observed_at,c.role
  FROM app_copies c LEFT JOIN agent_presence p ON p.installation_id=c.installation_id AND p.node_id=c.node_id
  JOIN nodes n ON n.installation_id=c.installation_id AND n.id=c.node_id
- WHERE c.installation_id=$1 AND c.app_id=$2 AND c.desired ORDER BY c.copy_index`, installationID, appID)
+ WHERE c.installation_id=$1 AND c.app_id=$2 AND (c.desired OR $3) ORDER BY c.copy_index`, installationID, appID, retired)
 	if err != nil {
 		return nil, admissionError(err)
 	}
@@ -189,7 +198,7 @@ func (s *Store) GetAppCopies(ctx context.Context, installationID, appID uuid.UUI
 	var copies []app.Copy
 	for rows.Next() {
 		var c app.Copy
-		if err := rows.Scan(&c.ID, &c.AppID, &c.NodeID, &c.CopyIndex, &c.HostPort, &c.ObservedState, &c.CreatedAt, &c.UpdatedAt, &c.Health, &c.ObservedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.AppID, &c.NodeID, &c.CopyIndex, &c.HostPort, &c.ObservedState, &c.CreatedAt, &c.UpdatedAt, &c.Health, &c.ObservedAt, &c.Role); err != nil {
 			return nil, admissionError(err)
 		}
 		copies = append(copies, c)

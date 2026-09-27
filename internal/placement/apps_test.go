@@ -203,3 +203,65 @@ func TestGenericArchitectureSetMustBeVerifiedAndUnambiguous(t *testing.T) {
 		}
 	}
 }
+
+func TestWriterPlacementRequiresPathsAndOrdersPreferredNodes(t *testing.T) {
+	request, snapshot := fixture()
+	r := &request.Resources[0]
+	r.Kind, r.Role, r.Engine, r.Version, r.Architecture = "service", "active", "generic", "", ""
+	r.SupportedArchitectures = []string{"arm64"}
+	r.RequiredPaths = []string{"/media"}
+	r.PreferredNodes = []uuid.UUID{snapshot.Nodes[1].ID, snapshot.Nodes[0].ID}
+	r.AllowedNodes = []uuid.UUID{snapshot.Nodes[2].ID}
+	for i := range snapshot.Nodes {
+		snapshot.Nodes[i].Probe.Paths = []string{"/media"}
+		snapshot.Nodes[i].Report.ExistingPaths = []string{"/media"}
+	}
+	decision, err := Plan(request, snapshot)
+	if err != nil || decision.Assignments[0].NodeID != snapshot.Nodes[1].ID {
+		t.Fatalf("first preferred: %+v %v", decision, err)
+	}
+	snapshot.Nodes[1].Report.ExistingPaths = nil
+	decision, err = Plan(request, snapshot)
+	if err != nil || decision.Assignments[0].NodeID != snapshot.Nodes[0].ID {
+		t.Fatalf("second preferred: %+v %v", decision, err)
+	}
+	snapshot.Nodes[0].Probe.Paths = nil
+	decision, err = Plan(request, snapshot)
+	if err != nil || decision.Assignments[0].NodeID != snapshot.Nodes[2].ID {
+		t.Fatalf("allowed fallback: %+v %v", decision, err)
+	}
+	snapshot.Nodes[2].Report.ExistingPaths = nil
+	if _, err := Plan(request, snapshot); !errors.Is(err, ErrUnsatisfied) {
+		t.Fatalf("missing paths: %v", err)
+	}
+}
+
+func TestStandbyReservesDiskWithoutCPUOrMemory(t *testing.T) {
+	request, snapshot := fixture()
+	r := &request.Resources[0]
+	r.Kind, r.Role, r.Engine, r.Version, r.Architecture = "service", "standby", "generic", "", ""
+	r.SupportedArchitectures = []string{"arm64"}
+	r.Budgets = Budgets{Workload: &Vector{DiskBytes: 1000}, Supporting: &Vector{}, Backup: &Vector{}}
+	snapshot.Nodes = snapshot.Nodes[:1]
+	n := &snapshot.Nodes[0]
+	n.Report.Used.CPUMillis = n.Report.Capacity.CPUMillis - n.Policy.Headroom.CPUMillis
+	n.Report.Used.MemoryBytes = n.Report.Capacity.MemoryBytes - n.Policy.Headroom.MemoryBytes
+	if _, err := Plan(request, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	r.Role = "active"
+	r.Budgets.Workload.CPUMillis = 100
+	r.Budgets.Workload.MemoryBytes = 100
+	if _, err := Plan(request, snapshot); !errors.Is(err, ErrUnsatisfied) {
+		t.Fatalf("promotion did not require compute: %v", err)
+	}
+}
+
+func TestStandbyRejectsMissingBudget(t *testing.T) {
+	request, _ := fixture()
+	request.Resources[0].Role = "standby"
+	request.Resources[0].Budgets.Workload = nil
+	if err := request.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing standby budget: %v", err)
+	}
+}

@@ -71,7 +71,7 @@ func (e *Executor) execute(ctx context.Context, task job) {
 			e.recordOutcome(record, result, err)
 			return
 		}
-		result, err := e.runtime.Execute(ctx, record.Command, secrets)
+		result, err := e.executeWriter(ctx, record.Command, secrets)
 		e.recordOutcome(record, result, err)
 		return
 	}
@@ -81,7 +81,13 @@ func (e *Executor) execute(ctx context.Context, task job) {
 func (e *Executor) recoverRecord(ctx context.Context, record journal.Record) {
 	read, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.options.InspectionTimeout)
 	defer cancel()
-	result, err := e.runtime.Recover(read, record.Command, record.Effects)
+	var result runtime.Result
+	var err error
+	if record.Command.Input.GetFinalAppSnapshot() != nil || record.Command.Input.GetRemoveAppData() != nil {
+		result, err = e.recoverAppData(read, record.Command)
+	} else {
+		result, err = e.runtime.Recover(read, record.Command, record.Effects)
+	}
 	e.recordOutcome(record, result, err)
 }
 

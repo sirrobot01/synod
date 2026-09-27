@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/operation"
@@ -20,7 +21,7 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 		return err
 	}
 	spec := found.Spec
-	if spec.Tier != app.TierParallel || len(spec.Service.Ports) != 1 || (spec.Service.Ports[0].Protocol != "" && spec.Service.Ports[0].Protocol != "tcp") {
+	if (spec.Tier != app.TierParallel && spec.Tier != app.TierSingleWriter) || len(spec.Service.Ports) != 1 || (spec.Service.Ports[0].Protocol != "" && spec.Service.Ports[0].Protocol != "tcp") {
 		return fmt.Errorf("unsupported app configuration")
 	}
 	resolved, err := p.config.ResolveImage(ctx, spec.Service)
@@ -64,11 +65,14 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 		if err != nil {
 			return err
 		}
-		if !slices.Contains(presence.Hello.Capabilities, "runtime.docker") && !slices.Contains(preferences[2], node.ID) {
+		if (!slices.Contains(presence.Hello.Capabilities, "runtime.docker") || (spec.Tier == app.TierSingleWriter && !slices.Contains(presence.Hello.Capabilities, replication.Capability))) && !slices.Contains(preferences[2], node.ID) {
 			preferences[2] = append(preferences[2], node.ID)
 		}
 	}
-	budget := placement.Vector{CPUMillis: service.Resources.CPUMillis, MemoryBytes: service.Resources.MemoryBytes}
+	budget := placement.Vector{CPUMillis: service.Resources.CPUMillis, MemoryBytes: service.Resources.MemoryBytes, DiskBytes: service.Resources.DiskBytes}
+	if spec.Tier == app.TierSingleWriter && budget.DiskBytes == 0 {
+		budget.DiskBytes = 1 << 30
+	}
 	if budget.CPUMillis == 0 {
 		budget.CPUMillis = 500
 	}
@@ -78,6 +82,14 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 	resourceID := uuid.New()
 	resource := placement.Resource{ID: resourceID, ReservationID: uuid.New(), OwnedResourceIDs: []uuid.UUID{resourceID}, Kind: "service", Engine: "generic", SupportedArchitectures: service.SupportedArchitectures,
 		PreferredNodes: preferences[0], AllowedNodes: preferences[1], ExcludedNodes: preferences[2], Budgets: placement.Budgets{Workload: &budget, Supporting: &placement.Vector{}, Backup: &placement.Vector{}}, Ports: []placement.Port{{Name: "backend", Address: "0.0.0.0", Transport: "tcp"}}}
+	if spec.Tier == app.TierSingleWriter {
+		resource.Role = "active"
+		for _, mount := range service.Mounts {
+			if mount.Type == "bind" {
+				resource.RequiredPaths = append(resource.RequiredPaths, mount.Source)
+			}
+		}
+	}
 	request := placement.Request{Version: 1, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID, OperationID: claim.OperationID, DesiredRevision: found.DesiredRevision, Profile: "compact", PortRange: p.config.EndpointPorts, Resources: []placement.Resource{resource}}
 	// Refresh measured capacity before counting capable devices or reserving ingress.
 	_, snapshot, err = p.config.Decider.Decide(ctx, request)
@@ -86,6 +98,9 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 	}
 	request.Resources = nil
 	count := spec.Copies
+	if spec.Tier == app.TierSingleWriter {
+		count += spec.Replication.Standbys
+	}
 	var capable []uuid.UUID
 	if spec.CopiesMode == app.CopiesModeAllCapable {
 		for _, node := range snapshot.Nodes {
@@ -107,6 +122,19 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 		copy := resource
 		copy.ID, copy.ReservationID = uuid.New(), uuid.New()
 		copy.OwnedResourceIDs = []uuid.UUID{copy.ID}
+		if spec.Tier == app.TierSingleWriter && index > 0 {
+			copy.Role = "standby"
+			copy.Budgets = placement.Budgets{Workload: &placement.Vector{DiskBytes: budget.DiskBytes}, Supporting: &placement.Vector{}, Backup: &placement.Vector{}}
+			copy.PreferredNodes = nil
+			if len(copy.AllowedNodes) > 0 {
+				copy.AllowedNodes = slices.Clone(copy.AllowedNodes)
+				for _, node := range preferences[0] {
+					if !slices.Contains(copy.AllowedNodes, node) {
+						copy.AllowedNodes = append(copy.AllowedNodes, node)
+					}
+				}
+			}
+		}
 		if spec.CopiesMode == app.CopiesModeAllCapable {
 			copy.NodeAffinity = capable[index]
 		}
@@ -115,6 +143,9 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 	}
 	if count > 1 {
 		request.Groups = []placement.Group{group}
+		if spec.Tier == app.TierSingleWriter {
+			request.Groups = append(request.Groups, placement.Group{ID: "app-nodes", DomainKey: "node", Members: group.Members})
+		}
 	}
 	for _, node := range snapshot.Nodes {
 		if node.Policy == nil || node.Policy.ClientAddress == "" || node.SessionID == uuid.Nil {
@@ -150,6 +181,9 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 	plan := &agentv1.ExecutionPlan{Version: 1}
 	previous := map[uuid.UUID]string{}
 	for index, resource := range request.Resources[:count] {
+		if resource.Role == "standby" {
+			continue
+		}
 		at := slices.IndexFunc(decision.Assignments, func(a placement.Assignment) bool { return a.ResourceID == resource.ID })
 		if at < 0 {
 			return fmt.Errorf("app placement omitted copy %d", index)

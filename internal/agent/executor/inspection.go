@@ -7,6 +7,7 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -33,7 +34,13 @@ func (e *Executor) inspectCommand(ctx context.Context, current *session, request
 	e.inspectionBusy, e.active[cluster] = true, true
 	read, cancel := context.WithTimeout(ctx, e.options.InspectionTimeout)
 	e.mu.Unlock()
-	result, err := e.runtime.Recover(read, command, request.PriorEffects)
+	var result runtime.Result
+	var err error
+	if command.Input.GetFinalAppSnapshot() != nil || command.Input.GetRemoveAppData() != nil {
+		result, err = e.recoverAppData(read, command)
+	} else {
+		result, err = e.runtime.Recover(read, command, request.PriorEffects)
+	}
 	cancel()
 	e.mu.Lock()
 	e.inspectionBusy = false

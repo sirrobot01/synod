@@ -67,7 +67,7 @@ func TestNodePolicyMakesANodePlaceable(t *testing.T) {
 	if len(before.Nodes) != 1 || before.Nodes[0].Policy != nil {
 		t.Fatalf("snapshot=%+v, want an enrolled node with no policy", before.Nodes)
 	}
-	body := strings.Replace(soundPolicy, `"architecture":`, `"client_address":"192.168.10.25","architecture":`, 1)
+	body := strings.Replace(soundPolicy, `"architecture":`, `"replication_port":9445,"client_address":"192.168.10.25","architecture":`, 1)
 	status, headers, data := approved(t, server, token, node, "0", body)
 	if status != 200 {
 		t.Fatalf("status=%d body=%s", status, data)
@@ -83,7 +83,7 @@ func TestNodePolicyMakesANodePlaceable(t *testing.T) {
 		t.Fatal("the node has no policy after one was approved")
 	}
 	stored := after.Nodes[0].Policy
-	if stored.Architecture != "amd64" || stored.StorageID != "pool-a" || stored.Revision != 1 || stored.ClientAddress != "192.168.10.25" {
+	if stored.Architecture != "amd64" || stored.StorageID != "pool-a" || stored.Revision != 1 || stored.ClientAddress != "192.168.10.25" || stored.ReplicationPort != 9445 {
 		t.Fatalf("policy=%+v, want what was approved", stored)
 	}
 	if len(stored.Engines) != 1 || stored.Engines[0] != (placement.EngineVersion{Engine: "postgres", Version: "17.11"}) {

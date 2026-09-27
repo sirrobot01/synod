@@ -11,6 +11,8 @@ import (
 
 	"github.com/sirrobot01/synod/internal/agent/capacity"
 	"github.com/sirrobot01/synod/internal/agent/journal"
+	"github.com/sirrobot01/synod/internal/agent/replica"
+	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/engine"
@@ -45,6 +47,14 @@ type Options struct {
 	// rather than a failure.
 	Probers map[string]engine.Prober
 	Router  *router.Manager
+	// Replication receives the tier 2 assignment. It outlives a session, so a
+	// standby keeps its assignment while the controller is away.
+	Replication   *replication.Table
+	AppsDir       string
+	ReplicaStatus *replication.Status
+	PushSnapshot  func(context.Context, *agentv1.ReplicaPeer, string, *replica.Manifest, string) (*agentv1.PushResult, error)
+	// BootTime must count time spent suspended. Tests can supply a controlled clock.
+	BootTime func() (time.Duration, error)
 }
 
 type epochGate struct {
@@ -76,6 +86,9 @@ type session struct {
 	secrets map[string]sessionSecret
 	router  bool
 	routes  *agentv1.RouteTable
+	// replicating is true when the session negotiated replication tables.
+	replicating bool
+	replication *agentv1.ReplicationTable
 }
 
 type job struct {
@@ -88,6 +101,7 @@ type job struct {
 
 // Executor runs controller commands against the local runtime under journal authority.
 type Executor struct {
+	leases         map[string]writerLease
 	journal        *journal.Journal
 	runtime        runtime.Runtime
 	options        Options
@@ -127,7 +141,14 @@ func New(j *journal.Journal, native runtime.Runtime, options Options) (*Executor
 	if options.Workers < 1 || options.Workers > 32 || options.QueueSize < 1 || options.QueueSize > 256 || options.PollInterval < 10*time.Millisecond || options.PollInterval > time.Minute || options.InspectionTimeout < time.Second || options.InspectionTimeout > time.Minute {
 		return nil, errors.New("invalid executor limits")
 	}
-	return &Executor{journal: j, runtime: native, options: options, active: make(map[string]bool), jobs: make(chan job, options.QueueSize), wake: make(chan struct{}, 1)}, nil
+	if options.BootTime == nil {
+		options.BootTime = bootTime
+	}
+	execution := &Executor{leases: make(map[string]writerLease), journal: j, runtime: native, options: options, active: make(map[string]bool), jobs: make(chan job, options.QueueSize), wake: make(chan struct{}, 1)}
+	if native, ok := native.(interface{ SetWriterLeaseCheck(func(string) error) }); ok {
+		native.SetWriterLeaseCheck(execution.checkWriter)
+	}
+	return execution, nil
 }
 
 // Run owns a fixed worker pool. The executable runs the borrowed transport separately.
@@ -145,6 +166,7 @@ func (e *Executor) Run(ctx context.Context, stream *transport.Client) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var workers sync.WaitGroup
+	workers.Go(func() { e.watchWriters(ctx) })
 	for range e.options.Workers {
 		workers.Go(func() {
 			for {
@@ -178,6 +200,7 @@ func (e *Executor) Run(ctx context.Context, stream *transport.Client) error {
 	defer func() {
 		cancel()
 		workers.Wait()
+		e.fenceWriters()
 		e.mu.Lock()
 		e.running = false
 		e.session = nil

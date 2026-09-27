@@ -2,10 +2,11 @@ package placement
 
 import (
 	"cmp"
-	"github.com/google/uuid"
 	"math/bits"
 	"slices"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 type planner struct {
@@ -178,8 +179,13 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 	if policy.InstallationID != p.request.InstallationID || policy.NodeID != node.ID || policy.Revision < 1 || probe.InstallationID != node.InstallationID || probe.NodeID != node.ID || probe.SessionID != node.SessionID || probe.BootID != node.BootID || probe.JournalGeneration != node.JournalGeneration || probe.PolicyRevision != policy.Revision || probe.IssuedAt.After(now) || !probe.ValidUntil.After(now) || probe.ValidUntil.After(probe.IssuedAt.Add(CapacityAge)) || report.ProbeID != probe.ID || report.ProbeRevision != probe.Revision || report.InstallationID != node.InstallationID || report.NodeID != node.ID || report.SessionID != node.SessionID || report.BootID != node.BootID || report.JournalGeneration != node.JournalGeneration {
 		return candidate{}, false
 	}
-	if (len(resource.AllowedNodes) != 0 && !slices.Contains(resource.AllowedNodes, node.ID)) || slices.Contains(resource.ExcludedNodes, node.ID) {
+	if (len(resource.AllowedNodes) != 0 && !slices.Contains(resource.AllowedNodes, node.ID) && !((resource.Role == "active" || resource.Role == "standby") && slices.Contains(resource.PreferredNodes, node.ID))) || slices.Contains(resource.ExcludedNodes, node.ID) {
 		return candidate{}, false
+	}
+	for _, name := range resource.RequiredPaths {
+		if !slices.Contains(report.ExistingPaths, name) || !slices.Contains(probe.Paths, name) {
+			return candidate{}, false
+		}
 	}
 	if resource.NodeAffinity != uuid.Nil && resource.NodeAffinity != node.ID {
 		return candidate{}, false
@@ -225,7 +231,7 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 			continue
 		}
 		domain := policy.FailureDomains[group.DomainKey]
-		if domain == "" && group.Soft {
+		if domain == "" && (group.Soft || group.DomainKey == "node") {
 			domain = node.ID.String()
 		}
 		if domain == "" {
@@ -251,6 +257,9 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 			if p.snapshot.Nodes[otherIndex].Policy != nil {
 				otherDomain = p.snapshot.Nodes[otherIndex].Policy.FailureDomains[group.DomainKey]
 			}
+			if otherDomain == "" && group.DomainKey == "node" {
+				otherDomain = otherNode.String()
+			}
 			if group.Soft {
 				if otherDomain == "" {
 					otherDomain = otherNode.String()
@@ -274,8 +283,11 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 		return candidate{}, false
 	}
 	result := candidate{node: index, load: load, ports: chosen, spread: spread, numerator: uint64(load.CPUMillis), denominator: uint64(report.Capacity.CPUMillis)}
-	if len(resource.PreferredNodes) != 0 && !slices.Contains(resource.PreferredNodes, node.ID) {
-		result.preference = 1
+	if len(resource.PreferredNodes) != 0 {
+		result.preference = slices.Index(resource.PreferredNodes, node.ID)
+		if result.preference < 0 {
+			result.preference = len(resource.PreferredNodes)
+		}
 	}
 	if resource.Engine == "generic" && policy.Labels["synod.availability"] == "part-time" {
 		result.partTime = 1
@@ -415,7 +427,7 @@ func Plan(request Request, snapshot Snapshot) (Decision, error) {
 			if len(candidates) == 0 {
 				return false, nil
 			}
-			if next.ID == uuid.Nil || len(candidates) < len(options) || (len(candidates) == len(options) && strings.Compare(resource.ID.String(), next.ID.String()) < 0) {
+			if next.ID == uuid.Nil || (resource.Role == "active" && next.Role != "active") || ((resource.Role == "active") == (next.Role == "active") && (len(candidates) < len(options) || (len(candidates) == len(options) && strings.Compare(resource.ID.String(), next.ID.String()) < 0))) {
 				next, options = resource, candidates
 			}
 		}

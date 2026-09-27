@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/controller/worker"
 	"github.com/sirrobot01/synod/internal/controlstream"
@@ -39,6 +40,7 @@ import (
 
 // installation runs one controller against real PostgreSQL, real etcd, and real mutual TLS.
 type installation struct {
+	ca            *pki.CA
 	store         *postgres.Store
 	pool          *pgxpool.Pool
 	runner        *Runner
@@ -112,7 +114,7 @@ func newInstallation(t *testing.T) *installation {
 	var routed *Runner
 	server, err := controlstream.New(controlstream.Config{
 		InstallationID:    inst.id,
-		Capabilities:      []string{"runtime.docker", controlstream.CommandInspectionCapability, controlstream.RouterCapability},
+		Capabilities:      []string{"runtime.docker", controlstream.CommandInspectionCapability, controlstream.RouterCapability, replication.Capability},
 		HeartbeatInterval: time.Second,
 		TLS:               &tls.Config{MinVersion: tls.VersionTLS12, ClientCAs: inst.roots, Certificates: []tls.Certificate{inst.controllerTLS}},
 		Authorize:         store.CheckAgentCertificate,
@@ -154,6 +156,7 @@ func (i *installation) issue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	i.ca = ca
 	i.roots = x509.NewCertPool()
 	if !i.roots.AppendCertsFromPEM(caCert) {
 		t.Fatal("invalid fixture CA")

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/operation"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
@@ -95,7 +96,7 @@ func (s *Store) RecordAgentSession(ctx context.Context, installationID, nodeID, 
 		return admissionError(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO agent_presence (installation_id,node_id,session_id,recovery_required)
- VALUES ($1,$2,$3,$4) ON CONFLICT (installation_id,node_id) DO UPDATE SET session_id=EXCLUDED.session_id,
+ VALUES ($1,$2,$3,$4) ON CONFLICT (installation_id,node_id) DO UPDATE SET online_since=clock_timestamp(),session_id=EXCLUDED.session_id,
  heartbeat_sequence=0,heartbeat_bytes=NULL,last_seen_at=clock_timestamp(),recovery_required=EXCLUDED.recovery_required`, installationID, nodeID, sessionID, recovery); err != nil {
 		return admissionError(err)
 	}
@@ -107,6 +108,16 @@ func (s *Store) RecordAgentSession(ctx context.Context, installationID, nodeID, 
 func (s *Store) RecordAgentHeartbeat(ctx context.Context, installationID, nodeID, sessionID uuid.UUID, heartbeat *agentv1.Heartbeat) error {
 	if installationID == uuid.Nil || nodeID == uuid.Nil || sessionID == uuid.Nil || heartbeat == nil || heartbeat.Sequence == 0 || heartbeat.Sequence > math.MaxInt64 || heartbeat.ObservedAt == nil || heartbeat.ObservedAt.CheckValid() != nil || proto.Size(heartbeat) > 256<<10 || len(heartbeat.Observations) > 1024 {
 		return &AdmissionError{Code: InvalidRequest}
+	}
+	if len(heartbeat.Replicas) > 256 || controlstream.CheckAgentMessage(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_Heartbeat{Heartbeat: heartbeat}}, "", "") != nil {
+		return &AdmissionError{Code: InvalidRequest}
+	}
+	seenReplicas := map[string]bool{}
+	for _, r := range heartbeat.Replicas {
+		if seenReplicas[r.AppId] || r.Epoch > math.MaxInt64 || r.Sequence > math.MaxInt64 {
+			return &AdmissionError{Code: InvalidRequest}
+		}
+		seenReplicas[r.AppId] = true
 	}
 	for _, observation := range heartbeat.Observations {
 		if observation == nil || observation.ObservedAt == nil || observation.ObservedAt.CheckValid() != nil || observation.ObservedRevision < 0 || len(observation.Lifecycle) > 64 || len(observation.Reason) > 1024 {
@@ -126,6 +137,16 @@ func (s *Store) RecordAgentHeartbeat(ctx context.Context, installationID, nodeID
 		return admissionError(err)
 	}
 	defer tx.Rollback(ctx)
+	// Replica inserts reference apps. Lock those parents before presence to match writer changes.
+	ids := make([]string, 0, len(heartbeat.Replicas))
+	for _, report := range heartbeat.Replicas {
+		ids = append(ids, report.AppId)
+	}
+	if len(ids) > 0 {
+		if _, err := tx.Exec(ctx, `SELECT id FROM apps WHERE installation_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR KEY SHARE`, installationID, ids); err != nil {
+			return admissionError(err)
+		}
+	}
 	var current uuid.UUID
 	var sequence int64
 	var previousBytes []byte
@@ -149,9 +170,12 @@ func (s *Store) RecordAgentHeartbeat(ctx context.Context, installationID, nodeID
 		}
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `UPDATE agent_presence SET heartbeat_sequence=$1,heartbeat_bytes=$2,last_seen_at=clock_timestamp()
+	if _, err := tx.Exec(ctx, `UPDATE agent_presence SET heartbeat_sequence=$1,heartbeat_bytes=$2,online_since=CASE WHEN last_seen_at<clock_timestamp()-interval '20 seconds' THEN clock_timestamp() ELSE online_since END,last_seen_at=clock_timestamp()
  WHERE installation_id=$3 AND node_id=$4`, int64(heartbeat.Sequence), encoded, installationID, nodeID); err != nil {
 		return admissionError(err)
+	}
+	if err := recordAppReplicas(ctx, tx, installationID, nodeID, sessionID, heartbeat.Replicas); err != nil {
+		return err
 	}
 	if err := recordAppObservations(ctx, tx, installationID, nodeID, sessionID, heartbeat.Observations); err != nil {
 		return err

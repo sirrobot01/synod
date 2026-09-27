@@ -3,6 +3,7 @@ package placement
 import (
 	"math"
 	"net/netip"
+	"path"
 	"slices"
 	"strings"
 
@@ -70,6 +71,14 @@ func (p NodePolicy) Validate() error {
 
 // Validate checks the report identity, capacity, and reservation totals.
 func (r CapacityReport) Validate() error {
+	if len(r.ExistingPaths) > 128 {
+		return ErrInvalid
+	}
+	for _, name := range r.ExistingPaths {
+		if len(name) > 4096 || !path.IsAbs(name) || strings.ContainsRune(name, 0) {
+			return ErrInvalid
+		}
+	}
 	for _, id := range []uuid.UUID{r.ProbeID, r.InstallationID, r.NodeID, r.SessionID, r.BootID, r.JournalGeneration} {
 		if id == uuid.Nil {
 			return ErrInvalid
@@ -150,7 +159,7 @@ func (r Request) Validate() error {
 			return ErrInvalid
 		}
 		if resource.Engine == "generic" {
-			if resource.Kind != "service" || resource.Version != "" || resource.Architecture != "" || len(resource.SupportedArchitectures) == 0 || len(resource.SupportedArchitectures) > 2 || resource.Budgets.Workload == nil || resource.Budgets.Workload.CPUMillis == 0 || resource.Budgets.Workload.MemoryBytes == 0 {
+			if resource.Kind != "service" || resource.Version != "" || resource.Architecture != "" || len(resource.SupportedArchitectures) == 0 || len(resource.SupportedArchitectures) > 2 || resource.Budgets.Workload == nil || (resource.Role != "standby" && (resource.Budgets.Workload.CPUMillis == 0 || resource.Budgets.Workload.MemoryBytes == 0)) {
 				return ErrInvalid
 			}
 			architectures := map[string]bool{}
@@ -175,14 +184,25 @@ func (r Request) Validate() error {
 				seen[id] = true
 			}
 		}
+		if resource.Role == "standby" && (resource.Budgets.Workload == nil || resource.Budgets.Workload.CPUMillis != 0 || resource.Budgets.Workload.MemoryBytes != 0 || resource.Budgets.Workload.DiskBytes == 0) {
+			return ErrInvalid
+		}
+		if len(resource.RequiredPaths) > 128 {
+			return ErrInvalid
+		}
+		for _, name := range resource.RequiredPaths {
+			if len(name) > 4096 || !path.IsAbs(name) || strings.ContainsRune(name, 0) {
+				return ErrInvalid
+			}
+		}
 		resources[resource.ID], reservations[resource.ReservationID] = true, true
 		total, err := resource.Budgets.Total()
 		if err != nil || total == (Vector{}) {
 			return ErrInvalid
 		}
 		// An instance is a member of the cluster, so it names which member it is.
-		// Another resource has no role.
-		if (resource.Kind == "instance") != (resource.Role == "primary" || resource.Role == "replica") || (resource.Kind != "instance" && resource.Role != "") {
+		// A generic service can be an active writer or a standby.
+		if (resource.Kind == "instance") != (resource.Role == "primary" || resource.Role == "replica") || (resource.Kind != "instance" && resource.Role != "" && !(resource.Engine == "generic" && (resource.Role == "active" || resource.Role == "standby"))) {
 			return ErrInvalid
 		}
 		if resource.Colocate != uuid.Nil && (resource.Colocate == resource.ID || !slices.ContainsFunc(r.Resources, func(other Resource) bool { return other.ID == resource.Colocate })) {

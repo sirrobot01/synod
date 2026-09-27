@@ -77,7 +77,6 @@ func TestAppAdmission(t *testing.T) {
 		"other actor":       {func(r *CreateAppRequest) { r.Identity.ActorID = "other" }, NameConflict},
 		"bad key":           {func(r *CreateAppRequest) { r.Identity.IdempotencyKey = "bad key" }, InvalidRequest},
 		"forged platforms":  {func(r *CreateAppRequest) { r.Spec.Service.SupportedArchitectures = []string{"amd64"} }, InvalidRequest},
-		"tier 2":            {func(r *CreateAppRequest) { r.Spec.Tier = app.TierSingleWriter; r.Spec.Copies = 1 }, UnsupportedSpec},
 	} {
 		t.Run(name, func(t *testing.T) {
 			input := request

@@ -76,3 +76,59 @@ func TestAppImportRejectsBeforeSending(t *testing.T) {
 		t.Fatalf("result: %d %s %s", code, &stdout, &stderr)
 	}
 }
+
+func TestAppImportSendsTier2Settings(t *testing.T) {
+	var spec appmodel.AppSpec
+	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		if err := json.NewEncoder(w).Encode(appmodel.Admission{AppID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1, AcceptedAt: time.Now().UTC()}); err != nil {
+			t.Error(err)
+		}
+	}))
+	filename := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(filename, []byte("services: {sonarr: {image: sonarr, ports: ['8989:8989'], volumes: ['config:/config']}}\nvolumes: {config: }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := append(flags, "app", "import", "-f", filename, "--tier", "2", "--prefer", "mac", "--allow", "server", "--never", "odin", "--standbys", "2", "--interval", "30s", "--failback", "manual")
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(t.Context(), args, &stdout, &stderr); code != 0 {
+		t.Fatalf("code %d: %s %s", code, &stdout, &stderr)
+	}
+	want := appmodel.ReplicationSpec{Standbys: 2, IntervalSeconds: 30, FailoverAfterSeconds: 90, Failback: appmodel.FailbackManual, FailbackStableSeconds: 600}
+	if spec.Tier != appmodel.TierSingleWriter || spec.Replication == nil || *spec.Replication != want {
+		t.Fatalf("spec: %+v %+v", spec, spec.Replication)
+	}
+	if p := spec.DevicePreference; len(p.Preferred) != 1 || p.Allowed[0] != "server" || p.Never[0] != "odin" {
+		t.Fatalf("preference: %+v", p)
+	}
+	if len(spec.Service.Mounts) != 1 || spec.Service.Mounts[0].Type != "replicated" {
+		t.Fatalf("mounts: %+v", spec.Service.Mounts)
+	}
+}
+
+func TestAppImportRejectsTier1BeforeSending(t *testing.T) {
+	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("invalid import sent to API") }))
+	filename := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(filename, []byte("services: {web: {image: nginx, ports: ['8080:80']}}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(t.Context(), append(flags, "app", "import", "-f", filename, "--tier", "1"), &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "tier 2 and tier 3") {
+		t.Fatalf("result: %d %s %s", code, &stdout, &stderr)
+	}
+}
+
+func TestAppImportRefusesZeroStandbysBeforeSending(t *testing.T) {
+	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("invalid import sent to API") }))
+	filename := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(filename, []byte("services: {sonarr: {image: sonarr, ports: ['8989:8989'], volumes: ['config:/config']}}\nvolumes: {config: }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(t.Context(), append(flags, "app", "import", "-f", filename, "--tier", "2", "--standbys", "0"), &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "1 to 3 standbys") {
+		t.Fatalf("result: %d %s %s", code, &stdout, &stderr)
+	}
+}

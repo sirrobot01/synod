@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 
+	"github.com/google/uuid"
+	containerapp "github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/client"
 	"github.com/spf13/cobra"
 )
@@ -23,7 +25,7 @@ func newAppInspectCommand(a *app) *cobra.Command {
 
 func newAppActionCommand(a *app, action string) *cobra.Command {
 	var expected int64
-	var key string
+	var key, to string
 	var wait, yes bool
 	cmd := &cobra.Command{Use: action + " ID", Short: action + " a container app", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		id, err := parseID(args[0], "Use a nonzero app UUID.")
@@ -60,7 +62,16 @@ func newAppActionCommand(a *app, action string) *cobra.Command {
 				return &client.Error{Code: "confirmation_required", Message: fmt.Sprintf("Confirm with --yes --expected-revision %d --idempotency-key %s.", expected, key)}
 			}
 		}
-		result, err := a.api.ActApp(cmd.Context(), id, action, expected, key)
+		var result containerapp.Admission
+		if action == "move" {
+			target, parseErr := uuid.Parse(to)
+			if parseErr != nil || target == uuid.Nil {
+				return &client.Error{Code: "invalid_request", Message: "Use a nonzero device UUID with --to."}
+			}
+			result, err = a.api.MoveApp(cmd.Context(), id, target, expected, key)
+		} else {
+			result, err = a.api.ActApp(cmd.Context(), id, action, expected, key)
+		}
 		if err != nil {
 			return err
 		}
@@ -70,6 +81,10 @@ func newAppActionCommand(a *app, action string) *cobra.Command {
 		}
 		return nil
 	}}
+	if action == "move" {
+		cmd.Flags().StringVar(&to, "to", "", "Target device UUID")
+		_ = cmd.MarkFlagRequired("to")
+	}
 	cmd.Flags().Int64Var(&expected, "expected-revision", 0, "Revision to replace (default: read current app)")
 	cmd.Flags().StringVar(&key, "idempotency-key", "", "Original retry key; requires --expected-revision")
 	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the operation to finish")

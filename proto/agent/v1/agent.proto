@@ -11,6 +11,12 @@ service AgentService {
   rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
 }
 
+// An active agent pushes tier 2 snapshots to a standby agent over mTLS.
+// The standby accepts only the peer that its ReplicationTable names.
+service ReplicationService {
+  rpc Push(stream PushRequest) returns (stream PushResponse);
+}
+
 message VersionRange { uint32 minimum = 1; uint32 maximum = 2; }
 message Hello {
   string installation_id = 1;
@@ -36,6 +42,22 @@ message Heartbeat {
   uint64 sequence = 1;
   google.protobuf.Timestamp observed_at = 2;
   repeated Observation observations = 3;
+  repeated ReplicaStatus replicas = 4;
+  // CLOCK_BOOTTIME in nanoseconds. Zero means unavailable.
+  uint64 writer_clock_nanos = 5;
+}
+// The newest complete snapshot that this device holds or produced for one tier 2 app.
+message ReplicaStatus {
+  string app_id = 1;
+  string role = 2;
+  uint64 epoch = 3;
+  uint64 sequence = 4;
+  google.protobuf.Timestamp completed_at = 5;
+  // Stable code of the last failed snapshot or push. Empty after a success.
+  string failure_code = 6;
+  uint64 last_pause_nanos = 7;
+  uint64 max_pause_nanos = 8;
+  uint64 skipped_snapshots = 9;
 }
 message Observation {
   string resource_id = 1;
@@ -62,6 +84,13 @@ message Effect {
   bool active = 4;
   bool outcome_unknown = 5;
   string state = 6;
+  AppSnapshotReceipt app_snapshot = 7;
+}
+message AppSnapshotReceipt {
+  uint64 writer_epoch = 1;
+  uint64 sequence = 2;
+  string target_node_id = 3;
+  bytes manifest_hash = 4;
 }
 message BarrierResult {
   Epoch epoch = 1;
@@ -232,8 +261,15 @@ message CommandInput {
     CheckReadiness check_readiness = 17;
     RecoverPostgresSetup recover_postgres_setup = 18;
     VerifyContainerAbsent verify_container_absent = 23;
+    FinalAppSnapshot final_app_snapshot = 24;
+    RemoveAppData remove_app_data = 25;
   }
 }
+message FinalAppSnapshot {
+  uint64 writer_epoch = 1;
+  string target_node_id = 2;
+}
+message RemoveAppData { uint64 writer_epoch = 1; }
 message Command {
   Epoch epoch = 1;
   string operation_id = 2;
@@ -305,6 +341,7 @@ message CapacityRequest {
   // mapping by looking at the host. It measures what it is told to measure and
   // echoes the pair back.
   repeated KnownReservation known = 7;
+  repeated string paths = 8;
 }
 message KnownReservation {
   string reservation_id = 1;
@@ -334,6 +371,7 @@ message CapacityReport {
   ResourceVector capacity = 9;
   ResourceVector used = 10;
   repeated ReservationUsage reservations = 11;
+  repeated string existing_paths = 12;
 }
 message InventoryPage {
   repeated Observation resources = 1;
@@ -386,6 +424,74 @@ message RouteAck {
   uint64 revision = 2;
   string failure_code = 3;
 }
+// A complete replication snapshot for one authenticated agent session.
+message ReplicationTable {
+  string session_id = 1;
+  uint64 revision = 2;
+  repeated AppReplication apps = 3;
+}
+message AppReplication {
+  string app_id = 1;
+  // The writer epoch. Snapshots from an older epoch are refused.
+  uint64 epoch = 2;
+  // "active" pushes to every peer. "standby" accepts pushes from its one peer.
+  string role = 3;
+  repeated ReplicaPeer peers = 4;
+  uint32 interval_seconds = 5;
+}
+// A lease is valid only for this session and the assigned active epoch.
+message WriterLease {
+  string session_id = 1;
+  string app_id = 2;
+  uint64 epoch = 3;
+  uint32 seconds = 4;
+  // Absolute deadline on the agent clock, based on a received heartbeat.
+  uint64 expires_at_boot_nanos = 5;
+}
+message ReplicaPeer {
+  string node_id = 1;
+  // host:port of the peer's replication listener.
+  string address = 2;
+}
+message ReplicationAck {
+  string session_id = 1;
+  uint64 revision = 2;
+  string failure_code = 3;
+}
+message PushRequest {
+  oneof message {
+    PushManifest manifest = 1;
+    ReplicaBlock block = 2;
+  }
+}
+message PushManifest {
+  string app_id = 1;
+  // JSON of replica.Manifest.
+  bytes manifest = 2;
+}
+message ReplicaBlock {
+  string path = 1;
+  uint32 index = 2;
+  bytes data = 3;
+}
+message PushResponse {
+  oneof message {
+    MissingBlocks missing = 1;
+    PushResult result = 2;
+  }
+}
+message MissingBlocks {
+  repeated BlockRef blocks = 1;
+}
+message BlockRef {
+  string path = 1;
+  uint32 index = 2;
+}
+message PushResult {
+  uint64 epoch = 1;
+  uint64 sequence = 2;
+  string failure_code = 3;
+}
 message AgentMessage {
   oneof message {
     Hello hello = 1;
@@ -399,6 +505,7 @@ message AgentMessage {
     CommandInspectionResult command_inspection = 9;
     CapacityReport capacity_report = 10;
     RouteAck route_ack = 11;
+    ReplicationAck replication_ack = 12;
   }
 }
 message ControllerMessage {
@@ -417,6 +524,8 @@ message ControllerMessage {
     CapacityRequest capacity_request = 10;
     SecretMaterial secret = 11;
     RouteTable routes = 13;
+    ReplicationTable replication = 14;
+    WriterLease writer_lease = 15;
   }
 }
 
@@ -445,4 +554,6 @@ enum Postcondition {
   POSTCONDITION_CONTAINER_INSPECTED = 7;
   POSTCONDITION_ENGINE_READY = 8;
   POSTCONDITION_POSTGRES_SETUP_RECOVERED = 9;
+  POSTCONDITION_APP_SNAPSHOT_TRANSFERRED = 10;
+  POSTCONDITION_APP_DATA_ABSENT = 11;
 }

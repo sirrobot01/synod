@@ -44,3 +44,17 @@ func TestGenericCommandValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestGenericReplicatedMountValidation(t *testing.T) {
+	image := "example@sha256:" + strings.Repeat("a", 64)
+	p := &agentv1.EnsureContainer{Engine: "generic", ImageDigest: image, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "writer", Mounts: []*agentv1.Mount{{Type: "replicated", Source: "config", Target: "/config"}}}}
+	if err := ValidateGenericContainer(p); err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{"../outside", "/absolute", "has/slash", ""} {
+		p.Generic.Mounts[0].Source = source
+		if err := ValidateGenericContainer(p); err == nil {
+			t.Fatalf("accepted %q", source)
+		}
+	}
+}

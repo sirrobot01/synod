@@ -136,10 +136,16 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 			r.ClaimID, r.OwnerID, result.ExecutionEpoch, result.ExpiresAt, generation, r.LeaseID, r.LeaseRevision, r.OperationID); err != nil {
 			return operation.Claim{}, admissionError(err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO claim_barriers (claim_id,installation_id,cluster_id,operation_id,node_id,execution_epoch,recovery_generation)
-			SELECT DISTINCT $1::uuid,installation_id,cluster_id,$2::uuid,node_id,$3::bigint,$4::uuid FROM command_dispatches WHERE installation_id=$5 AND cluster_id=$6`,
-			r.ClaimID, r.OperationID, result.ExecutionEpoch, generation, r.InstallationID, result.ClusterID); err != nil {
-			return operation.Claim{}, admissionError(err)
+		// A failover exists because the old writer is lost and cannot drain. Its
+		// expired writer lease fences it instead, so a failover waits only for the
+		// nodes in its own plan. The lost node drains in the next operation that
+		// reaches it.
+		if kind != "app.failover" {
+			if _, err := tx.Exec(ctx, `INSERT INTO claim_barriers (claim_id,installation_id,cluster_id,operation_id,node_id,execution_epoch,recovery_generation)
+				SELECT DISTINCT $1::uuid,installation_id,cluster_id,$2::uuid,node_id,$3::bigint,$4::uuid FROM command_dispatches WHERE installation_id=$5 AND cluster_id=$6`,
+				r.ClaimID, r.OperationID, result.ExecutionEpoch, generation, r.InstallationID, result.ClusterID); err != nil {
+				return operation.Claim{}, admissionError(err)
+			}
 		}
 		if plan != nil {
 			var persisted agentv1.ExecutionPlan
@@ -286,7 +292,7 @@ func validateInstalledPlan(claim operation.Claim, plan *agentv1.ExecutionPlan) (
 	stepIDs := make([]string, 0, len(plan.Steps))
 	commandIDs := make([]string, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
-		if step == nil || step.Command == nil || step.MaxAttempts < 1 || step.MaxAttempts > 10 || step.CancellationBoundary < agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION || step.CancellationBoundary > agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP || step.Postcondition < agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS || step.Postcondition > agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED {
+		if step == nil || step.Command == nil || step.MaxAttempts < 1 || step.MaxAttempts > 10 || step.CancellationBoundary < agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION || step.CancellationBoundary > agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP || step.Postcondition < agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS || step.Postcondition > agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT {
 			return nil, &AdmissionError{Code: InvalidRequest}
 		}
 		command := step.Command
@@ -568,6 +574,16 @@ func (s *Store) RecordDispatch(ctx context.Context, claim operation.Claim, comma
 		return admissionError(err)
 	}
 	if !ready {
+		return operation.ErrBarrierPending
+	}
+	var moveAllowed bool
+	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM app_moves WHERE operation_id=$1) OR EXISTS(
+      SELECT 1 FROM app_moves m JOIN apps a ON a.installation_id=m.installation_id AND a.id=m.app_id WHERE m.operation_id=$1 AND
+      (($2 AND m.promoted_at IS NOT NULL AND a.writer_node_id=m.target_node_id AND a.writer_epoch=m.writer_epoch+1)
+      OR (NOT $2 AND m.promoted_at IS NULL AND a.writer_node_id=m.source_node_id AND a.writer_epoch=m.writer_epoch)))`, claim.OperationID, command.Input.GetEnsureContainer() != nil || command.Input.GetStartContainer() != nil).Scan(&moveAllowed); err != nil {
+		return admissionError(err)
+	}
+	if !moveAllowed {
 		return operation.ErrBarrierPending
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO command_identities (command_id,input_hash) VALUES ($1,$2) ON CONFLICT DO NOTHING`, command.CommandId, command.InputHash); err != nil {

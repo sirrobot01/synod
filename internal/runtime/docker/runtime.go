@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -45,6 +46,7 @@ var _ runtime.Runtime = (*Runtime)(nil)
 
 // Options binds a runtime to one node and bounds its inspections.
 type Options struct {
+	AppsDir            string
 	InstallationID     uuid.UUID
 	NodeID             uuid.UUID
 	AllowBridgeFixture bool
@@ -53,10 +55,11 @@ type Options struct {
 
 // Runtime performs owned Docker actions for one node.
 type Runtime struct {
-	api      *client.Client
-	options  Options
-	healthMu sync.Mutex
-	health   map[string]genericHealth
+	writerLeaseCheck func(string) error
+	api              *client.Client
+	options          Options
+	healthMu         sync.Mutex
+	health           map[string]genericHealth
 }
 
 // New borrows the API client. The caller owns its connection and journal lifetime.
@@ -190,6 +193,14 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 		}
 		switch p := payload.(type) {
 		case *agentv1.CommandInput_StartContainer:
+			if current.Container.Config.Labels["synod.tier"] == "2" {
+				if r.writerLeaseCheck == nil {
+					return runtime.Result{}, runtime.ErrUnsupportedConfiguration
+				}
+				if err := r.writerLeaseCheck(command.Epoch.ClusterId); err != nil {
+					return runtime.Result{}, err
+				}
+			}
 			if err := r.checkStartStorage(ctx, command, current.Container); err != nil {
 				if current.Container.State.Running || current.Container.State.Restarting || len(current.Container.ExecIDs) != 0 {
 					result := r.containerResult(command, current.Container)
@@ -198,7 +209,14 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 				}
 				return runtime.Result{}, err
 			}
-			_, mutationErr = r.api.ContainerUpdate(ctx, current.Container.ID, client.ContainerUpdateOptions{RestartPolicy: &container.RestartPolicy{Name: container.RestartPolicyUnlessStopped}})
+			policy := container.RestartPolicyUnlessStopped
+			if current.Container.Config.Labels["synod.tier"] == "2" {
+				policy = container.RestartPolicyDisabled
+			}
+			_, mutationErr = r.api.ContainerUpdate(ctx, current.Container.ID, client.ContainerUpdateOptions{RestartPolicy: &container.RestartPolicy{Name: policy}})
+			if mutationErr == nil && current.Container.Config.Labels["synod.tier"] == "2" {
+				mutationErr = r.writerLeaseCheck(command.Epoch.ClusterId)
+			}
 			if mutationErr == nil {
 				_, mutationErr = r.api.ContainerStart(ctx, current.Container.ID, client.ContainerStartOptions{})
 			}
@@ -280,6 +298,13 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 			switch p.(type) {
 			case *agentv1.CommandInput_RemoveContainer, *agentv1.CommandInput_StopContainer:
 				result.Effects[0].State = "absent"
+			case *agentv1.CommandInput_EnsureContainer:
+				// The container name is fixed by the resource, so a missing container
+				// proves that this ensure created nothing. A later attempt adopts a late
+				// create under the same name.
+				result.Effects[0].State = "absent"
+				result.Effects[0].Active, result.Effects[0].OutcomeUnknown = false, false
+				return result, runtime.ErrNotApplied
 			}
 			if result.Effects[0].State == "absent" {
 				break
@@ -317,7 +342,11 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 					return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
 				}
 			}
-			matched = state.Running && !state.Restarting && !state.Dead && item.Container.HostConfig.RestartPolicy.Name == container.RestartPolicyUnlessStopped
+			policy := container.RestartPolicyUnlessStopped
+			if item.Container.Config.Labels["synod.tier"] == "2" {
+				policy = container.RestartPolicyDisabled
+			}
+			matched = state.Running && !state.Restarting && !state.Dead && item.Container.HostConfig.RestartPolicy.Name == policy
 		case *agentv1.CommandInput_StopContainer:
 			matched = !state.Running && item.Container.HostConfig.RestartPolicy.Name == container.RestartPolicyDisabled
 		}
@@ -386,7 +415,14 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	var mounts []mount.Mount
 	if p.Generic != nil {
 		for _, m := range p.Generic.Mounts {
-			mounts = append(mounts, mount.Mount{Type: mount.Type(m.Type), Source: m.Source, Target: m.Target, ReadOnly: m.ReadOnly})
+			kind, source := mount.Type(m.Type), m.Source
+			if m.Type == "replicated" {
+				if !filepath.IsAbs(r.options.AppsDir) {
+					return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
+				}
+				kind, source = mount.TypeBind, filepath.Join(r.options.AppsDir, command.Epoch.ClusterId, "live", m.Source)
+			}
+			mounts = append(mounts, mount.Mount{Type: kind, Source: source, Target: m.Target, ReadOnly: m.ReadOnly})
 		}
 	} else {
 		if err := r.verifyVolume(ctx, command, p.VolumeId); err != nil {
@@ -432,14 +468,18 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 			pullOptions.Platforms = []ocispec.Platform{*platform}
 		}
 		pull, pullErr := r.api.ImagePull(ctx, p.ImageDigest, pullOptions)
+		// A pull creates no container, so a failed pull is a definite outcome.
 		if pullErr != nil {
-			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: pullErr}
+			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrNotApplied, Cause: pullErr}
 		}
 		pullErr = errors.Join(pull.Wait(ctx), pull.Close())
 		if pullErr != nil {
-			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: fmt.Errorf("pull %s: %w", p.ImageDigest, pullErr)}
+			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrNotApplied, Cause: fmt.Errorf("pull %s: %w", p.ImageDigest, pullErr)}
 		}
 		image, err = r.api.ImageInspect(ctx, p.ImageDigest)
+		if err != nil {
+			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrNotApplied, Cause: err}
+		}
 	}
 	if err != nil {
 		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
@@ -475,6 +515,9 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 		labels["synod.app_name"] = g.AppName
 		labels["synod.copy_index"] = strconv.FormatUint(uint64(g.CopyIndex), 10)
 		labels["synod.tier"] = "3"
+		if slices.ContainsFunc(g.Mounts, func(m *agentv1.Mount) bool { return m.Type == "replicated" }) {
+			labels["synod.tier"] = "2"
+		}
 	}
 	memory, cpu := containerLimits(p)
 	if memory < 16<<20 || cpu < 1 || cpu > 1000000 {
@@ -613,6 +656,9 @@ func (r *Runtime) checkContainer(ctx context.Context, command *agentv1.Command, 
 		return runtime.ErrConfigurationConflict
 	}
 	if stored.Generic != nil {
+		if options.Config.Labels["synod.tier"] == "2" && item.HostConfig.RestartPolicy.Name != container.RestartPolicyDisabled {
+			return runtime.ErrConfigurationConflict
+		}
 		if item.HostConfig.RestartPolicy.Name != container.RestartPolicyDisabled && item.HostConfig.RestartPolicy.Name != container.RestartPolicyUnlessStopped {
 			return runtime.ErrConfigurationConflict
 		}

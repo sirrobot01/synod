@@ -2,6 +2,9 @@ package executor
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,7 +25,7 @@ import (
 // a sample pair. It runs outside the executor lock, like an inventory read, and
 // the answer is checked against the session and the challenge again afterwards.
 func (e *Executor) capacity(ctx context.Context, current *session, request *agentv1.CapacityRequest) (*agentv1.AgentMessage, error) {
-	if request == nil || request.ProbeId == "" || request.ProbeRevision < 1 || request.ExpiresUnixMs <= 0 {
+	if controlstream.CheckCapacityRequest(request) != nil {
 		return nil, controlstream.ErrMessage
 	}
 	identity := e.journal.Identity()
@@ -52,10 +55,35 @@ func (e *Executor) capacity(ctx context.Context, current *session, request *agen
 	e.capacityBusy = true
 	e.mu.Unlock()
 	measured, usage, err := e.measure(ctx, deadline, resources)
+	var existing []string
+	if err == nil && len(request.Paths) > 0 {
+		// Tier 2 agents share the host PID namespace. Resolve bind paths in the host root.
+		root, openErr := os.OpenRoot(filepath.Join(e.options.Host.ProcRoot, "1", "root"))
+		if openErr != nil {
+			err = openErr
+		} else {
+			defer root.Close()
+			for _, name := range request.Paths {
+				if ctx.Err() != nil || !time.Now().Before(deadline) {
+					err = context.DeadlineExceeded
+					break
+				}
+				relative, relErr := filepath.Rel("/", name)
+				if relErr != nil {
+					continue
+				}
+				if _, statErr := root.Stat(relative); statErr == nil {
+					existing = append(existing, name)
+				}
+			}
+		}
+	}
 	e.mu.Lock()
 	e.capacityBusy = false
 	if err != nil {
-		return nil, err
+		// A measurement that fails or misses its window fails this probe only.
+		// The controller issues a new probe, so the session stays open.
+		return nil, fmt.Errorf("%w: measure capacity: %w", journal.ErrBusy, err)
 	}
 	// The session or the challenge can be replaced while the host is measured.
 	// An answer for a challenge that no longer stands must never be sent.
@@ -65,6 +93,7 @@ func (e *Executor) capacity(ctx context.Context, current *session, request *agen
 
 	report := &agentv1.CapacityReport{
 		ProbeId:           request.ProbeId,
+		ExistingPaths:     existing,
 		ProbeRevision:     request.ProbeRevision,
 		SessionId:         current.id,
 		BootId:            e.options.BootID,

@@ -2,8 +2,10 @@ package operation
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"maps"
+	"math"
 	"slices"
 
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -48,6 +50,17 @@ func ValidatePlan(plan *agentv1.ExecutionPlan, op Operation) error {
 			expected = agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS
 		case *agentv1.CommandInput_RecoverPostgresSetup:
 			expected = agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED
+			if step.CancellationBoundary != agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION {
+				return ErrUnsupportedPlan
+			}
+		case *agentv1.CommandInput_FinalAppSnapshot:
+			expected = agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED
+			stop, ok := stopped[resource{command.Epoch.NodeId, command.Input.ResourceId}]
+			if !ok || !slices.Contains(step.DependsOn, stop) || step.CancellationBoundary != agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION {
+				return ErrUnsupportedPlan
+			}
+		case *agentv1.CommandInput_RemoveAppData:
+			expected = agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT
 			if step.CancellationBoundary != agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION {
 				return ErrUnsupportedPlan
 			}
@@ -154,7 +167,7 @@ func CheckStepEffects(step *agentv1.PlanStep, effects []*agentv1.Effect) error {
 		// container action, so it names itself differently. Both are one effect
 		// answering for one command.
 		if effect.NativeOperationId == "docker-command:"+command.CommandId ||
-			effect.NativeOperationId == "readiness:"+command.CommandId {
+			effect.NativeOperationId == "readiness:"+command.CommandId || effect.NativeOperationId == "app-data:"+command.CommandId {
 			if observed != nil {
 				return ErrPostconditionUnproved
 			}
@@ -179,6 +192,11 @@ func CheckStepEffects(step *agentv1.PlanStep, effects []*agentv1.Effect) error {
 		matched = observed.State == "absent"
 	case agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED:
 		matched = observed.State == "setup_recovered"
+	case agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED:
+		input, receipt := command.Input.GetFinalAppSnapshot(), observed.AppSnapshot
+		matched = observed.State == "snapshot_transferred" && input != nil && receipt != nil && receipt.WriterEpoch == input.WriterEpoch && receipt.TargetNodeId == input.TargetNodeId && receipt.Sequence > 0 && receipt.Sequence <= math.MaxInt64 && observed.NativeOperationId == "app-data:"+command.CommandId && len(receipt.ManifestHash) == sha256.Size
+	case agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT:
+		matched = observed.State == "app_data_absent" && observed.NativeOperationId == "app-data:"+command.CommandId && command.Input.GetRemoveAppData() != nil
 	case agentv1.Postcondition_POSTCONDITION_ENGINE_READY:
 		matched = observed.State == "ready"
 	}

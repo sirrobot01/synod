@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +22,7 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/enrollment"
 	"github.com/sirrobot01/synod/internal/agent/executor"
 	"github.com/sirrobot01/synod/internal/agent/journal"
+	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/controlstream"
@@ -144,7 +146,28 @@ func Run(ctx context.Context, config Config, testBootID string, diagnostics io.W
 		return fmt.Errorf("%w: build the router: %w", ErrExecution, err)
 	}
 	defer routes.Close()
-	execution, err := executor.New(j, native, executor.Options{
+	capabilities := []string{"runtime.docker", controlstream.RouterCapability}
+	var replicas *replication.Server
+	var replicaListener net.Listener
+	if config.AppsDir != "" {
+		if err := os.MkdirAll(config.AppsDir, 0o700); err != nil {
+			return fmt.Errorf("%w: create apps directory %s: %w", ErrConfiguration, config.AppsDir, err)
+		}
+		if err := privateDirectory(config.AppsDir); err != nil {
+			return err
+		}
+		installation, err := uuid.Parse(config.InstallationID)
+		if err != nil {
+			return fmt.Errorf("%w: parse installation_id: %w", ErrConfiguration, err)
+		}
+		replicas = &replication.Server{InstallationID: installation, Root: config.AppsDir, Table: &replication.Table{}, Status: &replication.Status{}, Logger: logger}
+		if replicaListener, err = net.Listen("tcp", config.replicationListen()); err != nil {
+			return fmt.Errorf("%w: listen for replication on %s: %w", ErrConfiguration, config.replicationListen(), err)
+		}
+		defer replicaListener.Close()
+		capabilities = append(capabilities, replication.Capability)
+	}
+	options := executor.Options{
 		Router:         routes,
 		Host:           capacity.Host{ProcRoot: "/proc", StoragePath: config.pool()},
 		BootID:         bootID,
@@ -152,11 +175,20 @@ func Run(ctx context.Context, config Config, testBootID string, diagnostics io.W
 		RuntimeVersion: version,
 		MinFreeBytes:   config.MinFreeBytes,
 		Probers:        probers,
-	})
+	}
+	transportConfig := transport.Config{Endpoints: config.ControllerEndpoints, TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{identity.Certificate}}, Logger: logger, Hello: &agentv1.Hello{InstallationId: config.InstallationID, NodeId: config.NodeID, BootId: bootID, JournalGeneration: j.Identity().JournalGeneration, Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, Capabilities: capabilities, RuntimeVersion: version, ActivePayloadVersions: []uint32{1}}}
+	if replicas != nil {
+		options.Replication, transportConfig.Replicas = replicas.Table, replicas.Status.List
+		options.AppsDir, options.ReplicaStatus = config.AppsDir, replicas.Status
+		options.PushSnapshot = (replication.Client{InstallationID: replicas.InstallationID, Certificate: identity.Certificate, Roots: roots}).Push
+	}
+	execution, err := executor.New(j, native, options)
 	if err != nil {
 		return fmt.Errorf("%w: build the executor: %w", ErrExecution, err)
 	}
-	stream, err := transport.New(transport.Config{Endpoints: config.ControllerEndpoints, TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{identity.Certificate}}, Logger: logger, Hello: &agentv1.Hello{InstallationId: config.InstallationID, NodeId: config.NodeID, BootId: bootID, JournalGeneration: j.Identity().JournalGeneration, Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, Capabilities: []string{"runtime.docker", controlstream.RouterCapability}, RuntimeVersion: version, ActivePayloadVersions: []uint32{1}}, Handle: execution.Handle, Observations: execution.Observations})
+	transportConfig.Handle, transportConfig.Observations = execution.Handle, execution.Observations
+	transportConfig.WriterClock = execution.WriterClock
+	stream, err := transport.New(transportConfig)
 	if err != nil {
 		return fmt.Errorf("%w: build the agent transport: %w", ErrConfiguration, err)
 	}
@@ -166,9 +198,21 @@ func Run(ctx context.Context, config Config, testBootID string, diagnostics io.W
 	stopped := make(chan error, 2)
 	go func() { stopped <- execution.Run(process, stream) }()
 	go func() { stopped <- stream.Run(process) }()
+	serving := make(chan struct{})
+	go func() {
+		defer close(serving)
+		if replicas == nil {
+			return
+		}
+		// A replication failure is logged, not fatal: the node still runs its apps without it.
+		if err := replicas.Serve(process, replicaListener, identity.Certificate, roots); err != nil {
+			logger.Warn("replication_listener_stopped", "error", err)
+		}
+	}()
 	first := <-stopped
 	cancel()
 	second := <-stopped
+	<-serving
 	// Caller cancellation is normal shutdown. A worker failure must remain visible.
 	if (first != nil && !errors.Is(first, context.Canceled)) || (second != nil && !errors.Is(second, context.Canceled)) {
 		return fmt.Errorf("%w: %w", ErrExecution, errors.Join(first, second))
@@ -199,7 +243,7 @@ func connectDocker(ctx context.Context, config Config) (*client.Client, noderunt
 	if err != nil {
 		return nil, nil, "", nil, errors.Join(fmt.Errorf("%w: read the runtime version: %w", ErrInventory, err), api.Close())
 	}
-	native, err := docker.New(api, docker.Options{InstallationID: uuid.MustParse(config.InstallationID), NodeID: uuid.MustParse(config.NodeID)})
+	native, err := docker.New(api, docker.Options{AppsDir: config.AppsDir, InstallationID: uuid.MustParse(config.InstallationID), NodeID: uuid.MustParse(config.NodeID)})
 	if err != nil {
 		return nil, nil, "", nil, errors.Join(fmt.Errorf("%w: build the native runtime: %w", ErrConfiguration, err), api.Close())
 	}

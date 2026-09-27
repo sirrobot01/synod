@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,5 +130,90 @@ func TestGenericContainerLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(source, "absent")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("runtime created the missing bind source: %v", err)
+	}
+}
+
+func TestTier2ContainerUsesLiveStorageAndFences(t *testing.T) {
+	r, api, appID := runtimeFixture(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.options.AppsDir = root
+	live := filepath.Join(root, appID.String(), "live", "config")
+	if err := os.MkdirAll(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.NewString()
+	command := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{ImageDigest: redisFixture, Engine: "generic", NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, Generic: &agentv1.GenericContainerConfig{Image: redisFixture, AppName: "writer", CommandOverride: true, Command: []string{"redis-server", "--save", "", "--appendonly", "no"}, Mounts: []*agentv1.Mount{{Type: "replicated", Source: "config", Target: "/data"}}}}}})
+	if _, err := r.Execute(t.Context(), command, nil); err != nil {
+		t.Fatalf("ensure: %v / %v", err, errors.Unwrap(err))
+	}
+	current, err := api.ContainerInspect(t.Context(), "synod-instance-"+id, client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Container.Config.Labels["synod.tier"] != "2" || len(current.Container.Mounts) != 1 || current.Container.Mounts[0].Source != live {
+		t.Fatalf("mounts: %+v", current.Container.Mounts)
+	}
+	start := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}})
+	if _, err := r.Execute(t.Context(), start, nil); err == nil {
+		t.Fatal("writer started without lease guard")
+	}
+	r.SetWriterLeaseCheck(func(got string) error {
+		if got != appID.String() {
+			return errors.New("wrong app")
+		}
+		return nil
+	})
+	if _, err := r.Execute(t.Context(), start, nil); err != nil {
+		t.Fatal(err)
+	}
+	current, err = api.ContainerInspect(t.Context(), "synod-instance-"+id, client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Container.HostConfig.RestartPolicy.Name != "no" || !current.Container.State.Running {
+		t.Fatalf("writer restart policy/state: %+v %+v", current.Container.HostConfig.RestartPolicy, current.Container.State)
+	}
+	apps, err := r.AppContainers(t.Context())
+	if err != nil || len(apps) != 1 || apps[0].PID <= 0 || !apps[0].Running {
+		t.Fatalf("writer inventory: %+v %v", apps, err)
+	}
+	foreign := apps[0]
+	foreign.AppID = uuid.NewString()
+	if err := r.FenceApp(t.Context(), foreign); !errors.Is(err, runtime.ErrOwnershipConflict) {
+		t.Fatal("foreign fence accepted", err)
+	}
+	if err := r.FenceApp(t.Context(), apps[0]); err != nil {
+		t.Fatal(err)
+	}
+	current, err = api.ContainerInspect(t.Context(), "synod-instance-"+id, client.ContainerInspectOptions{})
+	if err != nil || current.Container.State.Running {
+		t.Fatalf("writer remains running: %+v %v", current.Container.State, err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Fatal("fence removed live data", err)
+	}
+}
+
+func TestFailedPullIsNotAppliedAndRecoversAsAbsent(t *testing.T) {
+	r, _, appID := runtimeFixture(t)
+	r.options.AllowBridgeFixture = false
+	// No registry listens on port 1, so the pull fails without creating anything.
+	image := "127.0.0.1:1/synod-missing@sha256:" + strings.Repeat("0", 64)
+	id := uuid.NewString()
+	command := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
+		ImageDigest: image, Engine: "generic", NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
+		Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "missing", Mounts: []*agentv1.Mount{{Type: "tmpfs", Target: "/data"}}},
+	}}})
+	result, err := r.Execute(t.Context(), command, nil)
+	if !errors.Is(err, runtime.ErrNotApplied) || slices.ContainsFunc(result.Effects, func(effect *agentv1.Effect) bool { return effect.Active || effect.OutcomeUnknown }) {
+		t.Fatalf("failed pull left an open outcome: %+v %v", result, err)
+	}
+	// An agent that restarted during the pull recovers the command from the missing container.
+	result, err = r.Recover(t.Context(), command, nil)
+	if !errors.Is(err, runtime.ErrNotApplied) || len(result.Effects) != 1 || result.Effects[0].State != "absent" || result.Effects[0].Active || result.Effects[0].OutcomeUnknown {
+		t.Fatalf("missing container did not resolve the ensure: %+v %v", result, err)
 	}
 }

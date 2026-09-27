@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func TestCertificateIssuanceAndMutualTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !agentPublic.Equal(leaf.PublicKey) || leaf.IsCA || len(leaf.DNSNames) != 0 || len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth {
+	if !agentPublic.Equal(leaf.PublicKey) || leaf.IsCA || len(leaf.DNSNames) != 0 || !slices.Equal(leaf.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}) {
 		t.Fatal("CSR overrode assigned identity or certificate policy")
 	}
 	expectedURI, _ := agent.URI()
@@ -253,8 +254,8 @@ func TestRejectInvalidIssuance(t *testing.T) {
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, CurrentTime: now.Add(2 * time.Hour), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err == nil {
 		t.Fatal("accepted expired agent")
 	}
-	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err == nil {
-		t.Fatal("agent certificate accepted as server")
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		t.Fatalf("agent certificate refused for replication serving: %v", err)
 	}
 }
 

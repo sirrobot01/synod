@@ -28,6 +28,12 @@ type Options struct {
 	Copies    string
 	Port      uint16
 	Preferred []string
+	Allowed   []string
+	Never     []string
+	// Tier 2 replication settings. Zero values select the defaults.
+	Standbys int
+	Interval time.Duration
+	Failback string
 }
 
 // Import resolves local environment files relative to filename.
@@ -124,6 +130,7 @@ func Import(ctx context.Context, filename string, options Options) (app.AppSpec,
 	}
 	delete(service, "networks")
 	delete(service, "restart")
+	declared, _ := raw["volumes"].(map[string]any)
 	raw = map[string]any{"services": map[string]any{name: service}}
 	absolute, err := filepath.Abs(filename)
 	if err != nil {
@@ -156,12 +163,34 @@ func Import(ctx context.Context, filename string, options Options) (app.AppSpec,
 	}
 	svc = project.Services[name]
 	spec = app.AppSpec{SchemaVersion: 1, Name: cmp.Or(options.Name, name), Tier: cmp.Or(options.Tier, app.TierParallel), Copies: 1, CopiesMode: app.CopiesModeFixed,
-		DevicePreference: app.DevicePreference{Preferred: options.Preferred},
+		DevicePreference: app.DevicePreference{Preferred: options.Preferred, Allowed: options.Allowed, Never: options.Never},
 		Service:          app.ServiceSpec{Image: svc.Image, Command: svc.Command, Entrypoint: svc.Entrypoint, Environment: map[string]string{}},
 		Router:           app.RouterSpec{Protocol: "tcp", Port: options.Port},
 	}
-	if spec.Tier != app.TierParallel {
-		return app.AppSpec{}, fmt.Errorf("Compose import currently supports only tier 3")
+	switch spec.Tier {
+	case app.TierParallel:
+		if options.Standbys != 0 || options.Interval != 0 || options.Failback != "" {
+			return app.AppSpec{}, fmt.Errorf("replication settings apply only to tier 2")
+		}
+	case app.TierSingleWriter:
+		if svc.Deploy != nil && svc.Deploy.Replicas != nil && *svc.Deploy.Replicas != 1 {
+			return app.AppSpec{}, fmt.Errorf("tier 2 runs one active copy; remove deploy.replicas or set it to 1")
+		}
+		if options.Copies != "" && options.Copies != "1" {
+			return app.AppSpec{}, fmt.Errorf("tier 2 runs exactly one active copy")
+		}
+		replication := app.DefaultReplication()
+		replication.Standbys = cmp.Or(options.Standbys, replication.Standbys)
+		replication.Failback = cmp.Or(options.Failback, replication.Failback)
+		if options.Interval != 0 {
+			if options.Interval%time.Second != 0 || options.Interval < 0 || options.Interval/time.Second > math.MaxUint32 {
+				return app.AppSpec{}, fmt.Errorf("replication interval must be a whole number of seconds")
+			}
+			replication.IntervalSeconds = uint32(options.Interval / time.Second)
+		}
+		spec.Replication = &replication
+	default:
+		return app.AppSpec{}, fmt.Errorf("Compose import supports tier 2 and tier 3")
 	}
 	for key, value := range svc.Environment {
 		if value != nil {
@@ -193,7 +222,7 @@ func Import(ctx context.Context, filename string, options Options) (app.AppSpec,
 	}
 	// One ingress route has one backend port. Refuse extra ports until the model can name their routes.
 	if len(svc.Ports) != 1 {
-		return app.AppSpec{}, fmt.Errorf("tier 3 import requires exactly one TCP service port")
+		return app.AppSpec{}, fmt.Errorf("import requires exactly one TCP service port")
 	}
 	port := svc.Ports[0]
 	if port.Target == 0 || port.Target > 65535 || (port.Protocol != "" && port.Protocol != "tcp") {
@@ -217,13 +246,35 @@ func Import(ctx context.Context, filename string, options Options) (app.AppSpec,
 	}
 	spec.Service.Ports = []app.PortSpec{{ContainerPort: uint16(port.Target), Protocol: "tcp"}}
 	for _, volume := range svc.Volumes {
-		if volume.Type != "bind" && volume.Type != "tmpfs" {
+		mount := app.MountSpec{Type: volume.Type, Source: volume.Source, Target: volume.Target, ReadOnly: volume.ReadOnly}
+		switch {
+		case volume.Type == "bind" || volume.Type == "tmpfs":
+			if volume.Bind != nil && (volume.Bind.SELinux != "" || volume.Bind.Propagation != "") {
+				return app.AppSpec{}, fmt.Errorf("bind mount options are unsupported")
+			}
+		case volume.Type == "volume" && spec.Tier == app.TierSingleWriter:
+			if volume.Source == "" {
+				return app.AppSpec{}, fmt.Errorf("anonymous volumes are unsupported; name each tier 2 volume")
+			}
+			if volume.Volume != nil && (volume.Volume.NoCopy || volume.Volume.Subpath != "") {
+				return app.AppSpec{}, fmt.Errorf("volume options are unsupported")
+			}
+			// Synod owns replicated volumes, so a Compose volume cannot choose a driver or an external volume.
+			definition, ok := declared[volume.Source]
+			if !ok {
+				return app.AppSpec{}, fmt.Errorf("declare volume %s in the top-level volumes section", volume.Source)
+			}
+			fields, isMap := definition.(map[string]any)
+			if (definition != nil && !isMap) || len(fields) > 1 || (len(fields) == 1 && fields["driver"] != "local") {
+				return app.AppSpec{}, fmt.Errorf("volume %s must use the local driver without options", volume.Source)
+			}
+			mount.Type = "replicated"
+		case spec.Tier == app.TierParallel:
 			return app.AppSpec{}, fmt.Errorf("tier 3 refuses named volumes; use an external absolute bind path or tmpfs")
+		default:
+			return app.AppSpec{}, fmt.Errorf("tier 2 supports named volumes, absolute bind paths, and tmpfs")
 		}
-		if volume.Bind != nil && (volume.Bind.SELinux != "" || volume.Bind.Propagation != "") {
-			return app.AppSpec{}, fmt.Errorf("bind mount options are unsupported")
-		}
-		spec.Service.Mounts = append(spec.Service.Mounts, app.MountSpec{Type: volume.Type, Source: volume.Source, Target: volume.Target, ReadOnly: volume.ReadOnly})
+		spec.Service.Mounts = append(spec.Service.Mounts, mount)
 	}
 	for _, target := range svc.Tmpfs {
 		if strings.Contains(target, ":") {

@@ -1,9 +1,11 @@
 package journal
 
 import (
-	"google.golang.org/protobuf/encoding/protowire"
 	"maps"
 	"math"
+	"slices"
+
+	"google.golang.org/protobuf/encoding/protowire"
 
 	"github.com/sirrobot01/synod/internal/operation"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -74,24 +76,32 @@ func (j *Journal) barrier(epoch *agentv1.Epoch) (*agentv1.BarrierResult, error) 
 		if record.Epoch.ClusterId != epoch.ClusterId {
 			continue
 		}
+		current := make([]*agentv1.Effect, 0, len(record.Effects)+1)
 		if record.State == Running {
-			result.Drained = false
-			effect := &agentv1.Effect{CommandId: record.ID, ResourceId: record.ResourceID, Active: true, OutcomeUnknown: true, State: "runtime_inspection_required"}
-			size += protowire.SizeTag(4) + protowire.SizeBytes(proto.Size(effect))
-			if size > cluster.InventoryLimit {
-				return nil, j.blockExecution(ErrBusy)
-			}
-			result.Effects = append(result.Effects, effect)
+			current = append(current, &agentv1.Effect{CommandId: record.ID, ResourceId: record.ResourceID, Active: true, OutcomeUnknown: true, State: "runtime_inspection_required"})
 		}
-		for _, effect := range record.Effects {
-			if !effect.Active && !effect.OutcomeUnknown {
+		current = append(current, record.Effects...)
+		for _, effect := range current {
+			// A retained effect with the same identity is older evidence. The current
+			// record replaces it, so repeated epochs never report one effect twice.
+			index := slices.IndexFunc(result.Effects, func(retained *agentv1.Effect) bool {
+				return retained.CommandId == effect.CommandId && retained.ResourceId == effect.ResourceId && retained.NativeOperationId == effect.NativeOperationId
+			})
+			if index < 0 && !effect.Active && !effect.OutcomeUnknown {
 				continue
 			}
 			size += protowire.SizeTag(4) + protowire.SizeBytes(proto.Size(effect))
+			if index >= 0 {
+				size -= protowire.SizeTag(4) + protowire.SizeBytes(proto.Size(result.Effects[index]))
+			}
 			if size > cluster.InventoryLimit {
 				return nil, j.blockExecution(ErrBusy)
 			}
-			result.Effects = append(result.Effects, proto.Clone(effect).(*agentv1.Effect))
+			if index >= 0 {
+				result.Effects[index] = proto.Clone(effect).(*agentv1.Effect)
+			} else {
+				result.Effects = append(result.Effects, proto.Clone(effect).(*agentv1.Effect))
+			}
 			if effect.Active || effect.OutcomeUnknown {
 				result.Drained = false
 			}

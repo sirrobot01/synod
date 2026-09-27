@@ -120,6 +120,7 @@ func NewServer(store *postgres.Store, admin *auth.AdminToken, installationID uui
 				admin.Post("/clusters", server.createCluster)
 				admin.Post("/apps", server.createApp)
 				admin.Get("/apps/{id}", server.getApp)
+				admin.Post("/apps/{id}/move", server.appAction(postgres.MoveAppAPIOperation))
 				admin.Post("/apps/{id}/actions/stop", server.appAction(postgres.StopAppAPIOperation))
 				admin.Post("/apps/{id}/actions/start", server.appAction(postgres.StartAppAPIOperation))
 				admin.Delete("/apps/{id}", server.appAction(postgres.DeleteAppAPIOperation))

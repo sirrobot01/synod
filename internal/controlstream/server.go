@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"slices"
@@ -335,6 +336,9 @@ func (s *Server) receive(ctx context.Context, stream grpc.BidiStreamingServer[ag
 		callbackPeer := current.peer
 		callbackPeer.Capabilities = slices.Clone(callbackPeer.Capabilities)
 		if err := s.config.Handle(ctx, callbackPeer, message); err != nil || ctx.Err() != nil {
+			if err != nil {
+				s.config.Logger.Warn("agent message refused", "node_id", callbackPeer.NodeID, "session_id", callbackPeer.SessionID, "message", fmt.Sprintf("%T", message.Message), "error", err)
+			}
 			return status.Error(codes.Unavailable, "durable receive handling failed")
 		}
 		if ack != nil {
@@ -378,6 +382,9 @@ func (s *Server) publishSession(ctx context.Context, current *session, first *ag
 	callbackPeer := current.peer
 	callbackPeer.Capabilities = slices.Clone(callbackPeer.Capabilities)
 	if err := s.config.Handle(ctx, callbackPeer, first); err != nil || ctx.Err() != nil {
+		if err != nil {
+			s.config.Logger.Warn("agent Hello refused", "node_id", callbackPeer.NodeID, "session_id", callbackPeer.SessionID, "error", err)
+		}
 		return status.Error(codes.Unavailable, "Hello handling failed")
 	}
 

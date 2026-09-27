@@ -66,15 +66,17 @@ func (s *Server) appAction(action string) http.HandlerFunc {
 			s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use one Idempotency-Key and one positive If-Match revision.", uuid.Nil)
 			return
 		}
-		var input *struct{}
+		var input *struct {
+			TargetNodeID uuid.UUID `json:"target_node_id"`
+		}
 		if !s.decodeJSON(w, r, &input) {
 			return
 		}
-		if input == nil {
+		if input == nil || (action != postgres.MoveAppAPIOperation && input.TargetNodeID != uuid.Nil) {
 			s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use an empty JSON object.", uuid.Nil)
 			return
 		}
-		result, err := s.store.AdmitAppAction(r.Context(), postgres.AppActionRequest{Identity: postgres.RequestIdentity{InstallationID: s.installationID, ActorID: identity.actorID, APIOperation: action, IdempotencyKey: keys[0]}, RequestID: identity.requestID, AppID: id, ExpectedRevision: expected})
+		result, err := s.store.AdmitAppAction(r.Context(), postgres.AppActionRequest{Identity: postgres.RequestIdentity{InstallationID: s.installationID, ActorID: identity.actorID, APIOperation: action, IdempotencyKey: keys[0]}, RequestID: identity.requestID, AppID: id, ExpectedRevision: expected, TargetNodeID: input.TargetNodeID})
 		if err != nil {
 			s.storeError(w, r, err)
 			return

@@ -134,21 +134,25 @@ const (
 	Postcondition_POSTCONDITION_CONTAINER_INSPECTED      Postcondition = 7
 	Postcondition_POSTCONDITION_ENGINE_READY             Postcondition = 8
 	Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED Postcondition = 9
+	Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED Postcondition = 10
+	Postcondition_POSTCONDITION_APP_DATA_ABSENT          Postcondition = 11
 )
 
 // Enum value maps for Postcondition.
 var (
 	Postcondition_name = map[int32]string{
-		0: "POSTCONDITION_UNSPECIFIED",
-		1: "POSTCONDITION_VOLUME_EXISTS",
-		2: "POSTCONDITION_NETWORK_EXISTS",
-		3: "POSTCONDITION_CONTAINER_EXISTS",
-		4: "POSTCONDITION_CONTAINER_RUNNING",
-		5: "POSTCONDITION_CONTAINER_STOPPED",
-		6: "POSTCONDITION_CONTAINER_ABSENT",
-		7: "POSTCONDITION_CONTAINER_INSPECTED",
-		8: "POSTCONDITION_ENGINE_READY",
-		9: "POSTCONDITION_POSTGRES_SETUP_RECOVERED",
+		0:  "POSTCONDITION_UNSPECIFIED",
+		1:  "POSTCONDITION_VOLUME_EXISTS",
+		2:  "POSTCONDITION_NETWORK_EXISTS",
+		3:  "POSTCONDITION_CONTAINER_EXISTS",
+		4:  "POSTCONDITION_CONTAINER_RUNNING",
+		5:  "POSTCONDITION_CONTAINER_STOPPED",
+		6:  "POSTCONDITION_CONTAINER_ABSENT",
+		7:  "POSTCONDITION_CONTAINER_INSPECTED",
+		8:  "POSTCONDITION_ENGINE_READY",
+		9:  "POSTCONDITION_POSTGRES_SETUP_RECOVERED",
+		10: "POSTCONDITION_APP_SNAPSHOT_TRANSFERRED",
+		11: "POSTCONDITION_APP_DATA_ABSENT",
 	}
 	Postcondition_value = map[string]int32{
 		"POSTCONDITION_UNSPECIFIED":              0,
@@ -161,6 +165,8 @@ var (
 		"POSTCONDITION_CONTAINER_INSPECTED":      7,
 		"POSTCONDITION_ENGINE_READY":             8,
 		"POSTCONDITION_POSTGRES_SETUP_RECOVERED": 9,
+		"POSTCONDITION_APP_SNAPSHOT_TRANSFERRED": 10,
+		"POSTCONDITION_APP_DATA_ABSENT":          11,
 	}
 )
 
@@ -444,12 +450,15 @@ func (x *Session) GetCapabilities() []string {
 }
 
 type Heartbeat struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Sequence      uint64                 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
-	ObservedAt    *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
-	Observations  []*Observation         `protobuf:"bytes,3,rep,name=observations,proto3" json:"observations,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Sequence     uint64                 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	ObservedAt   *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Observations []*Observation         `protobuf:"bytes,3,rep,name=observations,proto3" json:"observations,omitempty"`
+	Replicas     []*ReplicaStatus       `protobuf:"bytes,4,rep,name=replicas,proto3" json:"replicas,omitempty"`
+	// CLOCK_BOOTTIME in nanoseconds. Zero means unavailable.
+	WriterClockNanos uint64 `protobuf:"varint,5,opt,name=writer_clock_nanos,json=writerClockNanos,proto3" json:"writer_clock_nanos,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -503,6 +512,130 @@ func (x *Heartbeat) GetObservations() []*Observation {
 	return nil
 }
 
+func (x *Heartbeat) GetReplicas() []*ReplicaStatus {
+	if x != nil {
+		return x.Replicas
+	}
+	return nil
+}
+
+func (x *Heartbeat) GetWriterClockNanos() uint64 {
+	if x != nil {
+		return x.WriterClockNanos
+	}
+	return 0
+}
+
+// The newest complete snapshot that this device holds or produced for one tier 2 app.
+type ReplicaStatus struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	AppId       string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	Role        string                 `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
+	Epoch       uint64                 `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Sequence    uint64                 `protobuf:"varint,4,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	CompletedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
+	// Stable code of the last failed snapshot or push. Empty after a success.
+	FailureCode      string `protobuf:"bytes,6,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
+	LastPauseNanos   uint64 `protobuf:"varint,7,opt,name=last_pause_nanos,json=lastPauseNanos,proto3" json:"last_pause_nanos,omitempty"`
+	MaxPauseNanos    uint64 `protobuf:"varint,8,opt,name=max_pause_nanos,json=maxPauseNanos,proto3" json:"max_pause_nanos,omitempty"`
+	SkippedSnapshots uint64 `protobuf:"varint,9,opt,name=skipped_snapshots,json=skippedSnapshots,proto3" json:"skipped_snapshots,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ReplicaStatus) Reset() {
+	*x = ReplicaStatus{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicaStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicaStatus) ProtoMessage() {}
+
+func (x *ReplicaStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicaStatus.ProtoReflect.Descriptor instead.
+func (*ReplicaStatus) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ReplicaStatus) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *ReplicaStatus) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *ReplicaStatus) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *ReplicaStatus) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *ReplicaStatus) GetCompletedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CompletedAt
+	}
+	return nil
+}
+
+func (x *ReplicaStatus) GetFailureCode() string {
+	if x != nil {
+		return x.FailureCode
+	}
+	return ""
+}
+
+func (x *ReplicaStatus) GetLastPauseNanos() uint64 {
+	if x != nil {
+		return x.LastPauseNanos
+	}
+	return 0
+}
+
+func (x *ReplicaStatus) GetMaxPauseNanos() uint64 {
+	if x != nil {
+		return x.MaxPauseNanos
+	}
+	return 0
+}
+
+func (x *ReplicaStatus) GetSkippedSnapshots() uint64 {
+	if x != nil {
+		return x.SkippedSnapshots
+	}
+	return 0
+}
+
 type Observation struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	ResourceId       string                 `protobuf:"bytes,1,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
@@ -518,7 +651,7 @@ type Observation struct {
 
 func (x *Observation) Reset() {
 	*x = Observation{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[4]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -530,7 +663,7 @@ func (x *Observation) String() string {
 func (*Observation) ProtoMessage() {}
 
 func (x *Observation) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[4]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -543,7 +676,7 @@ func (x *Observation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Observation.ProtoReflect.Descriptor instead.
 func (*Observation) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{4}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Observation) GetResourceId() string {
@@ -608,7 +741,7 @@ type Epoch struct {
 
 func (x *Epoch) Reset() {
 	*x = Epoch{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -620,7 +753,7 @@ func (x *Epoch) String() string {
 func (*Epoch) ProtoMessage() {}
 
 func (x *Epoch) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -633,7 +766,7 @@ func (x *Epoch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Epoch.ProtoReflect.Descriptor instead.
 func (*Epoch) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Epoch) GetInstallationId() string {
@@ -680,7 +813,7 @@ type PrepareEpoch struct {
 
 func (x *PrepareEpoch) Reset() {
 	*x = PrepareEpoch{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -692,7 +825,7 @@ func (x *PrepareEpoch) String() string {
 func (*PrepareEpoch) ProtoMessage() {}
 
 func (x *PrepareEpoch) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[6]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -705,7 +838,7 @@ func (x *PrepareEpoch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareEpoch.ProtoReflect.Descriptor instead.
 func (*PrepareEpoch) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *PrepareEpoch) GetEpoch() *Epoch {
@@ -724,7 +857,7 @@ type ActivateEpoch struct {
 
 func (x *ActivateEpoch) Reset() {
 	*x = ActivateEpoch{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -736,7 +869,7 @@ func (x *ActivateEpoch) String() string {
 func (*ActivateEpoch) ProtoMessage() {}
 
 func (x *ActivateEpoch) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[7]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -749,7 +882,7 @@ func (x *ActivateEpoch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActivateEpoch.ProtoReflect.Descriptor instead.
 func (*ActivateEpoch) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{7}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ActivateEpoch) GetEpoch() *Epoch {
@@ -767,13 +900,14 @@ type Effect struct {
 	Active            bool                   `protobuf:"varint,4,opt,name=active,proto3" json:"active,omitempty"`
 	OutcomeUnknown    bool                   `protobuf:"varint,5,opt,name=outcome_unknown,json=outcomeUnknown,proto3" json:"outcome_unknown,omitempty"`
 	State             string                 `protobuf:"bytes,6,opt,name=state,proto3" json:"state,omitempty"`
+	AppSnapshot       *AppSnapshotReceipt    `protobuf:"bytes,7,opt,name=app_snapshot,json=appSnapshot,proto3" json:"app_snapshot,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Effect) Reset() {
 	*x = Effect{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -785,7 +919,7 @@ func (x *Effect) String() string {
 func (*Effect) ProtoMessage() {}
 
 func (x *Effect) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[8]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -798,7 +932,7 @@ func (x *Effect) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Effect.ProtoReflect.Descriptor instead.
 func (*Effect) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Effect) GetCommandId() string {
@@ -843,6 +977,81 @@ func (x *Effect) GetState() string {
 	return ""
 }
 
+func (x *Effect) GetAppSnapshot() *AppSnapshotReceipt {
+	if x != nil {
+		return x.AppSnapshot
+	}
+	return nil
+}
+
+type AppSnapshotReceipt struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WriterEpoch   uint64                 `protobuf:"varint,1,opt,name=writer_epoch,json=writerEpoch,proto3" json:"writer_epoch,omitempty"`
+	Sequence      uint64                 `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	TargetNodeId  string                 `protobuf:"bytes,3,opt,name=target_node_id,json=targetNodeId,proto3" json:"target_node_id,omitempty"`
+	ManifestHash  []byte                 `protobuf:"bytes,4,opt,name=manifest_hash,json=manifestHash,proto3" json:"manifest_hash,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppSnapshotReceipt) Reset() {
+	*x = AppSnapshotReceipt{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppSnapshotReceipt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppSnapshotReceipt) ProtoMessage() {}
+
+func (x *AppSnapshotReceipt) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppSnapshotReceipt.ProtoReflect.Descriptor instead.
+func (*AppSnapshotReceipt) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *AppSnapshotReceipt) GetWriterEpoch() uint64 {
+	if x != nil {
+		return x.WriterEpoch
+	}
+	return 0
+}
+
+func (x *AppSnapshotReceipt) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *AppSnapshotReceipt) GetTargetNodeId() string {
+	if x != nil {
+		return x.TargetNodeId
+	}
+	return ""
+}
+
+func (x *AppSnapshotReceipt) GetManifestHash() []byte {
+	if x != nil {
+		return x.ManifestHash
+	}
+	return nil
+}
+
 type BarrierResult struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	Epoch            *Epoch                 `protobuf:"bytes,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
@@ -856,7 +1065,7 @@ type BarrierResult struct {
 
 func (x *BarrierResult) Reset() {
 	*x = BarrierResult{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -868,7 +1077,7 @@ func (x *BarrierResult) String() string {
 func (*BarrierResult) ProtoMessage() {}
 
 func (x *BarrierResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[9]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -881,7 +1090,7 @@ func (x *BarrierResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BarrierResult.ProtoReflect.Descriptor instead.
 func (*BarrierResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{9}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *BarrierResult) GetEpoch() *Epoch {
@@ -934,7 +1143,7 @@ type SecretReference struct {
 
 func (x *SecretReference) Reset() {
 	*x = SecretReference{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -946,7 +1155,7 @@ func (x *SecretReference) String() string {
 func (*SecretReference) ProtoMessage() {}
 
 func (x *SecretReference) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[10]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -959,7 +1168,7 @@ func (x *SecretReference) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretReference.ProtoReflect.Descriptor instead.
 func (*SecretReference) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{10}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SecretReference) GetCredentialId() string {
@@ -998,7 +1207,7 @@ type SecretMaterial struct {
 
 func (x *SecretMaterial) Reset() {
 	*x = SecretMaterial{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1010,7 +1219,7 @@ func (x *SecretMaterial) String() string {
 func (*SecretMaterial) ProtoMessage() {}
 
 func (x *SecretMaterial) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1023,7 +1232,7 @@ func (x *SecretMaterial) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretMaterial.ProtoReflect.Descriptor instead.
 func (*SecretMaterial) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SecretMaterial) GetCredentialId() string {
@@ -1066,7 +1275,7 @@ type SecretEnv struct {
 
 func (x *SecretEnv) Reset() {
 	*x = SecretEnv{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1078,7 +1287,7 @@ func (x *SecretEnv) String() string {
 func (*SecretEnv) ProtoMessage() {}
 
 func (x *SecretEnv) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1091,7 +1300,7 @@ func (x *SecretEnv) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretEnv.ProtoReflect.Descriptor instead.
 func (*SecretEnv) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SecretEnv) GetName() string {
@@ -1122,7 +1331,7 @@ type PlainEnv struct {
 
 func (x *PlainEnv) Reset() {
 	*x = PlainEnv{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1134,7 +1343,7 @@ func (x *PlainEnv) String() string {
 func (*PlainEnv) ProtoMessage() {}
 
 func (x *PlainEnv) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[13]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1147,7 +1356,7 @@ func (x *PlainEnv) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlainEnv.ProtoReflect.Descriptor instead.
 func (*PlainEnv) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PlainEnv) GetName() string {
@@ -1176,7 +1385,7 @@ type PortBinding struct {
 
 func (x *PortBinding) Reset() {
 	*x = PortBinding{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1188,7 +1397,7 @@ func (x *PortBinding) String() string {
 func (*PortBinding) ProtoMessage() {}
 
 func (x *PortBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[14]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1201,7 +1410,7 @@ func (x *PortBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PortBinding.ProtoReflect.Descriptor instead.
 func (*PortBinding) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *PortBinding) GetHostAddress() string {
@@ -1241,7 +1450,7 @@ type EnsureVolume struct {
 
 func (x *EnsureVolume) Reset() {
 	*x = EnsureVolume{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1253,7 +1462,7 @@ func (x *EnsureVolume) String() string {
 func (*EnsureVolume) ProtoMessage() {}
 
 func (x *EnsureVolume) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[15]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1266,7 +1475,7 @@ func (x *EnsureVolume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureVolume.ProtoReflect.Descriptor instead.
 func (*EnsureVolume) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *EnsureVolume) GetVolumeId() string {
@@ -1285,7 +1494,7 @@ type EnsureNetwork struct {
 
 func (x *EnsureNetwork) Reset() {
 	*x = EnsureNetwork{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1297,7 +1506,7 @@ func (x *EnsureNetwork) String() string {
 func (*EnsureNetwork) ProtoMessage() {}
 
 func (x *EnsureNetwork) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[16]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1310,7 +1519,7 @@ func (x *EnsureNetwork) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureNetwork.ProtoReflect.Descriptor instead.
 func (*EnsureNetwork) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{16}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *EnsureNetwork) GetNetworkId() string {
@@ -1345,7 +1554,7 @@ type EnsureContainer struct {
 
 func (x *EnsureContainer) Reset() {
 	*x = EnsureContainer{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1357,7 +1566,7 @@ func (x *EnsureContainer) String() string {
 func (*EnsureContainer) ProtoMessage() {}
 
 func (x *EnsureContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[17]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1370,7 +1579,7 @@ func (x *EnsureContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureContainer.ProtoReflect.Descriptor instead.
 func (*EnsureContainer) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{17}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *EnsureContainer) GetImageDigest() string {
@@ -1482,7 +1691,7 @@ type GenericContainerConfig struct {
 
 func (x *GenericContainerConfig) Reset() {
 	*x = GenericContainerConfig{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1494,7 +1703,7 @@ func (x *GenericContainerConfig) String() string {
 func (*GenericContainerConfig) ProtoMessage() {}
 
 func (x *GenericContainerConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[18]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1507,7 +1716,7 @@ func (x *GenericContainerConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenericContainerConfig.ProtoReflect.Descriptor instead.
 func (*GenericContainerConfig) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{18}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *GenericContainerConfig) GetImage() string {
@@ -1585,7 +1794,7 @@ type Mount struct {
 
 func (x *Mount) Reset() {
 	*x = Mount{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1597,7 +1806,7 @@ func (x *Mount) String() string {
 func (*Mount) ProtoMessage() {}
 
 func (x *Mount) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[19]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1610,7 +1819,7 @@ func (x *Mount) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Mount.ProtoReflect.Descriptor instead.
 func (*Mount) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Mount) GetSource() string {
@@ -1656,7 +1865,7 @@ type HealthCheckConfig struct {
 
 func (x *HealthCheckConfig) Reset() {
 	*x = HealthCheckConfig{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[20]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1668,7 +1877,7 @@ func (x *HealthCheckConfig) String() string {
 func (*HealthCheckConfig) ProtoMessage() {}
 
 func (x *HealthCheckConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[20]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1681,7 +1890,7 @@ func (x *HealthCheckConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthCheckConfig.ProtoReflect.Descriptor instead.
 func (*HealthCheckConfig) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{20}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *HealthCheckConfig) GetType() string {
@@ -1748,7 +1957,7 @@ type PostgresContainerConfig struct {
 
 func (x *PostgresContainerConfig) Reset() {
 	*x = PostgresContainerConfig{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[21]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1760,7 +1969,7 @@ func (x *PostgresContainerConfig) String() string {
 func (*PostgresContainerConfig) ProtoMessage() {}
 
 func (x *PostgresContainerConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[21]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1773,7 +1982,7 @@ func (x *PostgresContainerConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PostgresContainerConfig.ProtoReflect.Descriptor instead.
 func (*PostgresContainerConfig) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{21}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *PostgresContainerConfig) GetPort() uint32 {
@@ -1827,7 +2036,7 @@ type RedisContainerConfig struct {
 
 func (x *RedisContainerConfig) Reset() {
 	*x = RedisContainerConfig{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[22]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1839,7 +2048,7 @@ func (x *RedisContainerConfig) String() string {
 func (*RedisContainerConfig) ProtoMessage() {}
 
 func (x *RedisContainerConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[22]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1852,7 +2061,7 @@ func (x *RedisContainerConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RedisContainerConfig.ProtoReflect.Descriptor instead.
 func (*RedisContainerConfig) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{22}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *RedisContainerConfig) GetPort() uint32 {
@@ -1908,7 +2117,7 @@ type RedisUpstream struct {
 
 func (x *RedisUpstream) Reset() {
 	*x = RedisUpstream{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[23]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1920,7 +2129,7 @@ func (x *RedisUpstream) String() string {
 func (*RedisUpstream) ProtoMessage() {}
 
 func (x *RedisUpstream) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[23]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1933,7 +2142,7 @@ func (x *RedisUpstream) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RedisUpstream.ProtoReflect.Descriptor instead.
 func (*RedisUpstream) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{23}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *RedisUpstream) GetAddress() string {
@@ -1961,7 +2170,7 @@ type RedisReplicationCheck struct {
 
 func (x *RedisReplicationCheck) Reset() {
 	*x = RedisReplicationCheck{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[24]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1973,7 +2182,7 @@ func (x *RedisReplicationCheck) String() string {
 func (*RedisReplicationCheck) ProtoMessage() {}
 
 func (x *RedisReplicationCheck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[24]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1986,7 +2195,7 @@ func (x *RedisReplicationCheck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RedisReplicationCheck.ProtoReflect.Descriptor instead.
 func (*RedisReplicationCheck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{24}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *RedisReplicationCheck) GetExpectedRole() string {
@@ -2013,7 +2222,7 @@ type StartContainer struct {
 
 func (x *StartContainer) Reset() {
 	*x = StartContainer{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[25]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2025,7 +2234,7 @@ func (x *StartContainer) String() string {
 func (*StartContainer) ProtoMessage() {}
 
 func (x *StartContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[25]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2038,7 +2247,7 @@ func (x *StartContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartContainer.ProtoReflect.Descriptor instead.
 func (*StartContainer) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{25}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *StartContainer) GetAllowInitialization() bool {
@@ -2057,7 +2266,7 @@ type RecoverPostgresSetup struct {
 
 func (x *RecoverPostgresSetup) Reset() {
 	*x = RecoverPostgresSetup{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[26]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2069,7 +2278,7 @@ func (x *RecoverPostgresSetup) String() string {
 func (*RecoverPostgresSetup) ProtoMessage() {}
 
 func (x *RecoverPostgresSetup) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[26]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2082,7 +2291,7 @@ func (x *RecoverPostgresSetup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoverPostgresSetup.ProtoReflect.Descriptor instead.
 func (*RecoverPostgresSetup) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{26}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *RecoverPostgresSetup) GetPostgres() *PostgresContainerConfig {
@@ -2101,7 +2310,7 @@ type StopContainer struct {
 
 func (x *StopContainer) Reset() {
 	*x = StopContainer{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[27]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2113,7 +2322,7 @@ func (x *StopContainer) String() string {
 func (*StopContainer) ProtoMessage() {}
 
 func (x *StopContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[27]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2126,7 +2335,7 @@ func (x *StopContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopContainer.ProtoReflect.Descriptor instead.
 func (*StopContainer) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{27}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *StopContainer) GetGracePeriod() *durationpb.Duration {
@@ -2144,7 +2353,7 @@ type RemoveContainer struct {
 
 func (x *RemoveContainer) Reset() {
 	*x = RemoveContainer{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[28]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2156,7 +2365,7 @@ func (x *RemoveContainer) String() string {
 func (*RemoveContainer) ProtoMessage() {}
 
 func (x *RemoveContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[28]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2169,7 +2378,7 @@ func (x *RemoveContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveContainer.ProtoReflect.Descriptor instead.
 func (*RemoveContainer) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{28}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{30}
 }
 
 type InspectContainer struct {
@@ -2180,7 +2389,7 @@ type InspectContainer struct {
 
 func (x *InspectContainer) Reset() {
 	*x = InspectContainer{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2192,7 +2401,7 @@ func (x *InspectContainer) String() string {
 func (*InspectContainer) ProtoMessage() {}
 
 func (x *InspectContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[29]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2205,7 +2414,7 @@ func (x *InspectContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InspectContainer.ProtoReflect.Descriptor instead.
 func (*InspectContainer) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{29}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{31}
 }
 
 // Read native absence without stopping or removing a container.
@@ -2217,7 +2426,7 @@ type VerifyContainerAbsent struct {
 
 func (x *VerifyContainerAbsent) Reset() {
 	*x = VerifyContainerAbsent{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2229,7 +2438,7 @@ func (x *VerifyContainerAbsent) String() string {
 func (*VerifyContainerAbsent) ProtoMessage() {}
 
 func (x *VerifyContainerAbsent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[30]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2242,7 +2451,7 @@ func (x *VerifyContainerAbsent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerifyContainerAbsent.ProtoReflect.Descriptor instead.
 func (*VerifyContainerAbsent) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{30}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{32}
 }
 
 // Check that the engine answers through the endpoint it publishes.
@@ -2269,7 +2478,7 @@ type CheckReadiness struct {
 
 func (x *CheckReadiness) Reset() {
 	*x = CheckReadiness{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2281,7 +2490,7 @@ func (x *CheckReadiness) String() string {
 func (*CheckReadiness) ProtoMessage() {}
 
 func (x *CheckReadiness) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[31]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2294,7 +2503,7 @@ func (x *CheckReadiness) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckReadiness.ProtoReflect.Descriptor instead.
 func (*CheckReadiness) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{31}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *CheckReadiness) GetAddress() string {
@@ -2365,6 +2574,8 @@ type CommandInput struct {
 	//	*CommandInput_CheckReadiness
 	//	*CommandInput_RecoverPostgresSetup
 	//	*CommandInput_VerifyContainerAbsent
+	//	*CommandInput_FinalAppSnapshot
+	//	*CommandInput_RemoveAppData
 	Payload       isCommandInput_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2372,7 +2583,7 @@ type CommandInput struct {
 
 func (x *CommandInput) Reset() {
 	*x = CommandInput{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2384,7 +2595,7 @@ func (x *CommandInput) String() string {
 func (*CommandInput) ProtoMessage() {}
 
 func (x *CommandInput) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[32]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2397,7 +2608,7 @@ func (x *CommandInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandInput.ProtoReflect.Descriptor instead.
 func (*CommandInput) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{32}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *CommandInput) GetResourceId() string {
@@ -2525,6 +2736,24 @@ func (x *CommandInput) GetVerifyContainerAbsent() *VerifyContainerAbsent {
 	return nil
 }
 
+func (x *CommandInput) GetFinalAppSnapshot() *FinalAppSnapshot {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandInput_FinalAppSnapshot); ok {
+			return x.FinalAppSnapshot
+		}
+	}
+	return nil
+}
+
+func (x *CommandInput) GetRemoveAppData() *RemoveAppData {
+	if x != nil {
+		if x, ok := x.Payload.(*CommandInput_RemoveAppData); ok {
+			return x.RemoveAppData
+		}
+	}
+	return nil
+}
+
 type isCommandInput_Payload interface {
 	isCommandInput_Payload()
 }
@@ -2569,6 +2798,14 @@ type CommandInput_VerifyContainerAbsent struct {
 	VerifyContainerAbsent *VerifyContainerAbsent `protobuf:"bytes,23,opt,name=verify_container_absent,json=verifyContainerAbsent,proto3,oneof"`
 }
 
+type CommandInput_FinalAppSnapshot struct {
+	FinalAppSnapshot *FinalAppSnapshot `protobuf:"bytes,24,opt,name=final_app_snapshot,json=finalAppSnapshot,proto3,oneof"`
+}
+
+type CommandInput_RemoveAppData struct {
+	RemoveAppData *RemoveAppData `protobuf:"bytes,25,opt,name=remove_app_data,json=removeAppData,proto3,oneof"`
+}
+
 func (*CommandInput_EnsureVolume) isCommandInput_Payload() {}
 
 func (*CommandInput_EnsureNetwork) isCommandInput_Payload() {}
@@ -2589,6 +2826,106 @@ func (*CommandInput_RecoverPostgresSetup) isCommandInput_Payload() {}
 
 func (*CommandInput_VerifyContainerAbsent) isCommandInput_Payload() {}
 
+func (*CommandInput_FinalAppSnapshot) isCommandInput_Payload() {}
+
+func (*CommandInput_RemoveAppData) isCommandInput_Payload() {}
+
+type FinalAppSnapshot struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WriterEpoch   uint64                 `protobuf:"varint,1,opt,name=writer_epoch,json=writerEpoch,proto3" json:"writer_epoch,omitempty"`
+	TargetNodeId  string                 `protobuf:"bytes,2,opt,name=target_node_id,json=targetNodeId,proto3" json:"target_node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FinalAppSnapshot) Reset() {
+	*x = FinalAppSnapshot{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FinalAppSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FinalAppSnapshot) ProtoMessage() {}
+
+func (x *FinalAppSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FinalAppSnapshot.ProtoReflect.Descriptor instead.
+func (*FinalAppSnapshot) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *FinalAppSnapshot) GetWriterEpoch() uint64 {
+	if x != nil {
+		return x.WriterEpoch
+	}
+	return 0
+}
+
+func (x *FinalAppSnapshot) GetTargetNodeId() string {
+	if x != nil {
+		return x.TargetNodeId
+	}
+	return ""
+}
+
+type RemoveAppData struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WriterEpoch   uint64                 `protobuf:"varint,1,opt,name=writer_epoch,json=writerEpoch,proto3" json:"writer_epoch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveAppData) Reset() {
+	*x = RemoveAppData{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveAppData) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveAppData) ProtoMessage() {}
+
+func (x *RemoveAppData) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveAppData.ProtoReflect.Descriptor instead.
+func (*RemoveAppData) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *RemoveAppData) GetWriterEpoch() uint64 {
+	if x != nil {
+		return x.WriterEpoch
+	}
+	return 0
+}
+
 type Command struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Epoch           *Epoch                 `protobuf:"bytes,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
@@ -2606,7 +2943,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2618,7 +2955,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[33]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2631,7 +2968,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{33}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *Command) GetEpoch() *Epoch {
@@ -2709,7 +3046,7 @@ type CommandInspectionRequest struct {
 
 func (x *CommandInspectionRequest) Reset() {
 	*x = CommandInspectionRequest{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2721,7 +3058,7 @@ func (x *CommandInspectionRequest) String() string {
 func (*CommandInspectionRequest) ProtoMessage() {}
 
 func (x *CommandInspectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[34]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2734,7 +3071,7 @@ func (x *CommandInspectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandInspectionRequest.ProtoReflect.Descriptor instead.
 func (*CommandInspectionRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{34}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *CommandInspectionRequest) GetRequestId() string {
@@ -2772,7 +3109,7 @@ type CommandInspectionResult struct {
 
 func (x *CommandInspectionResult) Reset() {
 	*x = CommandInspectionResult{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2784,7 +3121,7 @@ func (x *CommandInspectionResult) String() string {
 func (*CommandInspectionResult) ProtoMessage() {}
 
 func (x *CommandInspectionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[35]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2797,7 +3134,7 @@ func (x *CommandInspectionResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandInspectionResult.ProtoReflect.Descriptor instead.
 func (*CommandInspectionResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{35}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *CommandInspectionResult) GetRequestId() string {
@@ -2856,7 +3193,7 @@ type AdmissionAck struct {
 
 func (x *AdmissionAck) Reset() {
 	*x = AdmissionAck{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2868,7 +3205,7 @@ func (x *AdmissionAck) String() string {
 func (*AdmissionAck) ProtoMessage() {}
 
 func (x *AdmissionAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[36]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2881,7 +3218,7 @@ func (x *AdmissionAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdmissionAck.ProtoReflect.Descriptor instead.
 func (*AdmissionAck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{36}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *AdmissionAck) GetDeliveryAttemptId() string {
@@ -2939,7 +3276,7 @@ type Progress struct {
 
 func (x *Progress) Reset() {
 	*x = Progress{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[37]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2951,7 +3288,7 @@ func (x *Progress) String() string {
 func (*Progress) ProtoMessage() {}
 
 func (x *Progress) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[37]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2964,7 +3301,7 @@ func (x *Progress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Progress.ProtoReflect.Descriptor instead.
 func (*Progress) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{37}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *Progress) GetEpoch() *Epoch {
@@ -3017,7 +3354,7 @@ type TerminalResult struct {
 
 func (x *TerminalResult) Reset() {
 	*x = TerminalResult{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[38]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3029,7 +3366,7 @@ func (x *TerminalResult) String() string {
 func (*TerminalResult) ProtoMessage() {}
 
 func (x *TerminalResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[38]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3042,7 +3379,7 @@ func (x *TerminalResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalResult.ProtoReflect.Descriptor instead.
 func (*TerminalResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{38}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *TerminalResult) GetEpoch() *Epoch {
@@ -3105,7 +3442,7 @@ type ResultAck struct {
 
 func (x *ResultAck) Reset() {
 	*x = ResultAck{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[39]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3117,7 +3454,7 @@ func (x *ResultAck) String() string {
 func (*ResultAck) ProtoMessage() {}
 
 func (x *ResultAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[39]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3130,7 +3467,7 @@ func (x *ResultAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultAck.ProtoReflect.Descriptor instead.
 func (*ResultAck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{39}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ResultAck) GetCommandId() string {
@@ -3164,7 +3501,7 @@ type CancelCommand struct {
 
 func (x *CancelCommand) Reset() {
 	*x = CancelCommand{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[40]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3176,7 +3513,7 @@ func (x *CancelCommand) String() string {
 func (*CancelCommand) ProtoMessage() {}
 
 func (x *CancelCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[40]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3189,7 +3526,7 @@ func (x *CancelCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelCommand.ProtoReflect.Descriptor instead.
 func (*CancelCommand) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{40}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *CancelCommand) GetCommandId() string {
@@ -3218,7 +3555,7 @@ type CancellationResult struct {
 
 func (x *CancellationResult) Reset() {
 	*x = CancellationResult{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[41]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3230,7 +3567,7 @@ func (x *CancellationResult) String() string {
 func (*CancellationResult) ProtoMessage() {}
 
 func (x *CancellationResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[41]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3243,7 +3580,7 @@ func (x *CancellationResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancellationResult.ProtoReflect.Descriptor instead.
 func (*CancellationResult) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{41}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *CancellationResult) GetCommandId() string {
@@ -3284,7 +3621,7 @@ type InventoryRequest struct {
 
 func (x *InventoryRequest) Reset() {
 	*x = InventoryRequest{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[42]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3296,7 +3633,7 @@ func (x *InventoryRequest) String() string {
 func (*InventoryRequest) ProtoMessage() {}
 
 func (x *InventoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[42]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3309,7 +3646,7 @@ func (x *InventoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InventoryRequest.ProtoReflect.Descriptor instead.
 func (*InventoryRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{42}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *InventoryRequest) GetCursor() string {
@@ -3344,13 +3681,14 @@ type CapacityRequest struct {
 	// mapping by looking at the host. It measures what it is told to measure and
 	// echoes the pair back.
 	Known         []*KnownReservation `protobuf:"bytes,7,rep,name=known,proto3" json:"known,omitempty"`
+	Paths         []string            `protobuf:"bytes,8,rep,name=paths,proto3" json:"paths,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CapacityRequest) Reset() {
 	*x = CapacityRequest{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[43]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3362,7 +3700,7 @@ func (x *CapacityRequest) String() string {
 func (*CapacityRequest) ProtoMessage() {}
 
 func (x *CapacityRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[43]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3375,7 +3713,7 @@ func (x *CapacityRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapacityRequest.ProtoReflect.Descriptor instead.
 func (*CapacityRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{43}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *CapacityRequest) GetProbeId() string {
@@ -3427,6 +3765,13 @@ func (x *CapacityRequest) GetKnown() []*KnownReservation {
 	return nil
 }
 
+func (x *CapacityRequest) GetPaths() []string {
+	if x != nil {
+		return x.Paths
+	}
+	return nil
+}
+
 type KnownReservation struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ReservationId string                 `protobuf:"bytes,1,opt,name=reservation_id,json=reservationId,proto3" json:"reservation_id,omitempty"`
@@ -3437,7 +3782,7 @@ type KnownReservation struct {
 
 func (x *KnownReservation) Reset() {
 	*x = KnownReservation{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[44]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3449,7 +3794,7 @@ func (x *KnownReservation) String() string {
 func (*KnownReservation) ProtoMessage() {}
 
 func (x *KnownReservation) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[44]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3462,7 +3807,7 @@ func (x *KnownReservation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KnownReservation.ProtoReflect.Descriptor instead.
 func (*KnownReservation) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{44}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *KnownReservation) GetReservationId() string {
@@ -3490,7 +3835,7 @@ type ResourceVector struct {
 
 func (x *ResourceVector) Reset() {
 	*x = ResourceVector{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[45]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3502,7 +3847,7 @@ func (x *ResourceVector) String() string {
 func (*ResourceVector) ProtoMessage() {}
 
 func (x *ResourceVector) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[45]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3515,7 +3860,7 @@ func (x *ResourceVector) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceVector.ProtoReflect.Descriptor instead.
 func (*ResourceVector) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{45}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *ResourceVector) GetCpuMillicores() int64 {
@@ -3550,7 +3895,7 @@ type ReservationUsage struct {
 
 func (x *ReservationUsage) Reset() {
 	*x = ReservationUsage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[46]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3562,7 +3907,7 @@ func (x *ReservationUsage) String() string {
 func (*ReservationUsage) ProtoMessage() {}
 
 func (x *ReservationUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[46]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3575,7 +3920,7 @@ func (x *ReservationUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReservationUsage.ProtoReflect.Descriptor instead.
 func (*ReservationUsage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{46}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *ReservationUsage) GetReservationId() string {
@@ -3614,13 +3959,14 @@ type CapacityReport struct {
 	Capacity          *ResourceVector        `protobuf:"bytes,9,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	Used              *ResourceVector        `protobuf:"bytes,10,opt,name=used,proto3" json:"used,omitempty"`
 	Reservations      []*ReservationUsage    `protobuf:"bytes,11,rep,name=reservations,proto3" json:"reservations,omitempty"`
+	ExistingPaths     []string               `protobuf:"bytes,12,rep,name=existing_paths,json=existingPaths,proto3" json:"existing_paths,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
 
 func (x *CapacityReport) Reset() {
 	*x = CapacityReport{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[47]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3632,7 +3978,7 @@ func (x *CapacityReport) String() string {
 func (*CapacityReport) ProtoMessage() {}
 
 func (x *CapacityReport) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[47]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3645,7 +3991,7 @@ func (x *CapacityReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapacityReport.ProtoReflect.Descriptor instead.
 func (*CapacityReport) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{47}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *CapacityReport) GetProbeId() string {
@@ -3725,6 +4071,13 @@ func (x *CapacityReport) GetReservations() []*ReservationUsage {
 	return nil
 }
 
+func (x *CapacityReport) GetExistingPaths() []string {
+	if x != nil {
+		return x.ExistingPaths
+	}
+	return nil
+}
+
 type InventoryPage struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	Resources  []*Observation         `protobuf:"bytes,1,rep,name=resources,proto3" json:"resources,omitempty"`
@@ -3747,7 +4100,7 @@ type InventoryPage struct {
 
 func (x *InventoryPage) Reset() {
 	*x = InventoryPage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[48]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3759,7 +4112,7 @@ func (x *InventoryPage) String() string {
 func (*InventoryPage) ProtoMessage() {}
 
 func (x *InventoryPage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[48]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3772,7 +4125,7 @@ func (x *InventoryPage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InventoryPage.ProtoReflect.Descriptor instead.
 func (*InventoryPage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{48}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *InventoryPage) GetResources() []*Observation {
@@ -3831,7 +4184,7 @@ type DriftItem struct {
 
 func (x *DriftItem) Reset() {
 	*x = DriftItem{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[49]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3843,7 +4196,7 @@ func (x *DriftItem) String() string {
 func (*DriftItem) ProtoMessage() {}
 
 func (x *DriftItem) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[49]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3856,7 +4209,7 @@ func (x *DriftItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DriftItem.ProtoReflect.Descriptor instead.
 func (*DriftItem) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{49}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *DriftItem) GetKind() string {
@@ -3925,7 +4278,7 @@ type ProtocolError struct {
 
 func (x *ProtocolError) Reset() {
 	*x = ProtocolError{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[50]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3937,7 +4290,7 @@ func (x *ProtocolError) String() string {
 func (*ProtocolError) ProtoMessage() {}
 
 func (x *ProtocolError) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[50]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3950,7 +4303,7 @@ func (x *ProtocolError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtocolError.ProtoReflect.Descriptor instead.
 func (*ProtocolError) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{50}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *ProtocolError) GetCode() string {
@@ -3979,7 +4332,7 @@ type RouteTable struct {
 
 func (x *RouteTable) Reset() {
 	*x = RouteTable{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[51]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3991,7 +4344,7 @@ func (x *RouteTable) String() string {
 func (*RouteTable) ProtoMessage() {}
 
 func (x *RouteTable) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[51]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4004,7 +4357,7 @@ func (x *RouteTable) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteTable.ProtoReflect.Descriptor instead.
 func (*RouteTable) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{51}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *RouteTable) GetSessionId() string {
@@ -4042,7 +4395,7 @@ type AppRoute struct {
 
 func (x *AppRoute) Reset() {
 	*x = AppRoute{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[52]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4054,7 +4407,7 @@ func (x *AppRoute) String() string {
 func (*AppRoute) ProtoMessage() {}
 
 func (x *AppRoute) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[52]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4067,7 +4420,7 @@ func (x *AppRoute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppRoute.ProtoReflect.Descriptor instead.
 func (*AppRoute) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{52}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *AppRoute) GetAppId() string {
@@ -4116,7 +4469,7 @@ type RouteAck struct {
 
 func (x *RouteAck) Reset() {
 	*x = RouteAck{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[53]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4128,7 +4481,7 @@ func (x *RouteAck) String() string {
 func (*RouteAck) ProtoMessage() {}
 
 func (x *RouteAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[53]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4141,7 +4494,7 @@ func (x *RouteAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteAck.ProtoReflect.Descriptor instead.
 func (*RouteAck) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{53}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *RouteAck) GetSessionId() string {
@@ -4165,6 +4518,769 @@ func (x *RouteAck) GetFailureCode() string {
 	return ""
 }
 
+// A complete replication snapshot for one authenticated agent session.
+type ReplicationTable struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Revision      uint64                 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
+	Apps          []*AppReplication      `protobuf:"bytes,3,rep,name=apps,proto3" json:"apps,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicationTable) Reset() {
+	*x = ReplicationTable{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[58]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicationTable) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicationTable) ProtoMessage() {}
+
+func (x *ReplicationTable) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[58]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicationTable.ProtoReflect.Descriptor instead.
+func (*ReplicationTable) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{58}
+}
+
+func (x *ReplicationTable) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ReplicationTable) GetRevision() uint64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *ReplicationTable) GetApps() []*AppReplication {
+	if x != nil {
+		return x.Apps
+	}
+	return nil
+}
+
+type AppReplication struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	AppId string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	// The writer epoch. Snapshots from an older epoch are refused.
+	Epoch uint64 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	// "active" pushes to every peer. "standby" accepts pushes from its one peer.
+	Role            string         `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
+	Peers           []*ReplicaPeer `protobuf:"bytes,4,rep,name=peers,proto3" json:"peers,omitempty"`
+	IntervalSeconds uint32         `protobuf:"varint,5,opt,name=interval_seconds,json=intervalSeconds,proto3" json:"interval_seconds,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *AppReplication) Reset() {
+	*x = AppReplication{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[59]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppReplication) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppReplication) ProtoMessage() {}
+
+func (x *AppReplication) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[59]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppReplication.ProtoReflect.Descriptor instead.
+func (*AppReplication) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{59}
+}
+
+func (x *AppReplication) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *AppReplication) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *AppReplication) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *AppReplication) GetPeers() []*ReplicaPeer {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
+func (x *AppReplication) GetIntervalSeconds() uint32 {
+	if x != nil {
+		return x.IntervalSeconds
+	}
+	return 0
+}
+
+// A lease is valid only for this session and the assigned active epoch.
+type WriterLease struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	SessionId string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	AppId     string                 `protobuf:"bytes,2,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	Epoch     uint64                 `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Seconds   uint32                 `protobuf:"varint,4,opt,name=seconds,proto3" json:"seconds,omitempty"`
+	// Absolute deadline on the agent clock, based on a received heartbeat.
+	ExpiresAtBootNanos uint64 `protobuf:"varint,5,opt,name=expires_at_boot_nanos,json=expiresAtBootNanos,proto3" json:"expires_at_boot_nanos,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *WriterLease) Reset() {
+	*x = WriterLease{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[60]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WriterLease) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WriterLease) ProtoMessage() {}
+
+func (x *WriterLease) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[60]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WriterLease.ProtoReflect.Descriptor instead.
+func (*WriterLease) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{60}
+}
+
+func (x *WriterLease) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *WriterLease) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *WriterLease) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *WriterLease) GetSeconds() uint32 {
+	if x != nil {
+		return x.Seconds
+	}
+	return 0
+}
+
+func (x *WriterLease) GetExpiresAtBootNanos() uint64 {
+	if x != nil {
+		return x.ExpiresAtBootNanos
+	}
+	return 0
+}
+
+type ReplicaPeer struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	NodeId string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	// host:port of the peer's replication listener.
+	Address       string `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicaPeer) Reset() {
+	*x = ReplicaPeer{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[61]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicaPeer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicaPeer) ProtoMessage() {}
+
+func (x *ReplicaPeer) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[61]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicaPeer.ProtoReflect.Descriptor instead.
+func (*ReplicaPeer) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{61}
+}
+
+func (x *ReplicaPeer) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *ReplicaPeer) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+type ReplicationAck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Revision      uint64                 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
+	FailureCode   string                 `protobuf:"bytes,3,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicationAck) Reset() {
+	*x = ReplicationAck{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[62]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicationAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicationAck) ProtoMessage() {}
+
+func (x *ReplicationAck) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[62]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicationAck.ProtoReflect.Descriptor instead.
+func (*ReplicationAck) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{62}
+}
+
+func (x *ReplicationAck) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ReplicationAck) GetRevision() uint64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *ReplicationAck) GetFailureCode() string {
+	if x != nil {
+		return x.FailureCode
+	}
+	return ""
+}
+
+type PushRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Message:
+	//
+	//	*PushRequest_Manifest
+	//	*PushRequest_Block
+	Message       isPushRequest_Message `protobuf_oneof:"message"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PushRequest) Reset() {
+	*x = PushRequest{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[63]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PushRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PushRequest) ProtoMessage() {}
+
+func (x *PushRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[63]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PushRequest.ProtoReflect.Descriptor instead.
+func (*PushRequest) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{63}
+}
+
+func (x *PushRequest) GetMessage() isPushRequest_Message {
+	if x != nil {
+		return x.Message
+	}
+	return nil
+}
+
+func (x *PushRequest) GetManifest() *PushManifest {
+	if x != nil {
+		if x, ok := x.Message.(*PushRequest_Manifest); ok {
+			return x.Manifest
+		}
+	}
+	return nil
+}
+
+func (x *PushRequest) GetBlock() *ReplicaBlock {
+	if x != nil {
+		if x, ok := x.Message.(*PushRequest_Block); ok {
+			return x.Block
+		}
+	}
+	return nil
+}
+
+type isPushRequest_Message interface {
+	isPushRequest_Message()
+}
+
+type PushRequest_Manifest struct {
+	Manifest *PushManifest `protobuf:"bytes,1,opt,name=manifest,proto3,oneof"`
+}
+
+type PushRequest_Block struct {
+	Block *ReplicaBlock `protobuf:"bytes,2,opt,name=block,proto3,oneof"`
+}
+
+func (*PushRequest_Manifest) isPushRequest_Message() {}
+
+func (*PushRequest_Block) isPushRequest_Message() {}
+
+type PushManifest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	AppId string                 `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
+	// JSON of replica.Manifest.
+	Manifest      []byte `protobuf:"bytes,2,opt,name=manifest,proto3" json:"manifest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PushManifest) Reset() {
+	*x = PushManifest{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[64]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PushManifest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PushManifest) ProtoMessage() {}
+
+func (x *PushManifest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[64]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PushManifest.ProtoReflect.Descriptor instead.
+func (*PushManifest) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{64}
+}
+
+func (x *PushManifest) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *PushManifest) GetManifest() []byte {
+	if x != nil {
+		return x.Manifest
+	}
+	return nil
+}
+
+type ReplicaBlock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Index         uint32                 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
+	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicaBlock) Reset() {
+	*x = ReplicaBlock{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[65]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicaBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicaBlock) ProtoMessage() {}
+
+func (x *ReplicaBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[65]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicaBlock.ProtoReflect.Descriptor instead.
+func (*ReplicaBlock) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{65}
+}
+
+func (x *ReplicaBlock) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ReplicaBlock) GetIndex() uint32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *ReplicaBlock) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+type PushResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Message:
+	//
+	//	*PushResponse_Missing
+	//	*PushResponse_Result
+	Message       isPushResponse_Message `protobuf_oneof:"message"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PushResponse) Reset() {
+	*x = PushResponse{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[66]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PushResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PushResponse) ProtoMessage() {}
+
+func (x *PushResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[66]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PushResponse.ProtoReflect.Descriptor instead.
+func (*PushResponse) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{66}
+}
+
+func (x *PushResponse) GetMessage() isPushResponse_Message {
+	if x != nil {
+		return x.Message
+	}
+	return nil
+}
+
+func (x *PushResponse) GetMissing() *MissingBlocks {
+	if x != nil {
+		if x, ok := x.Message.(*PushResponse_Missing); ok {
+			return x.Missing
+		}
+	}
+	return nil
+}
+
+func (x *PushResponse) GetResult() *PushResult {
+	if x != nil {
+		if x, ok := x.Message.(*PushResponse_Result); ok {
+			return x.Result
+		}
+	}
+	return nil
+}
+
+type isPushResponse_Message interface {
+	isPushResponse_Message()
+}
+
+type PushResponse_Missing struct {
+	Missing *MissingBlocks `protobuf:"bytes,1,opt,name=missing,proto3,oneof"`
+}
+
+type PushResponse_Result struct {
+	Result *PushResult `protobuf:"bytes,2,opt,name=result,proto3,oneof"`
+}
+
+func (*PushResponse_Missing) isPushResponse_Message() {}
+
+func (*PushResponse_Result) isPushResponse_Message() {}
+
+type MissingBlocks struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Blocks        []*BlockRef            `protobuf:"bytes,1,rep,name=blocks,proto3" json:"blocks,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MissingBlocks) Reset() {
+	*x = MissingBlocks{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[67]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MissingBlocks) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MissingBlocks) ProtoMessage() {}
+
+func (x *MissingBlocks) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[67]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MissingBlocks.ProtoReflect.Descriptor instead.
+func (*MissingBlocks) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{67}
+}
+
+func (x *MissingBlocks) GetBlocks() []*BlockRef {
+	if x != nil {
+		return x.Blocks
+	}
+	return nil
+}
+
+type BlockRef struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Index         uint32                 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlockRef) Reset() {
+	*x = BlockRef{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[68]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlockRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlockRef) ProtoMessage() {}
+
+func (x *BlockRef) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[68]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlockRef.ProtoReflect.Descriptor instead.
+func (*BlockRef) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{68}
+}
+
+func (x *BlockRef) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *BlockRef) GetIndex() uint32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+type PushResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Epoch         uint64                 `protobuf:"varint,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Sequence      uint64                 `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	FailureCode   string                 `protobuf:"bytes,3,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PushResult) Reset() {
+	*x = PushResult{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[69]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PushResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PushResult) ProtoMessage() {}
+
+func (x *PushResult) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[69]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PushResult.ProtoReflect.Descriptor instead.
+func (*PushResult) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{69}
+}
+
+func (x *PushResult) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *PushResult) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *PushResult) GetFailureCode() string {
+	if x != nil {
+		return x.FailureCode
+	}
+	return ""
+}
+
 type AgentMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Message:
@@ -4180,6 +5296,7 @@ type AgentMessage struct {
 	//	*AgentMessage_CommandInspection
 	//	*AgentMessage_CapacityReport
 	//	*AgentMessage_RouteAck
+	//	*AgentMessage_ReplicationAck
 	Message       isAgentMessage_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4187,7 +5304,7 @@ type AgentMessage struct {
 
 func (x *AgentMessage) Reset() {
 	*x = AgentMessage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[54]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4199,7 +5316,7 @@ func (x *AgentMessage) String() string {
 func (*AgentMessage) ProtoMessage() {}
 
 func (x *AgentMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[54]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4212,7 +5329,7 @@ func (x *AgentMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentMessage.ProtoReflect.Descriptor instead.
 func (*AgentMessage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{54}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *AgentMessage) GetMessage() isAgentMessage_Message {
@@ -4321,6 +5438,15 @@ func (x *AgentMessage) GetRouteAck() *RouteAck {
 	return nil
 }
 
+func (x *AgentMessage) GetReplicationAck() *ReplicationAck {
+	if x != nil {
+		if x, ok := x.Message.(*AgentMessage_ReplicationAck); ok {
+			return x.ReplicationAck
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Message interface {
 	isAgentMessage_Message()
 }
@@ -4369,6 +5495,10 @@ type AgentMessage_RouteAck struct {
 	RouteAck *RouteAck `protobuf:"bytes,11,opt,name=route_ack,json=routeAck,proto3,oneof"`
 }
 
+type AgentMessage_ReplicationAck struct {
+	ReplicationAck *ReplicationAck `protobuf:"bytes,12,opt,name=replication_ack,json=replicationAck,proto3,oneof"`
+}
+
 func (*AgentMessage_Hello) isAgentMessage_Message() {}
 
 func (*AgentMessage_Heartbeat) isAgentMessage_Message() {}
@@ -4391,6 +5521,8 @@ func (*AgentMessage_CapacityReport) isAgentMessage_Message() {}
 
 func (*AgentMessage_RouteAck) isAgentMessage_Message() {}
 
+func (*AgentMessage_ReplicationAck) isAgentMessage_Message() {}
+
 type ControllerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required for command delivery. It is not part of immutable command input.
@@ -4409,6 +5541,8 @@ type ControllerMessage struct {
 	//	*ControllerMessage_CapacityRequest
 	//	*ControllerMessage_Secret
 	//	*ControllerMessage_Routes
+	//	*ControllerMessage_Replication
+	//	*ControllerMessage_WriterLease
 	Message       isControllerMessage_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4416,7 +5550,7 @@ type ControllerMessage struct {
 
 func (x *ControllerMessage) Reset() {
 	*x = ControllerMessage{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[55]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4428,7 +5562,7 @@ func (x *ControllerMessage) String() string {
 func (*ControllerMessage) ProtoMessage() {}
 
 func (x *ControllerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[55]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4441,7 +5575,7 @@ func (x *ControllerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControllerMessage.ProtoReflect.Descriptor instead.
 func (*ControllerMessage) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{55}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *ControllerMessage) GetDeliveryAttemptId() string {
@@ -4566,6 +5700,24 @@ func (x *ControllerMessage) GetRoutes() *RouteTable {
 	return nil
 }
 
+func (x *ControllerMessage) GetReplication() *ReplicationTable {
+	if x != nil {
+		if x, ok := x.Message.(*ControllerMessage_Replication); ok {
+			return x.Replication
+		}
+	}
+	return nil
+}
+
+func (x *ControllerMessage) GetWriterLease() *WriterLease {
+	if x != nil {
+		if x, ok := x.Message.(*ControllerMessage_WriterLease); ok {
+			return x.WriterLease
+		}
+	}
+	return nil
+}
+
 type isControllerMessage_Message interface {
 	isControllerMessage_Message()
 }
@@ -4618,6 +5770,14 @@ type ControllerMessage_Routes struct {
 	Routes *RouteTable `protobuf:"bytes,13,opt,name=routes,proto3,oneof"`
 }
 
+type ControllerMessage_Replication struct {
+	Replication *ReplicationTable `protobuf:"bytes,14,opt,name=replication,proto3,oneof"`
+}
+
+type ControllerMessage_WriterLease struct {
+	WriterLease *WriterLease `protobuf:"bytes,15,opt,name=writer_lease,json=writerLease,proto3,oneof"`
+}
+
 func (*ControllerMessage_Session) isControllerMessage_Message() {}
 
 func (*ControllerMessage_PrepareEpoch) isControllerMessage_Message() {}
@@ -4642,6 +5802,10 @@ func (*ControllerMessage_Secret) isControllerMessage_Message() {}
 
 func (*ControllerMessage_Routes) isControllerMessage_Message() {}
 
+func (*ControllerMessage_Replication) isControllerMessage_Message() {}
+
+func (*ControllerMessage_WriterLease) isControllerMessage_Message() {}
+
 // The controller stores this plan before dispatch. Agents receive its commands.
 type ExecutionPlan struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -4653,7 +5817,7 @@ type ExecutionPlan struct {
 
 func (x *ExecutionPlan) Reset() {
 	*x = ExecutionPlan{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[56]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4665,7 +5829,7 @@ func (x *ExecutionPlan) String() string {
 func (*ExecutionPlan) ProtoMessage() {}
 
 func (x *ExecutionPlan) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[56]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4678,7 +5842,7 @@ func (x *ExecutionPlan) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutionPlan.ProtoReflect.Descriptor instead.
 func (*ExecutionPlan) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{56}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *ExecutionPlan) GetVersion() uint32 {
@@ -4708,7 +5872,7 @@ type PlanStep struct {
 
 func (x *PlanStep) Reset() {
 	*x = PlanStep{}
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[57]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4720,7 +5884,7 @@ func (x *PlanStep) String() string {
 func (*PlanStep) ProtoMessage() {}
 
 func (x *PlanStep) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_v1_agent_proto_msgTypes[57]
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4733,7 +5897,7 @@ func (x *PlanStep) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanStep.ProtoReflect.Descriptor instead.
 func (*PlanStep) Descriptor() ([]byte, []int) {
-	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{57}
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *PlanStep) GetCommand() *Command {
@@ -4798,12 +5962,24 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"staleAfter\x12*\n" +
 	"\x11max_message_bytes\x18\x05 \x01(\rR\x0fmaxMessageBytes\x12.\n" +
 	"\x13max_queued_commands\x18\x06 \x01(\rR\x11maxQueuedCommands\x12\"\n" +
-	"\fcapabilities\x18\a \x03(\tR\fcapabilities\"\xa5\x01\n" +
+	"\fcapabilities\x18\a \x03(\tR\fcapabilities\"\x8e\x02\n" +
 	"\tHeartbeat\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12;\n" +
 	"\vobserved_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"observedAt\x12?\n" +
-	"\fobservations\x18\x03 \x03(\v2\x1b.synod.agent.v1.ObservationR\fobservations\"\x99\x02\n" +
+	"\fobservations\x18\x03 \x03(\v2\x1b.synod.agent.v1.ObservationR\fobservations\x129\n" +
+	"\breplicas\x18\x04 \x03(\v2\x1d.synod.agent.v1.ReplicaStatusR\breplicas\x12,\n" +
+	"\x12writer_clock_nanos\x18\x05 \x01(\x04R\x10writerClockNanos\"\xcd\x02\n" +
+	"\rReplicaStatus\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x12\n" +
+	"\x04role\x18\x02 \x01(\tR\x04role\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\x12\x1a\n" +
+	"\bsequence\x18\x04 \x01(\x04R\bsequence\x12=\n" +
+	"\fcompleted_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAt\x12!\n" +
+	"\ffailure_code\x18\x06 \x01(\tR\vfailureCode\x12(\n" +
+	"\x10last_pause_nanos\x18\a \x01(\x04R\x0elastPauseNanos\x12&\n" +
+	"\x0fmax_pause_nanos\x18\b \x01(\x04R\rmaxPauseNanos\x12+\n" +
+	"\x11skipped_snapshots\x18\t \x01(\x04R\x10skippedSnapshots\"\x99\x02\n" +
 	"\vObservation\x12\x1f\n" +
 	"\vresource_id\x18\x01 \x01(\tR\n" +
 	"resourceId\x12+\n" +
@@ -4824,7 +6000,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\fPrepareEpoch\x12+\n" +
 	"\x05epoch\x18\x01 \x01(\v2\x15.synod.agent.v1.EpochR\x05epoch\"<\n" +
 	"\rActivateEpoch\x12+\n" +
-	"\x05epoch\x18\x01 \x01(\v2\x15.synod.agent.v1.EpochR\x05epoch\"\xcf\x01\n" +
+	"\x05epoch\x18\x01 \x01(\v2\x15.synod.agent.v1.EpochR\x05epoch\"\x96\x02\n" +
 	"\x06Effect\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x1f\n" +
@@ -4833,7 +6009,13 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x13native_operation_id\x18\x03 \x01(\tR\x11nativeOperationId\x12\x16\n" +
 	"\x06active\x18\x04 \x01(\bR\x06active\x12'\n" +
 	"\x0foutcome_unknown\x18\x05 \x01(\bR\x0eoutcomeUnknown\x12\x14\n" +
-	"\x05state\x18\x06 \x01(\tR\x05state\"\xd8\x01\n" +
+	"\x05state\x18\x06 \x01(\tR\x05state\x12E\n" +
+	"\fapp_snapshot\x18\a \x01(\v2\".synod.agent.v1.AppSnapshotReceiptR\vappSnapshot\"\x9e\x01\n" +
+	"\x12AppSnapshotReceipt\x12!\n" +
+	"\fwriter_epoch\x18\x01 \x01(\x04R\vwriterEpoch\x12\x1a\n" +
+	"\bsequence\x18\x02 \x01(\x04R\bsequence\x12$\n" +
+	"\x0etarget_node_id\x18\x03 \x01(\tR\ftargetNodeId\x12#\n" +
+	"\rmanifest_hash\x18\x04 \x01(\fR\fmanifestHash\"\xd8\x01\n" +
 	"\rBarrierResult\x12+\n" +
 	"\x05epoch\x18\x01 \x01(\v2\x15.synod.agent.v1.EpochR\x05epoch\x12+\n" +
 	"\x11admissions_closed\x18\x02 \x01(\bR\x10admissionsClosed\x12\x18\n" +
@@ -4944,7 +6126,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x04role\x18\x04 \x01(\tR\x04role\x12\x16\n" +
 	"\x06engine\x18\x05 \x01(\tR\x06engine\x12R\n" +
 	"\x11redis_replication\x18\x06 \x01(\v2%.synod.agent.v1.RedisReplicationCheckR\x10redisReplication\x12#\n" +
-	"\rpostgres_role\x18\a \x01(\tR\fpostgresRole\"\xea\a\n" +
+	"\rpostgres_role\x18\a \x01(\tR\fpostgresRole\"\x85\t\n" +
 	"\fCommandInput\x12\x1f\n" +
 	"\vresource_id\x18\x01 \x01(\tR\n" +
 	"resourceId\x12'\n" +
@@ -4961,8 +6143,15 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x11inspect_container\x18\x10 \x01(\v2 .synod.agent.v1.InspectContainerH\x00R\x10inspectContainer\x12I\n" +
 	"\x0fcheck_readiness\x18\x11 \x01(\v2\x1e.synod.agent.v1.CheckReadinessH\x00R\x0echeckReadiness\x12\\\n" +
 	"\x16recover_postgres_setup\x18\x12 \x01(\v2$.synod.agent.v1.RecoverPostgresSetupH\x00R\x14recoverPostgresSetup\x12_\n" +
-	"\x17verify_container_absent\x18\x17 \x01(\v2%.synod.agent.v1.VerifyContainerAbsentH\x00R\x15verifyContainerAbsentB\t\n" +
-	"\apayload\"\xcd\x02\n" +
+	"\x17verify_container_absent\x18\x17 \x01(\v2%.synod.agent.v1.VerifyContainerAbsentH\x00R\x15verifyContainerAbsent\x12P\n" +
+	"\x12final_app_snapshot\x18\x18 \x01(\v2 .synod.agent.v1.FinalAppSnapshotH\x00R\x10finalAppSnapshot\x12G\n" +
+	"\x0fremove_app_data\x18\x19 \x01(\v2\x1d.synod.agent.v1.RemoveAppDataH\x00R\rremoveAppDataB\t\n" +
+	"\apayload\"[\n" +
+	"\x10FinalAppSnapshot\x12!\n" +
+	"\fwriter_epoch\x18\x01 \x01(\x04R\vwriterEpoch\x12$\n" +
+	"\x0etarget_node_id\x18\x02 \x01(\tR\ftargetNodeId\"2\n" +
+	"\rRemoveAppData\x12!\n" +
+	"\fwriter_epoch\x18\x01 \x01(\x04R\vwriterEpoch\"\xcd\x02\n" +
 	"\aCommand\x12+\n" +
 	"\x05epoch\x18\x01 \x01(\v2\x15.synod.agent.v1.EpochR\x05epoch\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\tR\voperationId\x12\x17\n" +
@@ -5034,7 +6223,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x05epoch\x18\x04 \x01(\v2\x15.synod.agent.v1.EpochR\x05epoch\"G\n" +
 	"\x10InventoryRequest\x12\x16\n" +
 	"\x06cursor\x18\x01 \x01(\tR\x06cursor\x12\x1b\n" +
-	"\tpage_size\x18\x02 \x01(\rR\bpageSize\"\x9a\x02\n" +
+	"\tpage_size\x18\x02 \x01(\rR\bpageSize\"\xb0\x02\n" +
 	"\x0fCapacityRequest\x12\x19\n" +
 	"\bprobe_id\x18\x01 \x01(\tR\aprobeId\x12%\n" +
 	"\x0eprobe_revision\x18\x02 \x01(\x03R\rprobeRevision\x12\x1d\n" +
@@ -5043,7 +6232,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\aboot_id\x18\x04 \x01(\tR\x06bootId\x12-\n" +
 	"\x12journal_generation\x18\x05 \x01(\tR\x11journalGeneration\x12&\n" +
 	"\x0fexpires_unix_ms\x18\x06 \x01(\x03R\rexpiresUnixMs\x126\n" +
-	"\x05known\x18\a \x03(\v2 .synod.agent.v1.KnownReservationR\x05known\"Z\n" +
+	"\x05known\x18\a \x03(\v2 .synod.agent.v1.KnownReservationR\x05known\x12\x14\n" +
+	"\x05paths\x18\b \x03(\tR\x05paths\"Z\n" +
 	"\x10KnownReservation\x12%\n" +
 	"\x0ereservation_id\x18\x01 \x01(\tR\rreservationId\x12\x1f\n" +
 	"\vresource_id\x18\x02 \x01(\tR\n" +
@@ -5057,7 +6247,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x0ereservation_id\x18\x01 \x01(\tR\rreservationId\x12\x1f\n" +
 	"\vresource_id\x18\x02 \x01(\tR\n" +
 	"resourceId\x122\n" +
-	"\x04used\x18\x03 \x01(\v2\x1e.synod.agent.v1.ResourceVectorR\x04used\"\xdb\x03\n" +
+	"\x04used\x18\x03 \x01(\v2\x1e.synod.agent.v1.ResourceVectorR\x04used\"\x82\x04\n" +
 	"\x0eCapacityReport\x12\x19\n" +
 	"\bprobe_id\x18\x01 \x01(\tR\aprobeId\x12%\n" +
 	"\x0eprobe_revision\x18\x02 \x01(\x03R\rprobeRevision\x12\x1d\n" +
@@ -5072,7 +6262,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\bcapacity\x18\t \x01(\v2\x1e.synod.agent.v1.ResourceVectorR\bcapacity\x122\n" +
 	"\x04used\x18\n" +
 	" \x01(\v2\x1e.synod.agent.v1.ResourceVectorR\x04used\x12D\n" +
-	"\freservations\x18\v \x03(\v2 .synod.agent.v1.ReservationUsageR\freservations\"\xf7\x01\n" +
+	"\freservations\x18\v \x03(\v2 .synod.agent.v1.ReservationUsageR\freservations\x12%\n" +
+	"\x0eexisting_paths\x18\f \x03(\tR\rexistingPaths\"\xf7\x01\n" +
 	"\rInventoryPage\x129\n" +
 	"\tresources\x18\x01 \x03(\v2\x1b.synod.agent.v1.ObservationR\tresources\x120\n" +
 	"\aeffects\x18\x02 \x03(\v2\x16.synod.agent.v1.EffectR\aeffects\x12\x1f\n" +
@@ -5111,7 +6302,58 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12!\n" +
-	"\ffailure_code\x18\x03 \x01(\tR\vfailureCode\"\x87\x06\n" +
+	"\ffailure_code\x18\x03 \x01(\tR\vfailureCode\"\x81\x01\n" +
+	"\x10ReplicationTable\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1a\n" +
+	"\brevision\x18\x02 \x01(\x04R\brevision\x122\n" +
+	"\x04apps\x18\x03 \x03(\v2\x1e.synod.agent.v1.AppReplicationR\x04apps\"\xaf\x01\n" +
+	"\x0eAppReplication\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\x12\x12\n" +
+	"\x04role\x18\x03 \x01(\tR\x04role\x121\n" +
+	"\x05peers\x18\x04 \x03(\v2\x1b.synod.agent.v1.ReplicaPeerR\x05peers\x12)\n" +
+	"\x10interval_seconds\x18\x05 \x01(\rR\x0fintervalSeconds\"\xa6\x01\n" +
+	"\vWriterLease\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +
+	"\x06app_id\x18\x02 \x01(\tR\x05appId\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\x12\x18\n" +
+	"\aseconds\x18\x04 \x01(\rR\aseconds\x121\n" +
+	"\x15expires_at_boot_nanos\x18\x05 \x01(\x04R\x12expiresAtBootNanos\"@\n" +
+	"\vReplicaPeer\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x18\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\"n\n" +
+	"\x0eReplicationAck\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1a\n" +
+	"\brevision\x18\x02 \x01(\x04R\brevision\x12!\n" +
+	"\ffailure_code\x18\x03 \x01(\tR\vfailureCode\"\x8a\x01\n" +
+	"\vPushRequest\x12:\n" +
+	"\bmanifest\x18\x01 \x01(\v2\x1c.synod.agent.v1.PushManifestH\x00R\bmanifest\x124\n" +
+	"\x05block\x18\x02 \x01(\v2\x1c.synod.agent.v1.ReplicaBlockH\x00R\x05blockB\t\n" +
+	"\amessage\"A\n" +
+	"\fPushManifest\x12\x15\n" +
+	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x1a\n" +
+	"\bmanifest\x18\x02 \x01(\fR\bmanifest\"L\n" +
+	"\fReplicaBlock\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
+	"\x05index\x18\x02 \x01(\rR\x05index\x12\x12\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\"\x8a\x01\n" +
+	"\fPushResponse\x129\n" +
+	"\amissing\x18\x01 \x01(\v2\x1d.synod.agent.v1.MissingBlocksH\x00R\amissing\x124\n" +
+	"\x06result\x18\x02 \x01(\v2\x1a.synod.agent.v1.PushResultH\x00R\x06resultB\t\n" +
+	"\amessage\"A\n" +
+	"\rMissingBlocks\x120\n" +
+	"\x06blocks\x18\x01 \x03(\v2\x18.synod.agent.v1.BlockRefR\x06blocks\"4\n" +
+	"\bBlockRef\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
+	"\x05index\x18\x02 \x01(\rR\x05index\"a\n" +
+	"\n" +
+	"PushResult\x12\x14\n" +
+	"\x05epoch\x18\x01 \x01(\x04R\x05epoch\x12\x1a\n" +
+	"\bsequence\x18\x02 \x01(\x04R\bsequence\x12!\n" +
+	"\ffailure_code\x18\x03 \x01(\tR\vfailureCode\"\xd2\x06\n" +
 	"\fAgentMessage\x12-\n" +
 	"\x05hello\x18\x01 \x01(\v2\x15.synod.agent.v1.HelloH\x00R\x05hello\x129\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x19.synod.agent.v1.HeartbeatH\x00R\theartbeat\x12F\n" +
@@ -5124,8 +6366,9 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x12command_inspection\x18\t \x01(\v2'.synod.agent.v1.CommandInspectionResultH\x00R\x11commandInspection\x12I\n" +
 	"\x0fcapacity_report\x18\n" +
 	" \x01(\v2\x1e.synod.agent.v1.CapacityReportH\x00R\x0ecapacityReport\x127\n" +
-	"\troute_ack\x18\v \x01(\v2\x18.synod.agent.v1.RouteAckH\x00R\brouteAckB\t\n" +
-	"\amessage\"\xcc\x06\n" +
+	"\troute_ack\x18\v \x01(\v2\x18.synod.agent.v1.RouteAckH\x00R\brouteAck\x12I\n" +
+	"\x0freplication_ack\x18\f \x01(\v2\x1e.synod.agent.v1.ReplicationAckH\x00R\x0ereplicationAckB\t\n" +
+	"\amessage\"\xd4\a\n" +
 	"\x11ControllerMessage\x12.\n" +
 	"\x13delivery_attempt_id\x18\f \x01(\tR\x11deliveryAttemptId\x123\n" +
 	"\asession\x18\x01 \x01(\v2\x17.synod.agent.v1.SessionH\x00R\asession\x12C\n" +
@@ -5141,7 +6384,9 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x10capacity_request\x18\n" +
 	" \x01(\v2\x1f.synod.agent.v1.CapacityRequestH\x00R\x0fcapacityRequest\x128\n" +
 	"\x06secret\x18\v \x01(\v2\x1e.synod.agent.v1.SecretMaterialH\x00R\x06secret\x124\n" +
-	"\x06routes\x18\r \x01(\v2\x1a.synod.agent.v1.RouteTableH\x00R\x06routesB\t\n" +
+	"\x06routes\x18\r \x01(\v2\x1a.synod.agent.v1.RouteTableH\x00R\x06routes\x12D\n" +
+	"\vreplication\x18\x0e \x01(\v2 .synod.agent.v1.ReplicationTableH\x00R\vreplication\x12@\n" +
+	"\fwriter_lease\x18\x0f \x01(\v2\x1b.synod.agent.v1.WriterLeaseH\x00R\vwriterLeaseB\t\n" +
 	"\amessage\"Y\n" +
 	"\rExecutionPlan\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12.\n" +
@@ -5160,7 +6405,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x14CancellationBoundary\x12%\n" +
 	"!CANCELLATION_BOUNDARY_UNSPECIFIED\x10\x00\x12*\n" +
 	"&CANCELLATION_BOUNDARY_BEFORE_EXECUTION\x10\x01\x12#\n" +
-	"\x1fCANCELLATION_BOUNDARY_SAFE_STOP\x10\x02*\xf6\x02\n" +
+	"\x1fCANCELLATION_BOUNDARY_SAFE_STOP\x10\x02*\xc5\x03\n" +
 	"\rPostcondition\x12\x1d\n" +
 	"\x19POSTCONDITION_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bPOSTCONDITION_VOLUME_EXISTS\x10\x01\x12 \n" +
@@ -5171,9 +6416,14 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x1ePOSTCONDITION_CONTAINER_ABSENT\x10\x06\x12%\n" +
 	"!POSTCONDITION_CONTAINER_INSPECTED\x10\a\x12\x1e\n" +
 	"\x1aPOSTCONDITION_ENGINE_READY\x10\b\x12*\n" +
-	"&POSTCONDITION_POSTGRES_SETUP_RECOVERED\x10\t2^\n" +
+	"&POSTCONDITION_POSTGRES_SETUP_RECOVERED\x10\t\x12*\n" +
+	"&POSTCONDITION_APP_SNAPSHOT_TRANSFERRED\x10\n" +
+	"\x12!\n" +
+	"\x1dPOSTCONDITION_APP_DATA_ABSENT\x10\v2^\n" +
 	"\fAgentService\x12N\n" +
-	"\aConnect\x12\x1c.synod.agent.v1.AgentMessage\x1a!.synod.agent.v1.ControllerMessage(\x010\x01B4Z2github.com/sirrobot01/synod/proto/agent/v1;agentv1b\x06proto3"
+	"\aConnect\x12\x1c.synod.agent.v1.AgentMessage\x1a!.synod.agent.v1.ControllerMessage(\x010\x012[\n" +
+	"\x12ReplicationService\x12E\n" +
+	"\x04Push\x12\x1b.synod.agent.v1.PushRequest\x1a\x1c.synod.agent.v1.PushResponse(\x010\x01B4Z2github.com/sirrobot01/synod/proto/agent/v1;agentv1b\x06proto3"
 
 var (
 	file_proto_agent_v1_agent_proto_rawDescOnce sync.Once
@@ -5188,7 +6438,7 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_agent_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 58)
+var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 74)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(NetworkMode)(0),                 // 0: synod.agent.v1.NetworkMode
 	(CancellationBoundary)(0),        // 1: synod.agent.v1.CancellationBoundary
@@ -5197,159 +6447,192 @@ var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*Hello)(nil),                    // 4: synod.agent.v1.Hello
 	(*Session)(nil),                  // 5: synod.agent.v1.Session
 	(*Heartbeat)(nil),                // 6: synod.agent.v1.Heartbeat
-	(*Observation)(nil),              // 7: synod.agent.v1.Observation
-	(*Epoch)(nil),                    // 8: synod.agent.v1.Epoch
-	(*PrepareEpoch)(nil),             // 9: synod.agent.v1.PrepareEpoch
-	(*ActivateEpoch)(nil),            // 10: synod.agent.v1.ActivateEpoch
-	(*Effect)(nil),                   // 11: synod.agent.v1.Effect
-	(*BarrierResult)(nil),            // 12: synod.agent.v1.BarrierResult
-	(*SecretReference)(nil),          // 13: synod.agent.v1.SecretReference
-	(*SecretMaterial)(nil),           // 14: synod.agent.v1.SecretMaterial
-	(*SecretEnv)(nil),                // 15: synod.agent.v1.SecretEnv
-	(*PlainEnv)(nil),                 // 16: synod.agent.v1.PlainEnv
-	(*PortBinding)(nil),              // 17: synod.agent.v1.PortBinding
-	(*EnsureVolume)(nil),             // 18: synod.agent.v1.EnsureVolume
-	(*EnsureNetwork)(nil),            // 19: synod.agent.v1.EnsureNetwork
-	(*EnsureContainer)(nil),          // 20: synod.agent.v1.EnsureContainer
-	(*GenericContainerConfig)(nil),   // 21: synod.agent.v1.GenericContainerConfig
-	(*Mount)(nil),                    // 22: synod.agent.v1.Mount
-	(*HealthCheckConfig)(nil),        // 23: synod.agent.v1.HealthCheckConfig
-	(*PostgresContainerConfig)(nil),  // 24: synod.agent.v1.PostgresContainerConfig
-	(*RedisContainerConfig)(nil),     // 25: synod.agent.v1.RedisContainerConfig
-	(*RedisUpstream)(nil),            // 26: synod.agent.v1.RedisUpstream
-	(*RedisReplicationCheck)(nil),    // 27: synod.agent.v1.RedisReplicationCheck
-	(*StartContainer)(nil),           // 28: synod.agent.v1.StartContainer
-	(*RecoverPostgresSetup)(nil),     // 29: synod.agent.v1.RecoverPostgresSetup
-	(*StopContainer)(nil),            // 30: synod.agent.v1.StopContainer
-	(*RemoveContainer)(nil),          // 31: synod.agent.v1.RemoveContainer
-	(*InspectContainer)(nil),         // 32: synod.agent.v1.InspectContainer
-	(*VerifyContainerAbsent)(nil),    // 33: synod.agent.v1.VerifyContainerAbsent
-	(*CheckReadiness)(nil),           // 34: synod.agent.v1.CheckReadiness
-	(*CommandInput)(nil),             // 35: synod.agent.v1.CommandInput
-	(*Command)(nil),                  // 36: synod.agent.v1.Command
-	(*CommandInspectionRequest)(nil), // 37: synod.agent.v1.CommandInspectionRequest
-	(*CommandInspectionResult)(nil),  // 38: synod.agent.v1.CommandInspectionResult
-	(*AdmissionAck)(nil),             // 39: synod.agent.v1.AdmissionAck
-	(*Progress)(nil),                 // 40: synod.agent.v1.Progress
-	(*TerminalResult)(nil),           // 41: synod.agent.v1.TerminalResult
-	(*ResultAck)(nil),                // 42: synod.agent.v1.ResultAck
-	(*CancelCommand)(nil),            // 43: synod.agent.v1.CancelCommand
-	(*CancellationResult)(nil),       // 44: synod.agent.v1.CancellationResult
-	(*InventoryRequest)(nil),         // 45: synod.agent.v1.InventoryRequest
-	(*CapacityRequest)(nil),          // 46: synod.agent.v1.CapacityRequest
-	(*KnownReservation)(nil),         // 47: synod.agent.v1.KnownReservation
-	(*ResourceVector)(nil),           // 48: synod.agent.v1.ResourceVector
-	(*ReservationUsage)(nil),         // 49: synod.agent.v1.ReservationUsage
-	(*CapacityReport)(nil),           // 50: synod.agent.v1.CapacityReport
-	(*InventoryPage)(nil),            // 51: synod.agent.v1.InventoryPage
-	(*DriftItem)(nil),                // 52: synod.agent.v1.DriftItem
-	(*ProtocolError)(nil),            // 53: synod.agent.v1.ProtocolError
-	(*RouteTable)(nil),               // 54: synod.agent.v1.RouteTable
-	(*AppRoute)(nil),                 // 55: synod.agent.v1.AppRoute
-	(*RouteAck)(nil),                 // 56: synod.agent.v1.RouteAck
-	(*AgentMessage)(nil),             // 57: synod.agent.v1.AgentMessage
-	(*ControllerMessage)(nil),        // 58: synod.agent.v1.ControllerMessage
-	(*ExecutionPlan)(nil),            // 59: synod.agent.v1.ExecutionPlan
-	(*PlanStep)(nil),                 // 60: synod.agent.v1.PlanStep
-	(*durationpb.Duration)(nil),      // 61: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),    // 62: google.protobuf.Timestamp
+	(*ReplicaStatus)(nil),            // 7: synod.agent.v1.ReplicaStatus
+	(*Observation)(nil),              // 8: synod.agent.v1.Observation
+	(*Epoch)(nil),                    // 9: synod.agent.v1.Epoch
+	(*PrepareEpoch)(nil),             // 10: synod.agent.v1.PrepareEpoch
+	(*ActivateEpoch)(nil),            // 11: synod.agent.v1.ActivateEpoch
+	(*Effect)(nil),                   // 12: synod.agent.v1.Effect
+	(*AppSnapshotReceipt)(nil),       // 13: synod.agent.v1.AppSnapshotReceipt
+	(*BarrierResult)(nil),            // 14: synod.agent.v1.BarrierResult
+	(*SecretReference)(nil),          // 15: synod.agent.v1.SecretReference
+	(*SecretMaterial)(nil),           // 16: synod.agent.v1.SecretMaterial
+	(*SecretEnv)(nil),                // 17: synod.agent.v1.SecretEnv
+	(*PlainEnv)(nil),                 // 18: synod.agent.v1.PlainEnv
+	(*PortBinding)(nil),              // 19: synod.agent.v1.PortBinding
+	(*EnsureVolume)(nil),             // 20: synod.agent.v1.EnsureVolume
+	(*EnsureNetwork)(nil),            // 21: synod.agent.v1.EnsureNetwork
+	(*EnsureContainer)(nil),          // 22: synod.agent.v1.EnsureContainer
+	(*GenericContainerConfig)(nil),   // 23: synod.agent.v1.GenericContainerConfig
+	(*Mount)(nil),                    // 24: synod.agent.v1.Mount
+	(*HealthCheckConfig)(nil),        // 25: synod.agent.v1.HealthCheckConfig
+	(*PostgresContainerConfig)(nil),  // 26: synod.agent.v1.PostgresContainerConfig
+	(*RedisContainerConfig)(nil),     // 27: synod.agent.v1.RedisContainerConfig
+	(*RedisUpstream)(nil),            // 28: synod.agent.v1.RedisUpstream
+	(*RedisReplicationCheck)(nil),    // 29: synod.agent.v1.RedisReplicationCheck
+	(*StartContainer)(nil),           // 30: synod.agent.v1.StartContainer
+	(*RecoverPostgresSetup)(nil),     // 31: synod.agent.v1.RecoverPostgresSetup
+	(*StopContainer)(nil),            // 32: synod.agent.v1.StopContainer
+	(*RemoveContainer)(nil),          // 33: synod.agent.v1.RemoveContainer
+	(*InspectContainer)(nil),         // 34: synod.agent.v1.InspectContainer
+	(*VerifyContainerAbsent)(nil),    // 35: synod.agent.v1.VerifyContainerAbsent
+	(*CheckReadiness)(nil),           // 36: synod.agent.v1.CheckReadiness
+	(*CommandInput)(nil),             // 37: synod.agent.v1.CommandInput
+	(*FinalAppSnapshot)(nil),         // 38: synod.agent.v1.FinalAppSnapshot
+	(*RemoveAppData)(nil),            // 39: synod.agent.v1.RemoveAppData
+	(*Command)(nil),                  // 40: synod.agent.v1.Command
+	(*CommandInspectionRequest)(nil), // 41: synod.agent.v1.CommandInspectionRequest
+	(*CommandInspectionResult)(nil),  // 42: synod.agent.v1.CommandInspectionResult
+	(*AdmissionAck)(nil),             // 43: synod.agent.v1.AdmissionAck
+	(*Progress)(nil),                 // 44: synod.agent.v1.Progress
+	(*TerminalResult)(nil),           // 45: synod.agent.v1.TerminalResult
+	(*ResultAck)(nil),                // 46: synod.agent.v1.ResultAck
+	(*CancelCommand)(nil),            // 47: synod.agent.v1.CancelCommand
+	(*CancellationResult)(nil),       // 48: synod.agent.v1.CancellationResult
+	(*InventoryRequest)(nil),         // 49: synod.agent.v1.InventoryRequest
+	(*CapacityRequest)(nil),          // 50: synod.agent.v1.CapacityRequest
+	(*KnownReservation)(nil),         // 51: synod.agent.v1.KnownReservation
+	(*ResourceVector)(nil),           // 52: synod.agent.v1.ResourceVector
+	(*ReservationUsage)(nil),         // 53: synod.agent.v1.ReservationUsage
+	(*CapacityReport)(nil),           // 54: synod.agent.v1.CapacityReport
+	(*InventoryPage)(nil),            // 55: synod.agent.v1.InventoryPage
+	(*DriftItem)(nil),                // 56: synod.agent.v1.DriftItem
+	(*ProtocolError)(nil),            // 57: synod.agent.v1.ProtocolError
+	(*RouteTable)(nil),               // 58: synod.agent.v1.RouteTable
+	(*AppRoute)(nil),                 // 59: synod.agent.v1.AppRoute
+	(*RouteAck)(nil),                 // 60: synod.agent.v1.RouteAck
+	(*ReplicationTable)(nil),         // 61: synod.agent.v1.ReplicationTable
+	(*AppReplication)(nil),           // 62: synod.agent.v1.AppReplication
+	(*WriterLease)(nil),              // 63: synod.agent.v1.WriterLease
+	(*ReplicaPeer)(nil),              // 64: synod.agent.v1.ReplicaPeer
+	(*ReplicationAck)(nil),           // 65: synod.agent.v1.ReplicationAck
+	(*PushRequest)(nil),              // 66: synod.agent.v1.PushRequest
+	(*PushManifest)(nil),             // 67: synod.agent.v1.PushManifest
+	(*ReplicaBlock)(nil),             // 68: synod.agent.v1.ReplicaBlock
+	(*PushResponse)(nil),             // 69: synod.agent.v1.PushResponse
+	(*MissingBlocks)(nil),            // 70: synod.agent.v1.MissingBlocks
+	(*BlockRef)(nil),                 // 71: synod.agent.v1.BlockRef
+	(*PushResult)(nil),               // 72: synod.agent.v1.PushResult
+	(*AgentMessage)(nil),             // 73: synod.agent.v1.AgentMessage
+	(*ControllerMessage)(nil),        // 74: synod.agent.v1.ControllerMessage
+	(*ExecutionPlan)(nil),            // 75: synod.agent.v1.ExecutionPlan
+	(*PlanStep)(nil),                 // 76: synod.agent.v1.PlanStep
+	(*durationpb.Duration)(nil),      // 77: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),    // 78: google.protobuf.Timestamp
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
-	3,  // 0: synod.agent.v1.Hello.protocol:type_name -> synod.agent.v1.VersionRange
-	61, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
-	61, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
-	62, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
-	7,  // 4: synod.agent.v1.Heartbeat.observations:type_name -> synod.agent.v1.Observation
-	62, // 5: synod.agent.v1.Observation.observed_at:type_name -> google.protobuf.Timestamp
-	17, // 6: synod.agent.v1.Observation.ports:type_name -> synod.agent.v1.PortBinding
-	8,  // 7: synod.agent.v1.PrepareEpoch.epoch:type_name -> synod.agent.v1.Epoch
-	8,  // 8: synod.agent.v1.ActivateEpoch.epoch:type_name -> synod.agent.v1.Epoch
-	8,  // 9: synod.agent.v1.BarrierResult.epoch:type_name -> synod.agent.v1.Epoch
-	11, // 10: synod.agent.v1.BarrierResult.effects:type_name -> synod.agent.v1.Effect
-	17, // 11: synod.agent.v1.EnsureContainer.ports:type_name -> synod.agent.v1.PortBinding
-	0,  // 12: synod.agent.v1.EnsureContainer.network_mode:type_name -> synod.agent.v1.NetworkMode
-	15, // 13: synod.agent.v1.EnsureContainer.secret_env:type_name -> synod.agent.v1.SecretEnv
-	16, // 14: synod.agent.v1.EnsureContainer.plain_env:type_name -> synod.agent.v1.PlainEnv
-	25, // 15: synod.agent.v1.EnsureContainer.redis:type_name -> synod.agent.v1.RedisContainerConfig
-	24, // 16: synod.agent.v1.EnsureContainer.postgres:type_name -> synod.agent.v1.PostgresContainerConfig
-	21, // 17: synod.agent.v1.EnsureContainer.generic:type_name -> synod.agent.v1.GenericContainerConfig
-	22, // 18: synod.agent.v1.GenericContainerConfig.mounts:type_name -> synod.agent.v1.Mount
-	23, // 19: synod.agent.v1.GenericContainerConfig.health_check:type_name -> synod.agent.v1.HealthCheckConfig
-	26, // 20: synod.agent.v1.RedisContainerConfig.upstream:type_name -> synod.agent.v1.RedisUpstream
-	13, // 21: synod.agent.v1.RedisContainerConfig.credentials:type_name -> synod.agent.v1.SecretReference
-	26, // 22: synod.agent.v1.RedisReplicationCheck.upstream:type_name -> synod.agent.v1.RedisUpstream
-	24, // 23: synod.agent.v1.RecoverPostgresSetup.postgres:type_name -> synod.agent.v1.PostgresContainerConfig
-	61, // 24: synod.agent.v1.StopContainer.grace_period:type_name -> google.protobuf.Duration
-	27, // 25: synod.agent.v1.CheckReadiness.redis_replication:type_name -> synod.agent.v1.RedisReplicationCheck
-	61, // 26: synod.agent.v1.CommandInput.timeout:type_name -> google.protobuf.Duration
-	13, // 27: synod.agent.v1.CommandInput.secrets:type_name -> synod.agent.v1.SecretReference
-	18, // 28: synod.agent.v1.CommandInput.ensure_volume:type_name -> synod.agent.v1.EnsureVolume
-	19, // 29: synod.agent.v1.CommandInput.ensure_network:type_name -> synod.agent.v1.EnsureNetwork
-	20, // 30: synod.agent.v1.CommandInput.ensure_container:type_name -> synod.agent.v1.EnsureContainer
-	28, // 31: synod.agent.v1.CommandInput.start_container:type_name -> synod.agent.v1.StartContainer
-	30, // 32: synod.agent.v1.CommandInput.stop_container:type_name -> synod.agent.v1.StopContainer
-	31, // 33: synod.agent.v1.CommandInput.remove_container:type_name -> synod.agent.v1.RemoveContainer
-	32, // 34: synod.agent.v1.CommandInput.inspect_container:type_name -> synod.agent.v1.InspectContainer
-	34, // 35: synod.agent.v1.CommandInput.check_readiness:type_name -> synod.agent.v1.CheckReadiness
-	29, // 36: synod.agent.v1.CommandInput.recover_postgres_setup:type_name -> synod.agent.v1.RecoverPostgresSetup
-	33, // 37: synod.agent.v1.CommandInput.verify_container_absent:type_name -> synod.agent.v1.VerifyContainerAbsent
-	8,  // 38: synod.agent.v1.Command.epoch:type_name -> synod.agent.v1.Epoch
-	35, // 39: synod.agent.v1.Command.input:type_name -> synod.agent.v1.CommandInput
-	36, // 40: synod.agent.v1.CommandInspectionRequest.command:type_name -> synod.agent.v1.Command
-	11, // 41: synod.agent.v1.CommandInspectionRequest.prior_effects:type_name -> synod.agent.v1.Effect
-	8,  // 42: synod.agent.v1.CommandInspectionResult.epoch:type_name -> synod.agent.v1.Epoch
-	11, // 43: synod.agent.v1.CommandInspectionResult.effects:type_name -> synod.agent.v1.Effect
-	8,  // 44: synod.agent.v1.AdmissionAck.epoch:type_name -> synod.agent.v1.Epoch
-	8,  // 45: synod.agent.v1.Progress.epoch:type_name -> synod.agent.v1.Epoch
-	8,  // 46: synod.agent.v1.TerminalResult.epoch:type_name -> synod.agent.v1.Epoch
-	11, // 47: synod.agent.v1.TerminalResult.effects:type_name -> synod.agent.v1.Effect
-	8,  // 48: synod.agent.v1.ResultAck.epoch:type_name -> synod.agent.v1.Epoch
-	8,  // 49: synod.agent.v1.CancelCommand.epoch:type_name -> synod.agent.v1.Epoch
-	11, // 50: synod.agent.v1.CancellationResult.effects:type_name -> synod.agent.v1.Effect
-	8,  // 51: synod.agent.v1.CancellationResult.epoch:type_name -> synod.agent.v1.Epoch
-	47, // 52: synod.agent.v1.CapacityRequest.known:type_name -> synod.agent.v1.KnownReservation
-	48, // 53: synod.agent.v1.ReservationUsage.used:type_name -> synod.agent.v1.ResourceVector
-	48, // 54: synod.agent.v1.CapacityReport.capacity:type_name -> synod.agent.v1.ResourceVector
-	48, // 55: synod.agent.v1.CapacityReport.used:type_name -> synod.agent.v1.ResourceVector
-	49, // 56: synod.agent.v1.CapacityReport.reservations:type_name -> synod.agent.v1.ReservationUsage
-	7,  // 57: synod.agent.v1.InventoryPage.resources:type_name -> synod.agent.v1.Observation
-	11, // 58: synod.agent.v1.InventoryPage.effects:type_name -> synod.agent.v1.Effect
-	52, // 59: synod.agent.v1.InventoryPage.drift:type_name -> synod.agent.v1.DriftItem
-	55, // 60: synod.agent.v1.RouteTable.routes:type_name -> synod.agent.v1.AppRoute
-	4,  // 61: synod.agent.v1.AgentMessage.hello:type_name -> synod.agent.v1.Hello
-	6,  // 62: synod.agent.v1.AgentMessage.heartbeat:type_name -> synod.agent.v1.Heartbeat
-	12, // 63: synod.agent.v1.AgentMessage.barrier_result:type_name -> synod.agent.v1.BarrierResult
-	39, // 64: synod.agent.v1.AgentMessage.admission_ack:type_name -> synod.agent.v1.AdmissionAck
-	40, // 65: synod.agent.v1.AgentMessage.progress:type_name -> synod.agent.v1.Progress
-	41, // 66: synod.agent.v1.AgentMessage.terminal_result:type_name -> synod.agent.v1.TerminalResult
-	44, // 67: synod.agent.v1.AgentMessage.cancellation_result:type_name -> synod.agent.v1.CancellationResult
-	51, // 68: synod.agent.v1.AgentMessage.inventory:type_name -> synod.agent.v1.InventoryPage
-	38, // 69: synod.agent.v1.AgentMessage.command_inspection:type_name -> synod.agent.v1.CommandInspectionResult
-	50, // 70: synod.agent.v1.AgentMessage.capacity_report:type_name -> synod.agent.v1.CapacityReport
-	56, // 71: synod.agent.v1.AgentMessage.route_ack:type_name -> synod.agent.v1.RouteAck
-	5,  // 72: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
-	9,  // 73: synod.agent.v1.ControllerMessage.prepare_epoch:type_name -> synod.agent.v1.PrepareEpoch
-	10, // 74: synod.agent.v1.ControllerMessage.activate_epoch:type_name -> synod.agent.v1.ActivateEpoch
-	36, // 75: synod.agent.v1.ControllerMessage.command:type_name -> synod.agent.v1.Command
-	42, // 76: synod.agent.v1.ControllerMessage.result_ack:type_name -> synod.agent.v1.ResultAck
-	43, // 77: synod.agent.v1.ControllerMessage.cancel:type_name -> synod.agent.v1.CancelCommand
-	45, // 78: synod.agent.v1.ControllerMessage.inventory:type_name -> synod.agent.v1.InventoryRequest
-	53, // 79: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
-	37, // 80: synod.agent.v1.ControllerMessage.command_inspection:type_name -> synod.agent.v1.CommandInspectionRequest
-	46, // 81: synod.agent.v1.ControllerMessage.capacity_request:type_name -> synod.agent.v1.CapacityRequest
-	14, // 82: synod.agent.v1.ControllerMessage.secret:type_name -> synod.agent.v1.SecretMaterial
-	54, // 83: synod.agent.v1.ControllerMessage.routes:type_name -> synod.agent.v1.RouteTable
-	60, // 84: synod.agent.v1.ExecutionPlan.steps:type_name -> synod.agent.v1.PlanStep
-	36, // 85: synod.agent.v1.PlanStep.command:type_name -> synod.agent.v1.Command
-	1,  // 86: synod.agent.v1.PlanStep.cancellation_boundary:type_name -> synod.agent.v1.CancellationBoundary
-	2,  // 87: synod.agent.v1.PlanStep.postcondition:type_name -> synod.agent.v1.Postcondition
-	57, // 88: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
-	58, // 89: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
-	89, // [89:90] is the sub-list for method output_type
-	88, // [88:89] is the sub-list for method input_type
-	88, // [88:88] is the sub-list for extension type_name
-	88, // [88:88] is the sub-list for extension extendee
-	0,  // [0:88] is the sub-list for field type_name
+	3,   // 0: synod.agent.v1.Hello.protocol:type_name -> synod.agent.v1.VersionRange
+	77,  // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
+	77,  // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
+	78,  // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	8,   // 4: synod.agent.v1.Heartbeat.observations:type_name -> synod.agent.v1.Observation
+	7,   // 5: synod.agent.v1.Heartbeat.replicas:type_name -> synod.agent.v1.ReplicaStatus
+	78,  // 6: synod.agent.v1.ReplicaStatus.completed_at:type_name -> google.protobuf.Timestamp
+	78,  // 7: synod.agent.v1.Observation.observed_at:type_name -> google.protobuf.Timestamp
+	19,  // 8: synod.agent.v1.Observation.ports:type_name -> synod.agent.v1.PortBinding
+	9,   // 9: synod.agent.v1.PrepareEpoch.epoch:type_name -> synod.agent.v1.Epoch
+	9,   // 10: synod.agent.v1.ActivateEpoch.epoch:type_name -> synod.agent.v1.Epoch
+	13,  // 11: synod.agent.v1.Effect.app_snapshot:type_name -> synod.agent.v1.AppSnapshotReceipt
+	9,   // 12: synod.agent.v1.BarrierResult.epoch:type_name -> synod.agent.v1.Epoch
+	12,  // 13: synod.agent.v1.BarrierResult.effects:type_name -> synod.agent.v1.Effect
+	19,  // 14: synod.agent.v1.EnsureContainer.ports:type_name -> synod.agent.v1.PortBinding
+	0,   // 15: synod.agent.v1.EnsureContainer.network_mode:type_name -> synod.agent.v1.NetworkMode
+	17,  // 16: synod.agent.v1.EnsureContainer.secret_env:type_name -> synod.agent.v1.SecretEnv
+	18,  // 17: synod.agent.v1.EnsureContainer.plain_env:type_name -> synod.agent.v1.PlainEnv
+	27,  // 18: synod.agent.v1.EnsureContainer.redis:type_name -> synod.agent.v1.RedisContainerConfig
+	26,  // 19: synod.agent.v1.EnsureContainer.postgres:type_name -> synod.agent.v1.PostgresContainerConfig
+	23,  // 20: synod.agent.v1.EnsureContainer.generic:type_name -> synod.agent.v1.GenericContainerConfig
+	24,  // 21: synod.agent.v1.GenericContainerConfig.mounts:type_name -> synod.agent.v1.Mount
+	25,  // 22: synod.agent.v1.GenericContainerConfig.health_check:type_name -> synod.agent.v1.HealthCheckConfig
+	28,  // 23: synod.agent.v1.RedisContainerConfig.upstream:type_name -> synod.agent.v1.RedisUpstream
+	15,  // 24: synod.agent.v1.RedisContainerConfig.credentials:type_name -> synod.agent.v1.SecretReference
+	28,  // 25: synod.agent.v1.RedisReplicationCheck.upstream:type_name -> synod.agent.v1.RedisUpstream
+	26,  // 26: synod.agent.v1.RecoverPostgresSetup.postgres:type_name -> synod.agent.v1.PostgresContainerConfig
+	77,  // 27: synod.agent.v1.StopContainer.grace_period:type_name -> google.protobuf.Duration
+	29,  // 28: synod.agent.v1.CheckReadiness.redis_replication:type_name -> synod.agent.v1.RedisReplicationCheck
+	77,  // 29: synod.agent.v1.CommandInput.timeout:type_name -> google.protobuf.Duration
+	15,  // 30: synod.agent.v1.CommandInput.secrets:type_name -> synod.agent.v1.SecretReference
+	20,  // 31: synod.agent.v1.CommandInput.ensure_volume:type_name -> synod.agent.v1.EnsureVolume
+	21,  // 32: synod.agent.v1.CommandInput.ensure_network:type_name -> synod.agent.v1.EnsureNetwork
+	22,  // 33: synod.agent.v1.CommandInput.ensure_container:type_name -> synod.agent.v1.EnsureContainer
+	30,  // 34: synod.agent.v1.CommandInput.start_container:type_name -> synod.agent.v1.StartContainer
+	32,  // 35: synod.agent.v1.CommandInput.stop_container:type_name -> synod.agent.v1.StopContainer
+	33,  // 36: synod.agent.v1.CommandInput.remove_container:type_name -> synod.agent.v1.RemoveContainer
+	34,  // 37: synod.agent.v1.CommandInput.inspect_container:type_name -> synod.agent.v1.InspectContainer
+	36,  // 38: synod.agent.v1.CommandInput.check_readiness:type_name -> synod.agent.v1.CheckReadiness
+	31,  // 39: synod.agent.v1.CommandInput.recover_postgres_setup:type_name -> synod.agent.v1.RecoverPostgresSetup
+	35,  // 40: synod.agent.v1.CommandInput.verify_container_absent:type_name -> synod.agent.v1.VerifyContainerAbsent
+	38,  // 41: synod.agent.v1.CommandInput.final_app_snapshot:type_name -> synod.agent.v1.FinalAppSnapshot
+	39,  // 42: synod.agent.v1.CommandInput.remove_app_data:type_name -> synod.agent.v1.RemoveAppData
+	9,   // 43: synod.agent.v1.Command.epoch:type_name -> synod.agent.v1.Epoch
+	37,  // 44: synod.agent.v1.Command.input:type_name -> synod.agent.v1.CommandInput
+	40,  // 45: synod.agent.v1.CommandInspectionRequest.command:type_name -> synod.agent.v1.Command
+	12,  // 46: synod.agent.v1.CommandInspectionRequest.prior_effects:type_name -> synod.agent.v1.Effect
+	9,   // 47: synod.agent.v1.CommandInspectionResult.epoch:type_name -> synod.agent.v1.Epoch
+	12,  // 48: synod.agent.v1.CommandInspectionResult.effects:type_name -> synod.agent.v1.Effect
+	9,   // 49: synod.agent.v1.AdmissionAck.epoch:type_name -> synod.agent.v1.Epoch
+	9,   // 50: synod.agent.v1.Progress.epoch:type_name -> synod.agent.v1.Epoch
+	9,   // 51: synod.agent.v1.TerminalResult.epoch:type_name -> synod.agent.v1.Epoch
+	12,  // 52: synod.agent.v1.TerminalResult.effects:type_name -> synod.agent.v1.Effect
+	9,   // 53: synod.agent.v1.ResultAck.epoch:type_name -> synod.agent.v1.Epoch
+	9,   // 54: synod.agent.v1.CancelCommand.epoch:type_name -> synod.agent.v1.Epoch
+	12,  // 55: synod.agent.v1.CancellationResult.effects:type_name -> synod.agent.v1.Effect
+	9,   // 56: synod.agent.v1.CancellationResult.epoch:type_name -> synod.agent.v1.Epoch
+	51,  // 57: synod.agent.v1.CapacityRequest.known:type_name -> synod.agent.v1.KnownReservation
+	52,  // 58: synod.agent.v1.ReservationUsage.used:type_name -> synod.agent.v1.ResourceVector
+	52,  // 59: synod.agent.v1.CapacityReport.capacity:type_name -> synod.agent.v1.ResourceVector
+	52,  // 60: synod.agent.v1.CapacityReport.used:type_name -> synod.agent.v1.ResourceVector
+	53,  // 61: synod.agent.v1.CapacityReport.reservations:type_name -> synod.agent.v1.ReservationUsage
+	8,   // 62: synod.agent.v1.InventoryPage.resources:type_name -> synod.agent.v1.Observation
+	12,  // 63: synod.agent.v1.InventoryPage.effects:type_name -> synod.agent.v1.Effect
+	56,  // 64: synod.agent.v1.InventoryPage.drift:type_name -> synod.agent.v1.DriftItem
+	59,  // 65: synod.agent.v1.RouteTable.routes:type_name -> synod.agent.v1.AppRoute
+	62,  // 66: synod.agent.v1.ReplicationTable.apps:type_name -> synod.agent.v1.AppReplication
+	64,  // 67: synod.agent.v1.AppReplication.peers:type_name -> synod.agent.v1.ReplicaPeer
+	67,  // 68: synod.agent.v1.PushRequest.manifest:type_name -> synod.agent.v1.PushManifest
+	68,  // 69: synod.agent.v1.PushRequest.block:type_name -> synod.agent.v1.ReplicaBlock
+	70,  // 70: synod.agent.v1.PushResponse.missing:type_name -> synod.agent.v1.MissingBlocks
+	72,  // 71: synod.agent.v1.PushResponse.result:type_name -> synod.agent.v1.PushResult
+	71,  // 72: synod.agent.v1.MissingBlocks.blocks:type_name -> synod.agent.v1.BlockRef
+	4,   // 73: synod.agent.v1.AgentMessage.hello:type_name -> synod.agent.v1.Hello
+	6,   // 74: synod.agent.v1.AgentMessage.heartbeat:type_name -> synod.agent.v1.Heartbeat
+	14,  // 75: synod.agent.v1.AgentMessage.barrier_result:type_name -> synod.agent.v1.BarrierResult
+	43,  // 76: synod.agent.v1.AgentMessage.admission_ack:type_name -> synod.agent.v1.AdmissionAck
+	44,  // 77: synod.agent.v1.AgentMessage.progress:type_name -> synod.agent.v1.Progress
+	45,  // 78: synod.agent.v1.AgentMessage.terminal_result:type_name -> synod.agent.v1.TerminalResult
+	48,  // 79: synod.agent.v1.AgentMessage.cancellation_result:type_name -> synod.agent.v1.CancellationResult
+	55,  // 80: synod.agent.v1.AgentMessage.inventory:type_name -> synod.agent.v1.InventoryPage
+	42,  // 81: synod.agent.v1.AgentMessage.command_inspection:type_name -> synod.agent.v1.CommandInspectionResult
+	54,  // 82: synod.agent.v1.AgentMessage.capacity_report:type_name -> synod.agent.v1.CapacityReport
+	60,  // 83: synod.agent.v1.AgentMessage.route_ack:type_name -> synod.agent.v1.RouteAck
+	65,  // 84: synod.agent.v1.AgentMessage.replication_ack:type_name -> synod.agent.v1.ReplicationAck
+	5,   // 85: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
+	10,  // 86: synod.agent.v1.ControllerMessage.prepare_epoch:type_name -> synod.agent.v1.PrepareEpoch
+	11,  // 87: synod.agent.v1.ControllerMessage.activate_epoch:type_name -> synod.agent.v1.ActivateEpoch
+	40,  // 88: synod.agent.v1.ControllerMessage.command:type_name -> synod.agent.v1.Command
+	46,  // 89: synod.agent.v1.ControllerMessage.result_ack:type_name -> synod.agent.v1.ResultAck
+	47,  // 90: synod.agent.v1.ControllerMessage.cancel:type_name -> synod.agent.v1.CancelCommand
+	49,  // 91: synod.agent.v1.ControllerMessage.inventory:type_name -> synod.agent.v1.InventoryRequest
+	57,  // 92: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
+	41,  // 93: synod.agent.v1.ControllerMessage.command_inspection:type_name -> synod.agent.v1.CommandInspectionRequest
+	50,  // 94: synod.agent.v1.ControllerMessage.capacity_request:type_name -> synod.agent.v1.CapacityRequest
+	16,  // 95: synod.agent.v1.ControllerMessage.secret:type_name -> synod.agent.v1.SecretMaterial
+	58,  // 96: synod.agent.v1.ControllerMessage.routes:type_name -> synod.agent.v1.RouteTable
+	61,  // 97: synod.agent.v1.ControllerMessage.replication:type_name -> synod.agent.v1.ReplicationTable
+	63,  // 98: synod.agent.v1.ControllerMessage.writer_lease:type_name -> synod.agent.v1.WriterLease
+	76,  // 99: synod.agent.v1.ExecutionPlan.steps:type_name -> synod.agent.v1.PlanStep
+	40,  // 100: synod.agent.v1.PlanStep.command:type_name -> synod.agent.v1.Command
+	1,   // 101: synod.agent.v1.PlanStep.cancellation_boundary:type_name -> synod.agent.v1.CancellationBoundary
+	2,   // 102: synod.agent.v1.PlanStep.postcondition:type_name -> synod.agent.v1.Postcondition
+	73,  // 103: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
+	66,  // 104: synod.agent.v1.ReplicationService.Push:input_type -> synod.agent.v1.PushRequest
+	74,  // 105: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
+	69,  // 106: synod.agent.v1.ReplicationService.Push:output_type -> synod.agent.v1.PushResponse
+	105, // [105:107] is the sub-list for method output_type
+	103, // [103:105] is the sub-list for method input_type
+	103, // [103:103] is the sub-list for extension type_name
+	103, // [103:103] is the sub-list for extension extendee
+	0,   // [0:103] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -5357,7 +6640,7 @@ func file_proto_agent_v1_agent_proto_init() {
 	if File_proto_agent_v1_agent_proto != nil {
 		return
 	}
-	file_proto_agent_v1_agent_proto_msgTypes[32].OneofWrappers = []any{
+	file_proto_agent_v1_agent_proto_msgTypes[34].OneofWrappers = []any{
 		(*CommandInput_EnsureVolume)(nil),
 		(*CommandInput_EnsureNetwork)(nil),
 		(*CommandInput_EnsureContainer)(nil),
@@ -5368,8 +6651,18 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*CommandInput_CheckReadiness)(nil),
 		(*CommandInput_RecoverPostgresSetup)(nil),
 		(*CommandInput_VerifyContainerAbsent)(nil),
+		(*CommandInput_FinalAppSnapshot)(nil),
+		(*CommandInput_RemoveAppData)(nil),
 	}
-	file_proto_agent_v1_agent_proto_msgTypes[54].OneofWrappers = []any{
+	file_proto_agent_v1_agent_proto_msgTypes[63].OneofWrappers = []any{
+		(*PushRequest_Manifest)(nil),
+		(*PushRequest_Block)(nil),
+	}
+	file_proto_agent_v1_agent_proto_msgTypes[66].OneofWrappers = []any{
+		(*PushResponse_Missing)(nil),
+		(*PushResponse_Result)(nil),
+	}
+	file_proto_agent_v1_agent_proto_msgTypes[70].OneofWrappers = []any{
 		(*AgentMessage_Hello)(nil),
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_BarrierResult)(nil),
@@ -5381,8 +6674,9 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*AgentMessage_CommandInspection)(nil),
 		(*AgentMessage_CapacityReport)(nil),
 		(*AgentMessage_RouteAck)(nil),
+		(*AgentMessage_ReplicationAck)(nil),
 	}
-	file_proto_agent_v1_agent_proto_msgTypes[55].OneofWrappers = []any{
+	file_proto_agent_v1_agent_proto_msgTypes[71].OneofWrappers = []any{
 		(*ControllerMessage_Session)(nil),
 		(*ControllerMessage_PrepareEpoch)(nil),
 		(*ControllerMessage_ActivateEpoch)(nil),
@@ -5395,6 +6689,8 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*ControllerMessage_CapacityRequest)(nil),
 		(*ControllerMessage_Secret)(nil),
 		(*ControllerMessage_Routes)(nil),
+		(*ControllerMessage_Replication)(nil),
+		(*ControllerMessage_WriterLease)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -5402,9 +6698,9 @@ func file_proto_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_agent_proto_rawDesc), len(file_proto_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   58,
+			NumMessages:   74,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_proto_agent_v1_agent_proto_goTypes,
 		DependencyIndexes: file_proto_agent_v1_agent_proto_depIdxs,

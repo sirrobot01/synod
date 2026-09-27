@@ -319,7 +319,15 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 		return PlacementRecord{}, err
 	}
 	if strings.HasPrefix(kind, "app.") {
-		if err := recordAppCopies(ctx, tx, claim, request, decision, plan); err != nil {
+		if kind == "app.move" {
+			if err := recordAppMoveTarget(ctx, tx, claim, request, decision, plan); err != nil {
+				return PlacementRecord{}, err
+			}
+		} else if kind == "app.failover" {
+			if err := recordAppPromotion(ctx, tx, claim, request, decision, plan); err != nil {
+				return PlacementRecord{}, err
+			}
+		} else if err := recordAppCopies(ctx, tx, claim, request, decision, plan); err != nil {
 			return PlacementRecord{}, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE operations SET failure_code=NULL WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.OperationID); err != nil {

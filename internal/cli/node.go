@@ -58,6 +58,7 @@ func newNodeCommand(app *app) *cobra.Command {
 	approve.Flags().StringVar(&policy.Architecture, "architecture", "", "Node CPU architecture, amd64 or arm64")
 	approve.Flags().StringVar(&policy.RuntimeVersion, "runtime-version", "", "Container runtime version the node reports")
 	approve.Flags().StringVar(&policy.StorageID, "storage-id", "", "Storage pool identifier")
+	approve.Flags().Uint16Var(&policy.ReplicationPort, "replication-port", 0, "Agent replication port; 0 selects 8445")
 	approve.Flags().StringVar(&policy.ClientAddress, "client-address", "", "Canonical node IPv4 or IPv6 address for database clients")
 	approve.Flags().StringSliceVar(&engines, "engine", nil, "Engine and version the node may run, as engine:version (repeatable)")
 	// HA placement spreads members across distinct values of one key, such as host.

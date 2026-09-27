@@ -9,7 +9,7 @@ CREATE TABLE node_capacity (
  installation_id uuid NOT NULL, node_id uuid NOT NULL,
  probe_revision bigint NOT NULL CHECK (probe_revision>0),
  probe_id uuid NOT NULL UNIQUE,
- probe_bytes bytea NOT NULL CHECK (octet_length(probe_bytes) BETWEEN 1 AND 4096),
+ probe_bytes bytea NOT NULL CHECK (octet_length(probe_bytes) BETWEEN 1 AND 262144),
  report_bytes bytea CHECK (octet_length(report_bytes) BETWEEN 1 AND 262144),
  PRIMARY KEY (installation_id,node_id),
  FOREIGN KEY (installation_id,node_id) REFERENCES nodes (installation_id,id)

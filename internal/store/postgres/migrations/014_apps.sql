@@ -10,6 +10,12 @@ CREATE TABLE apps (
     spec_version integer NOT NULL CHECK (spec_version = 1),
     spec jsonb NOT NULL CHECK (jsonb_typeof(spec) = 'object'),
     execution_epoch bigint NOT NULL DEFAULT 0 CHECK (execution_epoch >= 0),
+    writer_epoch bigint NOT NULL DEFAULT 0 CHECK (writer_epoch >= 0),
+    writer_node_id uuid,
+    writer_last_grant_at timestamptz,
+    CHECK ((writer_epoch = 0 AND writer_node_id IS NULL AND writer_last_grant_at IS NULL)
+        OR (tier = 2 AND writer_epoch > 0 AND writer_node_id IS NOT NULL)),
+    FOREIGN KEY (installation_id, writer_node_id) REFERENCES nodes (installation_id, id),
     desired_revision bigint NOT NULL CHECK (desired_revision > 0),
     desired_lifecycle text NOT NULL CHECK (desired_lifecycle IN ('running', 'stopped', 'deleted')),
     observed_revision bigint NOT NULL CHECK (observed_revision >= 0),
@@ -30,6 +36,7 @@ CREATE TABLE app_copies (
     app_id uuid NOT NULL,
     node_id uuid NOT NULL,
     copy_index integer NOT NULL CHECK (copy_index >= 0),
+    role text NOT NULL DEFAULT 'parallel' CHECK (role IN ('parallel','active','standby')),
     host_port integer NOT NULL CHECK (host_port >= 0 AND host_port <= 65535),
     desired boolean NOT NULL DEFAULT true,
     desired_revision bigint NOT NULL DEFAULT 1 CHECK (desired_revision > 0),
@@ -45,6 +52,8 @@ CREATE TABLE app_copies (
     FOREIGN KEY (installation_id, node_id) REFERENCES nodes (installation_id, id)
 );
 CREATE UNIQUE INDEX app_copies_active_index ON app_copies (installation_id,app_id,copy_index) WHERE desired;
+CREATE UNIQUE INDEX app_copies_writer ON app_copies (installation_id,app_id) WHERE desired AND role='active';
+CREATE UNIQUE INDEX app_copies_writer_node ON app_copies (installation_id,app_id,node_id) WHERE desired AND role IN ('active','standby');
 CREATE INDEX app_copies_node ON app_copies (installation_id, node_id);
 
 -- Operations is created in migration 001. Apps does not exist until this migration.
@@ -54,7 +63,7 @@ ALTER TABLE operations ADD FOREIGN KEY (installation_id,app_id) REFERENCES apps 
 -- App admission records the retry identity for durable operation admission.
 -- The actor and request identify accepted work without storing environment values twice.
 CREATE TABLE app_admissions (
-    api_operation text NOT NULL CHECK (api_operation IN ('app.create','app.stop','app.start','app.delete')),
+    api_operation text NOT NULL CHECK (api_operation IN ('app.create','app.stop','app.start','app.delete','app.move')),
     installation_id uuid NOT NULL,
     actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 256),
     idempotency_key text NOT NULL CHECK (idempotency_key ~ '^[!-~]{1,128}$'),
@@ -79,4 +88,54 @@ CREATE TABLE agent_routes (
  failure_code text NOT NULL DEFAULT '',
  PRIMARY KEY (installation_id,node_id),
  FOREIGN KEY (installation_id,node_id) REFERENCES nodes (installation_id,id)
+);
+
+CREATE TABLE agent_replication (
+ installation_id uuid NOT NULL,
+ node_id uuid NOT NULL,
+ session_id uuid NOT NULL,
+ revision bigint NOT NULL CHECK (revision > 0),
+ table_bytes bytea NOT NULL CHECK (octet_length(table_bytes) BETWEEN 1 AND 1048576),
+ acknowledged_at timestamptz,
+ failure_code text NOT NULL DEFAULT '',
+ PRIMARY KEY (installation_id,node_id),
+ FOREIGN KEY (installation_id,node_id) REFERENCES nodes (installation_id,id)
+);
+
+CREATE TABLE app_replicas (
+ installation_id uuid NOT NULL,
+ app_id uuid NOT NULL,
+ node_id uuid NOT NULL,
+ session_id uuid NOT NULL,
+ role text NOT NULL CHECK (role IN ('active','standby')),
+ writer_epoch bigint NOT NULL CHECK (writer_epoch > 0),
+ sequence bigint NOT NULL CHECK (sequence >= 0),
+ completed_at timestamptz,
+ last_pause_nanos bigint NOT NULL DEFAULT 0 CHECK(last_pause_nanos>=0),
+ max_pause_nanos bigint NOT NULL DEFAULT 0 CHECK(max_pause_nanos>=last_pause_nanos),
+ skipped_snapshots bigint NOT NULL DEFAULT 0 CHECK(skipped_snapshots>=0),
+ observed_at timestamptz NOT NULL,
+ failure_code text NOT NULL DEFAULT '',
+ PRIMARY KEY (installation_id,app_id,node_id),
+ FOREIGN KEY (installation_id,app_id) REFERENCES apps (installation_id,id) ON DELETE CASCADE,
+ FOREIGN KEY (installation_id,node_id) REFERENCES nodes (installation_id,id),
+ CHECK ((sequence=0 AND completed_at IS NULL) OR (sequence>0 AND completed_at IS NOT NULL))
+);
+
+-- A move keeps its source identity until final-copy evidence permits promotion.
+CREATE TABLE app_moves (
+ installation_id uuid NOT NULL,
+ app_id uuid NOT NULL,
+ operation_id uuid PRIMARY KEY,
+ source_node_id uuid NOT NULL,
+ target_node_id uuid NOT NULL,
+ writer_epoch bigint NOT NULL CHECK(writer_epoch>0),
+ target_copy_id uuid REFERENCES app_copies(id),
+ promoted_at timestamptz,
+ rollback_operation_id uuid UNIQUE,
+ CHECK(source_node_id<>target_node_id),
+ FOREIGN KEY(installation_id,source_node_id) REFERENCES nodes(installation_id,id),
+ FOREIGN KEY(installation_id,target_node_id) REFERENCES nodes(installation_id,id),
+ FOREIGN KEY(installation_id,app_id,rollback_operation_id) REFERENCES operations(installation_id,cluster_id,id),
+ FOREIGN KEY(installation_id,app_id,operation_id) REFERENCES operations(installation_id,cluster_id,id)
 );

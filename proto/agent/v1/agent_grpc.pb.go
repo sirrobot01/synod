@@ -117,3 +117,105 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "proto/agent/v1/agent.proto",
 }
+
+const (
+	ReplicationService_Push_FullMethodName = "/synod.agent.v1.ReplicationService/Push"
+)
+
+// ReplicationServiceClient is the client API for ReplicationService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// An active agent pushes tier 2 snapshots to a standby agent over mTLS.
+// The standby accepts only the peer that its ReplicationTable names.
+type ReplicationServiceClient interface {
+	Push(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PushRequest, PushResponse], error)
+}
+
+type replicationServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewReplicationServiceClient(cc grpc.ClientConnInterface) ReplicationServiceClient {
+	return &replicationServiceClient{cc}
+}
+
+func (c *replicationServiceClient) Push(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PushRequest, PushResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ReplicationService_ServiceDesc.Streams[0], ReplicationService_Push_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PushRequest, PushResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ReplicationService_PushClient = grpc.BidiStreamingClient[PushRequest, PushResponse]
+
+// ReplicationServiceServer is the server API for ReplicationService service.
+// All implementations must embed UnimplementedReplicationServiceServer
+// for forward compatibility.
+//
+// An active agent pushes tier 2 snapshots to a standby agent over mTLS.
+// The standby accepts only the peer that its ReplicationTable names.
+type ReplicationServiceServer interface {
+	Push(grpc.BidiStreamingServer[PushRequest, PushResponse]) error
+	mustEmbedUnimplementedReplicationServiceServer()
+}
+
+// UnimplementedReplicationServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedReplicationServiceServer struct{}
+
+func (UnimplementedReplicationServiceServer) Push(grpc.BidiStreamingServer[PushRequest, PushResponse]) error {
+	return status.Error(codes.Unimplemented, "method Push not implemented")
+}
+func (UnimplementedReplicationServiceServer) mustEmbedUnimplementedReplicationServiceServer() {}
+func (UnimplementedReplicationServiceServer) testEmbeddedByValue()                            {}
+
+// UnsafeReplicationServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ReplicationServiceServer will
+// result in compilation errors.
+type UnsafeReplicationServiceServer interface {
+	mustEmbedUnimplementedReplicationServiceServer()
+}
+
+func RegisterReplicationServiceServer(s grpc.ServiceRegistrar, srv ReplicationServiceServer) {
+	// If the following call panics, it indicates UnimplementedReplicationServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ReplicationService_ServiceDesc, srv)
+}
+
+func _ReplicationService_Push_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ReplicationServiceServer).Push(&grpc.GenericServerStream[PushRequest, PushResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ReplicationService_PushServer = grpc.BidiStreamingServer[PushRequest, PushResponse]
+
+// ReplicationService_ServiceDesc is the grpc.ServiceDesc for ReplicationService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ReplicationService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "synod.agent.v1.ReplicationService",
+	HandlerType: (*ReplicationServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Push",
+			Handler:       _ReplicationService_Push_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
+	Metadata: "proto/agent/v1/agent.proto",
+}

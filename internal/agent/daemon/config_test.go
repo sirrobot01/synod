@@ -107,3 +107,29 @@ func TestBootIdentity(t *testing.T) {
 		t.Fatal("invalid boot ID accepted")
 	}
 }
+
+func TestAppsDirectoryConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	base := Config{InstallationID: uuid.NewString(), NodeID: uuid.NewString(), RecoveryGeneration: uuid.NewString(), EnrollmentDir: filepath.Join(dir, "enrollment"), JournalDir: filepath.Join(dir, "journal"), DockerSocket: "/var/run/docker.sock", ControllerEndpoints: []string{"localhost:8444"}, StorageID: "pool-a"}
+	valid := base
+	valid.AppsDir = filepath.Join(dir, "apps")
+	if err := valid.validate(); err != nil || valid.replicationListen() != DefaultReplicationListen {
+		t.Fatalf("valid apps directory: %v %s", err, valid.replicationListen())
+	}
+	for name, mutate := range map[string]func(*Config){
+		"relative":        func(c *Config) { c.AppsDir = "apps" },
+		"inside journal":  func(c *Config) { c.AppsDir = filepath.Join(c.JournalDir, "apps") },
+		"holds journal":   func(c *Config) { c.AppsDir = dir },
+		"host name":       func(c *Config) { c.AppsDir, c.ReplicationListen = filepath.Join(dir, "apps"), "odin:8445" },
+		"zero port":       func(c *Config) { c.AppsDir, c.ReplicationListen = filepath.Join(dir, "apps"), "0.0.0.0:0" },
+		"same enrollment": func(c *Config) { c.AppsDir = c.EnrollmentDir },
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := base
+			mutate(&config)
+			if err := config.validate(); err == nil {
+				t.Fatal("invalid apps configuration accepted")
+			}
+		})
+	}
+}

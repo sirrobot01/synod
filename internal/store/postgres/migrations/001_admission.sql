@@ -30,11 +30,11 @@ CREATE TABLE operations (
     installation_id uuid NOT NULL,
     cluster_id uuid NOT NULL,
     actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 256),
-    api_operation text NOT NULL CHECK (api_operation IN ('app.create','app.stop','app.start','app.delete','clusters.create.v1','clusters.stop.v1','clusters.start.v1','clusters.delete.v1','clusters.scale.v1','clusters.recover_setup.v1')),
+    api_operation text NOT NULL CHECK (api_operation IN ('app.create','app.stop','app.start','app.delete','app.move','app.failover','clusters.create.v1','clusters.stop.v1','clusters.start.v1','clusters.delete.v1','clusters.scale.v1','clusters.recover_setup.v1')),
     idempotency_key text NOT NULL CHECK (idempotency_key ~ '^[!-~]{1,128}$'),
     request_hash bytea NOT NULL CHECK (octet_length(request_hash) = 32),
     hash_version integer NOT NULL CHECK (hash_version = 1),
-    kind text NOT NULL CHECK (kind IN ('app.deploy','app.stop','app.start','app.delete','cluster.create','cluster.stop','cluster.start','cluster.delete','cluster.scale','cluster.recover_setup')),
+    kind text NOT NULL CHECK (kind IN ('app.deploy','app.stop','app.start','app.delete','app.move','app.failover','cluster.create','cluster.stop','cluster.start','cluster.delete','cluster.scale','cluster.recover_setup')),
     -- cluster_id is the execution scope. Generated targets keep its owner explicit.
     database_cluster_id uuid GENERATED ALWAYS AS (CASE WHEN kind LIKE 'cluster.%' THEN cluster_id END) STORED,
     app_id uuid GENERATED ALWAYS AS (CASE WHEN kind LIKE 'app.%' THEN cluster_id END) STORED,

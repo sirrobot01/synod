@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -173,6 +174,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			return w.cancel(ctx, state, found)
 		}
 		pass, err := w.dispatch(ctx, state, completed)
+		if errors.Is(err, postgres.ErrAppMoveTargetLost) {
+			return w.progress(ctx, state.ProgressSequence+1, operation.Failed, "The target was lost before promotion.", false, "app_move_target_lost")
+		}
 		if errors.Is(err, postgres.ErrAttemptsExhausted) {
 			// Reload deliveries and results, including commands sent during this pass.
 			continue
@@ -653,6 +657,26 @@ func (w *Worker) dispatch(ctx context.Context, state postgres.ExecutionState, co
 		if err != nil {
 			return pass, err
 		}
+		if step.Command.Input.GetRemoveAppData() != nil {
+			ready, err := w.config.Store.AppDataRemovalReady(ctx, w.config.Claim.InstallationID, w.config.Claim.ClusterID, nodeID)
+			if err != nil {
+				return pass, err
+			}
+			if !ready {
+				pass.retryAt = earlier(pass.retryAt, time.Now().Add(w.config.RetryDelay))
+				continue
+			}
+		}
+		if w.config.Operation.Kind == "app.move" {
+			ready, err := w.config.Store.PrepareAppMoveStep(ctx, w.config.Claim, uuid.MustParse(step.Command.StepId))
+			if err != nil {
+				return pass, err
+			}
+			if !ready {
+				pass.retryAt = earlier(pass.retryAt, time.Now().Add(w.config.RetryDelay))
+				continue
+			}
+		}
 		peer, sessionID, err := w.session(ctx, nodeID)
 		if err != nil {
 			return pass, err
@@ -664,6 +688,29 @@ func (w *Worker) dispatch(ctx context.Context, state postgres.ExecutionState, co
 		command := proto.Clone(step.Command).(*agentv1.Command)
 		command.Epoch.ExecutionEpoch = w.config.Claim.ExecutionEpoch
 		command.Epoch.RecoveryGeneration = w.config.Claim.RecoveryGeneration.String()
+		if strings.HasPrefix(w.config.Operation.Kind, "app.") && (command.Input.GetEnsureContainer() != nil || command.Input.GetStartContainer() != nil) {
+			writer, err := w.config.Store.GetAppWriter(ctx, w.config.Claim.InstallationID, w.config.Claim.ClusterID)
+			if err != nil {
+				return pass, err
+			}
+			if writer.Epoch > 0 {
+				grant, err := w.config.Store.PrepareAppWriterLease(ctx, w.config.Claim.InstallationID, w.config.Claim.ClusterID, nodeID, sessionID, writer.Epoch, true)
+				if err != nil {
+					return pass, err
+				}
+				if grant == nil {
+					pass.retryAt = earlier(pass.retryAt, time.Now().Add(w.config.RetryDelay))
+					continue
+				}
+				if err := w.config.Transport.Send(nodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_WriterLease{WriterLease: grant}}); err != nil {
+					if errors.Is(err, controlstream.ErrBusy) {
+						pass.retryAt = earlier(pass.retryAt, time.Now().Add(w.config.RetryDelay))
+						continue
+					}
+					return pass, err
+				}
+			}
+		}
 		// The dispatch identity must exist before an attempt can reserve the retry budget.
 		if err := w.config.Store.RecordDispatch(ctx, w.config.Claim, command); err != nil {
 			return pass, err

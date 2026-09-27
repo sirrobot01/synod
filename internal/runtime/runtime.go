@@ -17,6 +17,9 @@ var ErrUnsupportedConfiguration = errors.New("runtime_unsupported_configuration"
 var ErrOutcomeUnknown = errors.New("runtime_outcome_unknown")
 var ErrBusy = errors.New("runtime_busy")
 
+// ErrNotApplied reports a command that provably changed nothing, such as a failed image pull.
+var ErrNotApplied = errors.New("runtime_not_applied")
+
 // Error reports a runtime failure with a stable kind and its cause.
 type Error struct {
 	Kind  error
@@ -128,4 +131,13 @@ type Runtime interface {
 	// Drift reports objects on the host that this node did not expect to find as
 	// they are. It reads only, and it removes nothing.
 	Drift(ctx context.Context) ([]Drift, error)
+}
+
+// AppContainer identifies an owned tier 2 container for fencing and snapshots.
+type AppContainer struct {
+	AppID      string
+	ResourceID string
+	PID        int
+	Running    bool
+	Mounts     []*agentv1.Mount
 }

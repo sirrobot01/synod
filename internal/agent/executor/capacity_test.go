@@ -271,10 +271,31 @@ func TestCapacityRefusesWithoutAnApprovedPool(t *testing.T) {
 }
 
 // A driver that cannot measure must fail the probe rather than report zero.
+// The failure is a busy refusal, so the transport keeps the session open.
 func TestCapacityFailsWhenTheDriverCannotMeasure(t *testing.T) {
 	native := &measuredRuntime{err: errors.New("daemon unreachable")}
 	e, ctx, boot := challenged(t, native)
-	if _, err := answer(t, e, ctx, request(t, e, boot)); err == nil {
-		t.Fatal("an unmeasurable driver reported a capacity")
+	if _, err := answer(t, e, ctx, request(t, e, boot)); !errors.Is(err, journal.ErrBusy) {
+		t.Fatalf("an unmeasurable driver did not refuse only the probe: %v", err)
+	}
+}
+
+func TestCapacityReportsOnlyExistingBindPaths(t *testing.T) {
+	e, ctx, boot := challenged(t, &measuredRuntime{})
+	dir := "/media"
+	host := filepath.Join(e.options.Host.ProcRoot, "1", "root")
+	if err := os.MkdirAll(filepath.Join(host, "media"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	req := request(t, e, boot)
+	req.Paths = []string{dir, filepath.Join(dir, "missing"), "/"}
+	report, err := answer(t, e, ctx, req)
+	if err != nil || len(report.ExistingPaths) != 2 || report.ExistingPaths[0] != dir || report.ExistingPaths[1] != "/" {
+		t.Fatalf("path evidence: %v %v", report, err)
+	}
+	req = request(t, e, boot)
+	req.Paths = []string{"relative"}
+	if _, err := answer(t, e, ctx, req); !errors.Is(err, controlstream.ErrMessage) {
+		t.Fatalf("relative probe: %v", err)
 	}
 }

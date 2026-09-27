@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/engine"
@@ -41,7 +42,7 @@ func readyNodeWith(t *testing.T, store *postgres.Store, installation, node uuid.
 	hello := &agentv1.Hello{
 		InstallationId: installation.String(), NodeId: node.String(),
 		BootId: uuid.NewString(), JournalGeneration: uuid.NewString(),
-		Capabilities: []string{"runtime.docker", controlstream.RouterCapability},
+		Capabilities: []string{"runtime.docker", controlstream.RouterCapability, replication.Capability},
 		Protocol:     &agentv1.VersionRange{Minimum: 1, Maximum: 1}, ActivePayloadVersions: []uint32{1},
 	}
 	if err := store.RecordAgentSession(t.Context(), installation, node, session, hello); err != nil {
@@ -130,10 +131,11 @@ func realStore(t *testing.T) (*postgres.Store, *pgxpool.Pool) {
 // exactly one thing the real driver does — the probe challenge, which needs a live
 // agent — so the decision it returns is a real one that the store will accept.
 type localDecider struct {
-	store    *postgres.Store
-	request  placement.Request
-	decision placement.Decision
-	err      error
+	store         *postgres.Store
+	request       placement.Request
+	decision      placement.Decision
+	afterDecision func()
+	err           error
 }
 
 func (d *localDecider) Decide(ctx context.Context, request placement.Request) (placement.Decision, placement.Snapshot, error) {
@@ -147,6 +149,9 @@ func (d *localDecider) Decide(ctx context.Context, request placement.Request) (p
 	}
 	decision, err := placement.Plan(request, snapshot)
 	d.decision = decision
+	if err == nil && d.afterDecision != nil {
+		d.afterDecision()
+	}
 	return decision, snapshot, err
 }
 

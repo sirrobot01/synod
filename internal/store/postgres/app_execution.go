@@ -18,7 +18,8 @@ func recordAppCopies(ctx context.Context, tx pgx.Tx, claim operation.Claim, requ
 	var revision int64
 	var copies int
 	var mode string
-	if err := tx.QueryRow(ctx, `SELECT name,desired_revision,(spec->>'copies')::integer,COALESCE(spec->>'copies_mode','') FROM apps WHERE installation_id=$1 AND id=$2 FOR UPDATE`, claim.InstallationID, claim.ClusterID).Scan(&name, &revision, &copies, &mode); err != nil {
+	var tier, standbys int
+	if err := tx.QueryRow(ctx, `SELECT name,desired_revision,(spec->>'copies')::integer,COALESCE(spec->>'copies_mode',''),tier,COALESCE((spec->'replication'->>'standbys')::integer,0) FROM apps WHERE installation_id=$1 AND id=$2 FOR UPDATE`, claim.InstallationID, claim.ClusterID).Scan(&name, &revision, &copies, &mode, &tier, &standbys); err != nil {
 		return admissionError(err)
 	}
 	if revision != request.DesiredRevision {
@@ -72,6 +73,48 @@ func recordAppCopies(ctx context.Context, tx pgx.Tx, claim operation.Claim, requ
 	}
 	for index := range count {
 		if !indexes[uint32(index)] {
+			return operation.ErrCommandConflict
+		}
+	}
+	if tier == 2 {
+		if count != 1 || standbys < 1 || standbys > 3 {
+			return operation.ErrCommandConflict
+		}
+		standbyCount := 0
+		for _, resource := range request.Resources {
+			if resource.Role != "active" && resource.Role != "standby" {
+				continue
+			}
+			i := slices.IndexFunc(decision.Assignments, func(a placement.Assignment) bool { return a.ResourceID == resource.ID })
+			if i < 0 {
+				return operation.ErrCommandConflict
+			}
+			a := decision.Assignments[i]
+			if resource.Role == "active" {
+				if !resources[resource.ID.String()] {
+					return operation.ErrCommandConflict
+				}
+				if _, err := tx.Exec(ctx, `UPDATE app_copies SET role='active' WHERE id=$1`, resource.ID); err != nil {
+					return admissionError(err)
+				}
+				tag, err := tx.Exec(ctx, `UPDATE apps SET writer_node_id=$3,writer_epoch=1 WHERE installation_id=$1 AND id=$2 AND writer_epoch=0`, claim.InstallationID, claim.ClusterID, a.NodeID)
+				if err != nil {
+					return admissionError(err)
+				}
+				if tag.RowsAffected() != 1 {
+					return operation.ErrCommandConflict
+				}
+			} else {
+				if len(a.Ports) != 1 || a.Ports[0].Name != "backend" {
+					return operation.ErrCommandConflict
+				}
+				standbyCount++
+				if _, err := tx.Exec(ctx, `INSERT INTO app_copies(id,installation_id,app_id,node_id,copy_index,host_port,desired_revision,role,observed_state,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,'standby','pending',clock_timestamp(),clock_timestamp())`, a.ResourceID, claim.InstallationID, claim.ClusterID, a.NodeID, standbyCount, a.Ports[0].Number, revision); err != nil {
+					return admissionError(err)
+				}
+			}
+		}
+		if standbyCount != standbys {
 			return operation.ErrCommandConflict
 		}
 	}

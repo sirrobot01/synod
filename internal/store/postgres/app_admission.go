@@ -37,7 +37,7 @@ func (s *Store) AdmitApp(ctx context.Context, request CreateAppRequest) (app.Adm
 	if err := request.Spec.Validate(); err != nil {
 		return app.Admission{}, &AdmissionError{Code: InvalidRequest, Cause: err}
 	}
-	if request.Spec.Tier != app.TierParallel {
+	if request.Spec.Tier != app.TierParallel && request.Spec.Tier != app.TierSingleWriter {
 		return app.Admission{}, &AdmissionError{Code: UnsupportedSpec}
 	}
 	if len(request.Spec.Service.SupportedArchitectures) != 0 {

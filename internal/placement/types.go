@@ -51,23 +51,25 @@ type EngineVersion struct {
 // NodePolicy holds the operator policy and fixed capability of one node.
 // Headroom is the capacity that placement must leave unused.
 type NodePolicy struct {
-	InstallationID uuid.UUID         `json:"installation_id"`
-	NodeID         uuid.UUID         `json:"node_id"`
-	Revision       int64             `json:"revision"`
-	Architecture   string            `json:"architecture"`
-	RuntimeVersion string            `json:"runtime_version"`
-	StorageID      string            `json:"storage_id"`
-	ClientAddress  string            `json:"client_address,omitempty"`
-	Engines        []EngineVersion   `json:"engines"`
-	Labels         map[string]string `json:"labels"`
-	FailureDomains map[string]string `json:"failure_domains"`
-	Headroom       Vector            `json:"headroom"`
-	Cordoned       bool              `json:"cordoned"`
-	Maintenance    bool              `json:"maintenance"`
+	ReplicationPort uint16            `json:"replication_port,omitempty"`
+	InstallationID  uuid.UUID         `json:"installation_id"`
+	NodeID          uuid.UUID         `json:"node_id"`
+	Revision        int64             `json:"revision"`
+	Architecture    string            `json:"architecture"`
+	RuntimeVersion  string            `json:"runtime_version"`
+	StorageID       string            `json:"storage_id"`
+	ClientAddress   string            `json:"client_address,omitempty"`
+	Engines         []EngineVersion   `json:"engines"`
+	Labels          map[string]string `json:"labels"`
+	FailureDomains  map[string]string `json:"failure_domains"`
+	Headroom        Vector            `json:"headroom"`
+	Cordoned        bool              `json:"cordoned"`
+	Maintenance     bool              `json:"maintenance"`
 }
 
 // CapacityProbe requests a fresh capacity report from one node.
 type CapacityProbe struct {
+	Paths             []string  `json:"paths,omitempty"`
 	ID                uuid.UUID `json:"id"`
 	InstallationID    uuid.UUID `json:"installation_id"`
 	NodeID            uuid.UUID `json:"node_id"`
@@ -90,6 +92,7 @@ type Usage struct {
 
 // CapacityReport is an agent report of node capacity and current use.
 type CapacityReport struct {
+	ExistingPaths     []string  `json:"existing_paths,omitempty"`
 	ProbeID           uuid.UUID `json:"probe_id"`
 	ProbeRevision     int64     `json:"probe_revision"`
 	InstallationID    uuid.UUID `json:"installation_id"`
@@ -139,6 +142,7 @@ type Port struct {
 
 // Resource is one unit to place with the requirements a node must meet.
 type Resource struct {
+	RequiredPaths    []string    `json:"required_paths,omitempty"`
 	ID               uuid.UUID   `json:"id"`
 	ReservationID    uuid.UUID   `json:"reservation_id"`
 	OwnedResourceIDs []uuid.UUID `json:"owned_resource_ids"`

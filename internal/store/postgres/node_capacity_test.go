@@ -332,3 +332,32 @@ func TestCapacityFactsStayBoundToTheCurrentSessionAndApproval(t *testing.T) {
 		t.Fatalf("old session facts survived: %+v %v", facts, err)
 	}
 }
+
+func TestCapacityProbeBindsAppPathsToItsReport(t *testing.T) {
+	s, installation, node, session := capacityFixture(t)
+	policy := testPolicy(installation, node)
+	if _, err := s.PutNodePlacementPolicy(t.Context(), policy, 0); err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.New()
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO apps(id,installation_id,name,tier,spec_version,spec,desired_revision,desired_lifecycle,observed_revision,observed_lifecycle,created_at,updated_at) VALUES($1,$2,'paths',2,1,'{"name":"paths","tier":2,"schema_version":1,"service":{"mounts":[{"type":"bind","source":"/media"},{"type":"replicated","source":"config"}]}}',1,'running',0,'provisioning',clock_timestamp(),clock_timestamp())`, id, installation); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := s.BeginCapacityProbe(t.Context(), installation, node, session)
+	if err != nil || len(probe.Paths) != 1 || probe.Paths[0] != "/media" {
+		t.Fatalf("probe: %+v %v", probe, err)
+	}
+	report := testReport(probe, policy)
+	report.ExistingPaths = []string{"/not-requested"}
+	if err := s.RecordNodeCapacity(t.Context(), installation, node, report); err == nil {
+		t.Fatal("unsolicited path was accepted")
+	}
+	report.ExistingPaths = []string{"/media"}
+	if err := s.RecordNodeCapacity(t.Context(), installation, node, report); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := s.ReadPlacementSnapshot(t.Context(), installation)
+	if err != nil || len(snapshot.Nodes[0].Report.ExistingPaths) != 1 {
+		t.Fatalf("path evidence lost: %+v %v", snapshot, err)
+	}
+}

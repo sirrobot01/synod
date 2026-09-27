@@ -52,6 +52,10 @@ func planStep(t *testing.T, op operation.Operation, nodeID, resourceID string, p
 		input.Payload = &agentv1.CommandInput_RemoveContainer{RemoveContainer: &agentv1.RemoveContainer{}}
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED:
 		input.Payload = &agentv1.CommandInput_InspectContainer{InspectContainer: &agentv1.InspectContainer{}}
+	case agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED:
+		input.Payload = &agentv1.CommandInput_FinalAppSnapshot{FinalAppSnapshot: &agentv1.FinalAppSnapshot{WriterEpoch: 1, TargetNodeId: uuid.NewString()}}
+	case agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT:
+		input.Payload = &agentv1.CommandInput_RemoveAppData{RemoveAppData: &agentv1.RemoveAppData{WriterEpoch: 1}}
 	case agentv1.Postcondition_POSTCONDITION_ENGINE_READY:
 		input.Payload = &agentv1.CommandInput_CheckReadiness{CheckReadiness: &agentv1.CheckReadiness{
 			Address: "127.0.0.1", Port: 5432, Database: "app", Role: "synod_admin", Engine: "postgres", PostgresRole: "primary",

@@ -796,7 +796,7 @@ func TestFatalMessageHandlingReconnectsAndRedacts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(logged), `"reason":"`+test.reason+`"`) || !strings.Contains(string(logged), "agent_stream_ended") || strings.Contains(string(logged), "private-failure-token") || strings.Contains(string(logged), "agent_message_refused") {
+			if !strings.Contains(string(logged), `"reason":"`+test.reason+`"`) || !strings.Contains(string(logged), "agent_stream_ended") || !strings.Contains(string(logged), `"message":"*agentv1.ControllerMessage_`) || strings.Contains(string(logged), "private-failure-token") || strings.Contains(string(logged), "agent_message_refused") {
 				t.Fatalf("fatal log misclassified the error or exposed private text: %s", logged)
 			}
 		})
@@ -876,5 +876,37 @@ func TestHeartbeatRotatesObservationsAcrossFrames(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatalf("observations starved: received %d of %d", len(seen), len(observations))
 		}
+	}
+}
+
+func TestHeartbeatCarriesReplicaStatus(t *testing.T) {
+	received := make(chan *agentv1.AgentMessage, 1)
+	f := newFixture(t, func(_ context.Context, _ controlstream.Peer, message *agentv1.AgentMessage) error {
+		if message.GetHeartbeat() != nil {
+			select {
+			case received <- proto.Clone(message).(*agentv1.AgentMessage):
+			default:
+			}
+		}
+		return nil
+	}, nil)
+	status := &agentv1.ReplicaStatus{AppId: uuid.NewString(), Role: "standby", Epoch: 2, Sequence: 7}
+	client, err := transport.New(transport.Config{Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello, Replicas: func() []*agentv1.ReplicaStatus {
+		return []*agentv1.ReplicaStatus{proto.Clone(status).(*agentv1.ReplicaStatus)}
+	}, Handle: func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) { return nil, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- client.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case message := <-received:
+		if got := message.GetHeartbeat().Replicas; len(got) != 1 || !proto.Equal(got[0], status) {
+			t.Fatalf("heartbeat replicas: %v", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no replica status reached the controller")
 	}
 }

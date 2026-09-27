@@ -156,6 +156,19 @@ func TestAppSpecValidationFailures(t *testing.T) {
 				s.Copies = 2
 			},
 		},
+		{
+			name: "tier 3 replication rejected",
+			mutate: func(s *AppSpec) {
+				r := DefaultReplication()
+				s.Replication = &r
+			},
+		},
+		{
+			name: "tier 3 replicated mount rejected",
+			mutate: func(s *AppSpec) {
+				s.Service.Mounts = []MountSpec{{Type: "replicated", Source: "config", Target: "/config"}}
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -208,5 +221,76 @@ func TestContainerOverridesRoundTrip(t *testing.T) {
 		if !reflect.DeepEqual(spec, got) {
 			t.Fatalf("override changed: %s", data)
 		}
+	}
+}
+
+func validTier2Spec() AppSpec {
+	r := DefaultReplication()
+	return AppSpec{
+		SchemaVersion:    1,
+		Name:             "sonarr",
+		Tier:             TierSingleWriter,
+		Copies:           1,
+		DevicePreference: DevicePreference{Preferred: []string{"mac"}, Allowed: []string{"server"}},
+		Service: ServiceSpec{
+			Image: "lscr.io/linuxserver/sonarr:4",
+			Ports: []PortSpec{{ContainerPort: 8989, Protocol: "tcp"}},
+			Mounts: []MountSpec{
+				{Type: "replicated", Source: "config", Target: "/config"},
+				{Type: "bind", Source: "/mnt/media/tv", Target: "/tv"},
+				{Type: "tmpfs", Target: "/tmp"},
+			},
+		},
+		Router:      RouterSpec{Protocol: "tcp", Port: 8989},
+		Replication: &r,
+	}
+}
+
+func TestTier2Validation(t *testing.T) {
+	spec := validTier2Spec()
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("valid tier 2 spec: %v", err)
+	}
+	for name, mutate := range map[string]func(*AppSpec){
+		"no replication":       func(s *AppSpec) { s.Replication = nil },
+		"all capable copies":   func(s *AppSpec) { s.CopiesMode = CopiesModeAllCapable },
+		"no replicated volume": func(s *AppSpec) { s.Service.Mounts = s.Service.Mounts[1:] },
+		"volume mounted twice": func(s *AppSpec) {
+			s.Service.Mounts[1] = MountSpec{Type: "replicated", Source: "config", Target: "/other"}
+		},
+		"invalid volume name":      func(s *AppSpec) { s.Service.Mounts[0].Source = "/config" },
+		"relative volume target":   func(s *AppSpec) { s.Service.Mounts[0].Target = "config" },
+		"docker volume type":       func(s *AppSpec) { s.Service.Mounts[0].Type = "volume" },
+		"zero standbys":            func(s *AppSpec) { s.Replication.Standbys = 0 },
+		"four standbys":            func(s *AppSpec) { s.Replication.Standbys = 4 },
+		"short interval":           func(s *AppSpec) { s.Replication.IntervalSeconds = 9 },
+		"long interval":            func(s *AppSpec) { s.Replication.IntervalSeconds = 3601 },
+		"failover inside a lease":  func(s *AppSpec) { s.Replication.FailoverAfterSeconds = 2*LeaseSeconds - 1 },
+		"unknown failback":         func(s *AppSpec) { s.Replication.Failback = "later" },
+		"short failback stability": func(s *AppSpec) { s.Replication.FailbackStableSeconds = 59 },
+		"no router port":           func(s *AppSpec) { s.Router.Port = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := validTier2Spec()
+			mutate(&spec)
+			if err := spec.Validate(); err == nil {
+				t.Fatal("invalid tier 2 spec accepted")
+			}
+		})
+	}
+}
+
+func TestTier2JSONRoundTrip(t *testing.T) {
+	spec := validTier2Spec()
+	data, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded AppSpec
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(spec, decoded) {
+		t.Fatalf("round trip changed the spec:\n%+v\n%+v", spec, decoded)
 	}
 }

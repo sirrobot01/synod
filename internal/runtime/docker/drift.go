@@ -264,9 +264,8 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 		len(host.CapAdd) != 0 || len(host.SecurityOpt) != 0 || host.AutoRemove || host.PublishAllPorts || host.ReadonlyRootfs:
 		// Each grants the container more of the host than this node gave it.
 		return driftHostConfig, nil
-	case host.RestartPolicy.Name != container.RestartPolicyDisabled && host.RestartPolicy.Name != container.RestartPolicyUnlessStopped:
-		// This node uses disabled while stopped and unless-stopped while running.
-		// Anything else undoes a stopped intent.
+	case (item.Config.Labels["synod.tier"] == "2" && host.RestartPolicy.Name != container.RestartPolicyDisabled) || (host.RestartPolicy.Name != container.RestartPolicyDisabled && host.RestartPolicy.Name != container.RestartPolicyUnlessStopped):
+		// Tier 2 always disables restart. Other containers may restart only while active.
 		return driftRestartPolicy, nil
 	case host.Memory != memory || host.NanoCPUs != cpu*1000000:
 		return driftResources, nil

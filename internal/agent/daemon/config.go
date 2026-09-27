@@ -3,12 +3,14 @@ package daemon
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,6 +53,18 @@ type Config struct {
 	JournalMaxRetainedBytes      int64 `json:"journal_max_retained_bytes,omitzero"`
 	JournalMaxStoredBytes        int64 `json:"journal_max_stored_bytes,omitzero"`
 	JournalRecoveryWindowSeconds int64 `json:"journal_recovery_window_seconds,omitzero"`
+	// AppsDir holds tier 2 volumes, snapshots, and replicas, one directory per app.
+	// Empty disables tier 2 replication on this node.
+	AppsDir string `json:"apps_dir,omitzero"`
+	// ReplicationListen is the address of the replication listener. Empty selects 0.0.0.0:8445.
+	ReplicationListen string `json:"replication_listen,omitzero"`
+}
+
+// DefaultReplicationListen is the replication address when the configuration names none.
+const DefaultReplicationListen = "0.0.0.0:8445"
+
+func (c Config) replicationListen() string {
+	return cmp.Or(c.ReplicationListen, DefaultReplicationListen)
 }
 
 // Load accepts one bounded, private JSON file. It does not create local state.
@@ -123,6 +137,19 @@ func (c Config) validate() error {
 	for _, path := range []string{c.EnrollmentDir, c.JournalDir, c.DockerSocket} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 			return fmt.Errorf("%w: %q is not a clean absolute path", ErrConfiguration, path)
+		}
+	}
+	if c.AppsDir != "" {
+		if !filepath.IsAbs(c.AppsDir) || filepath.Clean(c.AppsDir) != c.AppsDir {
+			return fmt.Errorf("%w: apps_dir %q is not a clean absolute path", ErrConfiguration, c.AppsDir)
+		}
+		for _, other := range []string{c.EnrollmentDir, c.JournalDir} {
+			if c.AppsDir == other || strings.HasPrefix(c.AppsDir, other+string(os.PathSeparator)) || strings.HasPrefix(other, c.AppsDir+string(os.PathSeparator)) {
+				return fmt.Errorf("%w: apps_dir %q must not contain or sit inside %q", ErrConfiguration, c.AppsDir, other)
+			}
+		}
+		if address, err := netip.ParseAddrPort(c.replicationListen()); err != nil || address.Port() == 0 {
+			return fmt.Errorf("%w: replication_listen %q must be an IP address and a nonzero port", ErrConfiguration, c.ReplicationListen)
 		}
 	}
 	if c.StoragePath != "" && (!filepath.IsAbs(c.StoragePath) || filepath.Clean(c.StoragePath) != c.StoragePath) {

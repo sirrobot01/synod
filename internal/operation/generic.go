@@ -65,6 +65,10 @@ func ValidateGenericContainer(p *agentv1.EnsureContainer) error {
 			return fmt.Errorf("generic mount is invalid or repeated")
 		}
 		targets[m.Target] = true
+		if m.Type == "replicated" {
+			spec.Tier = app.TierSingleWriter
+			spec.Replication = new(app.DefaultReplication())
+		}
 		spec.Service.Mounts = append(spec.Service.Mounts, app.MountSpec{Type: m.Type, Source: m.Source, Target: m.Target, ReadOnly: m.ReadOnly})
 	}
 	if h := g.HealthCheck; h != nil {

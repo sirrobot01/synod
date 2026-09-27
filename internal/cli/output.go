@@ -110,8 +110,29 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			if item.Status.FailureCode != "" {
 				fmt.Fprintf(&output, "Failure: %s\n", item.Status.FailureCode)
 			}
+			if item.Tier == appmodel.TierSingleWriter {
+				fmt.Fprintf(&output, "Active device: %s\nWriter epoch: %d\nPlacement: %s\n", item.Status.ActiveNodeID, item.Status.WriterEpoch, item.Status.Placement)
+				if item.Status.LossWindowSeconds != nil {
+					fmt.Fprintf(&output, "Loss window: %.1f seconds\n", *item.Status.LossWindowSeconds)
+				} else {
+					fmt.Fprintln(&output, "Loss window: no usable replica")
+				}
+				fmt.Fprintf(&output, "Snapshot pause: %.3f seconds (maximum %.3f)\nSkipped snapshots: %d\n", item.Status.LastPauseSeconds, item.Status.MaxPauseSeconds, item.Status.SkippedSnapshots)
+				for _, standby := range item.Status.Standbys {
+					fmt.Fprintf(&output, "Standby: %s (epoch %d, sequence %d, usable: %t)\n", standby.NodeID, standby.Epoch, standby.Sequence, standby.Usable)
+					if standby.CompletedAt != nil {
+						fmt.Fprintf(&output, "  Completed: %s\n", standby.CompletedAt.Format(time.RFC3339))
+					}
+					if standby.LagSeconds != nil {
+						fmt.Fprintf(&output, "  Lag: %.1f seconds\n", *standby.LagSeconds)
+					}
+					if standby.FailureCode != "" {
+						fmt.Fprintf(&output, "  Failure: %s\n", standby.FailureCode)
+					}
+				}
+			}
 			for _, copy := range item.Status.Copies {
-				fmt.Fprintf(&output, "Copy %d: %s on %s (%s, %s)\n", copy.CopyIndex, copy.ID, copy.NodeID, copy.ObservedState, copy.Health)
+				fmt.Fprintf(&output, "Copy %d: %s on %s (%s, %s, %s)\n", copy.CopyIndex, copy.ID, copy.NodeID, copy.Role, copy.ObservedState, copy.Health)
 			}
 			for _, endpoint := range item.Status.Endpoints {
 				fmt.Fprintf(&output, "Endpoint: %s (ready: %t)\n", endpoint.Address, endpoint.Ready)

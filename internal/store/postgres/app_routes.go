@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -69,10 +70,20 @@ func (s *Store) AppRouteTargets(ctx context.Context, installation uuid.UUID) (ma
 		if err != nil {
 			return nil, err
 		}
+		var writer AppWriter
+		if item.Tier == app.TierSingleWriter {
+			writer, err = s.GetAppWriter(ctx, installation, item.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
 		var backends []string
 		for _, copy := range copies {
+			if item.Tier == app.TierSingleWriter && (copy.NodeID != writer.NodeID || writer.LastGrantAt == nil || !writer.LastGrantAt.Add(app.LeaseSeconds*time.Second).After(snapshot.ObservedAt)) {
+				continue
+			}
 			node, ok := nodes[copy.NodeID]
-			if ok && copy.ObservedState == "running" && copy.Health == "healthy" {
+			if ok && copy.Role != "standby" && copy.ObservedState == "running" && copy.Health == "healthy" {
 				backends = append(backends, net.JoinHostPort(node.Policy.ClientAddress, strconv.Itoa(int(copy.HostPort))))
 			}
 		}
@@ -132,12 +143,36 @@ func (s *Store) PrepareAppRoutes(ctx context.Context, installation, node uuid.UU
 	slices.Sort(ids)
 	for _, id := range ids {
 		var lifecycle string
-		err := tx.QueryRow(ctx, `SELECT desired_lifecycle FROM apps WHERE installation_id=$1 AND id=$2 FOR SHARE`, installation, id).Scan(&lifecycle)
+		var tier int
+		err := tx.QueryRow(ctx, `SELECT desired_lifecycle,tier FROM apps WHERE installation_id=$1 AND id=$2 FOR SHARE`, installation, id).Scan(&lifecycle, &tier)
 		if err != nil {
 			return nil, false, admissionError(err)
 		}
 		if lifecycle != "running" {
 			return nil, false, operation.ErrCommandConflict
+		}
+		if tier == 2 {
+			route := desired.Routes[slices.IndexFunc(desired.Routes, func(r *agentv1.AppRoute) bool { return r.AppId == id })]
+			if len(route.Backends) > 1 {
+				return nil, false, operation.ErrCommandConflict
+			}
+			if len(route.Backends) == 1 {
+				var address string
+				var port uint16
+				err := tx.QueryRow(ctx, `SELECT (convert_from(policy.policy_bytes,'UTF8')::jsonb)->>'client_address',c.host_port
+ FROM apps a JOIN app_copies c ON c.installation_id=a.installation_id AND c.app_id=a.id AND c.node_id=a.writer_node_id
+ JOIN node_placement_policies policy ON policy.installation_id=c.installation_id AND policy.node_id=c.node_id
+ WHERE a.installation_id=$1 AND a.id=$2 AND c.desired AND c.role='active' AND a.writer_last_grant_at>clock_timestamp()-interval '30 seconds'`, installation, id).Scan(&address, &port)
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil, false, operation.ErrCommandConflict
+				}
+				if err != nil {
+					return nil, false, admissionError(err)
+				}
+				if route.Backends[0] != net.JoinHostPort(address, strconv.Itoa(int(port))) {
+					return nil, false, operation.ErrCommandConflict
+				}
+			}
 		}
 	}
 	var current uuid.UUID
@@ -237,6 +272,11 @@ func (s *Store) GetAppStatus(ctx context.Context, installation, id uuid.UUID) (a
 		} else {
 			status.State = "stopping"
 		}
+		if item.Tier == app.TierSingleWriter {
+			if err := s.appWriterStatus(ctx, &item); err != nil {
+				return app.App{}, err
+			}
+		}
 		return item, nil
 	}
 	targets, err := s.AppRouteTargets(ctx, installation)
@@ -245,7 +285,12 @@ func (s *Store) GetAppStatus(ctx context.Context, installation, id uuid.UUID) (a
 	}
 	healthy := 0
 	failed := 0
+	expected := 0
 	for _, copy := range copies {
+		if copy.Role == "standby" {
+			continue
+		}
+		expected++
 		if copy.ObservedState == "failed" || copy.Health == "unhealthy" {
 			failed++
 		}
@@ -280,13 +325,18 @@ func (s *Store) GetAppStatus(ctx context.Context, installation, id uuid.UUID) (a
 	switch {
 	case status.OperationState == "failed" || status.OperationState == "cancelled":
 		status.State = "failed"
-	case status.OperationState == "succeeded" && healthy == len(copies) && routedHealthy == len(copies) && healthy > 0 && ready:
+	case status.OperationState == "succeeded" && healthy == expected && routedHealthy == expected && healthy > 0 && ready:
 		status.State = "running"
 	case status.OperationState == "succeeded" && healthy == 0 && failed > 0:
 		status.State = "failed"
 		status.FailureCode = "app_copies_unhealthy"
 	case healthy > 0 && ready:
 		status.State = "degraded"
+	}
+	if item.Tier == app.TierSingleWriter {
+		if err := s.appWriterStatus(ctx, &item); err != nil {
+			return app.App{}, err
+		}
 	}
 	if status.State == "running" {
 		item.ObservedLifecycle = "running"

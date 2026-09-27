@@ -163,6 +163,7 @@ func (d *Driver) Refresh(ctx context.Context, installationID uuid.UUID, snapshot
 			JournalGeneration: node.JournalGeneration.String(),
 			ExpiresUnixMs:     probe.ExpiresAt.UnixMilli(),
 			Known:             known[node.ID],
+			Paths:             probe.Paths,
 		}
 		message := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CapacityRequest{CapacityRequest: request}}
 		if err := d.config.Transport.Send(node.ID, peer.SessionID, message); err != nil {

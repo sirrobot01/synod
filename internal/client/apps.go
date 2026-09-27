@@ -51,3 +51,19 @@ func (c *Client) GetApp(ctx context.Context, id uuid.UUID) (app.App, error) {
 	}
 	return result, err
 }
+
+// MoveApp moves a single writer after its final snapshot reaches the target.
+func (c *Client) MoveApp(ctx context.Context, id, target uuid.UUID, expected int64, key string) (app.Admission, error) {
+	var result app.Admission
+	if id == uuid.Nil || target == uuid.Nil || expected < 1 || len(key) < 1 || len(key) > 128 || strings.ContainsFunc(key, func(r rune) bool { return r < '!' || r > '~' }) {
+		return result, &Error{Code: "invalid_request", Message: "Use app and target device IDs, a positive revision, and a visible ASCII retry key."}
+	}
+	input := struct {
+		TargetNodeID uuid.UUID `json:"target_node_id"`
+	}{target}
+	err := c.requestWith(ctx, http.MethodPost, "/v1/apps/"+id.String()+"/move", input, key, strconv.Quote(strconv.FormatInt(expected, 10)), http.StatusAccepted, &result)
+	if err == nil && (result.AppID != id || result.OperationID == uuid.Nil || result.DesiredRevision != expected+1 || result.AcceptedAt.IsZero()) {
+		err = &Error{Code: "invalid_response", Message: "The API returned an invalid move admission. Retry with the same target, key, and revision."}
+	}
+	return result, err
+}

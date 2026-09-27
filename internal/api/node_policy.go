@@ -17,16 +17,17 @@ import (
 // policyRequest is what an operator declares about one node. Omitted facts default
 // to the node's measured report, and the planner refuses a node with no policy.
 type policyRequest struct {
-	Architecture   string                `json:"architecture"`
-	RuntimeVersion string                `json:"runtime_version"`
-	StorageID      string                `json:"storage_id"`
-	ClientAddress  string                `json:"client_address"`
-	Engines        []policyEngineVersion `json:"engines"`
-	Labels         map[string]string     `json:"labels"`
-	FailureDomains map[string]string     `json:"failure_domains"`
-	Headroom       policyVector          `json:"headroom"`
-	Cordoned       bool                  `json:"cordoned"`
-	Maintenance    bool                  `json:"maintenance"`
+	ReplicationPort uint16                `json:"replication_port"`
+	Architecture    string                `json:"architecture"`
+	RuntimeVersion  string                `json:"runtime_version"`
+	StorageID       string                `json:"storage_id"`
+	ClientAddress   string                `json:"client_address"`
+	Engines         []policyEngineVersion `json:"engines"`
+	Labels          map[string]string     `json:"labels"`
+	FailureDomains  map[string]string     `json:"failure_domains"`
+	Headroom        policyVector          `json:"headroom"`
+	Cordoned        bool                  `json:"cordoned"`
+	Maintenance     bool                  `json:"maintenance"`
 }
 
 type policyEngineVersion struct {
@@ -80,8 +81,9 @@ func (s *Server) putNodePlacementPolicy(w http.ResponseWriter, r *http.Request) 
 	policy := placement.NodePolicy{
 		InstallationID: s.installationID, NodeID: nodeID,
 		Architecture: body.Architecture, RuntimeVersion: body.RuntimeVersion, StorageID: body.StorageID,
-		ClientAddress: body.ClientAddress,
-		Labels:        body.Labels, FailureDomains: body.FailureDomains,
+		ClientAddress:   body.ClientAddress,
+		ReplicationPort: body.ReplicationPort,
+		Labels:          body.Labels, FailureDomains: body.FailureDomains,
 		Headroom: placement.Vector{
 			CPUMillis: body.Headroom.CPUMillis, MemoryBytes: body.Headroom.MemoryBytes, DiskBytes: body.Headroom.DiskBytes,
 		},

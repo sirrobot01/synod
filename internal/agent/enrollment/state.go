@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -355,7 +356,7 @@ func (s *State) validateCertificate(response *Response) error {
 	if err != nil {
 		return fmt.Errorf("%w: build the expected agent URI: %w", ErrCertificate, err)
 	}
-	if leaf.IsCA || !leaf.BasicConstraintsValid || leaf.SerialNumber == nil || leaf.SerialNumber.Sign() <= 0 || len(leaf.URIs) != 1 || leaf.URIs[0].String() != expected.String() || len(leaf.DNSNames) != 0 || len(leaf.IPAddresses) != 0 || len(leaf.EmailAddresses) != 0 || leaf.KeyUsage != x509.KeyUsageDigitalSignature || len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth || len(leaf.UnknownExtKeyUsage) != 0 {
+	if leaf.IsCA || !leaf.BasicConstraintsValid || leaf.SerialNumber == nil || leaf.SerialNumber.Sign() <= 0 || len(leaf.URIs) != 1 || leaf.URIs[0].String() != expected.String() || len(leaf.DNSNames) != 0 || len(leaf.IPAddresses) != 0 || len(leaf.EmailAddresses) != 0 || leaf.KeyUsage != x509.KeyUsageDigitalSignature || !slices.Equal(leaf.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}) || len(leaf.UnknownExtKeyUsage) != 0 {
 		return fmt.Errorf("%w: the issued certificate is not a client-auth agent leaf named %q", ErrCertificate, expected)
 	}
 	roots := x509.NewCertPool()

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sirrobot01/synod/internal/app"
 )
@@ -183,5 +184,87 @@ func TestImportSelectsOneService(t *testing.T) {
 		if _, err := Import(t.Context(), filename, options); err == nil {
 			t.Fatalf("accepted %+v", options)
 		}
+	}
+}
+
+func TestImportTier2(t *testing.T) {
+	filename := filepath.Join(t.TempDir(), "compose.yml")
+	content := `services:
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:4
+    ports: ['8989:8989']
+    volumes:
+      - config:/config
+      - /mnt/media/tv:/tv
+    tmpfs: /tmp
+    deploy: {replicas: 1}
+volumes:
+  config:
+`
+	if err := os.WriteFile(filename, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := Import(t.Context(), filename, Options{Tier: app.TierSingleWriter, Preferred: []string{"mac"}, Allowed: []string{"server"}, Never: []string{"odin"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []app.MountSpec{{Type: "replicated", Source: "config", Target: "/config"}, {Type: "bind", Source: "/mnt/media/tv", Target: "/tv"}, {Type: "tmpfs", Target: "/tmp"}}
+	if spec.Tier != app.TierSingleWriter || spec.Copies != 1 || !reflect.DeepEqual(spec.Service.Mounts, want) {
+		t.Fatalf("spec: %+v", spec)
+	}
+	if !reflect.DeepEqual(spec.DevicePreference, app.DevicePreference{Preferred: []string{"mac"}, Allowed: []string{"server"}, Never: []string{"odin"}}) {
+		t.Fatalf("preference: %+v", spec.DevicePreference)
+	}
+	if spec.Replication == nil || *spec.Replication != app.DefaultReplication() {
+		t.Fatalf("replication: %+v", spec.Replication)
+	}
+	spec, err = Import(t.Context(), filename, Options{Tier: app.TierSingleWriter, Standbys: 2, Interval: 30 * time.Second, Failback: app.FailbackManual})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := spec.Replication; r.Standbys != 2 || r.IntervalSeconds != 30 || r.Failback != app.FailbackManual {
+		t.Fatalf("replication overrides: %+v", r)
+	}
+}
+
+func TestImportTier2Refusals(t *testing.T) {
+	for name, tc := range map[string]struct {
+		service, volumes string
+		options          Options
+	}{
+		"no named volume":       {service: "volumes: [/mnt/tv:/tv]"},
+		"two replicas":          {service: "volumes: [config:/config]\n    deploy: {replicas: 2}", volumes: "config:"},
+		"copies option":         {service: "volumes: [config:/config]", volumes: "config:", options: Options{Copies: "2"}},
+		"anonymous volume":      {service: "volumes: [/config]"},
+		"undeclared volume":     {service: "volumes: [config:/config]"},
+		"external volume":       {service: "volumes: [config:/config]", volumes: "config: {external: true}"},
+		"volume driver":         {service: "volumes: [config:/config]", volumes: "config: {driver: nfs}"},
+		"driver options":        {service: "volumes: [config:/config]", volumes: "config: {driver: local, driver_opts: {type: nfs}}"},
+		"scalar volume":         {service: "volumes: [config:/config]", volumes: "config: local"},
+		"nocopy":                {service: "volumes: ['config:/config:nocopy']", volumes: "config:"},
+		"fractional interval":   {service: "volumes: [config:/config]", volumes: "config:", options: Options{Interval: 1500 * time.Millisecond}},
+		"short interval":        {service: "volumes: [config:/config]", volumes: "config:", options: Options{Interval: 5 * time.Second}},
+		"unknown failback":      {service: "volumes: [config:/config]", volumes: "config:", options: Options{Failback: "never"}},
+		"too many standbys":     {service: "volumes: [config:/config]", volumes: "config:", options: Options{Standbys: 4}},
+		"tier 3 replication":    {service: "volumes: [/mnt/tv:/tv]", options: Options{Tier: app.TierParallel, Standbys: 1}},
+		"tier 3 named volume":   {service: "volumes: [config:/config]", volumes: "config:", options: Options{Tier: app.TierParallel}},
+		"tier 1 is not Compose": {service: "volumes: [config:/config]", volumes: "config:", options: Options{Tier: app.TierDatabase}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			content := "services:\n  sonarr:\n    image: sonarr\n    ports: ['8989:8989']\n    " + tc.service + "\n"
+			if tc.volumes != "" {
+				content += "volumes:\n  " + tc.volumes + "\n"
+			}
+			filename := filepath.Join(t.TempDir(), "compose.yml")
+			if err := os.WriteFile(filename, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.options.Tier == 0 {
+				tc.options.Tier = app.TierSingleWriter
+			}
+			if spec, err := Import(t.Context(), filename, tc.options); err == nil {
+				t.Fatalf("accepted: %+v", spec)
+			}
+		})
 	}
 }

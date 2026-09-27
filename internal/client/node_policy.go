@@ -11,16 +11,17 @@ import (
 // NodePolicy is what an operator declares about one node. Nothing infers it from the
 // host, and the planner refuses a node with no policy.
 type NodePolicy struct {
-	Architecture   string            `json:"architecture"`
-	RuntimeVersion string            `json:"runtime_version"`
-	StorageID      string            `json:"storage_id"`
-	ClientAddress  string            `json:"client_address,omitempty"`
-	Engines        []EngineVersion   `json:"engines"`
-	Labels         map[string]string `json:"labels,omitempty"`
-	FailureDomains map[string]string `json:"failure_domains,omitempty"`
-	Headroom       Vector            `json:"headroom"`
-	Cordoned       bool              `json:"cordoned,omitempty"`
-	Maintenance    bool              `json:"maintenance,omitempty"`
+	ReplicationPort uint16            `json:"replication_port,omitempty"`
+	Architecture    string            `json:"architecture"`
+	RuntimeVersion  string            `json:"runtime_version"`
+	StorageID       string            `json:"storage_id"`
+	ClientAddress   string            `json:"client_address,omitempty"`
+	Engines         []EngineVersion   `json:"engines"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	FailureDomains  map[string]string `json:"failure_domains,omitempty"`
+	Headroom        Vector            `json:"headroom"`
+	Cordoned        bool              `json:"cordoned,omitempty"`
+	Maintenance     bool              `json:"maintenance,omitempty"`
 }
 
 // EngineVersion names one engine and version a node may run.

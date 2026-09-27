@@ -7,10 +7,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/agent/capacity"
 	"github.com/sirrobot01/synod/internal/agent/journal"
+	"github.com/sirrobot01/synod/internal/agent/replica"
+	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/router"
@@ -39,6 +42,7 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 		}
 		e.session = &session{ctx: ctx, id: value.SessionId, gates: make(map[string]*epochGate), sent: make(map[string]bool), inspection: slices.Contains(value.Capabilities, controlstream.CommandInspectionCapability)}
 		e.session.router = slices.Contains(value.Capabilities, controlstream.RouterCapability)
+		e.session.replicating = slices.Contains(value.Capabilities, replication.Capability)
 		select {
 		case e.wake <- struct{}{}:
 		default:
@@ -56,6 +60,37 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 		}
 	}()
 	switch value := message.Message.(type) {
+	case *agentv1.ControllerMessage_WriterLease:
+		lease := value.WriterLease
+		if !current.replicating || lease == nil || lease.SessionId != current.id || controlstream.CheckControllerMessage(message, "", "") != nil || e.options.Replication == nil {
+			return nil, controlstream.ErrMessage
+		}
+		assignment, ok := e.options.Replication.Lookup(lease.AppId)
+		if !ok || assignment.Role != replication.RoleActive || assignment.Epoch != lease.Epoch {
+			return nil, operation.ErrStaleOwner
+		}
+		if e.options.BootTime == nil {
+			return nil, controlstream.ErrMessage
+		}
+		now, err := e.options.BootTime()
+		if err != nil {
+			return nil, err
+		}
+		if e.leases == nil {
+			e.leases = make(map[string]writerLease)
+		}
+		expires := time.Duration(lease.ExpiresAtBootNanos)
+		if expires <= now {
+			return nil, nil
+		}
+		if expires-now > time.Duration(lease.Seconds)*time.Second {
+			return nil, controlstream.ErrMessage
+		}
+		previous := e.leases[lease.AppId]
+		if previous.epoch != lease.Epoch || expires > previous.expires {
+			e.leases[lease.AppId] = writerLease{epoch: lease.Epoch, expires: expires}
+		}
+		return nil, nil
 	case *agentv1.ControllerMessage_Routes:
 		table := value.Routes
 		if !current.router || table == nil || table.SessionId != current.id || controlstream.CheckControllerMessage(message, "", "") != nil {
@@ -86,6 +121,42 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 			}
 		}
 		return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_RouteAck{RouteAck: ack}}, nil
+	case *agentv1.ControllerMessage_Replication:
+		table := value.Replication
+		if !current.replicating || table == nil || table.SessionId != current.id || controlstream.CheckControllerMessage(message, "", "") != nil {
+			return nil, controlstream.ErrMessage
+		}
+		ack := &agentv1.ReplicationAck{SessionId: current.id, Revision: table.Revision}
+		switch {
+		case e.options.Replication == nil:
+			ack.FailureCode = "replication_unavailable"
+		case current.replication != nil && table.Revision < current.replication.Revision:
+			ack.FailureCode = "stale_replication_revision"
+		case current.replication != nil && table.Revision == current.replication.Revision:
+			if !proto.Equal(table, current.replication) {
+				ack.FailureCode = "replication_revision_conflict"
+			}
+		default:
+			if err := e.recordReplicationEpochs(table.Apps); err != nil {
+				if errors.Is(err, operation.ErrStaleOwner) {
+					ack.FailureCode = "stale_replication_epoch"
+				} else {
+					ack.FailureCode = "replication_unavailable"
+				}
+				break
+			}
+			for appID, lease := range e.leases {
+				index := slices.IndexFunc(table.Apps, func(a *agentv1.AppReplication) bool {
+					return a.AppId == appID && a.Role == replication.RoleActive && a.Epoch == lease.epoch
+				})
+				if index < 0 {
+					delete(e.leases, appID)
+				}
+			}
+			e.options.Replication.Set(table.Apps)
+			current.replication = proto.Clone(table).(*agentv1.ReplicationTable)
+		}
+		return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_ReplicationAck{ReplicationAck: ack}}, nil
 	case *agentv1.ControllerMessage_PrepareEpoch:
 		if value.PrepareEpoch == nil || value.PrepareEpoch.Epoch == nil {
 			return nil, controlstream.ErrMessage
@@ -267,6 +338,10 @@ func (e *Executor) inventory(ctx context.Context, current *session, request *age
 
 func failureCode(err error) string {
 	switch {
+	case errors.Is(err, errWriterLease):
+		return "writer_lease_expired"
+	case errors.Is(err, replica.ErrNoReplica):
+		return "no_replica"
 	case errors.Is(err, runtime.ErrStorageLost):
 		return "storage_lost"
 	case errors.Is(err, journal.ErrBusy), errors.Is(err, controlstream.ErrBusy):

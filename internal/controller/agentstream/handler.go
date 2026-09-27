@@ -38,6 +38,8 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 			return fmt.Errorf("%w: the Hello of node %s does not match the boot and journal generation of its session", ErrUnsupportedMessage, peer.NodeID)
 		}
 		return r.Store.RecordAgentSession(ctx, peer.InstallationID, peer.NodeID, sessionID, value.Hello)
+	case *agentv1.AgentMessage_ReplicationAck:
+		return r.Store.RecordAppReplicationAck(ctx, peer.InstallationID, peer.NodeID, sessionID, value.ReplicationAck)
 	case *agentv1.AgentMessage_RouteAck:
 		return r.Store.RecordAppRouteAck(ctx, peer.InstallationID, peer.NodeID, sessionID, value.RouteAck)
 	case *agentv1.AgentMessage_Heartbeat:
@@ -90,6 +92,7 @@ func capacityReport(peer controlstream.Peer, sessionID uuid.UUID, report *agentv
 		BootID: bootID, JournalGeneration: generation,
 		Architecture: report.Architecture, RuntimeVersion: report.RuntimeVersion, StorageID: report.StorageId,
 		Capacity: vector(report.Capacity), Used: vector(report.Used),
+		ExistingPaths: report.ExistingPaths,
 	}
 	for _, item := range report.Reservations {
 		reservationID, err := uuid.Parse(item.ReservationId)

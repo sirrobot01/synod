@@ -603,3 +603,44 @@ func TestStartRejectsLateNativeEffect(t *testing.T) {
 		t.Fatalf("resolved observation blocked execution: %v", err)
 	}
 }
+
+func TestRepeatedBarriersReportEachEffectOnce(t *testing.T) {
+	j, _, command, _ := fixture(t)
+	if _, err := j.Admit(command); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.Start(command.CommandId); err != nil {
+		t.Fatal(err)
+	}
+	effect := &agentv1.Effect{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-command:" + command.CommandId, Active: true, OutcomeUnknown: true, State: "unknown"}
+	if err := j.Observe(command.CommandId, []*agentv1.Effect{effect}); err != nil {
+		t.Fatal(err)
+	}
+	for epoch := int64(2); epoch <= 5; epoch++ {
+		next := proto.Clone(command.Epoch).(*agentv1.Epoch)
+		next.ExecutionEpoch = epoch
+		if err := j.Prepare(next); err != nil {
+			t.Fatal(err)
+		}
+		// PrepareEpoch sends this report before inspection and records it unchanged.
+		barrier, err := j.Barrier(next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		barrier.Drained, barrier.FailureCode = false, "inspection_pending"
+		if err := j.RecordBarrier(barrier); err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, effect := range barrier.Effects {
+			key := effect.CommandId + "/" + effect.ResourceId + "/" + effect.NativeOperationId
+			if seen[key] {
+				t.Fatalf("epoch %d repeats effect %s in %d effects", epoch, key, len(barrier.Effects))
+			}
+			seen[key] = true
+		}
+		if len(barrier.Effects) != 2 {
+			t.Fatalf("epoch %d reports %d effects, want the running command and its native effect", epoch, len(barrier.Effects))
+		}
+	}
+}

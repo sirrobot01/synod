@@ -93,6 +93,8 @@ func TestEveryPostconditionCanBeProved(t *testing.T) {
 		agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED:      "running",
 		agentv1.Postcondition_POSTCONDITION_ENGINE_READY:             "ready",
 		agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED: "setup_recovered",
+		agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED: "snapshot_transferred",
+		agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT:          "app_data_absent",
 	} {
 		t.Run(postcondition.String(), func(t *testing.T) {
 			step := planStep(t, op, node, uuid.NewString(), postcondition)
@@ -102,17 +104,22 @@ func TestEveryPostconditionCanBeProved(t *testing.T) {
 			if postcondition == agentv1.Postcondition_POSTCONDITION_ENGINE_READY {
 				native = "readiness:" + step.Command.CommandId
 			}
-			if err := operation.CheckStepEffects(step, []*agentv1.Effect{{
-				CommandId: step.Command.CommandId, ResourceId: step.Command.Input.ResourceId,
-				NativeOperationId: native, State: state,
-			}}); err != nil {
+			effect := &agentv1.Effect{CommandId: step.Command.CommandId, ResourceId: step.Command.Input.ResourceId, NativeOperationId: native, State: state}
+			if postcondition == agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED {
+				effect.NativeOperationId = "app-data:" + step.Command.CommandId
+				effect.AppSnapshot = &agentv1.AppSnapshotReceipt{WriterEpoch: 1, Sequence: 1, TargetNodeId: step.Command.Input.GetFinalAppSnapshot().TargetNodeId, ManifestHash: make([]byte, 32)}
+			}
+			if postcondition == agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT {
+				effect.NativeOperationId = "app-data:" + step.Command.CommandId
+			}
+			if err := operation.CheckStepEffects(step, []*agentv1.Effect{effect}); err != nil {
 				t.Fatalf("a %s postcondition cannot be proved: %v", postcondition, err)
 			}
 		})
 	}
 	// Every postcondition in the enum is covered above, so a new one added without a
 	// rule here fails this test rather than a four-minute replay loop in production.
-	highest := agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED
+	highest := agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT
 	if _, known := agentv1.Postcondition_name[int32(highest)+1]; known {
 		t.Fatal("a postcondition was added to the protocol without a rule that proves it")
 	}

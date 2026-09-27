@@ -13,6 +13,7 @@ CREATE TABLE agent_presence (
     session_id uuid NOT NULL,
     heartbeat_sequence bigint NOT NULL DEFAULT 0 CHECK (heartbeat_sequence >= 0),
     heartbeat_bytes bytea CHECK (octet_length(heartbeat_bytes) BETWEEN 1 AND 262144),
+    online_since timestamptz NOT NULL DEFAULT clock_timestamp(),
     last_seen_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     recovery_required boolean NOT NULL DEFAULT false,
     PRIMARY KEY (installation_id, node_id),

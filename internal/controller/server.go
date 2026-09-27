@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/api"
 	"github.com/sirrobot01/synod/internal/auth"
 	"github.com/sirrobot01/synod/internal/cluster"
@@ -213,7 +214,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		// The runner needs the transport and the transport needs the runner's routing,
 		// so the handler reads the pointer that the runner build fills in below.
 		handle := (agentstream.Receiver{Store: store}).Handle
-		agentServer, err = controlstream.New(controlstream.Config{InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Authorize: store.CheckAgentCertificate, Capabilities: []string{"runtime.docker", controlstream.CommandInspectionCapability, controlstream.RouterCapability}, Logger: logger,
+		agentServer, err = controlstream.New(controlstream.Config{InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Authorize: store.CheckAgentCertificate, Capabilities: []string{"runtime.docker", controlstream.CommandInspectionCapability, controlstream.RouterCapability, replication.Capability}, Logger: logger,
 			Handle: func(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
 				if operations != nil {
 					return operations.Handle(ctx, peer, message)
@@ -296,6 +297,15 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	} else {
 		close(routesStopped)
 	}
+	replicationStopped := make(chan struct{})
+	if agentServer != nil {
+		go func() {
+			defer close(replicationStopped)
+			runAppReplication(runnerCtx, store, agentServer, uuid.MustParse(settings.InstallationID), logger)
+		}()
+	} else {
+		close(replicationStopped)
+	}
 	probesStopped := make(chan struct{})
 	if capacityDriver != nil {
 		go func() {
@@ -345,6 +355,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	stopRunner()
 	<-running
 	<-routesStopped
+	<-replicationStopped
 	<-probesStopped
 	if agentServer != nil {
 		agentServer.Stop()

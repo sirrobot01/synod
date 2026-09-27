@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/auth"
+	"github.com/sirrobot01/synod/internal/store/postgres"
 )
 
 func TestAppAPIAdmission(t *testing.T) {
@@ -132,5 +133,75 @@ func TestAppAPIAdmission(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestAppMoveAPIKeepsTargetAndRetryIdentity(t *testing.T) {
+	store, pool, _ := apiTestStore(t)
+	installation, source, target := uuid.New(), uuid.New(), uuid.New()
+	token := strings.Repeat("move-token-", 8)
+	verifier, err := auth.NewAdminToken(token, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(store, verifier, installation, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := app.DefaultReplication()
+	created, err := store.AdmitApp(t.Context(), postgres.CreateAppRequest{Identity: postgres.RequestIdentity{InstallationID: installation, ActorID: "operator", APIOperation: postgres.CreateAppAPIOperation, IdempotencyKey: "create"}, RequestID: "create", Spec: app.AppSpec{SchemaVersion: 1, Name: "move-app", Tier: app.TierSingleWriter, Copies: 1, Replication: &r, Service: app.ServiceSpec{Image: "example", Ports: []app.PortSpec{{ContainerPort: 80}}, Mounts: []app.MountSpec{{Type: "replicated", Source: "config", Target: "/config"}}}, Router: app.RouterSpec{Protocol: "tcp", Port: 8080}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range []uuid.UUID{source, target} {
+		if _, err := pool.Exec(t.Context(), `INSERT INTO nodes(id,installation_id,public_key_hash,enrolled_at) VALUES($1,$2,$3,clock_timestamp())`, node, installation, make([]byte, 32)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE apps SET writer_node_id=$2,writer_epoch=1 WHERE id=$1`, created.AppID, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE operations SET status='succeeded',finished_at=clock_timestamp() WHERE id=$1`, created.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"target_node_id":"` + target.String() + `"}`
+	var accepted app.Admission
+	for _, test := range []struct {
+		name, body, key, revision, credential string
+		code                                  int
+	}{
+		{"unauthorized", body, "move", `"1"`, "", 401},
+		{"missing target", "{}", "move", `"1"`, token, 400},
+		{"bad target", `{"target_node_id":"device"}`, "move", `"1"`, token, 400},
+		{"stale", body, "stale", `"2"`, token, 412},
+		{"accepted", body, "move", `"1"`, token, 202},
+		{"replay", body, "move", `"1"`, token, 202},
+		{"changed", `{"target_node_id":"` + source.String() + `"}`, "move", `"1"`, token, 409},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/v1/apps/"+created.AppID.String()+"/move", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Idempotency-Key", test.key)
+			request.Header.Set("If-Match", test.revision)
+			if test.credential != "" {
+				request.Header.Set("Authorization", "Bearer "+test.credential)
+			}
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, request)
+			if response.Code != test.code {
+				t.Fatalf("response %d: %s", response.Code, response.Body.String())
+			}
+			if test.code == 202 {
+				var result app.Admission
+				if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				if test.name == "accepted" {
+					accepted = result
+				} else if !result.Replayed || result.OperationID != accepted.OperationID {
+					t.Fatalf("replay changed operation: %+v", result)
+				}
+			}
+		})
 	}
 }

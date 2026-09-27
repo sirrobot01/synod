@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -110,8 +111,19 @@ func (s *Store) BeginCapacityProbe(ctx context.Context, installationID, nodeID, 
 		Revision: previous + 1, PolicyRevision: policyRevision, IssuedAt: issued,
 		ExpiresAt: issued.Add(placement.ProbeWindow), ValidUntil: issued.Add(placement.CapacityAge),
 	}
+	rows, err := tx.Query(ctx, `SELECT DISTINCT mount->>'source' FROM apps CROSS JOIN LATERAL jsonb_array_elements(COALESCE(spec->'service'->'mounts','[]'::jsonb)) mount WHERE installation_id=$1 AND tier=2 AND desired_lifecycle='running' AND mount->>'type'='bind' ORDER BY 1 LIMIT 129`, installationID)
+	if err != nil {
+		return placement.CapacityProbe{}, admissionError(err)
+	}
+	probe.Paths, err = pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return placement.CapacityProbe{}, admissionError(err)
+	}
+	if len(probe.Paths) > 128 {
+		return placement.CapacityProbe{}, &AdmissionError{Code: InvalidRequest}
+	}
 	encoded, err := json.Marshal(probe)
-	if err != nil || len(encoded) > 4096 {
+	if err != nil || len(encoded) > maxReportBytes {
 		return placement.CapacityProbe{}, &AdmissionError{Code: InvalidRequest, Cause: err}
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO node_capacity (installation_id,node_id,probe_revision,probe_id,probe_bytes,report_bytes)
@@ -159,6 +171,11 @@ func (s *Store) RecordNodeCapacity(ctx context.Context, installationID, nodeID u
 	}
 	if probe.ID != report.ProbeID || probe.Revision != report.ProbeRevision || probe.SessionID != report.SessionID || probe.BootID != report.BootID || probe.JournalGeneration != report.JournalGeneration {
 		return ErrProbeExpired
+	}
+	for _, name := range report.ExistingPaths {
+		if !slices.Contains(probe.Paths, name) {
+			return &AdmissionError{Code: InvalidRequest}
+		}
 	}
 	if storedReport != nil {
 		// A replay is idempotent. It never extends the freshness of its challenge.

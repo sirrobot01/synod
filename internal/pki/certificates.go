@@ -144,9 +144,10 @@ func (ca *CA) Issue(csrDER []byte, identity Identity, serverNames []string, now 
 	if err != nil {
 		return nil, err
 	}
+	// Agents also serve tier 2 replication to other agents. Peers check the URI identity, not a server name.
 	template := &x509.Certificate{
 		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, URIs: []*url.URL{uri},
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, URIs: []*url.URL{uri},
 	}
 	if identity.Role == Agent && len(serverNames) != 0 {
 		return nil, fmt.Errorf("%w: an agent certificate carries no server name and %d were requested", ErrIdentity, len(serverNames))
@@ -155,7 +156,6 @@ func (ca *CA) Issue(csrDER []byte, identity Identity, serverNames []string, now 
 		if len(serverNames) == 0 || len(serverNames) > 32 {
 			return nil, fmt.Errorf("%w: a controller certificate needs 1 to 32 server names and %d were requested", ErrIdentity, len(serverNames))
 		}
-		template.ExtKeyUsage = append(template.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
 		for _, name := range serverNames {
 			if ip := net.ParseIP(name); ip != nil {
 				template.IPAddresses = append(template.IPAddresses, ip)

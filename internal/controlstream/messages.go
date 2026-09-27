@@ -2,9 +2,12 @@ package controlstream
 
 import (
 	"fmt"
+	"math"
+	"path"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/router"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -30,6 +33,11 @@ func checkEpoch(epoch *agentv1.Epoch, installationID, nodeID string) error {
 	return nil
 }
 
+func canonicalID(id string) bool {
+	parsed, err := uuid.Parse(id)
+	return err == nil && parsed != uuid.Nil && parsed.String() == id
+}
+
 // CheckAgentMessage validates wire shape and authenticated target, not execution policy.
 func CheckAgentMessage(message *agentv1.AgentMessage, installationID, nodeID string) error {
 	if message == nil {
@@ -52,11 +60,32 @@ func CheckAgentMessage(message *agentv1.AgentMessage, installationID, nodeID str
 		default:
 			return ErrMessage
 		}
+	case *agentv1.AgentMessage_ReplicationAck:
+		ack := value.ReplicationAck
+		if ack == nil || ack.Revision == 0 || !canonicalID(ack.SessionId) {
+			return ErrMessage
+		}
+		switch ack.FailureCode {
+		case "", "stale_replication_revision", "replication_revision_conflict", "replication_unavailable", "stale_replication_epoch":
+			return nil
+		default:
+			return ErrMessage
+		}
 	case *agentv1.AgentMessage_CommandInspection:
 		return CheckCommandInspectionResult(value.CommandInspection, installationID, nodeID)
 	case *agentv1.AgentMessage_Heartbeat:
 		if value.Heartbeat == nil {
 			return ErrMessage
+		}
+		for _, replica := range value.Heartbeat.Replicas {
+			if replica == nil || replica.LastPauseNanos > replica.MaxPauseNanos || replica.MaxPauseNanos > uint64(1<<63-1) || replica.SkippedSnapshots > uint64(1<<63-1) || !canonicalID(replica.AppId) || (replica.Role != replication.RoleActive && replica.Role != replication.RoleStandby) {
+				return ErrMessage
+			}
+			switch replica.FailureCode {
+			case "", replication.FailureEpochMismatch, replication.FailureStale, replication.FailureCorrupt, replication.FailureApply, replication.FailurePush, replication.FailureFreeze, replication.FailureSnapshot:
+			default:
+				return ErrMessage
+			}
 		}
 		return nil
 	case *agentv1.AgentMessage_Inventory:
@@ -121,6 +150,18 @@ func CheckControllerMessage(message *agentv1.ControllerMessage, installationID, 
 		}
 		id, err := uuid.Parse(table.SessionId)
 		if err != nil || id == uuid.Nil || id.String() != table.SessionId {
+			return ErrMessage
+		}
+		return nil
+	case *agentv1.ControllerMessage_WriterLease:
+		lease := value.WriterLease
+		if lease == nil || !canonicalID(lease.SessionId) || !canonicalID(lease.AppId) || lease.Epoch == 0 || lease.Seconds == 0 || lease.Seconds > 30 || lease.ExpiresAtBootNanos == 0 || lease.ExpiresAtBootNanos > uint64(1<<63-1) {
+			return ErrMessage
+		}
+		return nil
+	case *agentv1.ControllerMessage_Replication:
+		table := value.Replication
+		if table == nil || table.Revision == 0 || !canonicalID(table.SessionId) || replication.Validate(table.Apps) != nil {
 			return ErrMessage
 		}
 		return nil
@@ -232,6 +273,9 @@ func checkInspectionEffects(effects []*agentv1.Effect, commandID, resourceID str
 		if effect == nil || effect.CommandId != commandID || len(effect.NativeOperationId) > 256 || strings.ContainsFunc(effect.NativeOperationId, func(r rune) bool { return r < '!' || r > '~' }) || len(effect.State) == 0 || len(effect.State) > 64 || strings.ContainsFunc(effect.State, func(r rune) bool { return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') }) || seen[effect.NativeOperationId] {
 			return ErrMessage
 		}
+		if receipt := effect.AppSnapshot; receipt != nil && (receipt.WriterEpoch == 0 || receipt.WriterEpoch > math.MaxInt64 || receipt.Sequence == 0 || receipt.Sequence > math.MaxInt64 || !identifier(receipt.TargetNodeId) || len(receipt.ManifestHash) != 32) {
+			return ErrMessage
+		}
 		id, err := uuid.Parse(effect.ResourceId)
 		if err != nil {
 			return fmt.Errorf("parse the resource of an effect of command %s (%q): %w: %w", commandID, effect.ResourceId, ErrMessage, err)
@@ -253,8 +297,13 @@ func checkInspectionEffects(effects []*agentv1.Effect, commandID, resourceID str
 // CheckCapacityRequest validates one outgoing capacity challenge.
 // It carries no epoch, because capacity is a property of a node.
 func CheckCapacityRequest(request *agentv1.CapacityRequest) error {
-	if request == nil || request.ProbeRevision < 1 || request.ExpiresUnixMs <= 0 || len(request.Known) > maxReservationItems {
+	if request == nil || request.ProbeRevision < 1 || request.ExpiresUnixMs <= 0 || len(request.Known) > maxReservationItems || len(request.Paths) > 128 {
 		return ErrMessage
+	}
+	for _, name := range request.Paths {
+		if len(name) > 4096 || !path.IsAbs(name) || strings.ContainsRune(name, 0) {
+			return ErrMessage
+		}
 	}
 	for _, id := range []string{request.ProbeId, request.SessionId, request.BootId, request.JournalGeneration} {
 		if !identifier(id) {
@@ -277,8 +326,13 @@ func CheckCapacityRequest(request *agentv1.CapacityRequest) error {
 // rules mirror the placement report: positive capacity, a known architecture,
 // bounded text, no duplicate identity, and itemized use never above the total.
 func CheckCapacityReport(report *agentv1.CapacityReport) error {
-	if report == nil || report.ProbeRevision < 1 || len(report.Reservations) > maxReservationItems {
+	if report == nil || report.ProbeRevision < 1 || len(report.Reservations) > maxReservationItems || len(report.ExistingPaths) > 128 {
 		return ErrMessage
+	}
+	for _, name := range report.ExistingPaths {
+		if len(name) > 4096 || !path.IsAbs(name) || strings.ContainsRune(name, 0) {
+			return ErrMessage
+		}
 	}
 	for _, id := range []string{report.ProbeId, report.SessionId, report.BootId, report.JournalGeneration} {
 		if !identifier(id) {

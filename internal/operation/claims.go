@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"regexp"
 	"slices"
@@ -175,6 +176,19 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 		}
 		if err := validatePostgresConfiguration(payload.RecoverPostgresSetup.Postgres, command.Input.Secrets); err != nil {
 			return [32]byte{}, err
+		}
+	case *agentv1.CommandInput_FinalAppSnapshot:
+		p := payload.FinalAppSnapshot
+		if p == nil || p.WriterEpoch == 0 || p.WriterEpoch > math.MaxInt64 || len(command.Input.Secrets) != 0 {
+			return [32]byte{}, fmt.Errorf("final snapshot input is invalid")
+		}
+		target, err := uuid.Parse(p.TargetNodeId)
+		if err != nil || target == uuid.Nil || target.String() != p.TargetNodeId || p.TargetNodeId == command.Epoch.NodeId {
+			return [32]byte{}, fmt.Errorf("final snapshot target is invalid")
+		}
+	case *agentv1.CommandInput_RemoveAppData:
+		if payload.RemoveAppData == nil || payload.RemoveAppData.WriterEpoch == 0 || payload.RemoveAppData.WriterEpoch > math.MaxInt64 || len(command.Input.Secrets) != 0 {
+			return [32]byte{}, fmt.Errorf("app cleanup input is invalid")
 		}
 	case *agentv1.CommandInput_StartContainer:
 		if payload.StartContainer == nil {

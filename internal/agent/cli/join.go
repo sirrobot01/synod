@@ -121,6 +121,8 @@ func join(ctx context.Context, encoded string, options joinOptions, stdout, stde
 		DockerSocket:        options.dockerSocket,
 		StoragePath:         options.storagePath,
 		StorageID:           options.storageID,
+		AppsDir:             filepath.Join(dir, "apps"),
+		ReplicationListen:   daemon.DefaultReplicationListen,
 	}
 	// A rerun after a journal was created keeps that journal.
 	if _, err := os.Lstat(config.JournalDir); errors.Is(err, os.ErrNotExist) {
