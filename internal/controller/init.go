@@ -69,8 +69,6 @@ type InitOptions struct {
 	Directory               string
 	DatabaseURL             string
 	InstallationID          string
-	PatroniImage            string
-	EtcdImage               string
 	PlacementArchitecture   string
 	PlacementRuntimeVersion string
 	PlacementStorageID      string
@@ -100,15 +98,11 @@ type controllerJSON struct {
 	AgentTLSCertFile        string `json:"agent_tls_cert_file"`
 	AgentTLSKeyFile         string `json:"agent_tls_key_file"`
 	AgentCAFile             string `json:"agent_ca_file"`
-	PatroniCACertFile       string `json:"patroni_ca_cert_file,omitempty"`
-	PatroniCAKeyFile        string `json:"patroni_ca_key_file,omitempty"`
 	SecretKeyFile           string `json:"secret_key_file"`
 	SecretKeyID             string `json:"secret_key_id"`
 	PlacementArchitecture   string `json:"placement_architecture,omitempty"`
 	PlacementRuntimeVersion string `json:"placement_runtime_version,omitempty"`
 	PlacementStorageID      string `json:"placement_storage_id,omitempty"`
-	PatroniImage            string `json:"patroni_image,omitempty"`
-	EtcdImage               string `json:"etcd_image,omitempty"`
 }
 
 func initCommand() *cobra.Command {
@@ -125,8 +119,6 @@ func initCommand() *cobra.Command {
 	command.Flags().StringVar(&options.Directory, "dir", "", "Directory to write the installation material and configuration into (required)")
 	command.Flags().StringVar(&options.DatabaseURL, "database-url", "", "PostgreSQL URL for an existing metadata database")
 	command.Flags().StringVar(&options.InstallationID, "installation-id", "", "Installation UUID; one is generated when absent")
-	command.Flags().StringVar(&options.PatroniImage, "patroni-image", "", "Patroni member image digest")
-	command.Flags().StringVar(&options.EtcdImage, "etcd-image", "", "etcd member image digest")
 	command.Flags().StringVar(&options.PlacementArchitecture, "placement-architecture", "", "Node CPU architectures to place onto, in preference order (default: any)")
 	command.Flags().StringVar(&options.PlacementRuntimeVersion, "placement-runtime-version", "", "Container runtime version placement requires (default: any)")
 	command.Flags().StringVar(&options.PlacementStorageID, "placement-storage-id", "", "Storage pool identifier placement requires (default: any)")
@@ -196,13 +188,6 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		PlacementArchitecture:   options.PlacementArchitecture,
 		PlacementRuntimeVersion: options.PlacementRuntimeVersion,
 		PlacementStorageID:      options.PlacementStorageID,
-	}
-
-	if options.PatroniImage != "" && options.EtcdImage != "" {
-		cfg.PatroniCACertFile = filepath.Join(absDir, "patroni-ca.crt")
-		cfg.PatroniCAKeyFile = filepath.Join(absDir, "patroni-ca.key")
-		cfg.PatroniImage = options.PatroniImage
-		cfg.EtcdImage = options.EtcdImage
 	}
 
 	encodedConfig, err := json.MarshalIndent(cfg, "", "  ")
@@ -345,10 +330,6 @@ func writeMaterialWithAddress(directory, installation, address string, output io
 	if err != nil {
 		return materialResult{}, err
 	}
-	patroniCertificatePEM, patroniKeyPEM, err := pki.CreatePatroniCA(id, time.Now(), caLifetime)
-	if err != nil {
-		return materialResult{}, fmt.Errorf("create the Patroni CA for %s: %w", id, err)
-	}
 	apiCACertPEM, apiCAKeyPEM, err := createAPICA(id, time.Now(), caLifetime)
 	if err != nil {
 		return materialResult{}, fmt.Errorf("create API CA: %w", err)
@@ -385,8 +366,6 @@ func writeMaterialWithAddress(directory, installation, address string, output io
 	}{
 		{"ca.crt", 0o644, certificatePEM},
 		{"ca.key", 0o600, keyPEM},
-		{"patroni-ca.crt", 0o644, patroniCertificatePEM},
-		{"patroni-ca.key", 0o600, patroniKeyPEM},
 		{"agent-tls.crt", 0o644, controllerCert},
 		{"agent-tls.key", 0o600, controllerKey},
 		{"api-ca.crt", 0o644, apiCACertPEM},

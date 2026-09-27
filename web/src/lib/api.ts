@@ -51,7 +51,7 @@ export interface MintedToken extends APIToken {
 }
 
 export type ClusterSpec = { schema_version: 1; name: string } & (
-  | { engine: "postgres"; postgresql: { version: string; topology: "standalone"; replication_policy?: "" | "asynchronous" | "synchronous" }; redis: null }
+  | { engine: "postgres"; postgresql: { version: string; topology: "standalone" }; redis: null }
   | { engine: "redis"; postgresql: null; redis: {
       version: string; topology: "standalone"; persistence: "none" | "rdb" | "aof" | "rdb+aof";
       eviction_policy?: "noeviction" | "allkeys-lru" | "allkeys-lfu" | "allkeys-random" | "volatile-lru" | "volatile-lfu" | "volatile-random" | "volatile-ttl";
@@ -332,11 +332,8 @@ function listedCluster(value: unknown): Cluster | null {
     engineSpec.version.length > 64 || !/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/.test(engineSpec.version)) return null;
   let projected: ClusterSpec;
   if (spec.engine === "postgres" && spec.redis === null) {
-    if (engineSpec.replication_policy !== undefined &&
-      (typeof engineSpec.replication_policy !== "string" || !["", "asynchronous", "synchronous"].includes(engineSpec.replication_policy))) return null;
     projected = { schema_version: 1, name: spec.name, engine: "postgres", redis: null,
-      postgresql: { version: engineSpec.version, topology: "standalone",
-        ...(engineSpec.replication_policy === undefined ? {} : { replication_policy: engineSpec.replication_policy as NonNullable<NonNullable<ClusterSpec["postgresql"]>["replication_policy"]> }) } };
+      postgresql: { version: engineSpec.version, topology: "standalone" } };
   } else if (spec.engine === "redis" && spec.postgresql === null) {
     if (typeof engineSpec.persistence !== "string" || !["none", "rdb", "aof", "rdb+aof"].includes(engineSpec.persistence) ||
       (engineSpec.eviction_policy !== undefined && (typeof engineSpec.eviction_policy !== "string" || !["noeviction", "allkeys-lru", "allkeys-lfu", "allkeys-random",

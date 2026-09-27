@@ -23,9 +23,11 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/engine"
 	postgresengine "github.com/sirrobot01/synod/internal/engine/postgres"
 	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
+	"github.com/sirrobot01/synod/internal/router"
 	noderuntime "github.com/sirrobot01/synod/internal/runtime"
 	docker "github.com/sirrobot01/synod/internal/runtime/docker"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -137,7 +139,13 @@ func Run(ctx context.Context, config Config, testBootID string, diagnostics io.W
 	// The agent measures its own host. Nothing here declares a figure: an absent
 	// storage identity leaves the executor unable to answer a capacity challenge,
 	// which is the honest outcome when policy has approved no pool.
+	routes, err := router.New(ctx, router.Options{})
+	if err != nil {
+		return fmt.Errorf("%w: build the router: %w", ErrExecution, err)
+	}
+	defer routes.Close()
 	execution, err := executor.New(j, native, executor.Options{
+		Router:         routes,
 		Host:           capacity.Host{ProcRoot: "/proc", StoragePath: config.pool()},
 		BootID:         bootID,
 		StorageID:      config.StorageID,
@@ -148,7 +156,7 @@ func Run(ctx context.Context, config Config, testBootID string, diagnostics io.W
 	if err != nil {
 		return fmt.Errorf("%w: build the executor: %w", ErrExecution, err)
 	}
-	stream, err := transport.New(transport.Config{Endpoints: config.ControllerEndpoints, TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{identity.Certificate}}, Logger: logger, Hello: &agentv1.Hello{InstallationId: config.InstallationID, NodeId: config.NodeID, BootId: bootID, JournalGeneration: j.Identity().JournalGeneration, Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, Capabilities: []string{"runtime.docker"}, RuntimeVersion: version, ActivePayloadVersions: []uint32{1}}, Handle: execution.Handle})
+	stream, err := transport.New(transport.Config{Endpoints: config.ControllerEndpoints, TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{identity.Certificate}}, Logger: logger, Hello: &agentv1.Hello{InstallationId: config.InstallationID, NodeId: config.NodeID, BootId: bootID, JournalGeneration: j.Identity().JournalGeneration, Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, Capabilities: []string{"runtime.docker", controlstream.RouterCapability}, RuntimeVersion: version, ActivePayloadVersions: []uint32{1}}, Handle: execution.Handle, Observations: execution.Observations})
 	if err != nil {
 		return fmt.Errorf("%w: build the agent transport: %w", ErrConfiguration, err)
 	}

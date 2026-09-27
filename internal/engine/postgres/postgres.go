@@ -28,10 +28,6 @@ func (Engine) Validate(spec cluster.CreateSpec) error {
 	if spec.Redis != nil {
 		return fmt.Errorf("%w: a postgres spec carries redis settings", engine.ErrUnsupportedCombination)
 	}
-	// Standalone PostgreSQL has no replicas, so only Patroni can wait for one.
-	if spec.PostgreSQL.ReplicationPolicy == "synchronous" && spec.PostgreSQL.Topology != "patroni" {
-		return fmt.Errorf("%w: synchronous replication requires the patroni topology", engine.ErrUnsupportedCombination)
-	}
 	return nil
 }
 
@@ -60,7 +56,7 @@ func (Engine) Advertised() []engine.Capabilities {
 		found := engine.Capabilities{
 			Combination: engine.Combination{Engine: cluster.PostgreSQL, Version: version, Topology: "standalone"},
 			Status:      engine.RequiredPending,
-			// Standalone is one node. Replicas need the patroni topology. PITR needs pgBackRest.
+			// Standalone is one node. PITR needs pgBackRest.
 			Replicas:           engine.Replicas{Minimum: 0, Maximum: 0},
 			NativeFailover:     false,
 			Sharding:           false,
@@ -77,19 +73,5 @@ func (Engine) Advertised() []engine.Capabilities {
 		}
 		all = append(all, found)
 	}
-	// Patroni runs three members: one elected primary and two replicas. Native Patroni
-	// tests cover 17.11 only. Clients reach members directly with a multi-host URL.
-	all = append(all, engine.Capabilities{
-		Combination:    engine.Combination{Engine: cluster.PostgreSQL, Version: "17.11", Topology: "patroni"},
-		Status:         engine.RequiredPending,
-		Replicas:       engine.Replicas{Minimum: 2, Maximum: 2},
-		NativeFailover: true,
-		// A libpq multi-host URL finds the writer. Synod runs no proxy yet.
-		ClientDiscovery: true,
-		BackupFormats:   []string{},
-		RestoreScopes:   []string{},
-		EndpointType:    "multi_host",
-		TLS:             true,
-	})
 	return all
 }

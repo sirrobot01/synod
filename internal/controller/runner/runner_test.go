@@ -111,9 +111,11 @@ func newInstallation(t *testing.T) *installation {
 	inst.issue(t)
 	var routed *Runner
 	server, err := controlstream.New(controlstream.Config{
-		InstallationID: inst.id,
-		TLS:            &tls.Config{MinVersion: tls.VersionTLS12, ClientCAs: inst.roots, Certificates: []tls.Certificate{inst.controllerTLS}},
-		Authorize:      store.CheckAgentCertificate,
+		InstallationID:    inst.id,
+		Capabilities:      []string{"runtime.docker", controlstream.CommandInspectionCapability, controlstream.RouterCapability},
+		HeartbeatInterval: time.Second,
+		TLS:               &tls.Config{MinVersion: tls.VersionTLS12, ClientCAs: inst.roots, Certificates: []tls.Certificate{inst.controllerTLS}},
+		Authorize:         store.CheckAgentCertificate,
 		Handle: func(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
 			return routed.Handle(ctx, peer, message)
 		},

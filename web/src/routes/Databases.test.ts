@@ -136,8 +136,8 @@ describe("the engine choice", () => {
     await open();
     // The shapes are drawn so the client mode each one forces is visible, and
     // refused so no request can carry a topology the server would reject.
-    expect(screen.getByText("Patroni HA")).toBeTruthy();
-    expect(screen.getAllByText("not admitted by this server yet")).toHaveLength(2);
+    expect(screen.getByText("Primary + standbys")).toBeTruthy();
+    expect(screen.getAllByText("not admitted by this server yet")).toHaveLength(1);
     await pick("Redis");
     expect(screen.getByText("Sentinel")).toBeTruthy();
     expect(screen.getByText("Redis Cluster")).toBeTruthy();

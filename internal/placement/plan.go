@@ -18,10 +18,11 @@ type planner struct {
 }
 
 type candidate struct {
-	node                   int
-	load                   Vector
-	ports                  []Port
-	numerator, denominator uint64
+	node                         int
+	load                         Vector
+	ports                        []Port
+	numerator, denominator       uint64
+	spread, preference, partTime int
 }
 
 func prepare(request Request, snapshot Snapshot) (*planner, error) {
@@ -122,10 +123,13 @@ func prepare(request Request, snapshot Snapshot) (*planner, error) {
 			if prior, exists := p.existing[member]; exists && !prior.Released {
 				i, found := p.nodes[prior.NodeID]
 				if !found || snapshot.Nodes[i].Policy == nil {
+					if group.Soft {
+						continue
+					}
 					return nil, ErrUnsatisfied
 				}
 				domain := snapshot.Nodes[i].Policy.FailureDomains[group.DomainKey]
-				if domain == "" || domains[domain] {
+				if !group.Soft && (domain == "" || domains[domain]) {
 					return nil, ErrUnsatisfied
 				}
 				domains[domain] = true
@@ -174,6 +178,9 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 	if policy.InstallationID != p.request.InstallationID || policy.NodeID != node.ID || policy.Revision < 1 || probe.InstallationID != node.InstallationID || probe.NodeID != node.ID || probe.SessionID != node.SessionID || probe.BootID != node.BootID || probe.JournalGeneration != node.JournalGeneration || probe.PolicyRevision != policy.Revision || probe.IssuedAt.After(now) || !probe.ValidUntil.After(now) || probe.ValidUntil.After(probe.IssuedAt.Add(CapacityAge)) || report.ProbeID != probe.ID || report.ProbeRevision != probe.Revision || report.InstallationID != node.InstallationID || report.NodeID != node.ID || report.SessionID != node.SessionID || report.BootID != node.BootID || report.JournalGeneration != node.JournalGeneration {
 		return candidate{}, false
 	}
+	if (len(resource.AllowedNodes) != 0 && !slices.Contains(resource.AllowedNodes, node.ID)) || slices.Contains(resource.ExcludedNodes, node.ID) {
+		return candidate{}, false
+	}
 	if resource.NodeAffinity != uuid.Nil && resource.NodeAffinity != node.ID {
 		return candidate{}, false
 	}
@@ -189,7 +196,11 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 			return candidate{}, false
 		}
 	}
-	if policy.Architecture != resource.Architecture || report.Architecture != resource.Architecture || !slices.Contains(policy.Engines, EngineVersion{resource.Engine, resource.Version}) {
+	if resource.Engine == "generic" {
+		if !slices.Contains(resource.SupportedArchitectures, policy.Architecture) || report.Architecture != policy.Architecture || report.RuntimeVersion != policy.RuntimeVersion || report.StorageID != policy.StorageID {
+			return candidate{}, false
+		}
+	} else if policy.Architecture != resource.Architecture || report.Architecture != resource.Architecture || !slices.Contains(policy.Engines, EngineVersion{resource.Engine, resource.Version}) {
 		return candidate{}, false
 	}
 	// An empty runtime version or storage ID in the request accepts any node value.
@@ -208,11 +219,15 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 	if !ok {
 		return candidate{}, false
 	}
+	spread := 0
 	for _, group := range p.request.Groups {
 		if !slices.Contains(group.Members, resource.ID) {
 			continue
 		}
 		domain := policy.FailureDomains[group.DomainKey]
+		if domain == "" && group.Soft {
+			domain = node.ID.String()
+		}
 		if domain == "" {
 			return candidate{}, false
 		}
@@ -229,11 +244,21 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 				continue
 			}
 			otherIndex, exists := p.nodes[otherNode]
-			if !exists || p.snapshot.Nodes[otherIndex].Policy == nil {
+			if !exists {
 				return candidate{}, false
 			}
-			otherDomain := p.snapshot.Nodes[otherIndex].Policy.FailureDomains[group.DomainKey]
-			if otherDomain == "" || otherDomain == domain {
+			otherDomain := ""
+			if p.snapshot.Nodes[otherIndex].Policy != nil {
+				otherDomain = p.snapshot.Nodes[otherIndex].Policy.FailureDomains[group.DomainKey]
+			}
+			if group.Soft {
+				if otherDomain == "" {
+					otherDomain = otherNode.String()
+				}
+				if otherDomain == domain {
+					spread++
+				}
+			} else if otherDomain == "" || otherDomain == domain {
 				return candidate{}, false
 			}
 		}
@@ -248,7 +273,13 @@ func (p *planner) viable(resource Resource, index int) (candidate, bool) {
 	if err != nil || load.CPUMillis > report.Capacity.CPUMillis || load.MemoryBytes > report.Capacity.MemoryBytes || load.DiskBytes > report.Capacity.DiskBytes {
 		return candidate{}, false
 	}
-	result := candidate{node: index, load: load, ports: chosen, numerator: uint64(load.CPUMillis), denominator: uint64(report.Capacity.CPUMillis)}
+	result := candidate{node: index, load: load, ports: chosen, spread: spread, numerator: uint64(load.CPUMillis), denominator: uint64(report.Capacity.CPUMillis)}
+	if len(resource.PreferredNodes) != 0 && !slices.Contains(resource.PreferredNodes, node.ID) {
+		result.preference = 1
+	}
+	if resource.Engine == "generic" && policy.Labels["synod.availability"] == "part-time" {
+		result.partTime = 1
+	}
 	for _, ratio := range [][2]int64{{load.MemoryBytes, report.Capacity.MemoryBytes}, {load.DiskBytes, report.Capacity.DiskBytes}} {
 		if compareRatio(uint64(ratio[0]), uint64(ratio[1]), result.numerator, result.denominator) > 0 {
 			result.numerator, result.denominator = uint64(ratio[0]), uint64(ratio[1])
@@ -389,7 +420,7 @@ func Plan(request Request, snapshot Snapshot) (Decision, error) {
 			}
 		}
 		slices.SortFunc(options, func(a, b candidate) int {
-			return cmp.Or(compareRatio(a.numerator, a.denominator, b.numerator, b.denominator), strings.Compare(snapshot.Nodes[a.node].ID.String(), snapshot.Nodes[b.node].ID.String()))
+			return cmp.Or(cmp.Compare(a.spread, b.spread), cmp.Compare(a.preference, b.preference), cmp.Compare(a.partTime, b.partTime), compareRatio(a.numerator, a.denominator, b.numerator, b.denominator), strings.Compare(snapshot.Nodes[a.node].ID.String(), snapshot.Nodes[b.node].ID.String()))
 		})
 		for _, option := range options {
 			if explored >= MaxSearch {

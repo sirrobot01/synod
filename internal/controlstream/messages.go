@@ -6,11 +6,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/router"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
 )
 
 const CommandInspectionCapability = "runtime.command-inspection.v1"
+const RouterCapability = "runtime.router.v1"
 
 func checkEpoch(epoch *agentv1.Epoch, installationID, nodeID string) error {
 	if epoch == nil || epoch.InstallationId != installationID || epoch.NodeId != nodeID || epoch.ExecutionEpoch < 1 {
@@ -35,6 +37,21 @@ func CheckAgentMessage(message *agentv1.AgentMessage, installationID, nodeID str
 	}
 	var epoch *agentv1.Epoch
 	switch value := message.Message.(type) {
+	case *agentv1.AgentMessage_RouteAck:
+		ack := value.RouteAck
+		if ack == nil || ack.Revision == 0 {
+			return ErrMessage
+		}
+		id, err := uuid.Parse(ack.SessionId)
+		if err != nil || id == uuid.Nil || id.String() != ack.SessionId {
+			return ErrMessage
+		}
+		switch ack.FailureCode {
+		case "", "route_port_conflict", "invalid_route_configuration", "router_closed", "stale_route_revision", "route_revision_conflict", "router_unavailable":
+			return nil
+		default:
+			return ErrMessage
+		}
 	case *agentv1.AgentMessage_CommandInspection:
 		return CheckCommandInspectionResult(value.CommandInspection, installationID, nodeID)
 	case *agentv1.AgentMessage_Heartbeat:
@@ -97,6 +114,16 @@ func CheckControllerMessage(message *agentv1.ControllerMessage, installationID, 
 	}
 	var epoch *agentv1.Epoch
 	switch value := message.Message.(type) {
+	case *agentv1.ControllerMessage_Routes:
+		table := value.Routes
+		if table == nil || table.Revision == 0 || router.Validate(table.Routes) != nil {
+			return ErrMessage
+		}
+		id, err := uuid.Parse(table.SessionId)
+		if err != nil || id == uuid.Nil || id.String() != table.SessionId {
+			return ErrMessage
+		}
+		return nil
 	case *agentv1.ControllerMessage_CommandInspection:
 		return CheckCommandInspectionRequest(value.CommandInspection, installationID, nodeID)
 	case *agentv1.ControllerMessage_Session:

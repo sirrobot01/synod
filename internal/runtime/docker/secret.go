@@ -70,6 +70,14 @@ func secretEnvironment(imageEnv []string, p *agentv1.EnsureContainer, secrets ru
 // It is applied where the options are built, not where the credentials are, so a
 // verification rebuild can reproduce them and detect a value changed by hand.
 func plainEnvironment(imageEnv []string, p *agentv1.EnsureContainer) ([]string, error) {
+	if p.Generic != nil {
+		environment := slices.Clone(imageEnv)
+		for _, env := range p.PlainEnv {
+			environment = slices.DeleteFunc(environment, func(entry string) bool { name, _, _ := strings.Cut(entry, "="); return name == env.Name })
+			environment = append(environment, env.Name+"="+env.Value)
+		}
+		return environment, nil
+	}
 	if p.Postgres != nil {
 		if len(p.PlainEnv) != 0 {
 			return nil, runtime.ErrUnsupportedConfiguration

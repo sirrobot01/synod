@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	appmodel "github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/client"
 	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/operation"
@@ -19,6 +20,8 @@ import (
 
 // Result is the single JSON document that the CLI writes to stdout.
 type Result struct {
+	App                  *appmodel.App                 `json:"app,omitzero"`
+	AppAdmission         *appmodel.Admission           `json:"app_admission,omitzero"`
 	EnrollmentToken      *client.EnrollmentToken       `json:"enrollment_token,omitzero"`
 	Admission            *client.Admission             `json:"admission,omitzero"`
 	Cluster              *cluster.Cluster              `json:"cluster,omitzero"`
@@ -96,6 +99,24 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 	}
 	if a.result.JoinToken != "" && a.result.EnrollmentToken != nil {
 		fmt.Fprintf(&output, "Join token for one agent node, valid until %s:\n  %s\n\nOn that node, run:\n  synod agent join %s\n", a.result.EnrollmentToken.ExpiresAt.Format(time.RFC3339), a.result.JoinToken, a.result.JoinToken)
+	}
+	if a.result.AppAdmission != nil {
+		fmt.Fprintf(&output, "Accepted app: %s\nOperation: %s\nDesired revision: %d\nIdempotency key: %s\n", a.result.AppAdmission.AppID, a.result.AppAdmission.OperationID, a.result.AppAdmission.DesiredRevision, a.result.IdempotencyKey)
+	}
+	if item := a.result.App; item != nil {
+		fmt.Fprintf(&output, "App: %s\nName: %s\nDesired: %s (revision %d)\nObserved: %s (revision %d)\n", item.ID, item.Name, item.DesiredLifecycle, item.DesiredRevision, item.ObservedLifecycle, item.ObservedRevision)
+		if item.Status != nil {
+			fmt.Fprintf(&output, "State: %s\nOperation: %s (%s)\n", item.Status.State, item.Status.OperationID, item.Status.OperationState)
+			if item.Status.FailureCode != "" {
+				fmt.Fprintf(&output, "Failure: %s\n", item.Status.FailureCode)
+			}
+			for _, copy := range item.Status.Copies {
+				fmt.Fprintf(&output, "Copy %d: %s on %s (%s, %s)\n", copy.CopyIndex, copy.ID, copy.NodeID, copy.ObservedState, copy.Health)
+			}
+			for _, endpoint := range item.Status.Endpoints {
+				fmt.Fprintf(&output, "Endpoint: %s (ready: %t)\n", endpoint.Address, endpoint.Ready)
+			}
+		}
 	}
 	if a.result.Admission != nil {
 		fmt.Fprintf(&output, "Accepted cluster: %s\nOperation: %s\nIdempotency key: %s\n", a.result.Admission.ClusterID, a.result.Admission.OperationID, a.result.IdempotencyKey)

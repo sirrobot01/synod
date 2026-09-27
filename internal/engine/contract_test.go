@@ -273,19 +273,6 @@ func TestRedisReplicaLimitsMatchPersistence(t *testing.T) {
 	}
 }
 
-func TestPostgresSynchronousPolicyRequiresPatroni(t *testing.T) {
-	for _, topology := range []string{"standalone", "patroni"} {
-		spec := cluster.CreateSpec{SchemaVersion: 1, Name: "db", Engine: cluster.PostgreSQL, PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: topology, ReplicationPolicy: "synchronous"}}
-		_, err := postgres.New().Resolve(spec)
-		if topology == "patroni" && err != nil {
-			t.Fatal(err)
-		}
-		if topology == "standalone" && !errors.Is(err, engine.ErrUnsupportedCombination) {
-			t.Fatalf("standalone synchronous policy accepted: %v", err)
-		}
-	}
-}
-
 func TestPostgresReplicaLimitsMatchImplementedVersion(t *testing.T) {
 	for _, version := range []string{"17.11", "18.6"} {
 		t.Run(version, func(t *testing.T) {
@@ -294,7 +281,7 @@ func TestPostgresReplicaLimitsMatchImplementedVersion(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Standalone is one node. Replicas need the patroni topology.
+			// Standalone is one node.
 			if found.Replicas.Minimum != 0 || found.Replicas.Maximum != 0 {
 				t.Fatalf("replica limits %+v, want none", found.Replicas)
 			}
@@ -305,18 +292,13 @@ func TestPostgresReplicaLimitsMatchImplementedVersion(t *testing.T) {
 	}
 }
 
-func TestPostgresPatroniCapabilities(t *testing.T) {
-	spec := cluster.CreateSpec{SchemaVersion: 1, Name: "ha", Engine: cluster.PostgreSQL, PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "patroni", FailureDomain: "host"}}
-	found, err := postgres.New().Resolve(spec)
-	if err != nil {
-		t.Fatal(err)
+// A retired topology is refused, not served.
+func TestPostgresPatroniTopologyIsRefused(t *testing.T) {
+	spec := cluster.CreateSpec{SchemaVersion: 1, Name: "ha", Engine: cluster.PostgreSQL, PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "patroni"}}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("a well-formed topology failed validation: %v", err)
 	}
-	if found.Status != engine.RequiredPending || !found.NativeFailover || !found.TLS || !found.ClientDiscovery || found.ProxyRouting || found.PITR ||
-		found.Replicas != (engine.Replicas{Minimum: 2, Maximum: 2}) || found.EndpointType != "multi_host" || len(found.ScaleActions) != 0 || found.CredentialRotation {
-		t.Fatalf("Patroni capabilities claim more or less than was implemented: %+v", found)
-	}
-	spec.PostgreSQL.Version = "18.6"
 	if _, err := postgres.New().Resolve(spec); !errors.Is(err, engine.ErrUnsupportedCombination) {
-		t.Fatalf("Patroni on an untested version was served: %v", err)
+		t.Fatalf("a patroni topology resolved: %v", err)
 	}
 }

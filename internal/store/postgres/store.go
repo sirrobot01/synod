@@ -19,7 +19,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirrobot01/synod/internal/cluster"
-	"github.com/sirrobot01/synod/internal/operation"
 )
 
 //go:embed migrations/*.sql
@@ -177,7 +176,7 @@ func admissionError(err error) error {
 	}
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "23505" {
 		switch pgErr.ConstraintName {
-		case "clusters_active_name":
+		case "clusters_active_name", "apps_active_name":
 			return &AdmissionError{Code: NameConflict, Cause: err}
 		case "nodes_pkey", "enrollment_tokens_installation_id_token_verifier_key", "node_certificates_installation_id_serial_key":
 			return &AdmissionError{Code: EnrollmentConflict, Cause: err}
@@ -243,15 +242,10 @@ func (s *Store) CreateCluster(ctx context.Context, request CreateClusterRequest)
 	if err != nil {
 		return Admission{}, admissionError(err)
 	}
-	// A Patroni cluster starts with three members: one elected primary and two replicas.
-	replicas := 0
-	if request.Spec.PostgreSQL != nil && request.Spec.PostgreSQL.Topology == "patroni" {
-		replicas = operation.MinPatroniMembers - 1
-	}
 	if _, err := tx.Exec(ctx, `INSERT INTO clusters
-		(id, installation_id, name, engine, spec_version, spec, desired_revision, desired_lifecycle, desired_replicas, observed_revision, observed_lifecycle, execution_epoch, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,1,$5,1,'running',$6,0,'provisioning',0,transaction_timestamp(),transaction_timestamp())`,
-		clusterID, identity.InstallationID, request.Spec.Name, request.Spec.Engine, body, replicas); err != nil {
+		(id, installation_id, name, engine, spec_version, spec, desired_revision, desired_lifecycle, observed_revision, observed_lifecycle, execution_epoch, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,1,$5,1,'running',0,'provisioning',0,transaction_timestamp(),transaction_timestamp())`,
+		clusterID, identity.InstallationID, request.Spec.Name, request.Spec.Engine, body); err != nil {
 		return Admission{}, admissionError(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operations

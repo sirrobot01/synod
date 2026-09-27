@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"fmt"
-	"net/netip"
 	"regexp"
 	"time"
 
@@ -44,23 +43,10 @@ type CreateSpec struct {
 	Redis         *RedisSpec      `json:"redis"`
 }
 
-// PostgreSQLSpec holds the PostgreSQL version, topology, and replication policy.
+// PostgreSQLSpec holds the PostgreSQL version and topology.
 type PostgreSQLSpec struct {
-	Version           string `json:"version"`
-	Topology          string `json:"topology"`
-	ReplicationPolicy string `json:"replication_policy,omitempty"`
-	// FailureDomain is the host failure a patroni cluster survives. Only host is supported.
-	FailureDomain string `json:"failure_domain,omitempty"`
-	// Endpoint is an optional operator load balancer in front of the routers of a patroni cluster.
-	Endpoint *PostgresEndpoint `json:"endpoint,omitempty"`
-}
-
-// PostgresEndpoint is an operator TCP load balancer. It listens on the writer and reader
-// ports and forwards to the router ports that the endpoint output lists.
-type PostgresEndpoint struct {
-	Address    string `json:"address"`
-	WriterPort uint16 `json:"writer_port"`
-	ReaderPort uint16 `json:"reader_port"`
+	Version  string `json:"version"`
+	Topology string `json:"topology"`
 }
 
 // RedisSpec holds the Redis version, topology, and persistence.
@@ -88,28 +74,9 @@ func (s CreateSpec) Validate() error {
 		if s.PostgreSQL == nil || s.Redis != nil {
 			return fmt.Errorf("postgres requires only a postgresql spec")
 		}
-		switch {
-		case s.PostgreSQL.Topology == "standalone" && s.PostgreSQL.FailureDomain == "":
-		case s.PostgreSQL.Topology == "patroni" && s.PostgreSQL.FailureDomain == "host":
-		default:
-			return fmt.Errorf("postgres topology must be standalone, or patroni with failure domain host")
-		}
-		if endpoint := s.PostgreSQL.Endpoint; endpoint != nil {
-			address, err := netip.ParseAddr(endpoint.Address)
-			if s.PostgreSQL.Topology != "patroni" || err != nil || address.String() != endpoint.Address || !address.IsGlobalUnicast() || address.Zone() != "" ||
-				endpoint.WriterPort == 0 || endpoint.ReaderPort == 0 || endpoint.WriterPort == endpoint.ReaderPort {
-				return fmt.Errorf("postgres endpoint needs topology patroni, a canonical routable IP, and two different ports")
-			}
-		}
-		switch s.PostgreSQL.ReplicationPolicy {
-		case "", "asynchronous":
-		case "synchronous":
-			// Standalone PostgreSQL has no replica to wait for.
-			if s.PostgreSQL.Topology != "patroni" {
-				return fmt.Errorf("postgres synchronous replication needs topology patroni")
-			}
-		default:
-			return fmt.Errorf("postgres replication policy must be asynchronous or synchronous")
+		// The engine catalog decides which topologies this server supports.
+		if !namePattern.MatchString(s.PostgreSQL.Topology) {
+			return fmt.Errorf("postgres topology must match %s", namePattern)
 		}
 		if len(s.PostgreSQL.Version) > 64 || !versionPattern.MatchString(s.PostgreSQL.Version) {
 			return fmt.Errorf("postgres version must have two or three numeric parts")
@@ -118,8 +85,8 @@ func (s CreateSpec) Validate() error {
 		if s.Redis == nil || s.PostgreSQL != nil {
 			return fmt.Errorf("redis requires only a redis spec")
 		}
-		if s.Redis.Topology != "standalone" {
-			return fmt.Errorf("redis topology must be standalone")
+		if !namePattern.MatchString(s.Redis.Topology) {
+			return fmt.Errorf("redis topology must match %s", namePattern)
 		}
 		if len(s.Redis.Version) > 64 || !versionPattern.MatchString(s.Redis.Version) {
 			return fmt.Errorf("redis version must have two or three numeric parts")

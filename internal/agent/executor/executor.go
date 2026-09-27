@@ -14,6 +14,7 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/engine"
+	"github.com/sirrobot01/synod/internal/router"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
@@ -43,6 +44,7 @@ type Options struct {
 	// An engine with no prober cannot be told about, which is an unavailable probe
 	// rather than a failure.
 	Probers map[string]engine.Prober
+	Router  *router.Manager
 }
 
 type epochGate struct {
@@ -72,6 +74,8 @@ type session struct {
 	// secrets are the resolved credentials this session was sent, by purpose. They
 	// are held here and nowhere else, so they end when the session does.
 	secrets map[string]sessionSecret
+	router  bool
+	routes  *agentv1.RouteTable
 }
 
 type job struct {
@@ -99,6 +103,8 @@ type Executor struct {
 	capacityBusy   bool
 	failure        error
 	nextCompaction time.Time
+	observations   []*agentv1.Observation
+	observedAt     time.Time
 }
 
 // New builds an executor on a journal and a runtime and applies default options.
@@ -158,6 +164,17 @@ func (e *Executor) Run(ctx context.Context, stream *transport.Client) error {
 			}
 		})
 	}
+	workers.Go(func() {
+		e.collectObservations(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				e.collectObservations(ctx)
+			}
+		}
+	})
 	defer func() {
 		cancel()
 		workers.Wait()

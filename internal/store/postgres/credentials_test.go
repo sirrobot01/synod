@@ -1,14 +1,11 @@
 package postgres
 
 import (
-	"bytes"
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/sirrobot01/synod/internal/placement"
 	"github.com/sirrobot01/synod/internal/secret"
 )
 
@@ -28,9 +25,6 @@ func keyring(t *testing.T) *secret.Keyring {
 func sealed(t *testing.T, ring *secret.Keyring, host *placementHost, clusterID uuid.UUID, purpose, role, password string) Credential {
 	t.Helper()
 	credential := Credential{CredentialID: uuid.New(), Version: 1, Purpose: purpose, RoleName: role}
-	if purpose == PatroniMemberTLSCredential || purpose == PatroniDCSTLSCredential {
-		credential.ExpiresAt = time.Now().Add(30 * 24 * time.Hour)
-	}
 	binding := secret.Binding{
 		InstallationID: host.id, OwnerType: "cluster", OwnerID: clusterID,
 		CredentialID: credential.CredentialID, Version: credential.Version,
@@ -250,131 +244,5 @@ func TestClusterIntentRefusesAnUnsoundRequest(t *testing.T) {
 	}
 	if total := host.count(t, `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1`, host.id); total != 0 {
 		t.Fatalf("credentials=%d, want none", total)
-	}
-}
-
-func TestNativeCredentialIdentityAndIsolation(t *testing.T) {
-	host := placementFixture(t)
-	claim := host.claimCluster(t, "native")
-	other := host.claimCluster(t, "other")
-	ring := keyring(t)
-	members := []uuid.UUID{uuid.New(), uuid.New()}
-	for _, member := range members {
-		host.store.seedAllocation(t, placement.Allocation{
-			ID: uuid.New(), InstallationID: host.id, ClusterID: claim.ClusterID, NodeID: host.node,
-			ResourceID: member, CreatedRevision: 1,
-		}, claim.OperationID)
-	}
-	credentials := []Credential{
-		sealed(t, ring, host, claim.ClusterID, PatroniMemberTLSCredential, "", "first-member"),
-		sealed(t, ring, host, claim.ClusterID, PatroniMemberTLSCredential, "", "second-member"),
-		sealed(t, ring, host, claim.ClusterID, PatroniDCSTLSCredential, "", "dcs-leaf"),
-		sealed(t, ring, host, claim.ClusterID, PatroniRewindCredential, "synod_rewind", "rewind"),
-		sealed(t, ring, host, claim.ClusterID, PatroniRESTCredential, "synod_patroni", "rest"),
-	}
-	credentials[0].MemberID, credentials[1].MemberID = members[0], members[1]
-	intent := ClusterIntent{InstallationID: host.id, ClusterID: claim.ClusterID, Credentials: credentials}
-	if err := host.store.RecordClusterIntent(t.Context(), intent); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.store.RecordClusterIntent(t.Context(), intent); err != nil {
-		t.Fatal("exact replay", err)
-	}
-	for _, expected := range credentials {
-		found, err := host.store.ReadCredentialVersion(t.Context(), host.id, claim.ClusterID, expected.CredentialID, 1, expected.Purpose)
-		if err != nil || found.MemberID != expected.MemberID || found.Purpose != expected.Purpose || !bytes.Equal(found.Envelope.Sealed, expected.Envelope.Sealed) {
-			t.Fatal("exact credential mismatch", err)
-		}
-		if _, err := ring.Open(secret.Binding{InstallationID: host.id, OwnerType: "cluster", OwnerID: claim.ClusterID, CredentialID: found.CredentialID, Version: 1}, found.Envelope); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := host.store.ReadClusterCredential(t.Context(), host.id, claim.ClusterID, expected.Purpose); err == nil {
-			t.Fatal("native purpose accepted by latest SQL reader")
-		}
-		if _, err := host.store.AuthorizeCredentialReveal(t.Context(), host.id, claim.ClusterID, expected.Purpose, "actor", "request"); err == nil {
-			t.Fatal("native key accepted by password reveal")
-		}
-	}
-	inspection, err := host.store.InspectClusterCredentials(t.Context(), host.id, claim.ClusterID)
-	if err != nil || len(inspection.Credentials) != 0 {
-		t.Fatal("native credentials entered password inspection", err)
-	}
-	duplicate := credentials[0]
-	duplicate.CredentialID = uuid.New()
-	if err := host.store.RecordClusterIntent(t.Context(), ClusterIntent{InstallationID: host.id, ClusterID: claim.ClusterID, Credentials: []Credential{duplicate}}); err == nil {
-		t.Fatal("two credentials occupied the same member purpose and version")
-	}
-	if err := host.store.RecordClusterIntent(t.Context(), ClusterIntent{InstallationID: host.id, ClusterID: other.ClusterID, Credentials: []Credential{credentials[2]}}); !errors.Is(err, ErrCredentialConflict) {
-		t.Fatalf("foreign-owner replay: %v", err)
-	}
-	old := credentials[0]
-	next := old
-	next.Version++
-	next.Envelope, err = ring.Seal(secret.Binding{InstallationID: host.id, OwnerType: "cluster", OwnerID: claim.ClusterID, CredentialID: next.CredentialID, Version: next.Version}, []byte("renewed-member"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := host.store.RecordClusterIntent(t.Context(), ClusterIntent{InstallationID: host.id, ClusterID: claim.ClusterID, Credentials: []Credential{next}}); err != nil {
-		t.Fatal(err)
-	}
-	found, err := host.store.ReadCredentialVersion(t.Context(), host.id, claim.ClusterID, old.CredentialID, old.Version, old.Purpose)
-	if err != nil || found.Version != 1 || !bytes.Equal(found.Envelope.Sealed, old.Envelope.Sealed) {
-		t.Fatal("new version replaced old reference", err)
-	}
-	for name, change := range map[string]func(*Credential){
-		"member":     func(c *Credential) { c.MemberID = members[1] },
-		"ciphertext": func(c *Credential) { c.Envelope.Sealed = bytes.Repeat([]byte{7}, len(c.Envelope.Sealed)) },
-		"key":        func(c *Credential) { c.Envelope.KeyID = uuid.New() },
-	} {
-		t.Run(name, func(t *testing.T) {
-			changed := old
-			change(&changed)
-			err := host.store.RecordClusterIntent(t.Context(), ClusterIntent{InstallationID: host.id, ClusterID: claim.ClusterID, Credentials: []Credential{changed}})
-			if !errors.Is(err, ErrCredentialConflict) {
-				t.Fatalf("conflicting replay: %v", err)
-			}
-		})
-	}
-	for _, request := range []struct {
-		installation, cluster, id uuid.UUID
-		version                   int64
-		purpose                   string
-	}{
-		{uuid.New(), claim.ClusterID, old.CredentialID, 1, old.Purpose},
-		{host.id, other.ClusterID, old.CredentialID, 1, old.Purpose},
-		{host.id, claim.ClusterID, uuid.New(), 1, old.Purpose},
-		{host.id, claim.ClusterID, old.CredentialID, 3, old.Purpose},
-		{host.id, claim.ClusterID, old.CredentialID, 1, PatroniDCSTLSCredential},
-	} {
-		if _, err := host.store.ReadCredentialVersion(t.Context(), request.installation, request.cluster, request.id, request.version, request.purpose); err == nil {
-			t.Fatal("foreign or missing reference resolved")
-		}
-	}
-	for name, change := range map[string]func(*Credential){
-		"missing member":              func(c *Credential) { c.MemberID = uuid.Nil },
-		"unallocated member":          func(c *Credential) { c.MemberID = uuid.New() },
-		"TLS role":                    func(c *Credential) { c.RoleName = "synod_admin" },
-		"cluster purpose with member": func(c *Credential) { c.Purpose = PatroniDCSTLSCredential },
-		"TLS without expiry":          func(c *Credential) { c.ExpiresAt = time.Time{} },
-		"password with expiry": func(c *Credential) {
-			c.Purpose, c.RoleName, c.MemberID = PatroniRESTCredential, "synod_patroni", uuid.Nil
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			bad := old
-			bad.CredentialID = uuid.New()
-			change(&bad)
-			if err := host.store.RecordClusterIntent(t.Context(), ClusterIntent{InstallationID: host.id, ClusterID: claim.ClusterID, Credentials: []Credential{bad}}); err == nil {
-				t.Fatal("invalid native credential accepted")
-			}
-		})
-	}
-	foreign := old
-	foreign.CredentialID = uuid.New()
-	if err := host.store.RecordClusterIntent(t.Context(), ClusterIntent{InstallationID: host.id, ClusterID: other.ClusterID, Credentials: []Credential{foreign}}); err == nil {
-		t.Fatal("member allocated to another cluster accepted")
-	}
-	if total := host.count(t, `SELECT count(*) FROM cluster_credentials WHERE installation_id=$1`, host.id); total != 6 {
-		t.Fatalf("rows=%d, want 6", total)
 	}
 }

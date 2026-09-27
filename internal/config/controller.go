@@ -19,29 +19,21 @@ import (
 
 // Controller holds the resolved controller settings.
 type Controller struct {
-	AgentListen        string `json:"agent_listen"`
-	AgentTLSCertFile   string `json:"agent_tls_cert_file"`
-	AgentTLSKeyFile    string `json:"agent_tls_key_file"`
-	AgentCAFile        string `json:"agent_ca_file"`
-	InstallationID     string `json:"installation_id"`
-	Listen             string `json:"listen"`
-	DatabaseURL        string `json:"database_url"`
-	AdminTokenFile     string `json:"admin_token_file"`
-	ActorID            string `json:"actor_id"`
-	TLSCertFile        string `json:"tls_cert_file"`
-	TLSKeyFile         string `json:"tls_key_file"`
-	CACertFile         string `json:"ca_cert_file"`
-	CAKeyFile          string `json:"ca_key_file"`
-	PublicOrigin       string `json:"public_origin"`
-	// The native Patroni CA signs member, peer, and DCS client certificates.
-	PatroniCACertFile string `json:"patroni_ca_cert_file"`
-	PatroniCAKeyFile  string `json:"patroni_ca_key_file"`
-	// PatroniImage is the name@sha256 digest of the member image. With more than one placement
-	// architecture, it is an image index that covers each one.
-	PatroniImage string `json:"patroni_image"`
-	// EtcdImage is the name@sha256 digest of the etcd member image.
-	EtcdImage string `json:"etcd_image"`
-	LogLevel            string `json:"log_level"`
+	AgentListen      string `json:"agent_listen"`
+	AgentTLSCertFile string `json:"agent_tls_cert_file"`
+	AgentTLSKeyFile  string `json:"agent_tls_key_file"`
+	AgentCAFile      string `json:"agent_ca_file"`
+	InstallationID   string `json:"installation_id"`
+	Listen           string `json:"listen"`
+	DatabaseURL      string `json:"database_url"`
+	AdminTokenFile   string `json:"admin_token_file"`
+	ActorID          string `json:"actor_id"`
+	TLSCertFile      string `json:"tls_cert_file"`
+	TLSKeyFile       string `json:"tls_key_file"`
+	CACertFile       string `json:"ca_cert_file"`
+	CAKeyFile        string `json:"ca_key_file"`
+	PublicOrigin     string `json:"public_origin"`
+	LogLevel         string `json:"log_level"`
 	// SecretKeyFile holds the base64 of one 32-byte wrapping key, and SecretKeyID
 	// names it. A controller without both seals nothing, so it admits clusters and
 	// cannot provision them: a credential this installation cannot name later is
@@ -90,10 +82,6 @@ func BindController(flags *pflag.FlagSet) func() (Controller, error) {
 	flags.IntVar(&override.EngineEndpointFirstPort, "engine-endpoint-first-port", 0, "lowest host port an engine may publish on (default 5432)")
 	flags.IntVar(&override.EngineEndpointLastPort, "engine-endpoint-last-port", 0, "highest host port an engine may publish on (default 5531)")
 	flags.StringVar(&override.PublicOrigin, "public-origin", "", "browser origin of this API, such as https://synod.example.com")
-	flags.StringVar(&override.PatroniCACertFile, "patroni-ca-cert-file", "", "native Patroni CA certificate")
-	flags.StringVar(&override.PatroniCAKeyFile, "patroni-ca-key-file", "", "protected native Patroni CA private key")
-	flags.StringVar(&override.PatroniImage, "patroni-image", "", "Patroni member image as name@sha256:digest; an image index for every placement architecture")
-	flags.StringVar(&override.EtcdImage, "etcd-image", "", "etcd member image as name@sha256:digest; an image index for every placement architecture")
 	flags.StringVar(&override.LogLevel, "log-level", defaults.LogLevel, "debug, info, warn, or error")
 	return func() (Controller, error) {
 		return loadController(flags, *path, defaults, override)
@@ -149,10 +137,6 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 		{"SYNOD_CA_CERT_FILE", &config.CACertFile},
 		{"SYNOD_CA_KEY_FILE", &config.CAKeyFile},
 		{"SYNOD_PUBLIC_ORIGIN", &config.PublicOrigin},
-		{"SYNOD_PATRONI_CA_CERT_FILE", &config.PatroniCACertFile},
-		{"SYNOD_PATRONI_CA_KEY_FILE", &config.PatroniCAKeyFile},
-		{"SYNOD_PATRONI_IMAGE", &config.PatroniImage},
-		{"SYNOD_ETCD_IMAGE", &config.EtcdImage},
 		{"SYNOD_LOG_LEVEL", &config.LogLevel},
 		{"SYNOD_SECRET_KEY_FILE", &config.SecretKeyFile},
 		{"SYNOD_SECRET_KEY_ID", &config.SecretKeyID},
@@ -223,14 +207,6 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 			config.CAKeyFile = override.CAKeyFile
 		case "public-origin":
 			config.PublicOrigin = override.PublicOrigin
-		case "patroni-ca-cert-file":
-			config.PatroniCACertFile = override.PatroniCACertFile
-		case "patroni-ca-key-file":
-			config.PatroniCAKeyFile = override.PatroniCAKeyFile
-		case "patroni-image":
-			config.PatroniImage = override.PatroniImage
-		case "etcd-image":
-			config.EtcdImage = override.EtcdImage
 		case "log-level":
 			config.LogLevel = override.LogLevel
 		}
@@ -307,30 +283,6 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 		}
 		if port < 0 || port > 65535 {
 			return Controller{}, errors.New("agent_listen port must be between 0 and 65535")
-		}
-	}
-	patroniFields := 0
-	for _, value := range []string{config.PatroniCACertFile, config.PatroniCAKeyFile, config.PatroniImage, config.EtcdImage} {
-		if value != "" {
-			patroniFields++
-		}
-	}
-	if patroniFields != 0 && patroniFields != 4 {
-		return Controller{}, errors.New("patroni HA requires patroni_ca_cert_file, patroni_ca_key_file, patroni_image, and etcd_image together")
-	}
-	if config.PatroniImage != "" {
-		name, digest, found := strings.Cut(config.PatroniImage, "@sha256:")
-		if !found || name == "" || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" || strings.ContainsFunc(name, func(r rune) bool { return r < '!' || r > '~' }) {
-			return Controller{}, errors.New("patroni_image must be name@sha256 followed by 64 lowercase hex digits")
-		}
-	}
-	if config.EtcdImage != "" {
-		name, digest, found := strings.Cut(config.EtcdImage, "@sha256:")
-		if !found || name == "" || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" || strings.ContainsFunc(name, func(r rune) bool { return r < '!' || r > '~' }) {
-			return Controller{}, errors.New("etcd_image must be name@sha256 followed by 64 lowercase hex digits")
-		}
-		if config.AgentListen == "" {
-			return Controller{}, errors.New("patroni HA requires agent_listen, because a worker dispatches over the agent transport")
 		}
 	}
 	if config.PublicOrigin != "" {

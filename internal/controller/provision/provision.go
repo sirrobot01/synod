@@ -1,6 +1,4 @@
-// Package provision turns an admitted cluster into a plan a node can run. It produces
-// and installs a plan and executes nothing: specification 06 keeps planning separate
-// from side-effect execution, and the worker owns dispatch.
+// Package provision turns admitted workloads into durable execution plans.
 package provision
 
 import (
@@ -11,10 +9,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/engine"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/placement"
+	imageinspect "github.com/sirrobot01/synod/internal/runtime/image"
 	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -56,12 +56,14 @@ type Profile struct {
 
 // Config binds one planner.
 type Config struct {
-	Store   *postgres.Store
-	Decider Decider
-	Catalog *engine.Catalog
-	Keyring *secret.Keyring
-	Profile Profile
-	Images  []Image
+	// ResolveImage supplies verified image facts. A nil value uses registry inspection.
+	ResolveImage func(context.Context, app.ServiceSpec) (imageinspect.Resolution, error)
+	Store        *postgres.Store
+	Decider      Decider
+	Catalog      *engine.Catalog
+	Keyring      *secret.Keyring
+	Profile      Profile
+	Images       []Image
 	// Budget is the resource amount one instance reserves.
 	Budget placement.Vector
 	// StepTimeout bounds one command on a node.
@@ -74,8 +76,6 @@ type Config struct {
 	// exactly the chosen binding rather than to the container.
 	EndpointAddress string
 	EndpointPorts   placement.PortRange
-	// Patroni enables topology patroni. Nil leaves Patroni creation unavailable.
-	Patroni *PatroniConfig
 }
 
 // Planner produces and installs provisioning plans.
@@ -83,8 +83,11 @@ type Planner struct{ config Config }
 
 // New checks the planner inputs.
 func New(config Config) (*Planner, error) {
-	if config.Store == nil || config.Decider == nil || config.Catalog == nil || config.Keyring == nil {
-		return nil, errors.New("provision planner requires a store, a decider, a catalog, and a keyring")
+	if config.Store == nil || config.Decider == nil || config.Catalog == nil {
+		return nil, errors.New("provision planner requires a store, a decider, a catalog")
+	}
+	if config.ResolveImage == nil {
+		config.ResolveImage = (imageinspect.Inspector{}).Resolve
 	}
 	if len(config.Profile.Architectures) == 0 {
 		config.Profile.Architectures = []string{"amd64", "arm64"}
@@ -116,9 +119,6 @@ func New(config Config) (*Planner, error) {
 	if !config.Budget.Valid() || config.Budget.CPUMillis == 0 || config.Budget.MemoryBytes == 0 || config.Budget.DiskBytes == 0 {
 		return nil, errors.New("provision planner requires a complete budget")
 	}
-	if native := config.Patroni; native != nil && (native.CA == nil || native.Image == "" || native.EtcdImage == "") {
-		return nil, errors.New("Patroni planning requires the native CA, a Patroni image, and an etcd image")
-	}
 	return &Planner{config: config}, nil
 }
 
@@ -135,9 +135,6 @@ func (p *Planner) provision(ctx context.Context, claim operation.Claim) (postgre
 	capabilities, err := p.config.Catalog.Resolve(found.Spec)
 	if err != nil {
 		return postgres.PlacementRecord{}, err
-	}
-	if found.Spec.PostgreSQL != nil && found.Spec.PostgreSQL.Topology == "patroni" {
-		return p.provisionPatroni(ctx, claim, found, capabilities.Combination)
 	}
 	if found.Spec.Engine == cluster.Redis && found.Spec.Redis.MaxmemoryBytes > p.config.Budget.MemoryBytes/4*3 {
 		return postgres.PlacementRecord{}, errors.New("redis maxmemory exceeds three quarters of the container memory")

@@ -8,13 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/sirrobot01/synod/internal/engine"
 	"github.com/sirrobot01/synod/internal/engine/postgres"
-	"github.com/sirrobot01/synod/internal/pki"
 )
 
 func TestApplicationProbeRejectsPrivilegeDrift(t *testing.T) {
@@ -217,18 +214,5 @@ func TestProbeUsesDeclaredModeDespiteAmbientSettings(t *testing.T) {
 	}
 	if observed := postgres.New().Probe(t.Context(), endpoint, password, 1); !observed.Healthy() {
 		t.Fatalf("ambient settings replaced declared probe: %+v", observed)
-	}
-}
-
-func TestProbeDoesNotDowngradeTLSOnPlaintextServer(t *testing.T) {
-	endpoint, password := live(t)
-	ca, _, err := pki.CreateCA(uuid.New(), time.Now(), time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	endpoint.PostgresTLS = &engine.PostgresTLS{RootCAPEM: ca, ServerName: "127.0.0.1"}
-	t.Setenv("PGSSLMODE", "prefer")
-	if observed := postgres.New().Probe(t.Context(), endpoint, password, 1); observed.Healthy() || observed.Ready.State == engine.ProbePassed {
-		t.Fatalf("TLS probe downgraded to plaintext: %+v", observed)
 	}
 }

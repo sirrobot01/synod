@@ -11,7 +11,7 @@ import (
 )
 
 func TestControllerConfigurationPrecedence(t *testing.T) {
-	for _, name := range []string{"SYNOD_ETCD_ENDPOINTS", "SYNOD_ETCD_PREFIX", "SYNOD_CONFIG", "SYNOD_INSTALLATION_ID", "SYNOD_LISTEN", "SYNOD_DATABASE_URL", "SYNOD_ADMIN_TOKEN_FILE", "SYNOD_ACTOR_ID", "SYNOD_TLS_CERT_FILE", "SYNOD_TLS_KEY_FILE", "SYNOD_LOG_LEVEL", "SYNOD_CA_CERT_FILE", "SYNOD_CA_KEY_FILE", "SYNOD_AGENT_LISTEN", "SYNOD_AGENT_TLS_CERT_FILE", "SYNOD_AGENT_TLS_KEY_FILE", "SYNOD_AGENT_CA_FILE", "SYNOD_PLACEMENT_ARCHITECTURE", "SYNOD_PLACEMENT_RUNTIME_VERSION", "SYNOD_PLACEMENT_STORAGE_ID", "SYNOD_ENGINE_ENDPOINT_FIRST_PORT", "SYNOD_ENGINE_ENDPOINT_LAST_PORT", "SYNOD_PATRONI_CA_CERT_FILE", "SYNOD_PATRONI_CA_KEY_FILE", "SYNOD_PATRONI_IMAGE", "SYNOD_ETCD_IMAGE"} {
+	for _, name := range []string{"SYNOD_ETCD_ENDPOINTS", "SYNOD_ETCD_PREFIX", "SYNOD_CONFIG", "SYNOD_INSTALLATION_ID", "SYNOD_LISTEN", "SYNOD_DATABASE_URL", "SYNOD_ADMIN_TOKEN_FILE", "SYNOD_ACTOR_ID", "SYNOD_TLS_CERT_FILE", "SYNOD_TLS_KEY_FILE", "SYNOD_LOG_LEVEL", "SYNOD_CA_CERT_FILE", "SYNOD_CA_KEY_FILE", "SYNOD_AGENT_LISTEN", "SYNOD_AGENT_TLS_CERT_FILE", "SYNOD_AGENT_TLS_KEY_FILE", "SYNOD_AGENT_CA_FILE", "SYNOD_PLACEMENT_ARCHITECTURE", "SYNOD_PLACEMENT_RUNTIME_VERSION", "SYNOD_PLACEMENT_STORAGE_ID", "SYNOD_ENGINE_ENDPOINT_FIRST_PORT", "SYNOD_ENGINE_ENDPOINT_LAST_PORT"} {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -93,13 +93,6 @@ func TestControllerRejectsInvalidInput(t *testing.T) {
 		{name: "endpoint port out of range", args: []string{"--engine-endpoint-last-port", "70000"}, want: "engine_endpoint_first_port"},
 		{name: "endpoint range inverted", args: []string{"--engine-endpoint-first-port", "6000", "--engine-endpoint-last-port", "5000"}, want: "engine_endpoint_first_port"},
 		{name: "endpoint port not a number", args: []string{"--engine-endpoint-first-port", "postgres"}, want: "invalid"},
-		{name: "patroni CA without key", args: []string{"--patroni-ca-cert-file", "patroni-ca.crt"}, want: "together"},
-		{name: "patroni CA without images", args: []string{"--patroni-ca-cert-file", "patroni-ca.crt", "--patroni-ca-key-file", "patroni-ca.key"}, want: "together"},
-		{name: "patroni image without CA", args: []string{"--patroni-image", "synod-patroni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, want: "together"},
-		{name: "patroni without etcd image", args: []string{"--agent-listen", "127.0.0.1:8444", "--agent-tls-cert-file", "cert", "--agent-tls-key-file", "key", "--agent-ca-file", "ca", "--patroni-ca-cert-file", "patroni-ca.crt", "--patroni-ca-key-file", "patroni-ca.key", "--patroni-image", "synod-patroni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, want: "together"},
-		{name: "patroni image without digest", args: []string{"--agent-listen", "127.0.0.1:8444", "--agent-tls-cert-file", "cert", "--agent-tls-key-file", "key", "--agent-ca-file", "ca", "--patroni-ca-cert-file", "patroni-ca.crt", "--patroni-ca-key-file", "patroni-ca.key", "--etcd-image", "synod-etcd@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "--patroni-image", "synod-patroni:latest"}, want: "patroni_image"},
-		{name: "etcd image without digest", args: []string{"--agent-listen", "127.0.0.1:8444", "--agent-tls-cert-file", "cert", "--agent-tls-key-file", "key", "--agent-ca-file", "ca", "--patroni-ca-cert-file", "patroni-ca.crt", "--patroni-ca-key-file", "patroni-ca.key", "--patroni-image", "synod-patroni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--etcd-image", "synod-etcd:latest"}, want: "etcd_image"},
-		{name: "patroni HA without agent listen", args: []string{"--patroni-ca-cert-file", "patroni-ca.crt", "--patroni-ca-key-file", "patroni-ca.key", "--patroni-image", "synod-patroni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--etcd-image", "synod-etcd@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, want: "agent_listen"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			args := []string{"--installation-id", "70c778bc-353c-4159-844b-882a493a1814", "--database-url", "postgres://localhost/synod", "--admin-token-file", "token", "--tls-cert-file", "cert", "--tls-key-file", "key"}
@@ -125,24 +118,6 @@ func TestControllerRejectsInvalidInput(t *testing.T) {
 				t.Fatal("configuration error exposed a supplied value")
 			}
 		})
-	}
-}
-
-func TestControllerAcceptsPatroniHA(t *testing.T) {
-	for _, name := range []string{"SYNOD_CONFIG", "SYNOD_PATRONI_CA_CERT_FILE", "SYNOD_PATRONI_CA_KEY_FILE", "SYNOD_PATRONI_IMAGE", "SYNOD_ETCD_IMAGE"} {
-		t.Setenv(name, "")
-		if err := os.Unsetenv(name); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("SYNOD_ETCD_IMAGE", "synod-etcd@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	args := []string{"--installation-id", "70c778bc-353c-4159-844b-882a493a1814", "--database-url", "postgres://localhost/synod", "--admin-token-file", "token", "--tls-cert-file", "cert", "--tls-key-file", "key", "--agent-listen", "127.0.0.1:8444", "--agent-tls-cert-file", "cert", "--agent-tls-key-file", "key", "--agent-ca-file", "ca", "--patroni-ca-cert-file", "patroni-ca.crt", "--patroni-ca-key-file", "patroni-ca.key", "--patroni-image", "synod-patroni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-	loaded, err := parse(args)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.PatroniImage == "" || loaded.EtcdImage == "" {
-		t.Fatalf("Patroni HA images = %q %q", loaded.PatroniImage, loaded.EtcdImage)
 	}
 }
 

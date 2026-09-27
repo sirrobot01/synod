@@ -461,7 +461,7 @@ describe("PostgreSQL recovery controls", () => {
     render(ClusterActions, recovery);
     expect(screen.queryByRole("button", { name: "Add replica" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Remove replica…" })).toBeNull();
-    expect(screen.getByText(/Use the patroni topology for replicas/)).toBeTruthy();
+    expect(screen.getByText(/PostgreSQL replicas are not available yet/)).toBeTruthy();
   });
 
   it("reviews and restores the exact recover-setup request after a lost reply", async () => {

@@ -426,6 +426,50 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	if presence.Heartbeat.Sequence != 1 {
 		t.Fatal("incorrect heartbeat sequence")
 	}
+	// A new node gets measured before any policy or workload exists.
+	message, err := stream.Recv()
+	if err != nil || message.GetCapacityRequest() == nil {
+		t.Fatalf("initial capacity challenge: %v %v", message, err)
+	}
+	challenge := message.GetCapacityRequest()
+	report := &agentv1.CapacityReport{ProbeId: challenge.ProbeId, ProbeRevision: challenge.ProbeRevision, SessionId: challenge.SessionId, BootId: challenge.BootId, JournalGeneration: challenge.JournalGeneration, Architecture: "arm64", RuntimeVersion: "29.7.2", StorageId: "local", Capacity: &agentv1.ResourceVector{CpuMillicores: 4000, MemoryBytes: 8 << 30, DiskBytes: 100 << 30}, Used: &agentv1.ResourceVector{}}
+	if err := stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_CapacityReport{CapacityReport: report}}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		facts, err := postgres.New(verification).ReadNodeCapacityReport(t.Context(), installation, node)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if facts != nil {
+			break
+		}
+		select {
+		case <-streamCtx.Done():
+			t.Fatal("initial facts did not arrive")
+		case <-ticker.C:
+		}
+	}
+	req, err := http.NewRequestWithContext(t.Context(), "PUT", "https://"+address+"/v1/nodes/"+node.String()+"/placement-policy", strings.NewReader(`{"client_address":"192.0.2.1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("If-Match", `"0"`)
+	response, err = tlsFixture.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("approval from initial facts: %d %s %v", response.StatusCode, body, err)
+	}
+	policy, err := postgres.New(verification).ReadNodePlacementPolicy(t.Context(), installation, node)
+	if err != nil || policy.Architecture != "arm64" || policy.RuntimeVersion != "29.7.2" {
+		t.Fatalf("measured policy: %+v %v", policy, err)
+	}
 	cancel()
 	select {
 	case err := <-done:

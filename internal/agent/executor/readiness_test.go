@@ -134,15 +134,7 @@ func TestReadinessPropagatesPostgresNativeRole(t *testing.T) {
 		capture := &readinessCapture{}
 		executor := &Executor{options: Options{Probers: map[string]engine.Prober{"postgres": capture}}}
 		command := &agentv1.Command{CommandId: uuid.NewString(), DesiredRevision: 12, Input: &agentv1.CommandInput{ResourceId: uuid.NewString(), Timeout: durationpb.New(time.Second), Secrets: []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Purpose: "application", Version: 1}}, Payload: &agentv1.CommandInput_CheckReadiness{CheckReadiness: &agentv1.CheckReadiness{Address: "127.0.0.1", Port: 5432, Database: "app", Role: "synod_app", Engine: "postgres", PostgresRole: role}}}}
-		command.Input.GetCheckReadiness().PostgresTls = &agentv1.PostgresTLS{RootCaPem: []byte("public-ca"), ServerName: "192.0.2.10"}
 		result, err := executor.readiness(t.Context(), command, runtime.Secrets{"application": []byte("application-only")})
-		if capture.endpoint.PostgresTLS == nil || capture.endpoint.PostgresTLS.ServerName != "192.0.2.10" || string(capture.endpoint.PostgresTLS.RootCAPEM) != "public-ca" {
-			t.Fatal("TLS settings lost")
-		}
-		capture.endpoint.PostgresTLS.RootCAPEM[0] = 'x'
-		if string(command.Input.GetCheckReadiness().PostgresTls.RootCaPem) != "public-ca" {
-			t.Fatal("probe shares command trust storage")
-		}
 		if err != nil || len(result.Effects) != 1 || capture.endpoint.PostgresRole != role || capture.endpoint.Role != "synod_app" || capture.revision != 12 || string(capture.password) != "application-only" {
 			t.Fatalf("lost PostgreSQL role expectation: %+v %+v %v", capture.endpoint, result, err)
 		}

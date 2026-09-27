@@ -1,13 +1,19 @@
 package docker
 
 import (
+	"cmp"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/runtime"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // Inventory returns only this installation and node's resources. It never adopts them.
@@ -40,6 +46,45 @@ func (r *Runtime) Inventory(ctx context.Context) ([]runtime.Resource, error) {
 		}
 		resource.NativeID = item.ID
 		resource.State = string(item.State)
+		if item.Labels["synod.managed"] == "true" {
+			detail, err := r.api.ContainerInspect(ctx, item.ID, client.ContainerInspectOptions{})
+			if err != nil {
+				return nil, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
+			}
+			live := detail.Container
+			if live.Config == nil || live.State == nil {
+				return nil, runtime.ErrOutcomeUnknown
+			}
+			data, err := base64.RawStdEncoding.DecodeString(live.Config.Labels[labelConfig])
+			if err != nil {
+				return nil, runtime.ErrConfigurationConflict
+			}
+			var stored agentv1.EnsureContainer
+			if err := proto.Unmarshal(data, &stored); err != nil || stored.Generic == nil {
+				return nil, runtime.ErrConfigurationConflict
+			}
+			changed, err := r.containerChanges(ctx, live)
+			if err != nil || changed != "" {
+				resource.Health = "unknown"
+			} else {
+				if live.NetworkSettings != nil {
+					for port, bindings := range live.NetworkSettings.Ports {
+						for _, binding := range bindings {
+							hostPort, err := strconv.ParseUint(binding.HostPort, 10, 16)
+							if err != nil || hostPort == 0 {
+								continue
+							}
+							resource.Ports = append(resource.Ports, &agentv1.PortBinding{ContainerPort: uint32(port.Num()), HostPort: uint32(hostPort), HostAddress: binding.HostIP.String(), Transport: string(port.Proto())})
+						}
+					}
+					slices.SortFunc(resource.Ports, func(a, b *agentv1.PortBinding) int {
+						return cmp.Or(cmp.Compare(a.ContainerPort, b.ContainerPort), cmp.Compare(a.HostAddress, b.HostAddress), cmp.Compare(a.HostPort, b.HostPort))
+					})
+				}
+				resource.Health = r.genericProbe(ctx, live, stored.Generic.HealthCheck, resource.Ports)
+			}
+		}
+
 		resources = append(resources, resource)
 	}
 	for _, item := range volumes.Items {
@@ -60,6 +105,13 @@ func (r *Runtime) Inventory(ctx context.Context) ([]runtime.Resource, error) {
 		resource.State = "present"
 		resources = append(resources, resource)
 	}
+	r.healthMu.Lock()
+	for id := range r.health {
+		if !slices.ContainsFunc(resources, func(item runtime.Resource) bool { return item.NativeID == id }) {
+			delete(r.health, id)
+		}
+	}
+	r.healthMu.Unlock()
 	return resources, nil
 }
 

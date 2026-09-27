@@ -18,10 +18,6 @@ import (
 
 const postgresTmpfs = "rw,noexec,nosuid,nodev,size=1m"
 
-func patroniHealthcheck() *container.HealthConfig {
-	return &container.HealthConfig{Test: append([]string{"CMD"}, postgres.PatroniHealthCommand()...), Interval: 2 * time.Second, Timeout: 25 * time.Second, Retries: 1}
-}
-
 func postgresHealthcheck() *container.HealthConfig {
 	return &container.HealthConfig{
 		Test:     []string{"CMD-SHELL", `phase=$(cat /run/synod-postgres/bootstrap-complete 2>/dev/null) || exit 1; case "$phase" in ready) printf ready; exit 0;; recovered) printf recovered; exit 0;; failed) printf failed; exit 1;; *) exit 1;; esac`},
@@ -42,14 +38,10 @@ func postgresPhase(item container.InspectResponse) (string, error) {
 	if err := proto.Unmarshal(encoded, &stored); err != nil {
 		return "bootstrap_unknown", &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
 	}
-	if stored.Engine != "postgres" || stored.Etcd != nil {
+	if stored.Engine != "postgres" {
 		return "", nil
 	}
 	if !item.State.Running && !item.State.Restarting {
-		return "", nil
-	}
-	// A pooler or router has no bootstrap phase.
-	if stored.Route != nil {
 		return "", nil
 	}
 	if stored.Postgres == nil {
@@ -57,10 +49,6 @@ func postgresPhase(item container.InspectResponse) (string, error) {
 	}
 	health := postgresHealthcheck()
 	tmpfs := map[string]string{postgres.ConfigDirectory: postgresTmpfs}
-	if stored.Postgres.Patroni != nil {
-		health = patroniHealthcheck()
-		tmpfs = map[string]string{postgres.PatroniDirectory: patroniTmpfs}
-	}
 	program, programErr := postgresCommand(stored.Postgres, item.Config.Labels[labelInstallation], item.Config.Labels[labelCluster], item.Config.Labels[labelResource])
 	hash := sha256.Sum256(encoded)
 	if programErr != nil || stored.Postgres == nil || item.HostConfig == nil || item.Config.Labels[labelHash] != hex.EncodeToString(hash[:]) ||
@@ -83,12 +71,6 @@ func postgresPhase(item container.InspectResponse) (string, error) {
 	if latest == nil || latest.Start.Before(started) || latest.End.Before(latest.Start) {
 		return "bootstrap_unknown", runtime.ErrOutcomeUnknown
 	}
-	if stored.Postgres.Patroni != nil {
-		if item.State.Health.Status == container.Healthy && latest.ExitCode == 0 && latest.Output == "patroni_ready" {
-			return "patroni_ready", nil
-		}
-		return "patroni_startup_unknown", runtime.ErrOutcomeUnknown
-	}
 	switch {
 	case item.State.Health.Status == container.Healthy && latest.ExitCode == 0 && latest.Output == "ready":
 		return "bootstrap_ready", nil
@@ -101,13 +83,10 @@ func postgresPhase(item container.InspectResponse) (string, error) {
 	}
 }
 
-// postgresCommand selects the fixed startup program from the persisted topology.
+// postgresCommand returns the fixed startup program of a PostgreSQL container.
 func postgresCommand(config *agentv1.PostgresContainerConfig, installation, cluster, resource string) ([]string, error) {
 	if config == nil {
 		return nil, runtime.ErrConfigurationConflict
-	}
-	if config.Patroni != nil {
-		return postgres.PatroniCommand(), nil
 	}
 	return postgres.ContainerCommand(config, installation, cluster, resource), nil
 }

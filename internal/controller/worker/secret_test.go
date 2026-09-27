@@ -26,11 +26,11 @@ func TestPlanAcceptsSQLReferencesAndRestrictsNativePurposes(t *testing.T) {
 	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{step}}, op); err != nil {
 		t.Fatalf("a plan naming a credential was refused: %v", err)
 	}
-	for _, purpose := range []string{"root", "patroni_member_tls", "patroni_dcs", "patroni_rewind", "patroni_rest", "patroni_dcs_tls"} {
+	for _, purpose := range []string{"root", "unknown"} {
 		step.Command.Input.Secrets[0].Purpose = purpose
 		rehash(t, step.Command)
 		if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{step}}, op); !errors.Is(err, operation.ErrUnsupportedPlan) {
-			t.Fatalf("purpose=%s err=%v, want refusal outside Patroni preparation", purpose, err)
+			t.Fatalf("purpose=%s err=%v, want refusal of an unknown purpose", purpose, err)
 		}
 	}
 }
@@ -84,21 +84,15 @@ func TestACredentialIsBoundToItsCluster(t *testing.T) {
 func TestEveryPostconditionCanBeProved(t *testing.T) {
 	op, node := testOperation(), uuid.NewString()
 	for postcondition, state := range map[agentv1.Postcondition]string{
-		agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS:              "present",
-		agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS:             "present",
-		agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS:           "created",
-		agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING:          "running",
-		agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED:          "exited",
-		agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT:           "absent",
-		agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED:        "running",
-		agentv1.Postcondition_POSTCONDITION_ENGINE_READY:               "ready",
-		agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED:   "setup_recovered",
-		agentv1.Postcondition_POSTCONDITION_PATRONI_START_FAILED:       "patroni_storage_attempt_failed",
-		agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_NOT_SERVING: "patroni_member_not_serving",
-		agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_FAILED:      "patroni_member_storage_failed",
-		agentv1.Postcondition_POSTCONDITION_PATRONI_MEMBER_RECREATED:   "patroni_member_recreated",
-		agentv1.Postcondition_POSTCONDITION_PATRONI_LEADER:             "patroni_leader",
-		agentv1.Postcondition_POSTCONDITION_ETCD_MEMBERSHIP:            "etcd_remove",
+		agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS:            "present",
+		agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS:           "present",
+		agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS:         "created",
+		agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING:        "running",
+		agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED:        "exited",
+		agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT:         "absent",
+		agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED:      "running",
+		agentv1.Postcondition_POSTCONDITION_ENGINE_READY:             "ready",
+		agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED: "setup_recovered",
 	} {
 		t.Run(postcondition.String(), func(t *testing.T) {
 			step := planStep(t, op, node, uuid.NewString(), postcondition)
@@ -107,13 +101,6 @@ func TestEveryPostconditionCanBeProved(t *testing.T) {
 			native := "docker-command:" + step.Command.CommandId
 			if postcondition == agentv1.Postcondition_POSTCONDITION_ENGINE_READY {
 				native = "readiness:" + step.Command.CommandId
-			}
-			if postcondition == agentv1.Postcondition_POSTCONDITION_PATRONI_LEADER {
-				native = "patroni-switchover:" + step.Command.CommandId
-			}
-			// An etcd membership change proves the state of its action.
-			if postcondition == agentv1.Postcondition_POSTCONDITION_ETCD_MEMBERSHIP {
-				native = "etcd-membership:" + step.Command.CommandId
 			}
 			if err := operation.CheckStepEffects(step, []*agentv1.Effect{{
 				CommandId: step.Command.CommandId, ResourceId: step.Command.Input.ResourceId,
@@ -125,13 +112,13 @@ func TestEveryPostconditionCanBeProved(t *testing.T) {
 	}
 	// Every postcondition in the enum is covered above, so a new one added without a
 	// rule here fails this test rather than a four-minute replay loop in production.
-	highest := agentv1.Postcondition_POSTCONDITION_ETCD_MEMBERSHIP
+	highest := agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED
 	if _, known := agentv1.Postcondition_name[int32(highest)+1]; known {
 		t.Fatal("a postcondition was added to the protocol without a rule that proves it")
 	}
 }
 
-func TestWorkerDeliversExactMemberCredentialVersion(t *testing.T) {
+func TestWorkerDeliversExactCredentialVersion(t *testing.T) {
 	h := newHarness(t, func(*agentv1.ControllerMessage) []*agentv1.AgentMessage { return nil })
 	key := uuid.New()
 	ring, err := secret.NewKeyring(key, map[uuid.UUID][]byte{key: make([]byte, 32)})
@@ -139,11 +126,10 @@ func TestWorkerDeliversExactMemberCredentialVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.worker.config.Keyring = ring
-	member := uuid.MustParse(h.plan.Steps[1].Command.Input.ResourceId)
-	credential := postgres.Credential{CredentialID: uuid.New(), MemberID: member, Version: 1, Purpose: postgres.PatroniMemberTLSCredential, ExpiresAt: time.Now().Add(30 * 24 * time.Hour)}
+	credential := postgres.Credential{CredentialID: uuid.New(), Version: 1, Purpose: postgres.SuperuserCredential, RoleName: "synod_admin"}
 	for version := int64(1); version <= 2; version++ {
 		credential.Version = version
-		credential.Envelope, err = ring.Seal(secret.Binding{InstallationID: h.claim.InstallationID, OwnerType: "cluster", OwnerID: h.claim.ClusterID, CredentialID: credential.CredentialID, Version: version}, []byte(fmt.Sprintf("member-material-%d", version)))
+		credential.Envelope, err = ring.Seal(secret.Binding{InstallationID: h.claim.InstallationID, OwnerType: "cluster", OwnerID: h.claim.ClusterID, CredentialID: credential.CredentialID, Version: version}, []byte(fmt.Sprintf("material-%d", version)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -163,37 +149,17 @@ func TestWorkerDeliversExactMemberCredentialVersion(t *testing.T) {
 	select {
 	case message := <-h.received:
 		material := message.GetSecret()
-		if material == nil || material.Version != 1 || material.CredentialId != credential.CredentialID.String() || string(material.Material) != "member-material-1" {
+		if material == nil || material.Version != 1 || material.CredentialId != credential.CredentialID.String() || string(material.Material) != "material-1" {
 			t.Fatal("worker substituted a newer credential")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("credential did not reach the authenticated session")
 	}
-	// A resource that the member reservation owns, such as its pooler, receives the member credential.
-	owned := uuid.New()
-	if _, err := h.pool.Exec(t.Context(), `INSERT INTO allocation_resources (installation_id,cluster_id,node_id,allocation_id,resource_id)
- SELECT installation_id,cluster_id,node_id,id,$3 FROM resource_allocations WHERE installation_id=$1 AND resource_id=$2 AND released_at IS NULL`, h.claim.InstallationID, member, owned); err != nil {
-		t.Fatal(err)
-	}
-	routed := proto.Clone(command).(*agentv1.Command)
-	routed.Input.ResourceId = owned.String()
-	if err := h.worker.pushSecrets(t.Context(), h.node, peer.SessionID, routed); err != nil {
-		t.Fatal("owned resource refused", err)
-	}
-	select {
-	case message := <-h.received:
-		if message.GetSecret().GetCredentialId() != credential.CredentialID.String() {
-			t.Fatal("owned resource received another credential")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("credential did not reach the owned resource")
-	}
 	for name, change := range map[string]func(*agentv1.Command){
-		"other member":     func(c *agentv1.Command) { c.Input.ResourceId = uuid.NewString() },
 		"other cluster":    func(c *agentv1.Command) { c.Epoch.ClusterId = uuid.NewString() },
 		"missing identity": func(c *agentv1.Command) { c.Input.Secrets[0].CredentialId = uuid.NewString() },
 		"missing version":  func(c *agentv1.Command) { c.Input.Secrets[0].Version = 3 },
-		"wrong purpose":    func(c *agentv1.Command) { c.Input.Secrets[0].Purpose = postgres.PatroniDCSTLSCredential },
+		"wrong purpose":    func(c *agentv1.Command) { c.Input.Secrets[0].Purpose = postgres.ApplicationCredential },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := proto.Clone(command).(*agentv1.Command)

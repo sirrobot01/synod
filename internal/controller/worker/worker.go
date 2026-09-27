@@ -315,7 +315,11 @@ func (w *Worker) conclude(ctx context.Context, state postgres.ExecutionState, co
 		}
 		return true, w.progress(ctx, state.ProgressSequence+1, operation.Failed, found.failure, false, found.failureCode)
 	case len(completed) == len(state.Plan.Steps):
-		return true, w.progress(ctx, state.ProgressSequence+1, operation.Succeeded, "plan_proved: every plan step is proved by a durable receipt", false, "")
+		err := w.progress(ctx, state.ProgressSequence+1, operation.Succeeded, "plan_proved: every plan step is proved by a durable receipt", false, "")
+		if errors.Is(err, postgres.ErrAppRoutesPending) {
+			return true, fmt.Errorf("%w: %s", ErrEvidencePending, err)
+		}
+		return true, err
 	}
 	return false, nil
 }

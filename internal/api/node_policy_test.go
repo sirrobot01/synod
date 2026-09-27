@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
 	"github.com/sirrobot01/synod/internal/placement"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
 // approved sends one policy for a node and returns the response.
@@ -116,14 +117,20 @@ func TestNodePolicyDefaultsToMeasuredFacts(t *testing.T) {
 	if status, _, data := approved(t, server, token, node, "0", `{}`); status != http.StatusConflict || !strings.Contains(string(data), `"node_facts_unavailable"`) {
 		t.Fatalf("status=%d body=%s, want node_facts_unavailable before any report", status, data)
 	}
-	report, err := json.Marshal(placement.CapacityReport{Architecture: "arm64", RuntimeVersion: "29.1.3", StorageID: "local", Capacity: placement.Vector{CPUMillis: 4000, MemoryBytes: 8 << 30, DiskBytes: 100 << 30}})
+	session := uuid.New()
+	hello := &agentv1.Hello{InstallationId: installation.String(), NodeId: node.String(), BootId: uuid.NewString(), JournalGeneration: uuid.NewString(), Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, ActivePayloadVersions: []uint32{1}}
+	if err := store.RecordAgentSession(t.Context(), installation, node, session, hello); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := store.BeginCapacityProbe(t.Context(), installation, node, session)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(t.Context(), `INSERT INTO node_capacity (installation_id,node_id,probe_revision,probe_id,probe_bytes,report_bytes)
- VALUES ($1,$2,1,$3,'{}',$4)`, installation, node, uuid.New(), report); err != nil {
+	report := placement.CapacityReport{InstallationID: installation, NodeID: node, ProbeID: probe.ID, ProbeRevision: probe.Revision, SessionID: session, BootID: probe.BootID, JournalGeneration: probe.JournalGeneration, Architecture: "arm64", RuntimeVersion: "29.1.3", StorageID: "local", Capacity: placement.Vector{CPUMillis: 4000, MemoryBytes: 8 << 30, DiskBytes: 100 << 30}}
+	if err := store.RecordNodeCapacity(t.Context(), installation, node, report); err != nil {
 		t.Fatal(err)
 	}
+
 	if status, _, data := approved(t, server, token, node, "0", `{"headroom":{"cpu_millis":250}}`); status != http.StatusOK {
 		t.Fatalf("status=%d body=%s", status, data)
 	}

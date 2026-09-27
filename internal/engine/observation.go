@@ -49,19 +49,12 @@ func (o Observation) Healthy() bool {
 
 // Endpoint is where a client reaches one engine.
 type Endpoint struct {
-	PostgresTLS      *PostgresTLS
 	PostgresRole     string
 	Address          string
 	Port             uint16
 	Database         string
 	Role             string
 	RedisReplication *RedisReplicationCheck
-}
-
-// PostgresTLS names public trust and the IP identity of the database certificate.
-type PostgresTLS struct {
-	RootCAPEM  []byte
-	ServerName string
 }
 
 // RedisReplicationCheck describes a native role and upstream that a probe must prove.

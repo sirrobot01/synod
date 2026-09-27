@@ -21,6 +21,7 @@ import (
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // maxHostObjects matches the inventory guard. A partial description of a larger host
@@ -236,13 +237,20 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 	if proto.Unmarshal(encoded, &stored) != nil {
 		return driftConfigUnreadable, nil
 	}
-	if stored.Engine == "postgres" && stored.Postgres == nil && stored.Route == nil {
-		return driftEngineConfig, nil
-	}
-	if stored.Route != nil {
-		if _, _, _, err := postgres.RouteSettings(stored.Route); err != nil || stored.Postgres != nil || stored.Redis != nil || stored.VolumeId != "" {
+	if stored.Generic != nil {
+		// This envelope validates stored configuration. It grants no execution authority.
+		id := item.Config.Labels[labelResource]
+		command := &agentv1.Command{CommandId: id, OperationId: id, StepId: id, DesiredRevision: 1, PlanVersion: 1,
+			Epoch: &agentv1.Epoch{InstallationId: r.options.InstallationID.String(), NodeId: r.options.NodeID.String(), ClusterId: item.Config.Labels[labelCluster], RecoveryGeneration: r.options.InstallationID.String(), ExecutionEpoch: 1},
+			Input: &agentv1.CommandInput{ResourceId: id, PayloadVersion: 1, Timeout: durationpb.New(r.options.InspectionTimeout)},
+		}
+		if err := r.checkContainer(ctx, command, item, &stored); err != nil {
 			return driftEngineConfig, nil
 		}
+		return "", nil
+	}
+	if stored.Engine == "postgres" && stored.Postgres == nil {
+		return driftEngineConfig, nil
 	}
 	if stored.Engine == "redis" || stored.Redis != nil {
 		if stored.Redis == nil || operation.ValidateRedisContainer(&stored, stored.Redis.Credentials) != nil {
@@ -265,7 +273,7 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 	case len(host.PortBindings) != len(stored.Ports):
 		return driftPorts, nil
 	}
-	if stored.Redis != nil || stored.Postgres != nil || stored.Route != nil || stored.Etcd != nil {
+	if stored.Redis != nil || stored.Postgres != nil {
 		image, err := r.api.ImageInspect(ctx, stored.ImageDigest)
 		if err != nil {
 			return "", &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
@@ -283,42 +291,16 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 			}
 			target = postgres.DataDirectory
 			tmpfs = map[string]string{postgres.ConfigDirectory: postgresTmpfs}
-			health := postgresHealthcheck()
-			if stored.Postgres.Patroni != nil {
-				if _, err := postgres.PatroniMemberSettings(&stored, item.Config.Labels[labelInstallation], item.Config.Labels[labelCluster], item.Config.Labels[labelResource]); err != nil {
-					return driftEngineConfig, nil
-				}
-				tmpfs = map[string]string{postgres.PatroniDirectory: patroniTmpfs}
-				health = patroniHealthcheck()
-				if err := r.inspectPatroniSource(ctx, item); err != nil {
-					return driftEngineConfig, nil
-				}
-			}
-			if !reflect.DeepEqual(item.Config.Healthcheck, health) || item.Config.StopSignal != image.Config.StopSignal {
-				return driftEngineConfig, nil
-			}
-		} else if stored.Route != nil {
-			expectedCommand, tmpfs = routeShape(stored.Route)
-			if err := r.inspectSource(ctx, item, routeSource(stored.Route)); err != nil || item.Config.StopSignal != image.Config.StopSignal {
-				return driftEngineConfig, nil
-			}
-		} else if stored.Etcd != nil {
-			expectedCommand = etcdCommand(stored.Etcd)
-			tmpfs = map[string]string{"/run/synod-etcd": "rw,noexec,nosuid,nodev,size=4m"}
-			if err := r.inspectSource(ctx, item, etcdSource); err != nil || item.Config.StopSignal != image.Config.StopSignal {
+			if !reflect.DeepEqual(item.Config.Healthcheck, postgresHealthcheck()) || item.Config.StopSignal != image.Config.StopSignal {
 				return driftEngineConfig, nil
 			}
 		} else {
 			expectedCommand = redisengine.ContainerCommand(stored.Redis)
 		}
-		mounts := 1
-		if stored.Route != nil {
-			mounts = 0
-		}
 		if item.Image != image.ID ||
 			!slices.Equal(item.Config.Cmd, expectedCommand) ||
 			!slices.Equal(item.Config.Entrypoint, image.Config.Entrypoint) ||
-			!maps.Equal(host.Tmpfs, tmpfs) || len(item.Mounts) != mounts {
+			!maps.Equal(host.Tmpfs, tmpfs) || len(item.Mounts) != 1 {
 			return driftEngineConfig, nil
 		}
 		environment, err := plainEnvironment(image.Config.Env, &stored)

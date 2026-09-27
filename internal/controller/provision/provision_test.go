@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/engine"
 	postgresengine "github.com/sirrobot01/synod/internal/engine/postgres"
 	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
@@ -40,7 +41,8 @@ func readyNodeWith(t *testing.T, store *postgres.Store, installation, node uuid.
 	hello := &agentv1.Hello{
 		InstallationId: installation.String(), NodeId: node.String(),
 		BootId: uuid.NewString(), JournalGeneration: uuid.NewString(),
-		Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, ActivePayloadVersions: []uint32{1},
+		Capabilities: []string{"runtime.docker", controlstream.RouterCapability},
+		Protocol:     &agentv1.VersionRange{Minimum: 1, Maximum: 1}, ActivePayloadVersions: []uint32{1},
 	}
 	if err := store.RecordAgentSession(t.Context(), installation, node, session, hello); err != nil {
 		t.Fatal(err)

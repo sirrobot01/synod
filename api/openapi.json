@@ -574,7 +574,7 @@
     "/v1/clusters/{id}/members": {
       "get": {
         "operationId": "getClusterMembers",
-        "description": "List the members a cluster still has, oldest first. Each member names its role, its state, the node of its live reservation, and the client address that node declares. Use the member id with switchover and rebuild-member.",
+        "description": "List the members a cluster still has, oldest first. Each member names its role, its state, the node of its live reservation, and the client address that node declares.",
         "parameters": [
           {
             "name": "id",
@@ -1291,7 +1291,7 @@
     "/v1/clusters/{id}/action-plans": {
       "post": {
         "operationId": "planClusterAction",
-        "description": "Preview retained-data deletion, Redis replica removal, PostgreSQL setup recovery, or Patroni member rebuild. The preview binds the actor, target, and revision for five minutes. Recovery and rebuild name the existing member, instance resource, and retained volume. A member rebuild names the member in member_id. The agent checks live failure before it removes anything.",
+        "description": "Preview retained-data deletion, Redis replica removal, or PostgreSQL setup recovery. The preview binds the actor, target, and revision for five minutes. Recovery names the existing member, instance resource, and retained volume. The agent checks live failure before it removes anything.",
         "security": [
           {
             "adminBearer": []
@@ -1907,263 +1907,6 @@
         "summary": "Recover failed PostgreSQL setup"
       }
     },
-    "/v1/clusters/{id}/actions/rebuild-member": {
-      "post": {
-        "operationId": "rebuildPatroniMember",
-        "description": "Confirm a member rebuild preview for a running Patroni cluster. The two other members must prove readiness. The named member must prove that it does not serve and that its storage cannot restart. Then Synod removes its container, keeps its old volume, and creates a fresh member on the same node and address. Completion requires exactly one writer. Acceptance does not prove completion. Retry the same key, revision, and confirmation after a lost reply.",
-        "security": [
-          {
-            "adminBearer": []
-          },
-          {
-            "adminSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/ClusterID"
-          },
-          {
-            "$ref": "#/components/parameters/ActionIdempotencyKey"
-          },
-          {
-            "$ref": "#/components/parameters/ActionRevision"
-          },
-          {
-            "$ref": "#/components/parameters/BrowserOrigin"
-          },
-          {
-            "$ref": "#/components/parameters/BrowserFetchSite"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ActionConfirmation"
-              }
-            }
-          }
-        },
-        "responses": {
-          "202": {
-            "$ref": "#/components/responses/ActionAdmission"
-          },
-          "400": {
-            "$ref": "#/components/responses/ActionBadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/ActionUnauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/ActionForbidden"
-          },
-          "404": {
-            "$ref": "#/components/responses/ActionNotFound"
-          },
-          "405": {
-            "$ref": "#/components/responses/ActionMethodNotAllowed"
-          },
-          "409": {
-            "$ref": "#/components/responses/ActionConflict"
-          },
-          "412": {
-            "$ref": "#/components/responses/ActionRevisionConflict"
-          },
-          "413": {
-            "$ref": "#/components/responses/ActionTooLarge"
-          },
-          "415": {
-            "$ref": "#/components/responses/ActionMediaType"
-          },
-          "429": {
-            "$ref": "#/components/responses/ActionRateLimit"
-          },
-          "500": {
-            "$ref": "#/components/responses/ActionInternalError"
-          },
-          "503": {
-            "$ref": "#/components/responses/ActionUnavailable"
-          },
-          "422": {
-            "description": "The engine or topology does not support setup recovery.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "summary": "Recover failed PostgreSQL setup"
-      }
-    },
-    "/v1/clusters/{id}/actions/renew-certificates": {
-      "post": {
-        "operationId": "renewPatroniCertificates",
-        "description": "Renew the member and DCS client certificates of a Patroni cluster. A running cluster renews one member at a time: the two other members must prove readiness, then the member stops, gets a new container with the new certificates, and restarts on its own data. A leader restart causes a Patroni failover. Completion requires exactly one writer. A stopped cluster gets new containers and stays stopped. The controller also admits a renewal on its own before a certificate expires. Acceptance does not prove completion.",
-        "security": [
-          {
-            "adminBearer": []
-          },
-          {
-            "adminSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/ClusterID"
-          },
-          {
-            "$ref": "#/components/parameters/ActionIdempotencyKey"
-          },
-          {
-            "$ref": "#/components/parameters/ActionRevision"
-          },
-          {
-            "$ref": "#/components/parameters/BrowserOrigin"
-          },
-          {
-            "$ref": "#/components/parameters/BrowserFetchSite"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EmptyAction"
-              }
-            }
-          }
-        },
-        "responses": {
-          "202": {
-            "$ref": "#/components/responses/ActionAdmission"
-          },
-          "400": {
-            "$ref": "#/components/responses/ActionBadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/ActionUnauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/ActionForbidden"
-          },
-          "404": {
-            "$ref": "#/components/responses/ActionNotFound"
-          },
-          "405": {
-            "$ref": "#/components/responses/ActionMethodNotAllowed"
-          },
-          "409": {
-            "$ref": "#/components/responses/ActionConflict"
-          },
-          "412": {
-            "$ref": "#/components/responses/ActionRevisionConflict"
-          },
-          "413": {
-            "$ref": "#/components/responses/ActionTooLarge"
-          },
-          "415": {
-            "$ref": "#/components/responses/ActionMediaType"
-          },
-          "429": {
-            "$ref": "#/components/responses/ActionRateLimit"
-          },
-          "500": {
-            "$ref": "#/components/responses/ActionInternalError"
-          },
-          "503": {
-            "$ref": "#/components/responses/ActionUnavailable"
-          }
-        }
-      }
-    },
-    "/v1/clusters/{id}/actions/switchover": {
-      "post": {
-        "operationId": "switchoverPatroni",
-        "description": "Make the named member the leader of a running Patroni cluster. All three members must be active. Every member proves readiness first. Then the agent on the named member asks the Patroni REST API for a switchover and waits until that member leads. If the member already leads, the step succeeds with no switchover. Then the new leader proves it accepts writes, and each other member proves it replicates. A routed cluster then checks the writer and reader routes of every router. Acceptance does not prove completion.",
-        "security": [
-          {
-            "adminBearer": []
-          },
-          {
-            "adminSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/ClusterID"
-          },
-          {
-            "$ref": "#/components/parameters/ActionIdempotencyKey"
-          },
-          {
-            "$ref": "#/components/parameters/ActionRevision"
-          },
-          {
-            "$ref": "#/components/parameters/BrowserOrigin"
-          },
-          {
-            "$ref": "#/components/parameters/BrowserFetchSite"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SwitchoverAction"
-              }
-            }
-          }
-        },
-        "responses": {
-          "202": {
-            "$ref": "#/components/responses/ActionAdmission"
-          },
-          "400": {
-            "$ref": "#/components/responses/ActionBadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/ActionUnauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/ActionForbidden"
-          },
-          "404": {
-            "$ref": "#/components/responses/ActionNotFound"
-          },
-          "405": {
-            "$ref": "#/components/responses/ActionMethodNotAllowed"
-          },
-          "409": {
-            "$ref": "#/components/responses/ActionConflict"
-          },
-          "412": {
-            "$ref": "#/components/responses/ActionRevisionConflict"
-          },
-          "413": {
-            "$ref": "#/components/responses/ActionTooLarge"
-          },
-          "415": {
-            "$ref": "#/components/responses/ActionMediaType"
-          },
-          "429": {
-            "$ref": "#/components/responses/ActionRateLimit"
-          },
-          "500": {
-            "$ref": "#/components/responses/ActionInternalError"
-          },
-          "503": {
-            "$ref": "#/components/responses/ActionUnavailable"
-          }
-        }
-      }
-    },
     "/v1/installation": {
       "get": {
         "operationId": "getInstallation",
@@ -2283,41 +2026,7 @@
                     ]
                   },
                   "topology": {
-                    "enum": [
-                      "standalone",
-                      "patroni"
-                    ],
-                    "description": "patroni runs three members with native Patroni failover."
-                  },
-                  "failure_domain": {
-                    "const": "host",
-                    "description": "Required for patroni and refused for standalone. Placement uses three nodes with distinct failure_domains.host values."
-                  },
-                  "endpoint": {
-                    "description": "Optional operator TCP load balancer in front of the routers of a patroni cluster. It listens on writer_port and reader_port and forwards to the router ports that the endpoint output lists. Every member certificate names this address.",
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "address",
-                      "writer_port",
-                      "reader_port"
-                    ],
-                    "properties": {
-                      "address": {
-                        "type": "string",
-                        "description": "Canonical routable IPv4 or IPv6 address."
-                      },
-                      "writer_port": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 65535
-                      },
-                      "reader_port": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 65535
-                      }
-                    }
+                    "const": "standalone"
                   }
                 }
               },
@@ -2404,41 +2113,7 @@
                     ]
                   },
                   "topology": {
-                    "enum": [
-                      "standalone",
-                      "patroni"
-                    ],
-                    "description": "patroni runs three members with native Patroni failover."
-                  },
-                  "failure_domain": {
-                    "const": "host",
-                    "description": "Required for patroni and refused for standalone. Placement uses three nodes with distinct failure_domains.host values."
-                  },
-                  "endpoint": {
-                    "description": "Optional operator TCP load balancer in front of the routers of a patroni cluster. It listens on writer_port and reader_port and forwards to the router ports that the endpoint output lists. Every member certificate names this address.",
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "address",
-                      "writer_port",
-                      "reader_port"
-                    ],
-                    "properties": {
-                      "address": {
-                        "type": "string",
-                        "description": "Canonical routable IPv4 or IPv6 address."
-                      },
-                      "writer_port": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 65535
-                      },
-                      "reader_port": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 65535
-                      }
-                    }
+                    "const": "standalone"
                   }
                 }
               },
@@ -2733,11 +2408,6 @@
             "type": "string",
             "format": "uuid",
             "description": "The prior failed or cancelled replica-add operation. Absent for an initial operation."
-          },
-          "target_member_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The member that a switchover makes the leader. Absent for other operations."
           }
         },
         "required": [
@@ -2886,20 +2556,6 @@
         "additionalProperties": false,
         "description": "An empty JSON object is required."
       },
-      "SwitchoverAction": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "member_id"
-        ],
-        "properties": {
-          "member_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The active Patroni member that becomes the leader."
-          }
-        }
-      },
       "ClusterActionPlan": {
         "type": "object",
         "additionalProperties": false,
@@ -2931,8 +2587,7 @@
             "enum": [
               "delete",
               "scale_down",
-              "recover_setup",
-              "rebuild_member"
+              "recover_setup"
             ]
           },
           "expected_revision": {
@@ -3094,34 +2749,16 @@
             "description": "app for PostgreSQL; 0 for Redis."
           },
           "client_mode": {
-            "enum": [
-              "direct",
-              "routed"
-            ],
-            "description": "direct reaches one member or instance. routed reaches a router writer or reader route."
+            "const": "direct",
+            "description": "direct reaches one instance."
           },
           "availability_profile": {
-            "enum": [
-              "single_node",
-              "patroni_direct",
-              "patroni_routed"
-            ],
-            "description": "single_node has no host-loss protection. patroni_direct is one Patroni member; use writer_url to reach the current primary. patroni_routed is one router route; use writer_url or reader_url."
+            "const": "single_node",
+            "description": "single_node has no host-loss protection."
           },
           "tls_mode": {
-            "enum": [
-              "disabled",
-              "verify-full"
-            ],
-            "description": "disabled sends plaintext. verify-full requires TLS with ca_certificate_pem and the endpoint host IP. This is not the management API TLS setting."
-          },
-          "role": {
-            "type": "string",
-            "enum": [
-              "writer",
-              "reader"
-            ],
-            "description": "The route of a routed Patroni endpoint."
+            "const": "disabled",
+            "description": "disabled sends plaintext. This is not the management API TLS setting."
           }
         }
       },
@@ -3180,7 +2817,7 @@
           },
           "endpoints": {
             "type": "array",
-            "maxItems": 3,
+            "maxItems": 1,
             "items": {
               "$ref": "#/components/schemas/Endpoint"
             }
@@ -3191,24 +2828,11 @@
               "not_allocated",
               "client_address_required",
               "address_not_bound",
-              "ambiguous_allocation",
-              "members_incomplete"
+              "ambiguous_allocation"
             ]
-          },
-          "writer_url": {
-            "type": "string",
-            "description": "Writer connection URL of a Patroni cluster. Direct: every member with target_session_attrs=read-write. Routed: every router writer route, or the load balancer writer address."
-          },
-          "ca_certificate_pem": {
-            "type": "string",
-            "description": "Patroni only. The public native CA that verifies each member certificate."
-          },
-          "reader_url": {
-            "type": "string",
-            "description": "Reader connection URL of a routed Patroni cluster: every router reader route with load_balance_hosts=random, or the load balancer reader address."
           }
         },
-        "description": "Reserved addresses and stored lifecycle observations. This is not a live health probe. Stopped clusters retain connection metadata. A standalone cluster reports one endpoint. A patroni cluster reports three members, writer_url, and ca_certificate_pem. Missing or ambiguous metadata produces an empty endpoints array and an unavailable_reason."
+        "description": "Reserved addresses and stored lifecycle observations. This is not a live health probe. Stopped clusters retain connection metadata. A cluster reports the endpoint of its primary. Missing or ambiguous metadata produces an empty endpoints array and an unavailable_reason."
       },
       "CredentialMetadata": {
         "type": "object",
@@ -3481,14 +3105,8 @@
             "enum": [
               "delete",
               "scale_down",
-              "recover_setup",
-              "rebuild_member"
+              "recover_setup"
             ]
-          },
-          "member_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The failed Patroni member. Use it with action rebuild_member only."
           }
         }
       },
@@ -3552,8 +3170,7 @@
             "type": "string",
             "enum": [
               "primary",
-              "replica",
-              "patroni"
+              "replica"
             ]
           },
           "state": {

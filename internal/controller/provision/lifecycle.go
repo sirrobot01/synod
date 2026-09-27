@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/placement"
+	imageinspect "github.com/sirrobot01/synod/internal/runtime/image"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -17,15 +20,12 @@ import (
 
 // The operation kinds this planner produces plans for.
 const (
-	createKind        = "cluster.create"
-	stopKind          = "cluster.stop"
-	startKind         = "cluster.start"
-	deleteKind        = "cluster.delete"
-	scaleKind         = "cluster.scale"
-	recoverSetupKind  = "cluster.recover_setup"
-	rebuildMemberKind = "cluster.rebuild_member"
-	renewKind         = "cluster.renew_certificates"
-	switchoverKind    = "cluster.switchover"
+	createKind       = "cluster.create"
+	stopKind         = "cluster.stop"
+	startKind        = "cluster.start"
+	deleteKind       = "cluster.delete"
+	scaleKind        = "cluster.scale"
+	recoverSetupKind = "cluster.recover_setup"
 )
 
 var (
@@ -42,16 +42,29 @@ func (p *Planner) Plan(ctx context.Context, claim operation.Claim) error {
 	if err != nil {
 		return err
 	}
+	if strings.HasPrefix(op.Kind, "app.") {
+		err := p.appLifecycle(ctx, claim, op)
+		if err != nil && ctx.Err() == nil {
+			code := "app_planning_pending"
+			if failure, ok := errors.AsType[*imageinspect.Error](err); ok {
+				code = string(failure.Code)
+			}
+			if errors.Is(err, placement.ErrUnsatisfied) {
+				code = "app_capacity_unavailable"
+			}
+			if noteErr := p.config.Store.RecordAppPlanningFailure(ctx, claim, code); noteErr != nil {
+				return errors.Join(err, noteErr)
+			}
+		}
+		return err
+	}
+	if p.config.Keyring == nil {
+		return errors.New("database planning requires a secret keyring")
+	}
 	switch op.Kind {
 	case createKind:
 		_, err := p.provision(ctx, claim)
 		return err
-	case rebuildMemberKind:
-		return p.rebuildMember(ctx, claim, op)
-	case renewKind:
-		return p.renewCertificates(ctx, claim, op)
-	case switchoverKind:
-		return p.switchover(ctx, claim, op)
 	case scaleKind:
 		return p.scale(ctx, claim, op)
 	}
@@ -73,51 +86,20 @@ func (p *Planner) lifecycle(ctx context.Context, claim operation.Claim, op opera
 		return err
 	}
 	var steps []*agentv1.PlanStep
-	// Patroni members stop together. Stopping the leader alone makes a replica promote
-	// only to be stopped next.
-	together := found.Spec.PostgreSQL != nil && found.Spec.PostgreSQL.Topology == "patroni"
 	switch op.Kind {
 	case stopKind:
-		steps, err = p.stopSteps(claim, op, running, together)
+		steps, err = p.stopSteps(claim, op, running)
 	case startKind:
-		if together {
-			steps, err = p.patroniStartSteps(ctx, claim, op, running)
-		} else {
-			steps, err = p.startSteps(ctx, claim, op, found, running)
-		}
+		steps, err = p.startSteps(ctx, claim, op, found, running)
 	case recoverSetupKind:
 		steps, err = p.recoverSetupSteps(ctx, claim, op, found, running)
 	case deleteKind:
-		steps, err = p.deleteSteps(claim, op, running, together)
+		steps, err = p.deleteSteps(claim, op, running)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnplannable, op.Kind)
 	}
 	if err != nil {
 		return err
-	}
-	// Routes, then etcd services, stop and leave with their members. Patroni keeps its DCS
-	// until its members are down.
-	if together && (op.Kind == stopKind || op.Kind == deleteKind) {
-		// Each node's steps follow that node's last step so far.
-		last := func() map[uuid.UUID]string {
-			found := map[uuid.UUID]string{}
-			for _, step := range steps {
-				found[uuid.MustParse(step.Command.Epoch.NodeId)] = step.Command.StepId
-			}
-			return found
-		}
-		if routed(running) {
-			routes, err := p.routeStopSteps(claim, op, running, op.Kind == deleteKind, last())
-			if err != nil {
-				return err
-			}
-			steps = append(steps, routes...)
-		}
-		etcd, err := p.etcdStopSteps(ctx, claim, op, op.Kind == deleteKind, last())
-		if err != nil {
-			return err
-		}
-		steps = append(steps, etcd...)
 	}
 	plan := &agentv1.ExecutionPlan{Version: 1, Steps: steps}
 	if err := operation.ValidatePlan(plan, op); err != nil {
@@ -136,8 +118,6 @@ type member struct {
 	NodeID     uuid.UUID
 	ResourceID uuid.UUID
 	Port       uint16
-	// Ports holds the named ports of the reservation, such as a Patroni member's routes.
-	Ports map[string]uint16
 }
 
 // members answers what the cluster runs. The recorded membership names each instance
@@ -166,13 +146,10 @@ func (p *Planner) members(ctx context.Context, claim operation.Claim) ([]member,
 		if !live {
 			return nil, fmt.Errorf("%w: member %s holds no reservation", ErrNoWorkload, each.MemberID)
 		}
-		instance := member{MemberID: each.MemberID, Role: each.Role, State: each.State, NodeID: hold.NodeID, ResourceID: each.ResourceID, Ports: map[string]uint16{}}
+		instance := member{MemberID: each.MemberID, Role: each.Role, State: each.State, NodeID: hold.NodeID, ResourceID: each.ResourceID}
 		for _, port := range hold.Ports {
 			if port.Transport == "tcp" && instance.Port == 0 {
 				instance.Port = port.Number
-			}
-			if port.Name != "" {
-				instance.Ports[port.Name] = port.Number
 			}
 		}
 		running = append(running, instance)
@@ -193,13 +170,12 @@ func epochFor(claim operation.Claim, nodeID uuid.UUID) *agentv1.Epoch {
 	}
 }
 
-// stopSteps stops every member and leaves their data alone. Together stops them with
-// no ordering between members.
-func (p *Planner) stopSteps(claim operation.Claim, op operation.Operation, running []member, together bool) ([]*agentv1.PlanStep, error) {
+// stopSteps stops every member in turn and leaves their data alone.
+func (p *Planner) stopSteps(claim operation.Claim, op operation.Operation, running []member) ([]*agentv1.PlanStep, error) {
 	steps := make([]*agentv1.PlanStep, 0, len(running))
 	for _, each := range running {
 		var dependsOn []string
-		if len(steps) > 0 && !together {
+		if len(steps) > 0 {
 			dependsOn = []string{steps[len(steps)-1].Command.StepId}
 		}
 		epoch := epochFor(claim, each.NodeID)
@@ -298,13 +274,12 @@ func (p *Planner) startSteps(ctx context.Context, claim operation.Claim, op oper
 
 // deleteSteps stop the engine and remove its container. The volume is not touched:
 // specification 33 retains data on a delete, and purge is a separate operation.
-// Together removes members with no ordering between them.
-func (p *Planner) deleteSteps(claim operation.Claim, op operation.Operation, running []member, together bool) ([]*agentv1.PlanStep, error) {
+func (p *Planner) deleteSteps(claim operation.Claim, op operation.Operation, running []member) ([]*agentv1.PlanStep, error) {
 	steps := make([]*agentv1.PlanStep, 0, 2*len(running))
 	for _, each := range running {
 		epoch := epochFor(claim, each.NodeID)
 		var dependsOn []string
-		if len(steps) > 0 && !together {
+		if len(steps) > 0 {
 			dependsOn = []string{steps[len(steps)-1].Command.StepId}
 		}
 		stop, err := p.step(claim, epoch, op.DesiredRevision, &agentv1.CommandInput{
@@ -338,17 +313,7 @@ func (p *Planner) scale(ctx context.Context, claim operation.Claim, op operation
 	if err != nil {
 		return err
 	}
-	if found.Spec.PostgreSQL != nil && found.Spec.PostgreSQL.Topology == "patroni" {
-		running, err := p.members(ctx, claim)
-		if err != nil {
-			return err
-		}
-		if found.DesiredReplicas+1 < len(running) {
-			return p.removePatroniMember(ctx, claim, op, found, running)
-		}
-		return p.addPatroniMember(ctx, claim, op, found)
-	}
-	// Only Redis runs native replicas. PostgreSQL replicas need the patroni topology.
+	// Only Redis runs replicas today.
 	if found.Spec.Engine != cluster.Redis {
 		return fmt.Errorf("%w: %s does not scale", ErrUnplannable, found.Spec.Engine)
 	}

@@ -546,41 +546,6 @@ func TestNodeJoinTokenPinsTheAPICA(t *testing.T) {
 	}
 }
 
-// A Patroni removal previews the named member, stops for confirmation, and then sends the
-// reviewed plan with the smaller count.
-func TestScaleRemovesANamedMember(t *testing.T) {
-	id, member, token := uuid.New(), uuid.New(), uuid.New()
-	var previewed map[string]any
-	var scaled map[string]any
-	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method + " " + r.URL.Path {
-		case "POST /v1/clusters/" + id.String() + "/action-plans":
-			json.NewDecoder(r.Body).Decode(&previewed)
-			json.NewEncoder(w).Encode(cluster.ActionPlan{PlanToken: token, ClusterID: id, ClusterName: "ha", ExpectedRevision: 4, Action: "scale_down",
-				DataDisposition: "retain", MemberID: member, Downtime: "The member leaves.", ExpiresAt: time.Now().Add(time.Minute)})
-		case "POST /v1/clusters/" + id.String() + "/actions/scale":
-			json.NewDecoder(r.Body).Decode(&scaled)
-			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(client.Admission{ClusterID: id, OperationID: uuid.New()})
-		default:
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-		}
-	}))
-	args := append(flags, "db", "scale", id.String(), "--replicas", "2", "--member", member.String(), "--expected-revision", "4")
-	var stdout, stderr bytes.Buffer
-	if code := cli.Run(t.Context(), args, &stdout, &stderr); code == 0 || scaled != nil || previewed["member_id"] != member.String() {
-		t.Fatalf("unconfirmed removal: code=%d preview=%v scale=%v stderr=%s", code, previewed, scaled, stderr.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := cli.Run(t.Context(), append(args, "--yes"), &stdout, &stderr); code != 0 {
-		t.Fatalf("confirmed removal: code=%d stderr=%s", code, stderr.String())
-	}
-	if scaled["replicas"] != float64(2) || scaled["plan_token"] != token.String() || scaled["confirm"] != true {
-		t.Fatalf("scale body=%v, want the reviewed plan and two replicas", scaled)
-	}
-}
-
 // dropTimeout bounds one test database teardown. It exists to stop a hang, not to
 // assert how fast PostgreSQL drops a database under load.
 const dropTimeout = 60 * time.Second
@@ -669,8 +634,8 @@ func TestMembersRenderWithoutJSON(t *testing.T) {
 	}
 }
 
-// A patroni create names its topology and failure domain. A patroni create without
-// the domain, or a domain on a standalone create, is refused before any request.
+// A create names its topology. A malformed topology or a removed flag is refused before any
+// request. The server decides which well-formed topologies it supports.
 func TestCreatePostgresSendsTopology(t *testing.T) {
 	var body []byte
 	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -679,18 +644,17 @@ func TestCreatePostgresSendsTopology(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"cluster_id": uuid.New(), "operation_id": uuid.New(), "desired_revision": 1})
 	}))
 	var stdout, stderr bytes.Buffer
-	code := cli.Run(t.Context(), append(flags, "db", "create", "postgres", "--name", "orders", "--version", "17.11", "--topology", "patroni", "--failure-domain", "host"), &stdout, &stderr)
+	code := cli.Run(t.Context(), append(flags, "db", "create", "postgres", "--name", "orders", "--version", "17.11"), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	var sent cluster.CreateSpec
-	if err := json.Unmarshal(body, &sent); err != nil || sent.PostgreSQL == nil || sent.PostgreSQL.Topology != "patroni" || sent.PostgreSQL.FailureDomain != "host" {
+	if err := json.Unmarshal(body, &sent); err != nil || sent.PostgreSQL == nil || sent.PostgreSQL.Topology != "standalone" {
 		t.Fatalf("body=%s", body)
 	}
 	for name, extra := range map[string][]string{
-		"patroni without domain": {"--topology", "patroni"},
-		"standalone with domain": {"--failure-domain", "host"},
-		"unknown topology":       {"--topology", "replicas"},
+		"failure domain":     {"--failure-domain", "host"},
+		"malformed topology": {"--topology", "Primary Replica"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var reached bool

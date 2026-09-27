@@ -153,9 +153,7 @@ func (d *Driver) Refresh(ctx context.Context, installationID uuid.UUID, snapshot
 		cancel()
 		if err != nil {
 			d.release(node.ID, owned)
-			// A node with no approved policy cannot prove anything, and a node that
-			// lost its session cannot answer. Neither is a reason to stop probing
-			// the rest of the installation.
+			// A node that lost its session cannot answer. Continue with the others.
 			d.config.Logger.Warn("capacity probe not begun", "installation_id", installationID, "node_id", node.ID, "session_id", node.SessionID, "error", err)
 			continue
 		}
@@ -205,9 +203,6 @@ func (d *Driver) probeable(node *placement.Node, now time.Time) bool {
 	switch {
 	case node.Revoked || node.RecoveryRequired || node.SessionID == uuid.Nil:
 		return false
-	case node.Policy == nil || node.Policy.Revision < 1:
-		// The store refuses a challenge without an approved policy anyway.
-		return false
 	// Presence must be inside the contract's limit. A node nobody has heard from
 	// cannot measure anything, whatever its last report said.
 	case node.LastSeenAt.After(now) || !node.LastSeenAt.Add(placement.PresenceAge).After(now):
@@ -222,6 +217,9 @@ func (d *Driver) probeable(node *placement.Node, now time.Time) bool {
 func usable(node *placement.Node, at time.Time) bool {
 	probe, report := node.Probe, node.Report
 	if probe == nil || report == nil {
+		return false
+	}
+	if node.Policy != nil && probe.PolicyRevision != node.Policy.Revision {
 		return false
 	}
 	if !probe.ValidUntil.After(at) {

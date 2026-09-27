@@ -16,12 +16,10 @@ import (
 // Stable probe reasons. They name what failed and never carry a credential, a host
 // path, or a driver message, because an observation travels to an operator's screen.
 const (
-	reasonTLSInvalid            = "postgres_tls_configuration_invalid"
 	reasonTLSVerification       = "postgres_tls_verification_failed"
 	reasonRoleInvalid           = "postgres_role_invalid"
 	reasonRoleUnavailable       = "postgres_role_unavailable"
 	reasonRoleMismatch          = "postgres_role_mismatch"
-	reasonReplicaNotStreaming   = "postgres_replica_not_streaming"
 	reasonReadOnlyMismatch      = "postgres_read_only_mismatch"
 	reasonNoEndpoint            = "endpoint_not_declared"
 	reasonUnreachable           = "endpoint_refused_connection"
@@ -44,16 +42,7 @@ const dialTimeout = 3 * time.Second
 // stays unavailable rather than being guessed at.
 func (Engine) Probe(ctx context.Context, endpoint engine.Endpoint, password []byte, revision int64) engine.Observation {
 	observed := engine.Observation{ObservedRevision: revision, ObservedAt: time.Now().UTC()}
-	var tlsConfig *tls.Config
-	if settings := endpoint.PostgresTLS; settings != nil {
-		var err error
-		tlsConfig, err = ReadinessTLSConfig(settings.RootCAPEM, settings.ServerName)
-		if err != nil {
-			observed.Reachable = engine.Probe{State: engine.ProbeFailed, Reason: reasonTLSInvalid}
-			return observed
-		}
-	}
-	if endpoint.PostgresRole != "primary" && endpoint.PostgresRole != "replica" && (endpoint.PostgresRole != "any" || endpoint.PostgresTLS == nil) {
+	if endpoint.PostgresRole != "primary" && endpoint.PostgresRole != "replica" {
 		observed.Reachable = engine.Probe{State: engine.ProbeFailed, Reason: reasonRoleInvalid}
 		return observed
 	}
@@ -93,7 +82,7 @@ func (Engine) Probe(ctx context.Context, endpoint engine.Endpoint, password []by
 	config.User, config.Password, config.Database = endpoint.Role, string(password), endpoint.Database
 	config.ConnectTimeout = dialTimeout
 	config.DialFunc = (&net.Dialer{Timeout: dialTimeout}).DialContext
-	config.TLSConfig, config.Fallbacks = tlsConfig, nil
+	config.TLSConfig, config.Fallbacks = nil, nil
 	config.SSLNegotiation = "postgres"
 	config.ValidateConnect = nil
 	config.RuntimeParams = map[string]string{"search_path": "pg_catalog"}
@@ -151,16 +140,7 @@ func (Engine) Probe(ctx context.Context, endpoint engine.Endpoint, password []by
 		role = "replica"
 	}
 	observed.Postgres = &engine.PostgresObservation{Role: role, ReadOnly: readOnly}
-	if endpoint.PostgresRole == "any" && recovery {
-		// Every Patroni member runs as a replica until a leader exists. A replica proves a
-		// writer only once it has streamed since this server started.
-		var streaming bool
-		if err := conn2.QueryRow(session, "SELECT pg_catalog.pg_last_wal_receive_lsn() IS NOT NULL").Scan(&streaming); err != nil || !streaming {
-			observed.Ready = engine.Probe{State: engine.ProbeFailed, Reason: reasonReplicaNotStreaming}
-			return observed
-		}
-	}
-	if role != endpoint.PostgresRole && endpoint.PostgresRole != "any" {
+	if role != endpoint.PostgresRole {
 		observed.Ready = engine.Probe{State: engine.ProbeFailed, Reason: reasonRoleMismatch}
 		return observed
 	}

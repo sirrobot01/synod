@@ -1,12 +1,8 @@
 package docker
 
 import (
-	"archive/tar"
 	"context"
 	"encoding/base64"
-	"errors"
-	"io"
-	"path"
 	"strings"
 	"time"
 
@@ -33,13 +29,6 @@ func (r *Runtime) checkStartStorage(ctx context.Context, command *agentv1.Comman
 	var marker string
 	switch stored.Engine {
 	case "postgres":
-		if stored.Postgres != nil && stored.Postgres.Patroni != nil {
-			return runtime.ErrUnsupportedConfiguration
-		}
-		// A pooler or router holds no data. Its protected files are checked instead.
-		if stored.Route != nil {
-			return r.inspectSource(ctx, item, routeSource(stored.Route))
-		}
 		// The marker must refer to the directory the image will use inside the owned mount.
 		dataDirectory := ""
 		for _, entry := range item.Config.Env {
@@ -84,30 +73,4 @@ func (r *Runtime) checkStartStorage(ctx context.Context, command *agentv1.Comman
 		return runtime.ErrStorageLost
 	}
 	return nil
-}
-
-// containerRecord reads one small regular file from a container. It rejects links,
-// large files, and extra archive entries.
-func (r *Runtime) containerRecord(ctx context.Context, containerID, filename string) (string, error) {
-	copy, err := r.api.CopyFromContainer(ctx, containerID, client.CopyFromContainerOptions{SourcePath: filename})
-	if err != nil {
-		return "", err
-	}
-	defer copy.Content.Close()
-	if !copy.Stat.Mode.IsRegular() || copy.Stat.LinkTarget != "" || copy.Stat.Size < 1 || copy.Stat.Size > 256 {
-		return "", runtime.ErrOutcomeUnknown
-	}
-	archive := tar.NewReader(io.LimitReader(copy.Content, 8192))
-	header, err := archive.Next()
-	if err != nil || header.Typeflag != tar.TypeReg || header.Name != path.Base(filename) || header.Linkname != "" || header.Size != copy.Stat.Size {
-		return "", runtime.ErrOutcomeUnknown
-	}
-	content, err := io.ReadAll(io.LimitReader(archive, 257))
-	if err != nil || int64(len(content)) != header.Size {
-		return "", runtime.ErrOutcomeUnknown
-	}
-	if _, err := archive.Next(); !errors.Is(err, io.EOF) {
-		return "", runtime.ErrOutcomeUnknown
-	}
-	return string(content), nil
 }

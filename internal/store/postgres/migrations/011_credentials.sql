@@ -14,30 +14,17 @@ CREATE TABLE cluster_credentials (
  -- Version rises on rotation. The row is never updated in place, so an older
  -- version stays readable while a rotation is still reaching hosts.
  version bigint NOT NULL CHECK (version > 0),
- -- Member TLS belongs to one allocated member. Other purposes are cluster-wide.
- member_id uuid,
- purpose text NOT NULL CHECK (purpose IN ('superuser','application','replication',
-  'patroni_rewind','patroni_rest','patroni_member_tls','patroni_dcs_tls')),
- CHECK ((purpose='patroni_member_tls' AND member_id IS NOT NULL AND member_id<>'00000000-0000-0000-0000-000000000000')
-  OR (purpose<>'patroni_member_tls' AND member_id IS NULL)),
- -- SQL and native passwords name their account. TLS material has no role name.
- role_name text NOT NULL,
- CHECK ((purpose IN ('superuser','application','replication') AND role_name ~ '^[a-z][a-z0-9_]{0,62}$')
-  OR (purpose='patroni_rewind' AND role_name='synod_rewind')
-  OR (purpose='patroni_rest' AND role_name='synod_patroni')
-  OR (purpose IN ('patroni_member_tls','patroni_dcs_tls') AND role_name='')),
+ purpose text NOT NULL CHECK (purpose IN ('superuser','application','replication')),
+ -- Each password names its account.
+ role_name text NOT NULL CHECK (role_name ~ '^[a-z][a-z0-9_]{0,62}$'),
  -- The wrapping key that sealed it. Old keys are retained for recovery.
  key_id uuid NOT NULL,
  format_version integer NOT NULL CHECK (format_version = 1),
  sealed bytea NOT NULL CHECK (octet_length(sealed) BETWEEN 1 AND 1048604),
- -- The certificate expiry of TLS material. Renewal reads it without opening the seal.
- expires_at timestamptz,
- CHECK ((purpose IN ('patroni_member_tls','patroni_dcs_tls')) = (expires_at IS NOT NULL)),
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY (installation_id,credential_id,version),
  UNIQUE (installation_id,cluster_id,credential_id,version),
- UNIQUE NULLS NOT DISTINCT (installation_id,cluster_id,purpose,member_id,version),
- FOREIGN KEY (installation_id,cluster_id,member_id) REFERENCES resource_allocations (installation_id,cluster_id,resource_id),
+ UNIQUE (installation_id,cluster_id,purpose,version),
  FOREIGN KEY (installation_id,cluster_id) REFERENCES clusters (installation_id,id)
 );
 CREATE INDEX cluster_credentials_by_cluster ON cluster_credentials (installation_id,cluster_id);

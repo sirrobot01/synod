@@ -3,13 +3,14 @@ package placement
 import (
 	"encoding/json"
 	"errors"
-	"github.com/google/uuid"
 	"math"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func fixture() (Request, Snapshot) {
@@ -96,14 +97,14 @@ func TestDeterministicPlacementAndHardFilters(t *testing.T) {
 func TestColocatedServiceSharesItsPartnersNode(t *testing.T) {
 	request, snapshot := fixture()
 	partner := request.Resources[0]
-	service := Resource{ID: uuid.New(), ReservationID: uuid.New(), Kind: "service", Role: "etcd", Engine: "postgres", Version: "17.11", Architecture: "arm64", Colocate: partner.ID, Budgets: Budgets{Workload: new(Vector{100, 100, 100}), Supporting: new(Vector{}), Backup: new(Vector{})}}
+	service := Resource{ID: uuid.New(), ReservationID: uuid.New(), Kind: "service", Engine: "postgres", Version: "17.11", Architecture: "arm64", Colocate: partner.ID, Budgets: Budgets{Workload: new(Vector{100, 100, 100}), Supporting: new(Vector{}), Backup: new(Vector{})}}
 	service.OwnedResourceIDs = []uuid.UUID{service.ID}
 	peer := partner
 	peer.ID, peer.ReservationID = uuid.New(), uuid.New()
 	peer.OwnedResourceIDs = []uuid.UUID{peer.ID}
 	request.Profile = "ha"
-	request.Groups = []Group{{ID: "patroni", DomainKey: "rack", Members: []uuid.UUID{partner.ID, peer.ID}}}
-	request.Resources[0].Role, peer.Role = "patroni", "patroni"
+	request.Groups = []Group{{ID: "members", DomainKey: "rack", Members: []uuid.UUID{partner.ID, peer.ID}}}
+	request.Resources[0].Role, peer.Role = "primary", "replica"
 	request.Resources = append(request.Resources, service, peer)
 	decision, err := Plan(request, snapshot)
 	if err != nil {
@@ -138,8 +139,6 @@ func TestColocatedServiceSharesItsPartnersNode(t *testing.T) {
 	for name, change := range map[string]func(*Request){
 		"self":       func(r *Request) { r.Resources[1].Colocate = r.Resources[1].ID },
 		"unknown":    func(r *Request) { r.Resources[1].Colocate = uuid.New() },
-		"etcd role":  func(r *Request) { r.Resources[1].Kind = "backup" },
-		"compact":    func(r *Request) { r.Profile, r.Groups, r.Resources[0].Role = "compact", nil, "primary" },
 		"other role": func(r *Request) { r.Resources[1].Role = "router" },
 	} {
 		changed := request
@@ -224,18 +223,6 @@ func TestHAAndConstrainedSearch(t *testing.T) {
 	decision, err := Plan(request, snapshot)
 	if err != nil || len(decision.Assignments) != 3 {
 		t.Fatal("three-domain placement", err)
-	}
-	patroni := request
-	patroni.Resources = slices.Clone(request.Resources)
-	for index := range patroni.Resources {
-		patroni.Resources[index].Role = "patroni"
-	}
-	if decision, err := Plan(patroni, snapshot); err != nil || len(decision.Assignments) != 3 {
-		t.Fatal("three Patroni members were not spread", err)
-	}
-	patroni.Profile, patroni.Groups = "compact", nil
-	if _, err := Plan(patroni, snapshot); !errors.Is(err, ErrInvalid) {
-		t.Fatal("Patroni members were placed without an HA spread", err)
 	}
 	if err := CheckDecision(request, snapshot, decision); err != nil {
 		t.Fatal(err)

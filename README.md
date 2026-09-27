@@ -28,7 +28,7 @@ the direct form.
 | `task build:web` | Build the browser application into `internal/web/dist` |
 | `task check` | Vet the Go code and type-check the browser application |
 | `task test` | Run the Go tests that need no dependency |
-| `task test:all` | Run the whole Go suite with PostgreSQL, etcd, and race detection |
+| `task test:all` | Run the whole Go suite with PostgreSQL and race detection |
 | `task test:web` | Run the browser application tests |
 | `task dev` | Run the controller on `https://127.0.0.1:8443` |
 | `task dev:web` | Serve the browser application with hot reload |
@@ -62,9 +62,8 @@ the development database trusts any password. Never use them anywhere else. Git 
 the directory.
 
 This development command starts no worker. Worker dispatch needs the agent transport,
-etcd, a credential wrapping key, and an approved node.
+a credential wrapping key, and an approved node.
 Use `synod server init --dir DIRECTORY` to create installation material.
-Use `task dev:etcd` to start a local etcd node.
 
 Run `task dev:reset` after you change a migration. AGENTS.md requires a dropped
 development database, never a repair migration.
@@ -79,23 +78,17 @@ cookie carries the `__Host-` prefix and a browser stores it only over HTTPS.
 
 ## Test fixtures
 
-Two scripts start the dependencies that the tests need.
+`./scripts/test-postgres.sh` starts the PostgreSQL database that the tests need.
 Docker must be available.
-Each script uses a pinned image and a random localhost port.
-Each script removes its container after the command exits.
+The script uses a pinned image and a random localhost port.
+It removes its container after the command exits.
+It exports `SYNOD_TEST_DATABASE_URL` for the test process.
 Pass a command after the script name to run a focused check.
 
-Run `./scripts/test-postgres.sh` for an isolated PostgreSQL database.
-It exports `SYNOD_TEST_DATABASE_URL` for the test process.
-
-Run `./scripts/test-etcd.sh` for an isolated etcd node.
-It exports `SYNOD_TEST_ETCD_ENDPOINT` for the test process.
-With no command it runs `./scripts/test-postgres.sh`, which starts both dependencies.
-
-Run the whole suite with both dependencies:
+Run the whole suite:
 
 ```sh
-./scripts/test-etcd.sh ./scripts/test-postgres.sh go test -race ./...
+./scripts/test-postgres.sh go test -race -p 1 ./...
 ```
 
 A test that needs a dependency skips when its variable is absent.
@@ -189,47 +182,9 @@ A session request that changes state must prove its origin.
 
 ## Running operations
 
-The controller runs an operation only when you supply etcd endpoints and the agent transport.
-Without them it admits requests and records desired state, and no worker starts.
-
-```sh
-export SYNOD_ETCD_ENDPOINTS='etcd.example.com:2379'
-export SYNOD_ETCD_PREFIX='/synod'
-export SYNOD_ETCD_CA_FILE='/path/to/etcd-ca.crt'
-export SYNOD_ETCD_USERNAME='synod-controller'
-export SYNOD_ETCD_PASSWORD_FILE='/path/to/etcd-password'
-```
-
-Use `--etcd-endpoints` and `--etcd-prefix` to override them.
-Separate several endpoints with commas.
-Use plain host and port pairs. Do not put credentials or URL schemes in an endpoint.
-Every controller in one installation must use the same prefix.
-
-Create the etcd account before controller startup. Enable etcd authentication.
-Grant the account read and write access only to `/synod/<installation-uuid>/`.
-Use your configured prefix in place of `/synod`.
-Keep this account separate from Patroni accounts.
-The controller does not create accounts or change etcd permissions.
-
-Keep the password file private to its owner.
-Use 32 to 256 visible ASCII bytes. One final LF or CRLF is permitted.
-The controller verifies the server certificate against the CA bundle and endpoint name.
-For mutual TLS, also set `SYNOD_ETCD_TLS_CERT_FILE` and `SYNOD_ETCD_TLS_KEY_FILE`.
-The client certificate must be current and permit client authentication.
-Keep its key file private to its owner.
-These settings also have matching `--etcd-*` flags and JSON fields.
-Restart the controller after you change the files or settings.
-
-A local development etcd can use explicit plaintext mode.
-Remove TLS and account settings before you select this mode.
-
-```sh
-export SYNOD_ETCD_ENDPOINTS='127.0.0.1:2379'
-export SYNOD_ETCD_ALLOW_PLAINTEXT=true
-```
-
-This mode has no transport encryption or authentication. Startup logs identify it.
-Secure mode refuses a server with authentication disabled.
+The controller runs an operation only when you supply the agent transport.
+Without it the controller admits requests and records desired state, and no worker starts.
+Controllers elect cluster owners in the metadata PostgreSQL database.
 
 One controller elects itself owner of a cluster, claims that cluster's operation,
 and runs one worker for it.
@@ -243,8 +198,7 @@ The `--placement-*` flags are optional. Use them only to limit placement.
 `--placement-architecture` accepts `amd64`, `arm64`, or both separated by a comma, in preference order.
 The default is `amd64,arm64`.
 `--placement-runtime-version` and `--placement-storage-id` limit placement to nodes that report those values.
-Each cluster stays on nodes of one architecture, because PostgreSQL replication needs one architecture.
-With both architectures, set the Patroni image to an image index digest that covers both.
+A Redis replica currently runs on the architecture of its primary.
 Use `--engine-endpoint-first-port` and `--engine-endpoint-last-port` to set the reserved port range.
 
 New Redis clusters have separate admin, application, and replication credentials.
@@ -252,29 +206,8 @@ The replication role can only run the native replication handshake commands and 
 The compact Redis profile supports one native replica with RDB, AOF, or combined persistence.
 It does not provide automatic failover.
 Standalone PostgreSQL is one node and has no replicas.
-Use the patroni topology for PostgreSQL replicas and automatic failover.
-A Patroni cluster starts with three members: one primary and two replicas.
-Use `synod db scale CLUSTER_ID --replicas N` to add one member. N is 3 or 4.
-Each scale adds one member. The new member needs a host that no member uses.
-The scale restarts each current member in turn, so that it admits the new member.
-The cluster keeps a writer during the scale. Then the new member copies the data from the primary.
-The per-cluster etcd stays on its three hosts.
-If a scale fails, the new member stays residual. Find it with `synod db members`. Then run `synod db rebuild-member` for it.
-To remove a member, name it with `--member` and set N to one less than now:
-
-```sh
-synod db scale CLUSTER_ID --replicas 2 --member MEMBER_ID
-```
-
-The command shows the removal plan. Review it, then run the command again with `--yes`.
-A cluster keeps at least three members.
-The removal proves that the member is a replica before it stops the member. To remove the leader, run a switchover first.
-The member's volume stays retained.
-The per-cluster etcd has three members on three member hosts.
-When the removed member's host runs one of them, that etcd member moves first to a kept member's host that runs none.
-The new etcd member joins as a learner and votes only when it is in sync. Then the old etcd member leaves.
-The member's host and every etcd host must be reachable. A lost host is not supported yet.
-If a removal fails, run the same command again. It continues the etcd move with the etcd member it already placed.
+PostgreSQL replicas and Synod-driven failover are planned work.
+Use `synod db scale CLUSTER_ID --replicas 1` to add a Redis replica:
 
 ```sh
 synod db scale CLUSTER_ID --replicas 1 --wait

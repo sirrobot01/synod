@@ -49,7 +49,7 @@ func validLabels(values map[string]string) bool {
 
 // Validate checks the policy identity, architecture, engines, labels, and headroom.
 func (p NodePolicy) Validate() error {
-	if p.InstallationID == uuid.Nil || p.NodeID == uuid.Nil || p.Revision < 0 || (p.Architecture != "amd64" && p.Architecture != "arm64") || !validText(p.RuntimeVersion) || !validText(p.StorageID) || len(p.Engines) == 0 || len(p.Engines) > 32 || !validLabels(p.Labels) || !validLabels(p.FailureDomains) || !p.Headroom.Valid() || p.Headroom.CPUMillis == 0 || p.Headroom.MemoryBytes == 0 || p.Headroom.DiskBytes == 0 {
+	if p.InstallationID == uuid.Nil || p.NodeID == uuid.Nil || p.Revision < 0 || (p.Architecture != "amd64" && p.Architecture != "arm64") || !validText(p.RuntimeVersion) || !validText(p.StorageID) || len(p.Engines) > 32 || !validLabels(p.Labels) || !validLabels(p.FailureDomains) || !p.Headroom.Valid() || p.Headroom.CPUMillis == 0 || p.Headroom.MemoryBytes == 0 || p.Headroom.DiskBytes == 0 {
 		return ErrInvalid
 	}
 	if p.ClientAddress != "" {
@@ -146,8 +146,34 @@ func (r Request) Validate() error {
 	}
 	resources, reservations, owned := make(map[uuid.UUID]bool), make(map[uuid.UUID]bool), make(map[uuid.UUID]bool)
 	for _, resource := range r.Resources {
-		if resource.ID == uuid.Nil || resource.ReservationID == uuid.Nil || resources[resource.ID] || reservations[resource.ReservationID] || len(resource.OwnedResourceIDs) == 0 || len(resource.OwnedResourceIDs) > 32 || !slices.Contains(resource.OwnedResourceIDs, resource.ID) || len(resource.Ports) > 32 || !validLabels(resource.Labels) || (resource.Kind != "instance" && resource.Kind != "service" && resource.Kind != "backup") || (resource.Engine != "postgres" && resource.Engine != "redis") || !validText(resource.Version) || (resource.Architecture != "arm64" && resource.Architecture != "amd64") || (resource.RuntimeVersion != "" && !validText(resource.RuntimeVersion)) || (resource.StorageID != "" && !validText(resource.StorageID)) {
+		if resource.ID == uuid.Nil || resource.ReservationID == uuid.Nil || resources[resource.ID] || reservations[resource.ReservationID] || len(resource.OwnedResourceIDs) == 0 || len(resource.OwnedResourceIDs) > 32 || !slices.Contains(resource.OwnedResourceIDs, resource.ID) || len(resource.Ports) > 32 || !validLabels(resource.Labels) || (resource.Kind != "instance" && resource.Kind != "service" && resource.Kind != "backup") || (resource.RuntimeVersion != "" && !validText(resource.RuntimeVersion)) || (resource.StorageID != "" && !validText(resource.StorageID)) {
 			return ErrInvalid
+		}
+		if resource.Engine == "generic" {
+			if resource.Kind != "service" || resource.Version != "" || resource.Architecture != "" || len(resource.SupportedArchitectures) == 0 || len(resource.SupportedArchitectures) > 2 || resource.Budgets.Workload == nil || resource.Budgets.Workload.CPUMillis == 0 || resource.Budgets.Workload.MemoryBytes == 0 {
+				return ErrInvalid
+			}
+			architectures := map[string]bool{}
+			for _, architecture := range resource.SupportedArchitectures {
+				if (architecture != "amd64" && architecture != "arm64") || architectures[architecture] {
+					return ErrInvalid
+				}
+				architectures[architecture] = true
+			}
+		} else if (resource.Engine != "postgres" && resource.Engine != "redis") || !validText(resource.Version) || (resource.Architecture != "arm64" && resource.Architecture != "amd64") || len(resource.SupportedArchitectures) != 0 {
+			return ErrInvalid
+		}
+		for _, nodes := range [][]uuid.UUID{resource.PreferredNodes, resource.AllowedNodes, resource.ExcludedNodes} {
+			if len(nodes) > MaxNodes {
+				return ErrInvalid
+			}
+			seen := map[uuid.UUID]bool{}
+			for _, id := range nodes {
+				if id == uuid.Nil || seen[id] {
+					return ErrInvalid
+				}
+				seen[id] = true
+			}
 		}
 		resources[resource.ID], reservations[resource.ReservationID] = true, true
 		total, err := resource.Budgets.Total()
@@ -155,11 +181,8 @@ func (r Request) Validate() error {
 			return ErrInvalid
 		}
 		// An instance is a member of the cluster, so it names which member it is.
-		// A Patroni member has no Synod-declared role, because Patroni elects its primary.
-		// It only exists in an HA placement that spreads it from its peers.
-		// The only other role is etcd: a service beside one Patroni member.
-		if (resource.Kind == "instance") != (resource.Role == "primary" || resource.Role == "replica" || resource.Role == "patroni") || (resource.Role == "patroni" && r.Profile != "ha") ||
-			(resource.Kind != "instance" && resource.Role != "" && (resource.Role != "etcd" || resource.Kind != "service" || r.Profile != "ha")) {
+		// Another resource has no role.
+		if (resource.Kind == "instance") != (resource.Role == "primary" || resource.Role == "replica") || (resource.Kind != "instance" && resource.Role != "") {
 			return ErrInvalid
 		}
 		if resource.Colocate != uuid.Nil && (resource.Colocate == resource.ID || !slices.ContainsFunc(r.Resources, func(other Resource) bool { return other.ID == resource.Colocate })) {
@@ -197,8 +220,14 @@ func (r Request) Validate() error {
 			return ErrInvalid
 		}
 		groups[group.ID] = true
+		if group.Soft && r.Profile == "ha" {
+			return ErrInvalid
+		}
 		members := make(map[uuid.UUID]bool)
 		for _, id := range group.Members {
+			if group.Soft && !slices.ContainsFunc(r.Resources, func(resource Resource) bool { return resource.ID == id && resource.Engine == "generic" }) {
+				return ErrInvalid
+			}
 			if id == uuid.Nil || members[id] {
 				return ErrInvalid
 			}

@@ -32,16 +32,6 @@ func (e *Executor) precheck(command *agentv1.Command) error {
 	switch payload := command.Input.Payload.(type) {
 	case *agentv1.CommandInput_EnsureVolume:
 		return e.checkSpace(0, 0)
-	case *agentv1.CommandInput_StartPatroniMember:
-		p := payload.StartPatroniMember
-		if p == nil || p.Container == nil || p.Container.Postgres == nil || p.Container.Postgres.Patroni == nil {
-			return fmt.Errorf("Patroni start configuration is absent")
-		}
-		var required int64
-		if p.AllowInitialization {
-			required = p.Container.Postgres.Patroni.RequiredFreeBytes
-		}
-		return e.checkSpace(p.Container.MemoryBytes, required)
 	case *agentv1.CommandInput_EnsureContainer:
 		container := payload.EnsureContainer
 		if container == nil {

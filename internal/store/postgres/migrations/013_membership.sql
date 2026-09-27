@@ -9,9 +9,7 @@ CREATE TABLE cluster_members (
  installation_id uuid NOT NULL,
  cluster_id uuid NOT NULL,
  member_id uuid NOT NULL,
- -- patroni: a member of a Patroni cluster. Patroni elects its primary, so Synod
- -- declares none, and the one-primary index below does not apply.
- role text NOT NULL CHECK (role IN ('primary','replica','patroni')),
+ role text NOT NULL CHECK (role IN ('primary','replica')),
  -- The instance resource this member runs as. The member and its capacity share one
  -- identity, so one read answers for both.
  resource_id uuid NOT NULL,
@@ -27,13 +25,9 @@ CREATE TABLE cluster_members (
  -- Set when a scale down removes the member. The row stays. A later add receives a
  -- new member identity.
  removed_at timestamptz,
- -- The operation whose plan holds the current container configuration, when it is not
- -- the creating operation. A certificate renewal recreates the container.
- container_operation_id uuid,
  PRIMARY KEY (installation_id,member_id),
  UNIQUE (installation_id,resource_id),
- FOREIGN KEY (installation_id,cluster_id,created_operation_id) REFERENCES operations (installation_id,cluster_id,id),
- FOREIGN KEY (installation_id,cluster_id,container_operation_id) REFERENCES operations (installation_id,cluster_id,id)
+ FOREIGN KEY (installation_id,cluster_id,created_operation_id) REFERENCES operations (installation_id,cluster_id,id)
 );
 
 -- One live primary for each cluster. The database refuses a second one. A writer does
@@ -43,16 +37,3 @@ CREATE UNIQUE INDEX cluster_members_primary ON cluster_members (installation_id,
 
 CREATE INDEX cluster_members_live ON cluster_members (installation_id,cluster_id)
  WHERE removed_at IS NULL;
-
--- The etcd members of a Patroni cluster. Each runs as its own service reservation on the
--- node of one Patroni member. They are not cluster members: they hold no database role,
--- and a member rebuild leaves them alone. The live reservation says where each runs.
-CREATE TABLE etcd_members (
- installation_id uuid NOT NULL,
- cluster_id uuid NOT NULL,
- resource_id uuid NOT NULL,
- -- The operation whose plan holds the container configuration.
- created_operation_id uuid NOT NULL,
- PRIMARY KEY (installation_id,resource_id),
- FOREIGN KEY (installation_id,cluster_id,created_operation_id) REFERENCES operations (installation_id,cluster_id,id)
-);

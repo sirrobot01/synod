@@ -49,6 +49,8 @@ type Resource struct {
 	Name       string
 	NativeID   string
 	State      string
+	Health     string
+	Ports      []*agentv1.PortBinding
 }
 
 // DriftClass says how an object on the host relates to this installation. The

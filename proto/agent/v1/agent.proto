@@ -43,6 +43,8 @@ message Observation {
   string lifecycle = 3;
   string reason = 4;
   google.protobuf.Timestamp observed_at = 5;
+  repeated PortBinding ports = 6;
+  string health = 7;
 }
 message Epoch {
   string installation_id = 1;
@@ -124,46 +126,34 @@ message EnsureContainer {
   repeated PlainEnv plain_env = 10;
   RedisContainerConfig redis = 11;
   PostgresContainerConfig postgres = 12;
-  // A pooler or router beside a Patroni member. It has no volume and uses host networking.
-  PostgresRouteConfig route = 13;
-  // An etcd member container beside a Patroni member. It uses an isolated volume and host networking.
-  EtcdContainerConfig etcd = 14;
+  GenericContainerConfig generic = 13;
 }
-message EtcdContainerConfig {
-  string name = 1;
-  string address = 2;
-  uint32 client_port = 3;
-  uint32 peer_port = 4;
-  string initial_cluster = 5;
-  string initial_cluster_state = 6;
-  string cluster_id = 7;
-  repeated SecretReference credentials = 8;
+message GenericContainerConfig {
+  string image = 1;
+  repeated string command = 2;
+  repeated Mount mounts = 3;
+  HealthCheckConfig health_check = 4;
+  repeated string entrypoint = 5;
+  // True also permits an empty override of the image default.
+  bool command_override = 6;
+  bool entrypoint_override = 7;
+  string app_name = 8;
+  uint32 copy_index = 9;
 }
-message PostgresRouteConfig {
-  // Exactly one of pooler or router.
-  PostgresPoolerConfig pooler = 1;
-  PostgresRouterConfig router = 2;
-  // A pooler needs application and patroni_member_tls. A router needs patroni_member_tls.
-  repeated SecretReference credentials = 3;
+message Mount {
+  string source = 1;
+  string target = 2;
+  bool read_only = 3;
+  string type = 4;
 }
-message PostgresPoolerConfig {
-  string address = 1;
-  uint32 port = 2;
-  uint32 database_port = 3;
-  // The member's Patroni REST port. The pooler restarts PgBouncer when the member changes role.
-  uint32 rest_port = 4;
-}
-message PostgresRouterConfig {
-  string address = 1;
-  uint32 writer_port = 2;
-  uint32 reader_port = 3;
-  int64 max_lag_bytes = 4;
-  repeated PostgresRouteBackend backends = 5;
-}
-message PostgresRouteBackend {
-  string address = 1;
-  uint32 pooler_port = 2;
-  uint32 rest_port = 3;
+message HealthCheckConfig {
+  string type = 1;
+  string path = 2;
+  uint32 port = 3;
+  repeated string command = 4;
+  uint32 interval_seconds = 5;
+  uint32 timeout_seconds = 6;
+  uint32 unhealthy_threshold = 7;
 }
 // Fixed PostgreSQL application setup. Credential identities remain in the
 // container configuration so restart inspection never needs secret material.
@@ -173,22 +163,6 @@ message PostgresContainerConfig {
   int64 application_credential_version = 3;
   string superuser_credential_id = 4;
   int64 superuser_credential_version = 5;
-  string replication_credential_id = 6;
-  int64 replication_credential_version = 7;
-  // Require one cluster-named standby to flush WAL before default commits return.
-  bool synchronous_replication = 9;
-  PatroniContainerConfig patroni = 10;
-}
-message PatroniContainerConfig {
-  string address = 1;
-  uint32 rest_port = 2;
-  repeated string dcs_endpoints = 3;
-  repeated string peer_networks = 4;
-  repeated string client_networks = 5;
-  string provision_id = 6;
-  bool allow_initialization = 7;
-  repeated SecretReference credentials = 8;
-  int64 required_free_bytes = 9;
 }
 message RedisContainerConfig {
   uint32 port = 1;
@@ -214,38 +188,6 @@ message StartContainer {
   // Only a container that has never started may initialize an empty volume.
   bool allow_initialization = 1;
 }
-// Verify or finish an existing PostgreSQL setup receipt after confirmed failure.
-message StartPatroniMember {
-  EnsureContainer container = 1;
-  bool allow_initialization = 2;
-}
-// Read a stopped Patroni member's failed storage attempt without changing it.
-message VerifyPatroniStartFailure { EnsureContainer container = 1; }
-// Read that a Patroni member is not serving, without changing it.
-message VerifyPatroniMemberNotServing { EnsureContainer container = 1; }
-// Read that a stopped Patroni member's storage cannot restart, without changing it.
-message VerifyPatroniMemberFailed { EnsureContainer container = 1; }
-// Make the command's member the Patroni leader through the REST API of that member.
-message SwitchoverPatroni {
-  string address = 1;
-  uint32 rest_port = 2;
-}
-// Change the membership of a Patroni cluster's etcd through the local member at address.
-// add_learner adds name at peer_url as a learner. promote makes name a voting member once it is
-// in sync. remove takes name out of the cluster. Each action succeeds when its result holds.
-message EtcdMembership {
-  string address = 1;
-  uint32 client_port = 2;
-  string action = 3;
-  string name = 4;
-  string peer_url = 5;
-}
-// Replace a stopped Patroni member container with one that holds renewed certificate files.
-// The member keeps its volume, identity, provision, and storage records.
-message RecreatePatroniMember {
-  EnsureContainer previous = 1;
-  EnsureContainer next = 2;
-}
 message RecoverPostgresSetup { PostgresContainerConfig postgres = 1; }
 message StopContainer { google.protobuf.Duration grace_period = 1; }
 message RemoveContainer {}
@@ -253,11 +195,6 @@ message InspectContainer {}
 // Read native absence without stopping or removing a container.
 message VerifyContainerAbsent {}
 
-// Public trust for a PostgreSQL connection. No private key or client certificate.
-message PostgresTLS {
-  bytes root_ca_pem = 1;
-  string server_name = 2;
-}
 
 // Check that the engine answers through the endpoint it publishes.
 //
@@ -276,7 +213,6 @@ message CheckReadiness {
   RedisReplicationCheck redis_replication = 6;
   // Required primary or replica for PostgreSQL. Separate from the SQL login role.
   string postgres_role = 7;
-  PostgresTLS postgres_tls = 9;
 }
 
 // This input is immutable. It has no controller epoch or plaintext secret.
@@ -296,13 +232,6 @@ message CommandInput {
     CheckReadiness check_readiness = 17;
     RecoverPostgresSetup recover_postgres_setup = 18;
     VerifyContainerAbsent verify_container_absent = 23;
-    StartPatroniMember start_patroni_member = 24;
-    VerifyPatroniStartFailure verify_patroni_start_failure = 25;
-    VerifyPatroniMemberNotServing verify_patroni_member_not_serving = 26;
-    VerifyPatroniMemberFailed verify_patroni_member_failed = 27;
-    RecreatePatroniMember recreate_patroni_member = 28;
-    SwitchoverPatroni switchover_patroni = 29;
-    EtcdMembership etcd_membership = 30;
   }
 }
 message Command {
@@ -438,6 +367,25 @@ message DriftItem {
   string detail = 8;
 }
 message ProtocolError { string code = 1; string message = 2; }
+// A complete route snapshot for one authenticated agent session.
+message RouteTable {
+  string session_id = 1;
+  uint64 revision = 2;
+  repeated AppRoute routes = 3;
+}
+message AppRoute {
+  string app_id = 1;
+  string protocol = 2;
+  uint32 ingress_port = 3;
+  repeated string backends = 4;
+  // Empty selects a TCP probe. Otherwise use HTTP GET at this path.
+  string health_path = 5;
+}
+message RouteAck {
+  string session_id = 1;
+  uint64 revision = 2;
+  string failure_code = 3;
+}
 message AgentMessage {
   oneof message {
     Hello hello = 1;
@@ -450,6 +398,7 @@ message AgentMessage {
     InventoryPage inventory = 8;
     CommandInspectionResult command_inspection = 9;
     CapacityReport capacity_report = 10;
+    RouteAck route_ack = 11;
   }
 }
 message ControllerMessage {
@@ -467,6 +416,7 @@ message ControllerMessage {
     CommandInspectionRequest command_inspection = 9;
     CapacityRequest capacity_request = 10;
     SecretMaterial secret = 11;
+    RouteTable routes = 13;
   }
 }
 
@@ -495,10 +445,4 @@ enum Postcondition {
   POSTCONDITION_CONTAINER_INSPECTED = 7;
   POSTCONDITION_ENGINE_READY = 8;
   POSTCONDITION_POSTGRES_SETUP_RECOVERED = 9;
-  POSTCONDITION_PATRONI_START_FAILED = 13;
-  POSTCONDITION_PATRONI_MEMBER_NOT_SERVING = 14;
-  POSTCONDITION_PATRONI_MEMBER_FAILED = 15;
-  POSTCONDITION_PATRONI_MEMBER_RECREATED = 16;
-  POSTCONDITION_PATRONI_LEADER = 17;
-  POSTCONDITION_ETCD_MEMBERSHIP = 18;
 }

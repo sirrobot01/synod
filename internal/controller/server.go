@@ -126,24 +126,6 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 			return fmt.Errorf("load the enrollment CA: %w", err)
 		}
 	}
-	// Patroni HA stays unavailable without the native CA. A wrong pair stops startup.
-	var patroniCertificate []byte
-	var patroniCA *pki.CA
-	if settings.PatroniCACertFile != "" {
-		patroniCertificate, err = readStartupFile(settings.PatroniCACertFile, 64<<10, false)
-		if err != nil {
-			return fmt.Errorf("read the Patroni CA certificate: %w", err)
-		}
-		patroniKey, err := readStartupFile(settings.PatroniCAKeyFile, 64<<10, true)
-		if err != nil {
-			return fmt.Errorf("read the protected Patroni CA key: %w", err)
-		}
-		patroniCA, err = pki.LoadPatroniCA(uuid.MustParse(settings.InstallationID), patroniCertificate, patroniKey)
-		clear(patroniKey)
-		if err != nil {
-			return fmt.Errorf("load the Patroni CA: %w", err)
-		}
-	}
 	var agentTLS *tls.Config
 	if settings.AgentListen != "" {
 		agentCert, err := readStartupFile(settings.AgentTLSCertFile, 64<<10, false)
@@ -201,7 +183,6 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	handler.PublicOrigin = settings.PublicOrigin
 	handler.AgentListen = settings.AgentListen
 	handler.SecretKeyring = ring
-	handler.PatroniCA = patroniCertificate
 	assets, err := web.Assets()
 	if err != nil {
 		return fmt.Errorf("load the web application: %w", err)
@@ -227,11 +208,12 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	var agentServer *controlstream.Server
 	var agentListener net.Listener
 	var operations *runner.Runner
+	var capacityDriver *capacity.Driver
 	if agentTLS != nil {
 		// The runner needs the transport and the transport needs the runner's routing,
 		// so the handler reads the pointer that the runner build fills in below.
 		handle := (agentstream.Receiver{Store: store}).Handle
-		agentServer, err = controlstream.New(controlstream.Config{InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Authorize: store.CheckAgentCertificate, Capabilities: []string{"runtime.docker", controlstream.CommandInspectionCapability}, Logger: logger,
+		agentServer, err = controlstream.New(controlstream.Config{InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Authorize: store.CheckAgentCertificate, Capabilities: []string{"runtime.docker", controlstream.CommandInspectionCapability, controlstream.RouterCapability}, Logger: logger,
 			Handle: func(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
 				if operations != nil {
 					return operations.Handle(ctx, peer, message)
@@ -255,25 +237,13 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		if err != nil {
 			return err
 		}
-		var patroni *provision.PatroniConfig
-		if patroniCA != nil && settings.PatroniImage != "" && settings.EtcdImage != "" {
-			patroni = &provision.PatroniConfig{
-				CA:        patroniCA,
-				Image:     settings.PatroniImage,
-				EtcdImage: settings.EtcdImage,
-			}
-			logger.Info("Patroni HA provisioner is available")
-		}
-		// Provisioning needs a wrapping key, because a plan names a credential
-		// and the controller has to open it to deliver one. Without a key the
-		// runner still runs plans that need none, so a controller can admit and
-		// observe without being able to create.
+		// App plans need no database credential key. Database plans still require one.
 		runnerConfig := runner.Config{
 			Store: store, Transport: agentServer, Coordinator: elector,
 			InstallationID: uuid.MustParse(settings.InstallationID), OwnerID: ownerID(), Logger: logger,
 		}
-		if ring != nil {
-			driver, err := capacity.New(capacity.Config{Store: store, Transport: agentServer, Logger: logger})
+		{
+			capacityDriver, err = capacity.New(capacity.Config{Store: store, Transport: agentServer, Logger: logger})
 			if err != nil {
 				return err
 			}
@@ -282,15 +252,14 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 				architectures = strings.Split(settings.PlacementArchitecture, ",")
 			}
 			planner, err := provision.New(provision.Config{
-				Store: store, Decider: driver, Catalog: catalog, Keyring: ring,
+				Store: store, Decider: capacityDriver, Catalog: catalog, Keyring: ring,
 				Profile: provision.Profile{
 					Architectures:  architectures,
 					RuntimeVersion: settings.PlacementRuntimeVersion,
 					StorageID:      settings.PlacementStorageID,
 				},
-				Images:  pinnedImages,
-				Budget:  provisionBudget,
-				Patroni: patroni,
+				Images: pinnedImages,
+				Budget: provisionBudget,
 				EndpointPorts: placement.PortRange{
 					First: uint16(settings.EngineEndpointFirstPort),
 					Last:  uint16(settings.EngineEndpointLastPort),
@@ -318,6 +287,41 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	// A failed listener must also stop the runner, so it runs on its own context.
 	runnerCtx, stopRunner := context.WithCancel(ctx)
 	defer stopRunner()
+	routesStopped := make(chan struct{})
+	if agentServer != nil {
+		go func() {
+			defer close(routesStopped)
+			runAppRoutes(runnerCtx, store, agentServer, uuid.MustParse(settings.InstallationID), logger)
+		}()
+	} else {
+		close(routesStopped)
+	}
+	probesStopped := make(chan struct{})
+	if capacityDriver != nil {
+		go func() {
+			defer close(probesStopped)
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				work, cancel := context.WithTimeout(runnerCtx, placement.ProbeWindow)
+				snapshot, err := store.ReadPlacementSnapshot(work, uuid.MustParse(settings.InstallationID))
+				if err == nil {
+					_, err = capacityDriver.Refresh(work, snapshot.InstallationID, snapshot)
+				}
+				if err != nil && runnerCtx.Err() == nil {
+					logger.Warn("refresh node facts", "error", err)
+				}
+				cancel()
+				select {
+				case <-runnerCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	} else {
+		close(probesStopped)
+	}
 	running := make(chan struct{})
 	if operations != nil {
 		go func() {
@@ -340,6 +344,8 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	// Wait for workers before the transport closes, so a late receipt still commits.
 	stopRunner()
 	<-running
+	<-routesStopped
+	<-probesStopped
 	if agentServer != nil {
 		agentServer.Stop()
 	}

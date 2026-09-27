@@ -18,7 +18,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	server := controller.Command()
 	agent := agentcli.Command()
 
-	root := &cobra.Command{Use: "synod", Short: "Deploy and manage Synod database clusters", SilenceErrors: true, SilenceUsage: true,
+	root := &cobra.Command{Use: "synod", Short: "Deploy and manage Synod apps and databases", SilenceErrors: true, SilenceUsage: true,
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true}}
 	root.SetArgs(args)
 	root.SetOut(stdout)
@@ -26,6 +26,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	app.bindFlags(root.PersistentFlags())
 	root.AddCommand(
 		newDBCommand(app),
+		newAppCommand(app),
 		newOperationCommand(app),
 		newEndpointCommand(app),
 		newCredentialCommand(app),

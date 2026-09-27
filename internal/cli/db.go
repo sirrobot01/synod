@@ -45,39 +45,12 @@ func newCreateCommand(app *app) *cobra.Command {
 
 func newCreatePostgresCommand(app *app, shared *createFlags) *cobra.Command {
 	var spec cluster.PostgreSQLSpec
-	var endpoint cluster.PostgresEndpoint
 	command := &cobra.Command{Use: string(cluster.PostgreSQL), Short: "Admit a " + string(cluster.PostgreSQL) + " cluster", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			spec.Version = shared.version
-			changed := 0
-			for _, flag := range []string{"endpoint-address", "endpoint-writer-port", "endpoint-reader-port"} {
-				if cmd.Flags().Changed(flag) {
-					changed++
-				}
-			}
-			if changed != 0 && changed != 3 {
-				return &client.Error{Code: "invalid_request", Message: "Set --endpoint-address, --endpoint-writer-port, and --endpoint-reader-port together."}
-			}
-			if changed == 3 {
-				spec.Endpoint = &endpoint
-			}
-			// Only Patroni replicates, so only a Patroni create discloses its replication policy.
-			notice := ""
-			if spec.Topology == "patroni" {
-				notice = "Asynchronous replication: commits do not wait for replicas. Recent writes can be lost if the primary is lost."
-				if spec.ReplicationPolicy == "synchronous" {
-					notice = "Synchronous replication: commits wait for one replica."
-				}
-			}
-			return app.create(cmd, shared, cluster.CreateSpec{Engine: cluster.PostgreSQL, PostgreSQL: &spec}, notice)
+			return app.create(cmd, shared, cluster.CreateSpec{Engine: cluster.PostgreSQL, PostgreSQL: &spec})
 		}}
-	flags := command.Flags()
-	flags.StringVar(&spec.ReplicationPolicy, "replication-policy", "", "Patroni replication policy: asynchronous (default) or synchronous (commits wait for one replica)")
-	flags.StringVar(&spec.Topology, "topology", "standalone", "Topology: standalone, or patroni for three members with native failover")
-	flags.StringVar(&spec.FailureDomain, "failure-domain", "", "Host failure a patroni cluster survives: host (required for patroni)")
-	flags.StringVar(&endpoint.Address, "endpoint-address", "", "Load balancer IP in front of the patroni routers (optional)")
-	flags.Uint16Var(&endpoint.WriterPort, "endpoint-writer-port", 0, "Load balancer port that forwards to the router writer ports")
-	flags.Uint16Var(&endpoint.ReaderPort, "endpoint-reader-port", 0, "Load balancer port that forwards to the router reader ports")
+	command.Flags().StringVar(&spec.Topology, "topology", "standalone", "Topology: standalone")
 	return command
 }
 
@@ -86,7 +59,7 @@ func newCreateRedisCommand(app *app, shared *createFlags) *cobra.Command {
 	command := &cobra.Command{Use: string(cluster.Redis), Short: "Admit a " + string(cluster.Redis) + " cluster", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			spec.Version = shared.version
-			return app.create(cmd, shared, cluster.CreateSpec{Engine: cluster.Redis, Redis: &spec}, "")
+			return app.create(cmd, shared, cluster.CreateSpec{Engine: cluster.Redis, Redis: &spec})
 		}}
 	flags := command.Flags()
 	flags.StringVar(&spec.Persistence, "persistence", "rdb+aof", "Persistence: none, rdb, aof, or rdb+aof")
@@ -95,11 +68,11 @@ func newCreateRedisCommand(app *app, shared *createFlags) *cobra.Command {
 	return command
 }
 
-// create validates spec, discloses the retry key and notice, and admits the cluster.
-func (a *app) create(cmd *cobra.Command, shared *createFlags, spec cluster.CreateSpec, notice string) error {
+// create validates spec, discloses the retry key, and admits the cluster.
+func (a *app) create(cmd *cobra.Command, shared *createFlags, spec cluster.CreateSpec) error {
 	spec.SchemaVersion, spec.Name = 1, shared.name
 	if err := spec.Validate(); err != nil {
-		return &client.Error{Code: "invalid_request", Message: "Set a valid --name, exact --version, supported persistence mode, and a patroni topology with --failure-domain host. An endpoint or a synchronous policy needs topology patroni. An endpoint needs a routable IP and two different ports. See command help."}
+		return &client.Error{Code: "invalid_request", Message: "Set a valid --name, exact --version, topology, and persistence mode. See command help."}
 	}
 	key, err := idempotencyKey(shared.key)
 	if err != nil {
@@ -108,11 +81,6 @@ func (a *app) create(cmd *cobra.Command, shared *createFlags, spec cluster.Creat
 	a.result.IdempotencyKey = key
 	if _, err := fmt.Fprintln(a.stderr, "Idempotency key:", key); err != nil {
 		return &client.Error{Code: "local_error", Message: "Disclose the retry key failed; no create request was sent."}
-	}
-	if notice != "" {
-		if _, err := fmt.Fprintln(a.stderr, notice); err != nil {
-			return &client.Error{Code: "local_error", Message: "Display replication policy failed. No create request was sent."}
-		}
 	}
 	admission, err := a.api.Create(cmd.Context(), spec, key)
 	if err != nil {
@@ -176,23 +144,18 @@ func newMembersCommand(app *app) *cobra.Command {
 type clusterAction struct {
 	name, short string
 	reviewed    bool
-	// member is the help text of --member. An action without it takes no member.
-	member string
 }
 
 var clusterActions = []clusterAction{
 	{name: "stop", short: "Stop a cluster"},
 	{name: "start", short: "Start a cluster"},
-	{name: "renew-certificates", short: "Renew the native certificates of a Patroni cluster one member at a time"},
-	{name: "switchover", short: "Make a named Patroni member the leader", member: "Member ID of the Patroni member that becomes the leader"},
 	{name: "delete", short: "Delete a cluster", reviewed: true},
 	{name: "recover-setup", short: "Recover confirmed PostgreSQL setup failure", reviewed: true},
-	{name: "rebuild-member", short: "Rebuild a failed Patroni member on its node and retain its old volume", reviewed: true, member: "Member ID of the failed Patroni member"},
 }
 
 func newActionCommand(app *app, action clusterAction) *cobra.Command {
 	var expected int64
-	var key, planToken, memberFlag string
+	var key, planToken string
 	var wait, yes bool
 	command := &cobra.Command{Use: action.name + " ID", Short: action.short, Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -202,13 +165,6 @@ func newActionCommand(app *app, action clusterAction) *cobra.Command {
 			}
 			if cmd.Flags().Changed("expected-revision") && expected < 1 {
 				return &client.Error{Code: "invalid_request", Message: "Use a positive expected revision."}
-			}
-			var member uuid.UUID
-			// A confirmed member rebuild names its member in the stored plan.
-			if action.name == "switchover" || (action.name == "rebuild-member" && planToken == "") {
-				if member, err = parseID(memberFlag, "Name the member with --member."); err != nil {
-					return err
-				}
 			}
 			var confirmation *cluster.ActionConfirmation
 			if action.reviewed && cmd.Flags().Changed("plan-token") && planToken == "" {
@@ -228,7 +184,7 @@ func newActionCommand(app *app, action clusterAction) *cobra.Command {
 			app.result.ExpectedRevision = expected
 			switch {
 			case action.reviewed && confirmation == nil:
-				plan, err := app.previewAction(cmd, action.name, id, member)
+				plan, err := app.previewAction(cmd, action.name, id)
 				if err != nil {
 					return err
 				}
@@ -256,21 +212,13 @@ func newActionCommand(app *app, action clusterAction) *cobra.Command {
 			if action.reviewed && !yes {
 				return &client.Error{Code: "confirmation_required", Message: fmt.Sprintf("Review the plan. Confirm with --yes --plan-token %s --expected-revision %d --idempotency-key %s.", confirmation.PlanToken, expected, key)}
 			}
-			var admission client.Admission
-			if action.name == "switchover" {
-				admission, err = app.api.Switchover(cmd.Context(), id, member, expected, key)
-			} else {
-				admission, err = app.api.Act(cmd.Context(), id, action.name, expected, key, confirmation)
-			}
+			admission, err := app.api.Act(cmd.Context(), id, action.name, expected, key, confirmation)
 			if err != nil {
 				return err
 			}
 			return app.admitted(cmd.Context(), admission, wait)
 		}}
 	flags := command.Flags()
-	if action.member != "" {
-		flags.StringVar(&memberFlag, "member", "", action.member)
-	}
 	flags.StringVar(&key, "idempotency-key", "", "Reuse a prior key with the same request for recovery")
 	flags.BoolVar(&wait, "wait", false, "Wait for terminal work within --timeout")
 	flags.Int64Var(&expected, "expected-revision", 0, "Positive desired revision this action replaces; read the current revision when omitted")
@@ -282,14 +230,12 @@ func newActionCommand(app *app, action clusterAction) *cobra.Command {
 }
 
 // previewAction reads the plan of a reviewed action. No action request is sent.
-func (a *app) previewAction(cmd *cobra.Command, action string, id, member uuid.UUID) (cluster.ActionPlan, error) {
+func (a *app) previewAction(cmd *cobra.Command, action string, id uuid.UUID) (cluster.ActionPlan, error) {
 	var plan cluster.ActionPlan
 	var err error
 	switch action {
 	case "recover-setup":
 		plan, err = a.api.PlanSetupRecovery(cmd.Context(), id)
-	case "rebuild-member":
-		plan, err = a.api.PlanMemberRebuild(cmd.Context(), id, member)
 	default:
 		plan, err = a.api.PlanDelete(cmd.Context(), id)
 	}
@@ -304,7 +250,7 @@ func (a *app) showPlan(action string, plan cluster.ActionPlan) error {
 	if _, err := fmt.Fprintf(a.stderr, "Action: %s\nCluster: %s (%s)\nData disposition: %s\nRetained volumes: %v\nDowntime: %s\nPlan token: %s\nPlan expires: %s\n", action, plan.ClusterName, plan.ClusterID, plan.DataDisposition, plan.RetainedVolumes, plan.Downtime, plan.PlanToken, plan.ExpiresAt.Format(time.RFC3339)); err != nil {
 		return &client.Error{Code: "local_error", Message: "Display the action plan failed. No action request was sent."}
 	}
-	// Delete acts on the whole cluster. The other reviewed actions name one member.
+	// Delete acts on the whole cluster. Setup recovery names one member.
 	if action != "delete" {
 		if _, err := fmt.Fprintf(a.stderr, "Member: %s\nResource: %s\n", plan.MemberID, plan.ResourceID); err != nil {
 			return &client.Error{Code: "local_error", Message: "Display the recovery target failed. No action request was sent."}
@@ -328,7 +274,7 @@ func (a *app) desiredRevision(cmd *cobra.Command, id uuid.UUID) (int64, error) {
 func newScaleCommand(app *app) *cobra.Command {
 	var expected int64
 	var replicas int
-	var key, planToken, removed string
+	var key, planToken string
 	var wait, yes bool
 	command := &cobra.Command{Use: "scale ID", Short: "Set how many replicas a cluster runs beside its primary", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -350,15 +296,8 @@ func newScaleCommand(app *app) *cobra.Command {
 					return err
 				}
 			}
-			// Removing a member is destructive, so it is shown and confirmed first. A Patroni
-			// removal names its member. A Redis removal scales to zero.
-			var member uuid.UUID
-			if removed != "" {
-				if member, err = parseID(removed, "Use a nonzero member UUID."); err != nil {
-					return err
-				}
-			}
-			removal := replicas == 0 || member != uuid.Nil
+			// Removing a replica is destructive, so it is shown and confirmed first.
+			removal := replicas == 0
 			var confirmation *cluster.ActionConfirmation
 			if removal && planToken != "" {
 				parsed, err := parseID(planToken, "Use a nonzero scale-down plan token.")
@@ -367,7 +306,7 @@ func newScaleCommand(app *app) *cobra.Command {
 				}
 				confirmation = &cluster.ActionConfirmation{PlanToken: parsed, Confirm: true, DataDisposition: "retain"}
 			} else if removal {
-				plan, err := app.api.PlanScaleDown(cmd.Context(), id, member)
+				plan, err := app.api.PlanScaleDown(cmd.Context(), id)
 				if err != nil {
 					return err
 				}
@@ -396,12 +335,11 @@ func newScaleCommand(app *app) *cobra.Command {
 			return app.admitted(cmd.Context(), admission, wait)
 		}}
 	flags := command.Flags()
-	flags.IntVar(&replicas, "replicas", 0, "How many replicas to run beside the primary: 0 or 1 for Redis, 2 to 4 for Patroni (one more member per scale)")
+	flags.IntVar(&replicas, "replicas", 0, "How many replicas to run beside the primary: 0 or 1 (Redis only)")
 	flags.StringVar(&key, "idempotency-key", "", "Reuse a prior key with the same request for recovery")
 	flags.BoolVar(&wait, "wait", false, "Wait for terminal work within --timeout")
 	flags.Int64Var(&expected, "expected-revision", 0, "Positive desired revision this scale replaces; read the current revision when omitted")
 	flags.BoolVar(&yes, "yes", false, "Confirm the displayed replica removal")
 	flags.StringVar(&planToken, "plan-token", "", "Retry the original removal plan with its expected revision and idempotency key")
-	flags.StringVar(&removed, "member", "", "Patroni member UUID to remove when --replicas is one less than now")
 	return command
 }

@@ -38,6 +38,8 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 			return fmt.Errorf("%w: the Hello of node %s does not match the boot and journal generation of its session", ErrUnsupportedMessage, peer.NodeID)
 		}
 		return r.Store.RecordAgentSession(ctx, peer.InstallationID, peer.NodeID, sessionID, value.Hello)
+	case *agentv1.AgentMessage_RouteAck:
+		return r.Store.RecordAppRouteAck(ctx, peer.InstallationID, peer.NodeID, sessionID, value.RouteAck)
 	case *agentv1.AgentMessage_Heartbeat:
 		return r.Store.RecordAgentHeartbeat(ctx, peer.InstallationID, peer.NodeID, sessionID, value.Heartbeat)
 	case *agentv1.AgentMessage_TerminalResult:

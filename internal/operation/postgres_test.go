@@ -50,12 +50,10 @@ func TestPostgresContainerRequiresBoundCredentialConfiguration(t *testing.T) {
 			p.Postgres.ApplicationCredentialId = p.Postgres.SuperuserCredentialId
 			c.Input.Secrets[1].CredentialId = p.Postgres.SuperuserCredentialId
 		},
-		// Standalone PostgreSQL has no replicas, so it names no replication credential.
-		"replication identity": func(c *agentv1.Command, p *agentv1.EnsureContainer) {
-			p.Postgres.ReplicationCredentialId, p.Postgres.ReplicationCredentialVersion = uuid.NewString(), 1
-			c.Input.Secrets = append(c.Input.Secrets, &agentv1.SecretReference{CredentialId: p.Postgres.ReplicationCredentialId, Version: 1, Purpose: "replication"})
+		// PostgreSQL binds exactly its superuser and application credentials.
+		"extra credential": func(c *agentv1.Command, p *agentv1.EnsureContainer) {
+			c.Input.Secrets = append(c.Input.Secrets, &agentv1.SecretReference{CredentialId: uuid.NewString(), Version: 1, Purpose: "replication"})
 		},
-		"synchronous replication":  func(_ *agentv1.Command, p *agentv1.EnsureContainer) { p.Postgres.SynchronousReplication = true },
 		"zero application version": func(_ *agentv1.Command, p *agentv1.EnsureContainer) { p.Postgres.ApplicationCredentialVersion = 0 },
 		"negative admin version":   func(_ *agentv1.Command, p *agentv1.EnsureContainer) { p.Postgres.SuperuserCredentialVersion = -1 },
 		"missing references":       func(c *agentv1.Command, _ *agentv1.EnsureContainer) { c.Input.Secrets = nil },

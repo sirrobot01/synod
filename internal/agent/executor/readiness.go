@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"time"
@@ -39,9 +38,6 @@ func (e *Executor) readiness(ctx context.Context, command *agentv1.Command, secr
 		})
 	}
 	endpoint := engine.Endpoint{Address: p.Address, Port: uint16(p.Port), Database: p.Database, Role: p.Role, PostgresRole: p.PostgresRole}
-	if settings := p.PostgresTls; settings != nil {
-		endpoint.PostgresTLS = &engine.PostgresTLS{RootCAPEM: bytes.Clone(settings.RootCaPem), ServerName: settings.ServerName}
-	}
 	if check := p.RedisReplication; check != nil {
 		endpoint.RedisReplication = &engine.RedisReplicationCheck{ExpectedRole: check.ExpectedRole}
 		if check.Upstream != nil {
@@ -82,10 +78,6 @@ func readinessResult(command *agentv1.Command, observed engine.Observation) (run
 		NativeOperationId: "readiness:" + command.CommandId,
 		State:             readyState,
 	}}}
-	// Role any reports the observed role, so completion can prove exactly one writer.
-	if command.Input.GetCheckReadiness().GetPostgresRole() == "any" && observed.Postgres != nil {
-		result.Effects[0].State = readyState + "_" + observed.Postgres.Role
-	}
 	if observed.Healthy() {
 		return result, nil
 	}

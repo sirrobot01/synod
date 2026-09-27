@@ -91,11 +91,8 @@ func (s *Store) BeginCapacityProbe(ctx context.Context, installationID, nodeID, 
 		return probe, err
 	}
 	var policyRevision int64
-	if err := tx.QueryRow(ctx, `SELECT revision FROM node_placement_policies WHERE installation_id=$1 AND node_id=$2 FOR SHARE`, installationID, nodeID).Scan(&policyRevision); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Placement excludes a node with no policy, so a probe would prove nothing.
-			return probe, &AdmissionError{Code: NotFound}
-		}
+	// Revision zero collects facts for approval. It grants no placement authority.
+	if err := tx.QueryRow(ctx, `SELECT revision FROM node_placement_policies WHERE installation_id=$1 AND node_id=$2 FOR SHARE`, installationID, nodeID).Scan(&policyRevision); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return probe, admissionError(err)
 	}
 	var previous int64
@@ -248,22 +245,40 @@ func (s *Store) ReadNodePlacementPolicy(ctx context.Context, installationID, nod
 	return policy, nil
 }
 
-// ReadNodeCapacityReport answers the latest capacity report an agent sent.
+// ReadNodeCapacityReport returns fresh facts from the current authenticated session.
 func (s *Store) ReadNodeCapacityReport(ctx context.Context, installationID, nodeID uuid.UUID) (*placement.CapacityReport, error) {
 	if installationID == uuid.Nil || nodeID == uuid.Nil {
 		return nil, &AdmissionError{Code: InvalidRequest}
 	}
-	var reportBytes []byte
-	err := s.pool.QueryRow(ctx, `SELECT report_bytes FROM node_capacity WHERE installation_id=$1 AND node_id=$2`, installationID, nodeID).Scan(&reportBytes)
-	if errors.Is(err, pgx.ErrNoRows) || len(reportBytes) == 0 {
+	var reportBytes, probeBytes, helloBytes []byte
+	var session uuid.UUID
+	var now time.Time
+	err := s.pool.QueryRow(ctx, `SELECT c.report_bytes,c.probe_bytes,p.session_id,s.hello_bytes,clock_timestamp()
+ FROM node_capacity c JOIN agent_presence p USING(installation_id,node_id)
+ JOIN agent_sessions s USING(installation_id,node_id,session_id)
+ JOIN nodes n ON n.installation_id=c.installation_id AND n.id=c.node_id
+ WHERE c.installation_id=$1 AND c.node_id=$2 AND n.revoked_at IS NULL AND NOT p.recovery_required
+ AND p.last_seen_at>clock_timestamp()-interval '20 seconds'`, installationID, nodeID).Scan(&reportBytes, &probeBytes, &session, &helloBytes, &now)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, admissionError(err)
 	}
+	if len(reportBytes) == 0 {
+		return nil, nil
+	}
 	var report placement.CapacityReport
-	if err := json.Unmarshal(reportBytes, &report); err != nil {
-		return nil, &AdmissionError{Code: DependencyUnavailable, Cause: err}
+	var probe placement.CapacityProbe
+	var hello agentv1.Hello
+	if json.Unmarshal(reportBytes, &report) != nil || json.Unmarshal(probeBytes, &probe) != nil || proto.Unmarshal(helloBytes, &hello) != nil || report.Validate() != nil {
+		return nil, &AdmissionError{Code: DependencyUnavailable}
+	}
+	if report.InstallationID != installationID || report.NodeID != nodeID || probe.InstallationID != installationID || probe.NodeID != nodeID ||
+		report.ProbeID != probe.ID || report.ProbeRevision != probe.Revision || report.SessionID != session || probe.SessionID != session ||
+		report.BootID != probe.BootID || report.JournalGeneration != probe.JournalGeneration || report.BootID.String() != hello.BootId || report.JournalGeneration.String() != hello.JournalGeneration ||
+		probe.IssuedAt.After(now) || !probe.ValidUntil.After(now) || probe.ValidUntil.After(probe.IssuedAt.Add(placement.CapacityAge)) {
+		return nil, nil
 	}
 	return &report, nil
 }

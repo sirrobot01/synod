@@ -43,13 +43,6 @@ func TestBootstrapWritesWhatAControllerNeeds(t *testing.T) {
 	if authority == nil {
 		t.Fatal("no certificate authority")
 	}
-	// The native Patroni CA loads under the same installation and refuses the control-plane profile.
-	if _, err := pki.LoadPatroniCA(id, []byte(readFile(t, dir, "patroni-ca.crt")), []byte(readFile(t, dir, "patroni-ca.key"))); err != nil {
-		t.Fatalf("the Patroni CA it wrote does not load: %v", err)
-	}
-	if _, err := pki.LoadCA(id, []byte(readFile(t, dir, "patroni-ca.crt")), []byte(readFile(t, dir, "patroni-ca.key"))); err == nil {
-		t.Fatal("the Patroni CA loaded as the control-plane CA")
-	}
 	// The controller certificate is signed by that CA and carries the controller role.
 	block, _ := pem.Decode([]byte(readFile(t, dir, "agent-tls.crt")))
 	if block == nil {
@@ -94,7 +87,7 @@ func TestBootstrapKeepsPrivateMaterialPrivate(t *testing.T) {
 	if err := writeMaterial(dir, "", &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"ca.key", "patroni-ca.key", "agent-tls.key", "secret.key"} {
+	for _, name := range []string{"ca.key", "agent-tls.key", "secret.key"} {
 		info, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatal(err)
@@ -114,12 +107,12 @@ func TestBootstrapRefusesToReplaceMaterial(t *testing.T) {
 	if err := writeMaterial(dir, "", &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	before, patroniBefore := readFile(t, dir, "ca.crt"), readFile(t, dir, "patroni-ca.crt")
+	before := readFile(t, dir, "ca.crt")
 	if err := writeMaterial(dir, "", &bytes.Buffer{}); err == nil {
 		t.Fatal("a rerun replaced installation material")
 	}
-	if readFile(t, dir, "ca.crt") != before || readFile(t, dir, "patroni-ca.crt") != patroniBefore {
-		t.Fatal("a refused rerun still changed a CA")
+	if readFile(t, dir, "ca.crt") != before {
+		t.Fatal("a refused rerun still changed the CA")
 	}
 }
 
@@ -183,8 +176,6 @@ func TestServerInitCommand(t *testing.T) {
 		"--address", "192.168.1.100",
 		"--no-container",
 		"--systemd-dir", sysDir,
-		"--patroni-image", "ghcr.io/sirrobot01/patroni@sha256:1111111111111111111111111111111111111111111111111111111111111111",
-		"--etcd-image", "quay.io/coreos/etcd@sha256:2222222222222222222222222222222222222222222222222222222222222222",
 	})
 
 	if err := cmd.Execute(); err != nil {
@@ -205,7 +196,7 @@ func TestServerInitCommand(t *testing.T) {
 
 	// Verify file permissions for secret files.
 	secretFiles := []string{
-		"ca.key", "patroni-ca.key", "agent-tls.key", "api-ca.key", "api.key",
+		"ca.key", "agent-tls.key", "api-ca.key", "api.key",
 		"secret.key", "admin.token", "metadata.password", "controller.json",
 	}
 	for _, name := range secretFiles {
@@ -262,12 +253,6 @@ func TestServerInitCommand(t *testing.T) {
 	}
 	if cfg.AgentListen != "192.168.1.100:8444" {
 		t.Errorf("cfg.AgentListen = %q, want 192.168.1.100:8444", cfg.AgentListen)
-	}
-	if cfg.PatroniImage != "ghcr.io/sirrobot01/patroni@sha256:1111111111111111111111111111111111111111111111111111111111111111" {
-		t.Errorf("cfg.PatroniImage = %q", cfg.PatroniImage)
-	}
-	if cfg.EtcdImage != "quay.io/coreos/etcd@sha256:2222222222222222222222222222222222222222222222222222222222222222" {
-		t.Errorf("cfg.EtcdImage = %q", cfg.EtcdImage)
 	}
 }
 

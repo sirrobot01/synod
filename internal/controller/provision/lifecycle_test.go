@@ -33,16 +33,9 @@ func (f *fixture) act(t *testing.T, apiOperation string) operation.Claim {
 		},
 		RequestID: uuid.NewString(), ClusterID: f.claim.ClusterID, ExpectedRevision: found.DesiredRevision,
 	}
-	// A Redis scale asks for its one replica, and a retry asks again. A Patroni scale adds a member.
+	// A Redis scale asks for its one replica, and a retry asks again.
 	if apiOperation == postgres.ScaleClusterAPIOperation {
 		request.Replicas = new(1)
-		if found.Spec.PostgreSQL != nil && found.Spec.PostgreSQL.Topology == "patroni" {
-			members, err := f.store.ReadClusterMembers(t.Context(), f.claim.InstallationID, f.claim.ClusterID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			request.Replicas = new(len(members))
-		}
 	}
 	if apiOperation == postgres.DeleteClusterAPIOperation {
 		plan, err := f.store.PreviewClusterDelete(t.Context(), f.claim.InstallationID, f.claim.ClusterID, "integration")

@@ -82,7 +82,6 @@ func TestPolicyRejectsInvalidInput(t *testing.T) {
 		"no node":           func(p *placement.NodePolicy) { p.NodeID = uuid.Nil },
 		"other node":        func(p *placement.NodePolicy) { p.NodeID = uuid.New() },
 		"unknown engine":    func(p *placement.NodePolicy) { p.Engines[0].Engine = "sqlite" },
-		"no engine":         func(p *placement.NodePolicy) { p.Engines = nil },
 		"unknown machine":   func(p *placement.NodePolicy) { p.Architecture = "riscv" },
 		"no headroom":       func(p *placement.NodePolicy) { p.Headroom.DiskBytes = 0 },
 		"negative headroom": func(p *placement.NodePolicy) { p.Headroom.CPUMillis = -1 },
@@ -98,9 +97,9 @@ func TestPolicyRejectsInvalidInput(t *testing.T) {
 
 func TestCapacityProbeBindsTheCurrentSession(t *testing.T) {
 	s, installation, node, session := capacityFixture(t)
-	// A node with no policy cannot prove anything, so it gets no challenge.
-	if _, err := s.BeginCapacityProbe(t.Context(), installation, node, session); err == nil {
-		t.Fatal("a node with no policy issued a probe")
+	initial, err := s.BeginCapacityProbe(t.Context(), installation, node, session)
+	if err != nil || initial.PolicyRevision != 0 || initial.Revision != 1 {
+		t.Fatalf("initial facts probe: %+v %v", initial, err)
 	}
 	policy := testPolicy(installation, node)
 	revision, err := s.PutNodePlacementPolicy(t.Context(), policy, 0)
@@ -111,7 +110,7 @@ func TestCapacityProbeBindsTheCurrentSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if probe.ID == uuid.Nil || probe.Revision != 1 || probe.SessionID != session || probe.PolicyRevision != revision {
+	if probe.ID == uuid.Nil || probe.Revision != 2 || probe.SessionID != session || probe.PolicyRevision != revision {
 		t.Fatalf("probe %+v", probe)
 	}
 	if !probe.ExpiresAt.Equal(probe.IssuedAt.Add(placement.ProbeWindow)) || !probe.ValidUntil.Equal(probe.IssuedAt.Add(placement.CapacityAge)) {
@@ -119,7 +118,7 @@ func TestCapacityProbeBindsTheCurrentSession(t *testing.T) {
 	}
 	// A second challenge advances the revision and replaces the first.
 	next, err := s.BeginCapacityProbe(t.Context(), installation, node, session)
-	if err != nil || next.Revision != 2 || next.ID == probe.ID {
+	if err != nil || next.Revision != 3 || next.ID == probe.ID {
 		t.Fatalf("second probe %+v: %v", next, err)
 	}
 	if err := s.RecordNodeCapacity(t.Context(), installation, node, testReport(probe, policy)); !errors.Is(err, ErrProbeExpired) {
@@ -250,4 +249,86 @@ func (s *Store) storeProbe(t *testing.T, nodeID uuid.UUID, probe placement.Capac
 	}
 	_, err = s.pool.Exec(t.Context(), `UPDATE node_capacity SET probe_bytes=$1 WHERE node_id=$2`, encoded, nodeID)
 	return err
+}
+
+func TestGenericOnlyNodePolicyNeedsNoDatabaseEngine(t *testing.T) {
+	s, installation, node, _ := capacityFixture(t)
+	policy := testPolicy(installation, node)
+	policy.Engines = nil
+	if _, err := s.PutNodePlacementPolicy(t.Context(), policy, 0); err != nil {
+		t.Fatalf("generic-only policy: %v", err)
+	}
+}
+
+func TestCapacityFactsStayBoundToTheCurrentSessionAndApproval(t *testing.T) {
+	s, installation, node, session := capacityFixture(t)
+	policy := testPolicy(installation, node)
+	probe, err := s.BeginCapacityProbe(t.Context(), installation, node, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordNodeCapacity(t.Context(), installation, node, testReport(probe, policy)); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := s.ReadNodeCapacityReport(t.Context(), installation, node)
+	if err != nil || facts == nil {
+		t.Fatalf("initial facts: %+v %v", facts, err)
+	}
+	aged := probe
+	aged.IssuedAt = aged.IssuedAt.Add(-placement.CapacityAge)
+	aged.ExpiresAt = aged.ExpiresAt.Add(-placement.CapacityAge)
+	aged.ValidUntil = aged.ValidUntil.Add(-placement.CapacityAge)
+	if err := s.storeProbe(t, node, aged); err != nil {
+		t.Fatal(err)
+	}
+	facts, err = s.ReadNodeCapacityReport(t.Context(), installation, node)
+	if err != nil || facts != nil {
+		t.Fatalf("expired facts survived: %+v %v", facts, err)
+	}
+	if err := s.storeProbe(t, node, probe); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := s.ReadPlacementSnapshot(t.Context(), installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := placementRequest(installation, uuid.New(), uuid.New(), policy, nil)
+	if _, err := placement.Plan(request, snapshot); !errors.Is(err, placement.ErrUnsatisfied) {
+		t.Fatalf("unapproved placement: %v", err)
+	}
+	if _, err := s.PutNodePlacementPolicy(t.Context(), policy, 0); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = s.ReadPlacementSnapshot(t.Context(), installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := placement.Plan(request, snapshot); !errors.Is(err, placement.ErrUnsatisfied) {
+		t.Fatalf("old policy evidence placed work: %v", err)
+	}
+	probe, err = s.BeginCapacityProbe(t.Context(), installation, node, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordNodeCapacity(t.Context(), installation, node, testReport(probe, policy)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = s.ReadPlacementSnapshot(t.Context(), installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := placement.Plan(request, snapshot); err != nil {
+		t.Fatalf("approved fresh placement: %v", err)
+	}
+	presence, err := s.GetAgentPresence(t.Context(), installation, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordAgentSession(t.Context(), installation, node, uuid.New(), presence.Hello); err != nil {
+		t.Fatal(err)
+	}
+	facts, err = s.ReadNodeCapacityReport(t.Context(), installation, node)
+	if err != nil || facts != nil {
+		t.Fatalf("old session facts survived: %+v %v", facts, err)
+	}
 }

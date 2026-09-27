@@ -73,7 +73,11 @@ func startController(t *testing.T, f *fixture, handle func(context.Context, cont
 		pairs[role] = pair
 	}
 	fixture := &controllerFixture{node: node, events: make(chan *agentv1.AgentMessage, 256)}
-	fixture.server, err = controlstream.New(controlstream.Config{InstallationID: installation, Capabilities: []string{controlstream.CommandInspectionCapability}, TLS: &tls.Config{MinVersion: tls.VersionTLS12, ClientCAs: roots, Certificates: []tls.Certificate{pairs[pki.Controller]}}, HeartbeatInterval: 50 * time.Millisecond, StaleAfter: 5 * time.Second, Authorize: func(_ context.Context, i, n uuid.UUID, leaf *x509.Certificate) error {
+	capabilities := []string{controlstream.CommandInspectionCapability}
+	if f.e.options.Router != nil {
+		capabilities = append(capabilities, controlstream.RouterCapability)
+	}
+	fixture.server, err = controlstream.New(controlstream.Config{InstallationID: installation, Capabilities: capabilities, TLS: &tls.Config{MinVersion: tls.VersionTLS12, ClientCAs: roots, Certificates: []tls.Certificate{pairs[pki.Controller]}}, HeartbeatInterval: 50 * time.Millisecond, StaleAfter: 5 * time.Second, Authorize: func(_ context.Context, i, n uuid.UUID, leaf *x509.Certificate) error {
 		if i != installation || n != node || !leaf.Equal(pairs[pki.Agent].Leaf) {
 			return errors.New("unexpected TLS identity")
 		}
@@ -103,7 +107,7 @@ func startController(t *testing.T, f *fixture, handle func(context.Context, cont
 	served := make(chan error, 1)
 	go func() { served <- fixture.server.Serve(listener) }()
 	t.Cleanup(func() { fixture.server.Stop(); <-served })
-	fixture.client, err = transport.New(transport.Config{Endpoints: []string{listener.Addr().String()}, TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{pairs[pki.Agent]}}, Hello: &agentv1.Hello{InstallationId: installation.String(), NodeId: node.String(), BootId: uuid.NewString(), JournalGeneration: uuid.NewString(), Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, ActivePayloadVersions: []uint32{1}, Capabilities: []string{controlstream.CommandInspectionCapability}}, BackoffMin: 10 * time.Millisecond, BackoffMax: 30 * time.Millisecond, Handle: f.e.Handle})
+	fixture.client, err = transport.New(transport.Config{Endpoints: []string{listener.Addr().String()}, TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{pairs[pki.Agent]}}, Hello: &agentv1.Hello{InstallationId: installation.String(), NodeId: node.String(), BootId: uuid.NewString(), JournalGeneration: uuid.NewString(), Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, ActivePayloadVersions: []uint32{1}, Capabilities: capabilities}, BackoffMin: 10 * time.Millisecond, BackoffMax: 30 * time.Millisecond, Handle: f.e.Handle})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -324,7 +324,7 @@ describe("cluster collection reads", () => {
     { desired_lifecycle: ["running"] }, { observed_lifecycle: ["running"] }, { created_at: "invalid" },
     { updated_at: "2099-02-31T10:00:00Z" }, { deleted_at: undefined }, { spec: { name: "partial", engine: "postgres" } },
     { spec: { ...storedCluster.spec, redis: {} } },
-    { spec: { ...storedCluster.spec, postgresql: { version: "17.11", topology: "patroni" } } },
+    { spec: { ...storedCluster.spec, postgresql: { version: "17.11", topology: "replicas" } } },
   ])("rejects malformed stored cluster %j", async (change) => {
     respond({ items: [{ ...storedCluster, ...change }], next_cursor: "" });
     await expect(api.clusters()).rejects.toMatchObject({ detail: { code: "invalid_response" } });
@@ -372,20 +372,6 @@ describe("cluster collection reads", () => {
   });
 });
 
-
-describe("stored PostgreSQL replication policy", () => {
-  it.each(["", "asynchronous", "synchronous"])("preserves %s", async (policy) => {
-    const configured = { ...storedCluster, spec: { ...storedCluster.spec,
-      postgresql: { ...storedCluster.spec.postgresql, replication_policy: policy } } };
-    respond(configured);
-    expect(await api.cluster(id)).toEqual(configured);
-  });
-  it.each(["automatic", true, 1, null])("rejects invalid policy %s", async (policy) => {
-    respond({ ...storedCluster, spec: { ...storedCluster.spec,
-      postgresql: { ...storedCluster.spec.postgresql, replication_policy: policy } } });
-    await expect(api.cluster(id)).rejects.toMatchObject({ detail: { code: "invalid_response" } });
-  });
-});
 
 describe("PostgreSQL recovery requests", () => {
   it("binds the setup recovery preview to a member, resource, and volume", async () => {

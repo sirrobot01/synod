@@ -8,10 +8,11 @@ import (
 	"strconv"
 	"testing"
 
+	"time"
+
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
 	"github.com/moby/moby/client"
-	"time"
 
 	"github.com/sirrobot01/synod/internal/agent/capacity"
 	"github.com/sirrobot01/synod/internal/agent/journal"
@@ -250,27 +251,5 @@ func TestCapacityFloorDoesNotBlockRecovery(t *testing.T) {
 	record, err := f.e.journal.Get(command.CommandId)
 	if err != nil || record.Result == nil || record.Result.State != "succeeded" {
 		t.Fatalf("full pool stranded prior effects: %+v %v", record.Result, err)
-	}
-}
-
-func TestPatroniStartCapacityAdmission(t *testing.T) {
-	host := pool(t, 8000000)
-	command := &agentv1.Command{Input: &agentv1.CommandInput{Payload: &agentv1.CommandInput_StartPatroniMember{StartPatroniMember: &agentv1.StartPatroniMember{
-		AllowInitialization: true, Container: &agentv1.EnsureContainer{MemoryBytes: 512 << 20, Postgres: &agentv1.PostgresContainerConfig{Patroni: &agentv1.PatroniContainerConfig{RequiredFreeBytes: 1 << 62}}},
-	}}}}
-	e := guard(t, host, 0)
-	if err := e.precheck(command); !errors.Is(err, capacity.ErrCapacityUnavailable) {
-		t.Fatal("initial copy allowance ignored", err)
-	}
-	command.Input.GetStartPatroniMember().AllowInitialization = false
-	if err := e.precheck(command); err != nil {
-		t.Fatal("restart charged initial copy space", err)
-	}
-	if err := guard(t, host, 1<<62).precheck(command); !errors.Is(err, capacity.ErrCapacityUnavailable) {
-		t.Fatal("restart ignored host floor", err)
-	}
-	command.Input.GetStartPatroniMember().Container.MemoryBytes = 1 << 62
-	if err := e.precheck(command); !errors.Is(err, capacity.ErrCapacityUnavailable) {
-		t.Fatal("native start ignored memory pressure", err)
 	}
 }

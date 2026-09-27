@@ -75,7 +75,7 @@ type CapacityProbe struct {
 	BootID            uuid.UUID `json:"boot_id"`
 	JournalGeneration uuid.UUID `json:"journal_generation"`
 	Revision          int64     `json:"revision"`
-	PolicyRevision    int64     `json:"policy_revision"`
+	PolicyRevision    int64     `json:"policy_revision"` // Zero collects facts before approval.
 	IssuedAt          time.Time `json:"issued_at"`
 	ExpiresAt         time.Time `json:"expires_at"`
 	ValidUntil        time.Time `json:"valid_until"`
@@ -147,9 +147,14 @@ type Resource struct {
 	Engine           string      `json:"engine"`
 	Version          string      `json:"version"`
 	Architecture     string      `json:"architecture"`
-	RuntimeVersion   string      `json:"runtime_version"`
-	StorageID        string      `json:"storage_id"`
-	NodeAffinity     uuid.UUID   `json:"node_affinity"`
+	// SupportedArchitectures comes from image inspection for a generic container.
+	SupportedArchitectures []string    `json:"supported_architectures,omitempty"`
+	PreferredNodes         []uuid.UUID `json:"preferred_nodes,omitempty"`
+	AllowedNodes           []uuid.UUID `json:"allowed_nodes,omitempty"`
+	ExcludedNodes          []uuid.UUID `json:"excluded_nodes,omitempty"`
+	RuntimeVersion         string      `json:"runtime_version"`
+	StorageID              string      `json:"storage_id"`
+	NodeAffinity           uuid.UUID   `json:"node_affinity"`
 	// Colocate names another resource of the same request. Both resources go to one node.
 	Colocate uuid.UUID         `json:"colocate,omitzero"`
 	Labels   map[string]string `json:"labels"`
@@ -157,11 +162,13 @@ type Resource struct {
 	Ports    []Port            `json:"ports"`
 }
 
-// Group names resources that must spread across a failure domain.
+// Group names resources that share a failure-domain spread rule.
 type Group struct {
 	ID        string      `json:"id"`
 	DomainKey string      `json:"domain_key"`
 	Members   []uuid.UUID `json:"members"`
+	// Soft prefers distinct domains but permits reuse when capacity needs it.
+	Soft bool `json:"soft,omitempty"`
 }
 
 // Request is one immutable placement request for one operation revision.

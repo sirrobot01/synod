@@ -45,6 +45,8 @@ type Config struct {
 	// Session is delivered first on each connection. Replay durable results with Send.
 	// Callbacks must honor cancellation. They must not stop database processes on disconnect.
 	Handle func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error)
+	// Observations returns an in-memory snapshot. It must not block on I/O.
+	Observations func() []*agentv1.Observation
 }
 
 type connection struct {
@@ -291,6 +293,7 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 		tick := time.NewTicker(session.HeartbeatInterval.AsDuration())
 		defer tick.Stop()
 		var sequence uint64
+		observationOffset := 0
 		for {
 			var message *agentv1.AgentMessage
 			select {
@@ -300,6 +303,22 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 			case <-tick.C:
 				sequence++
 				message = &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Heartbeat{Heartbeat: &agentv1.Heartbeat{Sequence: sequence, ObservedAt: timestamppb.Now()}}}
+				if c.config.Observations != nil {
+					heartbeat := message.GetHeartbeat()
+					observations := c.config.Observations()
+					for range observations {
+						observationOffset %= len(observations)
+						observation := observations[observationOffset]
+						heartbeat.Observations = append(heartbeat.Observations, observation)
+						if proto.Size(message) > active.maxBytes {
+							heartbeat.Observations = heartbeat.Observations[:len(heartbeat.Observations)-1]
+							if len(heartbeat.Observations) != 0 {
+								break
+							}
+						}
+						observationOffset++
+					}
+				}
 			}
 			if err := stream.Send(message); err != nil {
 				done <- "send_failed"

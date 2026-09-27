@@ -2,12 +2,13 @@ package postgres
 
 import (
 	"context"
-	"github.com/sirrobot01/synod/internal/operation"
-	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"io"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/sirrobot01/synod/internal/operation"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"

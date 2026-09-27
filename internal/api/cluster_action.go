@@ -31,9 +31,8 @@ func (s *Server) clusterAction(apiOperation string) http.HandlerFunc {
 		}
 		var confirmation *cluster.ActionConfirmation
 		var replicas *int
-		var memberID uuid.UUID
 		switch apiOperation {
-		case postgres.DeleteClusterAPIOperation, postgres.RecoverSetupAPIOperation, postgres.RebuildMemberAPIOperation:
+		case postgres.DeleteClusterAPIOperation, postgres.RecoverSetupAPIOperation:
 			if !s.decodeJSON(w, r, &confirmation) {
 				return
 			}
@@ -58,19 +57,6 @@ func (s *Server) clusterAction(apiOperation string) http.HandlerFunc {
 				return
 			}
 			replicas, confirmation = input.Replicas, input.ActionConfirmation
-		case postgres.SwitchoverAPIOperation:
-			// Patroni elects its leader, so the operator names the member that takes over.
-			var input *struct {
-				MemberID uuid.UUID `json:"member_id"`
-			}
-			if !s.decodeJSON(w, r, &input) {
-				return
-			}
-			if input == nil || input.MemberID == uuid.Nil {
-				s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Name the member_id that becomes the leader.", uuid.Nil)
-				return
-			}
-			memberID = input.MemberID
 		default:
 			var input *struct{}
 			if !s.decodeJSON(w, r, &input) {
@@ -91,7 +77,6 @@ func (s *Server) clusterAction(apiOperation string) http.HandlerFunc {
 			ExpectedRevision: expected,
 			Confirmation:     confirmation,
 			Replicas:         replicas,
-			MemberID:         memberID,
 		})
 		if err != nil {
 			s.storeError(w, r, err)
@@ -115,38 +100,13 @@ func (s *Server) planClusterAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input *struct {
-		Action   string    `json:"action"`
-		MemberID uuid.UUID `json:"member_id"`
+		Action string `json:"action"`
 	}
 	if !s.decodeJSON(w, r, &input) {
 		return
 	}
-	if input == nil || (input.Action != "delete" && input.Action != "scale_down" && input.Action != "recover_setup" && input.Action != "rebuild_member") {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use action delete, scale_down, recover_setup, or rebuild_member.", uuid.Nil)
-		return
-	}
-	// Patroni elects its primary, so only the operator can name the failed member or the
-	// member a Patroni scale removes. Redis names its own replica.
-	if input.Action == "rebuild_member" && input.MemberID == uuid.Nil || input.Action != "rebuild_member" && input.Action != "scale_down" && input.MemberID != uuid.Nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use member_id with action rebuild_member, or with scale_down for a Patroni cluster.", uuid.Nil)
-		return
-	}
-	if input.Action == "scale_down" && input.MemberID != uuid.Nil {
-		plan, err := s.store.PreviewMemberRemoval(r.Context(), s.installationID, clusterID, input.MemberID, identity.actorID)
-		if err != nil {
-			s.storeError(w, r, err)
-			return
-		}
-		s.writeJSON(w, r, plan)
-		return
-	}
-	if input.Action == "rebuild_member" {
-		plan, err := s.store.PreviewMemberRebuild(r.Context(), s.installationID, clusterID, input.MemberID, identity.actorID)
-		if err != nil {
-			s.storeError(w, r, err)
-			return
-		}
-		s.writeJSON(w, r, plan)
+	if input == nil || (input.Action != "delete" && input.Action != "scale_down" && input.Action != "recover_setup") {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use action delete, scale_down, or recover_setup.", uuid.Nil)
 		return
 	}
 	preview := s.store.PreviewClusterDelete

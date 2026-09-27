@@ -591,8 +591,11 @@ func TestActiveMutationSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const clone = `INSERT INTO operations SELECT (jsonb_populate_record(NULL::operations,
-		to_jsonb(o)||jsonb_build_object('id',$1::text,'status','pending'))).* FROM operations o WHERE id=$2`
+	var columns string
+	if err := s.pool.QueryRow(t.Context(), `SELECT string_agg(quote_ident(column_name),',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema='public' AND table_name='operations' AND is_generated='NEVER'`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	clone := fmt.Sprintf(`INSERT INTO operations (%s) SELECT %s FROM (SELECT (jsonb_populate_record(NULL::operations,to_jsonb(o)||jsonb_build_object('id',$1::text,'status','pending'))).* FROM operations o WHERE id=$2) AS cloned`, columns, columns)
 	for _, status := range []operation.Status{operation.Pending, operation.Running, operation.Waiting, operation.Cancelling} {
 		if _, err := s.pool.Exec(t.Context(), `UPDATE operations SET status=$1 WHERE id=$2`, status, admitted.OperationID); err != nil {
 			t.Fatal(err)
@@ -842,30 +845,3 @@ func TestInvalidReadsAndRequest(t *testing.T) {
 // dropTimeout bounds one test database teardown. It exists to stop a hang, not to
 // assert how fast PostgreSQL drops a database under load.
 const dropTimeout = 60 * time.Second
-
-func TestPostgresReplicationPolicyPersistsAndBindsReplay(t *testing.T) {
-	s := testStore(t)
-	request := testRequest()
-	// Only Patroni replicates, so only a Patroni spec can wait for a replica.
-	request.Spec.PostgreSQL.Topology, request.Spec.PostgreSQL.FailureDomain = "patroni", "host"
-	request.Spec.PostgreSQL.ReplicationPolicy = "synchronous"
-	first, err := s.CreateCluster(t.Context(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	replay, err := s.CreateCluster(t.Context(), request)
-	if err != nil || !replay.Replayed || replay.OperationID != first.OperationID {
-		t.Fatalf("policy replay: %+v %v", replay, err)
-	}
-	found, err := s.GetCluster(t.Context(), request.Identity.InstallationID, first.ClusterID)
-	if err != nil || found.Spec.PostgreSQL.ReplicationPolicy != "synchronous" {
-		t.Fatalf("stored policy: %+v %v", found, err)
-	}
-	request.Spec.PostgreSQL.ReplicationPolicy = "asynchronous"
-	_, err = s.CreateCluster(t.Context(), request)
-	requireCode(t, err, IdempotencyConflict)
-	request.Spec.PostgreSQL.ReplicationPolicy = "unknown"
-	_, err = s.CreateCluster(t.Context(), request)
-	requireCode(t, err, InvalidRequest)
-	requireCounts(t, s, 1)
-}

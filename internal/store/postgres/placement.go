@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -204,13 +205,6 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 			return PlacementRecord{}, err
 		}
 		for _, credential := range intent.Credentials {
-			// A new version of a member's credential belongs to a member this request does not
-			// place. The transaction proves its prior version instead.
-			if credential.MemberID != uuid.Nil && credential.Version == 1 && !slices.ContainsFunc(request.Resources, func(resource placement.Resource) bool {
-				return resource.ID == credential.MemberID && (resource.Kind == "instance" || resource.Role == "etcd") && resource.Engine == "postgres"
-			}) {
-				return PlacementRecord{}, ErrCredentialConflict
-			}
 			referenced := false
 			for _, step := range plan.Steps {
 				if slices.ContainsFunc(step.Command.Input.Secrets, func(reference *agentv1.SecretReference) bool {
@@ -245,6 +239,15 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 		return PlacementRecord{}, admissionError(err)
 	}
 	defer tx.Rollback(ctx)
+	var operationKind string
+	if err := tx.QueryRow(ctx, `SELECT kind FROM operations WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.OperationID).Scan(&operationKind); err != nil {
+		return PlacementRecord{}, admissionError(err)
+	}
+	if strings.HasPrefix(operationKind, "app.") {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM apps WHERE installation_id=$1 AND id=$2 FOR UPDATE`, claim.InstallationID, claim.ClusterID); err != nil {
+			return PlacementRecord{}, admissionError(err)
+		}
+	}
 	if intent != nil {
 		if _, err := tx.Exec(ctx, `SELECT 1 FROM clusters WHERE installation_id=$1 AND id=$2 FOR UPDATE`, claim.InstallationID, claim.ClusterID); err != nil {
 			return PlacementRecord{}, admissionError(err)
@@ -315,17 +318,18 @@ func (s *Store) InstallPlacementPlan(ctx context.Context, claim operation.Claim,
 	if err != nil {
 		return PlacementRecord{}, err
 	}
+	if strings.HasPrefix(kind, "app.") {
+		if err := recordAppCopies(ctx, tx, claim, request, decision, plan); err != nil {
+			return PlacementRecord{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE operations SET failure_code=NULL WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.OperationID); err != nil {
+			return PlacementRecord{}, admissionError(err)
+		}
+	}
 	if err := recordMembers(ctx, tx, claim, request); err != nil {
 		return PlacementRecord{}, err
 	}
 	if intent != nil {
-		for _, credential := range intent.Credentials {
-			if credential.Version > 1 {
-				if err := priorVersion(ctx, tx, claim, credential); err != nil {
-					return PlacementRecord{}, err
-				}
-			}
-		}
 		if err := recordClusterIntentTx(ctx, tx, *intent, true); err != nil {
 			return PlacementRecord{}, err
 		}

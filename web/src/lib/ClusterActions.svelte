@@ -301,7 +301,7 @@
     {/if}
   </div>
   {#if standalonePostgres}
-    <p class="scale-note">Standalone PostgreSQL runs one node. Use the patroni topology for replicas and automatic failover. Setup recovery verifies native failure before it runs.</p>
+    <p class="scale-note">Standalone PostgreSQL runs one node. PostgreSQL replicas are not available yet. Setup recovery verifies native failure before it runs.</p>
   {/if}
   {#if cluster?.spec.engine === "redis"}
     <p class="scale-note">Desired replicas: {cluster.desired_replicas}. The supported range is zero to one with RDB, AOF, or combined persistence. Scaling requires a running desired state. This mode has no automatic failover.</p>

@@ -103,7 +103,7 @@ func (s *Store) RecordAgentSession(ctx context.Context, installationID, nodeID, 
 }
 
 // RecordAgentHeartbeat uses database receipt time for freshness and exact session scope.
-// Observations remain agent evidence. They do not prove workload health or ownership.
+// App health requires an allocated copy, a current session, and fresh port evidence.
 func (s *Store) RecordAgentHeartbeat(ctx context.Context, installationID, nodeID, sessionID uuid.UUID, heartbeat *agentv1.Heartbeat) error {
 	if installationID == uuid.Nil || nodeID == uuid.Nil || sessionID == uuid.Nil || heartbeat == nil || heartbeat.Sequence == 0 || heartbeat.Sequence > math.MaxInt64 || heartbeat.ObservedAt == nil || heartbeat.ObservedAt.CheckValid() != nil || proto.Size(heartbeat) > 256<<10 || len(heartbeat.Observations) > 1024 {
 		return &AdmissionError{Code: InvalidRequest}
@@ -152,6 +152,9 @@ func (s *Store) RecordAgentHeartbeat(ctx context.Context, installationID, nodeID
 	if _, err := tx.Exec(ctx, `UPDATE agent_presence SET heartbeat_sequence=$1,heartbeat_bytes=$2,last_seen_at=clock_timestamp()
  WHERE installation_id=$3 AND node_id=$4`, int64(heartbeat.Sequence), encoded, installationID, nodeID); err != nil {
 		return admissionError(err)
+	}
+	if err := recordAppObservations(ctx, tx, installationID, nodeID, sessionID, heartbeat.Observations); err != nil {
+		return err
 	}
 	return s.commitMetadata(ctx, tx)
 }

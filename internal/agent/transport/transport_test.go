@@ -802,3 +802,79 @@ func TestFatalMessageHandlingReconnectsAndRedacts(t *testing.T) {
 		})
 	}
 }
+
+func TestHeartbeatCarriesBoundedAppObservations(t *testing.T) {
+	received := make(chan *agentv1.AgentMessage, 1)
+	f := newFixture(t, func(_ context.Context, _ controlstream.Peer, message *agentv1.AgentMessage) error {
+		if message.GetHeartbeat() != nil {
+			select {
+			case received <- proto.Clone(message).(*agentv1.AgentMessage):
+			default:
+			}
+		}
+		return nil
+	}, func(c *controlstream.Config) { c.MaxMessageBytes = 1024 })
+	observation := &agentv1.Observation{ResourceId: uuid.NewString(), Lifecycle: "running", Health: "healthy", Ports: []*agentv1.PortBinding{{ContainerPort: 80, HostAddress: "0.0.0.0", HostPort: 32100, Transport: "tcp"}}}
+	client, err := transport.New(transport.Config{Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello, Observations: func() []*agentv1.Observation {
+		return []*agentv1.Observation{proto.Clone(observation).(*agentv1.Observation), {ResourceId: strings.Repeat("x", 2048)}}
+	}, Handle: func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) { return nil, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- client.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case message := <-received:
+		got := message.GetHeartbeat().Observations
+		if len(got) != 1 || !proto.Equal(got[0], observation) || proto.Size(message) > 1024 {
+			t.Fatalf("heartbeat observations: %v", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no observation reached the controller")
+	}
+}
+
+func TestHeartbeatRotatesObservationsAcrossFrames(t *testing.T) {
+	received := make(chan *agentv1.AgentMessage, 16)
+	f := newFixture(t, func(_ context.Context, _ controlstream.Peer, message *agentv1.AgentMessage) error {
+		if message.GetHeartbeat() != nil {
+			select {
+			case received <- message:
+			default:
+			}
+		}
+		return nil
+	}, func(c *controlstream.Config) { c.MaxMessageBytes = 1024 })
+	var observations []*agentv1.Observation
+	for range 5 {
+		observation := &agentv1.Observation{ResourceId: uuid.NewString(), Lifecycle: "running", Health: "healthy"}
+		for port := range 20 {
+			observation.Ports = append(observation.Ports, &agentv1.PortBinding{ContainerPort: uint32(80 + port), HostPort: uint32(32000 + port), HostAddress: "127.0.0.1", Transport: "tcp"})
+		}
+		observations = append(observations, observation)
+	}
+	client, err := transport.New(transport.Config{Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello, Observations: func() []*agentv1.Observation { return observations }, Handle: func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) { return nil, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	done := make(chan error, 1)
+	go func() { done <- client.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	seen := map[string]bool{}
+	for len(seen) < len(observations) {
+		select {
+		case message := <-received:
+			if proto.Size(message) > 1024 {
+				t.Fatal("heartbeat exceeds negotiated limit")
+			}
+			for _, observation := range message.GetHeartbeat().Observations {
+				seen[observation.ResourceId] = true
+			}
+		case <-ctx.Done():
+			t.Fatalf("observations starved: received %d of %d", len(seen), len(observations))
+		}
+	}
+}

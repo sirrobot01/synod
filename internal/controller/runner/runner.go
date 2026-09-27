@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
@@ -63,8 +62,6 @@ type Runner struct {
 	mu       sync.Mutex
 	workers  map[uuid.UUID]*worker.Worker
 	wg       sync.WaitGroup
-	// renewed is when the last certificate renewal sweep ran. Only the Run loop reads it.
-	renewed time.Time
 }
 
 // New checks the runner settings and applies defaults.
@@ -176,10 +173,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		} else if err := r.scan(ctx); err != nil && ctx.Err() == nil {
 			r.config.Logger.Warn("controller scan failed", "error", err.Error())
 		}
-		if time.Since(r.renewed) >= renewalSweep {
-			renewCertificates(ctx, r.config.Store, r.config.InstallationID, r.config.Logger, time.Now())
-			r.renewed = time.Now()
-		}
 		select {
 		case <-notices:
 		case <-ticker.C:
@@ -189,55 +182,6 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.wg.Wait()
 			return nil
 		}
-	}
-}
-
-// Native Patroni leaves last 30 days. Renewal starts when 10 days remain, so a failed renewal
-// has days of retries before any certificate expires.
-const (
-	renewalWindow = 10 * 24 * time.Hour
-	renewalAlarm  = 3 * 24 * time.Hour
-	renewalSweep  = 10 * time.Minute
-	renewalActor  = "synod-controller"
-)
-
-// renewalStore is the part of the Store that the renewal sweep uses.
-type renewalStore interface {
-	ListCertificateExpiries(ctx context.Context, installationID uuid.UUID) ([]postgres.CertificateExpiry, error)
-	AdmitClusterAction(ctx context.Context, request postgres.ClusterActionRequest) (postgres.Admission, error)
-}
-
-// renewCertificates admits a certificate renewal for each Patroni cluster whose members use a
-// certificate that expires within the renewal window. The key names the cluster revision, so
-// two controllers that race admit one operation.
-func renewCertificates(ctx context.Context, store renewalStore, installationID uuid.UUID, logger *slog.Logger, now time.Time) {
-	expiries, err := store.ListCertificateExpiries(ctx, installationID)
-	if err != nil {
-		if ctx.Err() == nil {
-			logger.Warn("read Patroni certificate expiries failed", "error", err.Error())
-		}
-		return
-	}
-	for _, each := range expiries {
-		remaining := each.ExpiresAt.Sub(now)
-		if remaining >= renewalWindow {
-			continue
-		}
-		if remaining < renewalAlarm {
-			logger.Warn("Patroni certificate expires soon", "cluster_id", each.ClusterID, "expires_at", each.ExpiresAt)
-		}
-		admission, err := store.AdmitClusterAction(ctx, postgres.ClusterActionRequest{
-			Identity: postgres.RequestIdentity{
-				InstallationID: installationID, ActorID: renewalActor, APIOperation: postgres.RenewCertificatesAPIOperation,
-				IdempotencyKey: "renew-" + each.ClusterID.String() + "-" + strconv.FormatInt(each.DesiredRevision, 10),
-			},
-			RequestID: uuid.NewString(), ClusterID: each.ClusterID, ExpectedRevision: each.DesiredRevision,
-		})
-		if err != nil {
-			logger.Warn("admit Patroni certificate renewal failed", "cluster_id", each.ClusterID, "expires_at", each.ExpiresAt, "error", err.Error())
-			continue
-		}
-		logger.Info("Patroni certificate renewal admitted", "cluster_id", each.ClusterID, "operation_id", admission.OperationID, "expires_at", each.ExpiresAt, "replayed", admission.Replayed)
 	}
 }
 

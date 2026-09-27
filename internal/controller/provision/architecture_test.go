@@ -87,34 +87,3 @@ func TestMixedArchitecturesReportUnsatisfiedPlacement(t *testing.T) {
 		t.Fatalf("create tried %s, want only the architecture with an image", f.decider.request.Resources[0].Architecture)
 	}
 }
-
-// A Patroni cluster never spans architectures: two amd64 nodes and one arm64 node hold no cluster.
-// Three arm64 nodes do, although amd64 comes first.
-func TestPatroniMembersShareOneArchitecture(t *testing.T) {
-	domains := [3][2]string{{"host-a", "192.0.2.10"}, {"host-b", "192.0.2.11"}, {"host-c", "192.0.2.12"}}
-	for _, test := range []struct {
-		name          string
-		architectures [3]string
-		want          error
-	}{
-		{"mixed nodes", [3]string{"amd64", "amd64", "arm64"}, placement.ErrUnsatisfied},
-		{"arm64 nodes", [3]string{"arm64", "arm64", "arm64"}, nil},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			f := newPatroniFixtureOn(t, domains, test.architectures)
-			config := f.planner.config
-			config.Profile.Architectures = []string{"amd64", "arm64"}
-			planner, err := New(config)
-			if err != nil {
-				t.Fatal(err)
-			}
-			err = planner.Plan(t.Context(), f.claim)
-			if !errors.Is(err, test.want) || (test.want == nil && err != nil) {
-				t.Fatalf("plan: %v, want %v", err, test.want)
-			}
-			if test.want == nil && f.decider.request.Resources[0].Architecture != "arm64" {
-				t.Fatalf("members placed on %s", f.decider.request.Resources[0].Architecture)
-			}
-		})
-	}
-}

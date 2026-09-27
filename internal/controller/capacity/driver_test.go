@@ -91,7 +91,7 @@ func node(t *testing.T) placement.Node {
 func evidence(n *placement.Node, valid time.Duration) {
 	probe := &placement.CapacityProbe{
 		ID: uuid.New(), InstallationID: n.InstallationID, NodeID: n.ID, SessionID: n.SessionID,
-		BootID: n.BootID, JournalGeneration: n.JournalGeneration, Revision: 7,
+		BootID: n.BootID, JournalGeneration: n.JournalGeneration, Revision: 7, PolicyRevision: 1,
 		IssuedAt: fixedNow.Add(-time.Second), ValidUntil: fixedNow.Add(valid),
 	}
 	n.Probe = probe
@@ -178,7 +178,6 @@ func TestRefreshSkipsANodeThatCannotAnswer(t *testing.T) {
 		},
 		"revoked":           func(n *placement.Node, tr *fakeTransport) { n.Revoked = true },
 		"recovery required": func(n *placement.Node, tr *fakeTransport) { n.RecoveryRequired = true },
-		"no policy":         func(n *placement.Node, tr *fakeTransport) { n.Policy = nil },
 		"no session at all": func(n *placement.Node, tr *fakeTransport) { tr.sessions = nil },
 		// A report from another session cannot publish capacity, so challenging
 		// that session would spend a probe revision for nothing.
@@ -432,5 +431,24 @@ func TestRefreshChallengesAgainAfterAProbeExpiresOrASessionChanges(t *testing.T)
 				t.Fatalf("probes=%d, want %d", len(store.probes), step.want)
 			}
 		})
+	}
+}
+
+func TestRefreshMeasuresBeforeApprovalAndAgainAfterPolicyChanges(t *testing.T) {
+	n := node(t)
+	n.Policy = nil
+	tr := &fakeTransport{}
+	session(tr, n)
+	store := &fakeStore{snapshot: placement.Snapshot{Nodes: []placement.Node{n}}}
+	d := driver(t, store, tr)
+	challenged, err := d.Refresh(t.Context(), n.InstallationID, store.snapshot)
+	if err != nil || len(challenged) != 1 {
+		t.Fatalf("unapproved node was not measured: %v %v", challenged, err)
+	}
+	n = node(t)
+	evidence(&n, time.Minute)
+	n.Probe.PolicyRevision = 0
+	if usable(&n, fixedNow) {
+		t.Fatal("pre-approval probe satisfied approved policy")
 	}
 }

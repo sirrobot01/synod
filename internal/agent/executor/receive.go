@@ -12,8 +12,8 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/capacity"
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/controlstream"
-	"github.com/sirrobot01/synod/internal/engine/postgres"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/router"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
@@ -38,6 +38,7 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 			return nil, controlstream.ErrMessage
 		}
 		e.session = &session{ctx: ctx, id: value.SessionId, gates: make(map[string]*epochGate), sent: make(map[string]bool), inspection: slices.Contains(value.Capabilities, controlstream.CommandInspectionCapability)}
+		e.session.router = slices.Contains(value.Capabilities, controlstream.RouterCapability)
 		select {
 		case e.wake <- struct{}{}:
 		default:
@@ -55,6 +56,36 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 		}
 	}()
 	switch value := message.Message.(type) {
+	case *agentv1.ControllerMessage_Routes:
+		table := value.Routes
+		if !current.router || table == nil || table.SessionId != current.id || controlstream.CheckControllerMessage(message, "", "") != nil {
+			return nil, controlstream.ErrMessage
+		}
+		ack := &agentv1.RouteAck{SessionId: current.id, Revision: table.Revision}
+		switch {
+		case e.options.Router == nil:
+			ack.FailureCode = "router_unavailable"
+		case current.routes != nil && table.Revision < current.routes.Revision:
+			ack.FailureCode = "stale_route_revision"
+		case current.routes != nil && table.Revision == current.routes.Revision:
+			if !proto.Equal(table, current.routes) {
+				ack.FailureCode = "route_revision_conflict"
+			}
+		default:
+			if err := e.options.Router.Apply(ctx, table.Routes); err != nil {
+				switch {
+				case errors.Is(err, router.ErrPortConflict):
+					ack.FailureCode = "route_port_conflict"
+				case errors.Is(err, router.ErrConfiguration):
+					ack.FailureCode = "invalid_route_configuration"
+				default:
+					ack.FailureCode = "router_closed"
+				}
+			} else {
+				current.routes = proto.Clone(table).(*agentv1.RouteTable)
+			}
+		}
+		return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_RouteAck{RouteAck: ack}}, nil
 	case *agentv1.ControllerMessage_PrepareEpoch:
 		if value.PrepareEpoch == nil || value.PrepareEpoch.Epoch == nil {
 			return nil, controlstream.ErrMessage
@@ -220,7 +251,7 @@ func (e *Executor) inventory(ctx context.Context, current *session, request *age
 	end := min(offset+int(request.PageSize), len(current.inventory))
 	page := &agentv1.InventoryPage{}
 	for _, resource := range current.inventory[offset:end] {
-		page.Resources = append(page.Resources, &agentv1.Observation{ResourceId: resource.ResourceID.String(), Lifecycle: resource.State, ObservedAt: timestamppb.Now()})
+		page.Resources = append(page.Resources, &agentv1.Observation{ResourceId: resource.ResourceID.String(), Lifecycle: resource.State, ObservedAt: timestamppb.Now(), Health: resource.Health, Ports: resource.Ports})
 	}
 	if offset == 0 {
 		page.DriftTruncated = current.truncated
@@ -253,15 +284,6 @@ func failureCode(err error) string {
 		return notReadyCode
 	case errors.Is(err, ErrSecretUnavailable):
 		return "secret_unavailable"
-	// Each switchover error text is its stable code.
-	case errors.Is(err, errSwitchoverInterrupted):
-		return errSwitchoverInterrupted.Error()
-	case errors.Is(err, postgres.ErrSwitchoverIneligible):
-		return postgres.ErrSwitchoverIneligible.Error()
-	case errors.Is(err, postgres.ErrSwitchoverRefused):
-		return postgres.ErrSwitchoverRefused.Error()
-	case errors.Is(err, postgres.ErrSwitchoverUnconfirmed):
-		return postgres.ErrSwitchoverUnconfirmed.Error()
 	case errors.Is(err, journal.ErrRecoveryRequired):
 		return "recovery_required"
 	case errors.Is(err, capacity.ErrCapacityUnavailable):

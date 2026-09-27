@@ -22,10 +22,6 @@ func (s *Server) getClusterEndpoints(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, r, err)
 		return
 	}
-	// A Patroni endpoint requires verify-full TLS, so clients receive the public native CA with it.
-	if inspection.WriterURL != "" {
-		inspection.CACertificatePEM = string(s.PatroniCA)
-	}
 	s.writeJSON(w, r, inspection)
 }
 
@@ -128,7 +124,7 @@ func (s *Server) getClusterMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The member identity and its role are what an operator acts on. The node and its client
-	// address tell members apart, so an operator can name one for a switchover or a rebuild.
+	// address tell members apart.
 	reported := make([]clusterMember, 0, len(members))
 	for _, each := range members {
 		reported = append(reported, clusterMember{ID: each.MemberID, Role: each.Role, State: each.State, NodeID: each.NodeID, Address: each.Address})

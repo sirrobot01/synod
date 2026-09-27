@@ -1,8 +1,9 @@
 package operation
 
 import (
-	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"testing"
+
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
 func TestReadinessRequiresTheDeclaredPostgresRole(t *testing.T) {
