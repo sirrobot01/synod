@@ -27,8 +27,8 @@ func TestGenericContainerUsesDurableAdmission(t *testing.T) {
 	ctx, _ := localSession(t, f.e)
 	activateLocal(t, f.e, ctx, f.epoch)
 	image := "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3"
-	command = volumeCommand(t, f.epoch)
-	command.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{ImageDigest: image, Engine: "generic", NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "journal-app", Mounts: []*agentv1.Mount{{Type: "tmpfs", Target: "/data"}}}}}
+	command = ensureCommand(t, f.epoch)
+	command.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{ImageDigest: image, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "journal-app", Mounts: []*agentv1.Mount{{Type: "tmpfs", Target: "/data"}}}}}
 	for step := range 2 {
 		if step == 1 {
 			command.CommandId = uuid.NewString()
@@ -44,7 +44,7 @@ func TestGenericContainerUsesDurableAdmission(t *testing.T) {
 		if err != nil || ack.GetAdmissionAck().State != "queued" {
 			t.Fatalf("admission: %v %v", ack, err)
 		}
-		f.e.execute(t.Context(), job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]})
+		f.e.execute(t.Context(), job{app: f.epoch.AppId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.AppId]})
 		record, err := f.e.journal.Get(command.CommandId)
 		if err != nil || record.State != journal.Terminal || record.Result.State != "succeeded" {
 			t.Fatalf("step %d journal: %+v %v", step, record, err)

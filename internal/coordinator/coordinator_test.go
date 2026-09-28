@@ -102,10 +102,10 @@ func TestDisconnectedOwnerAndContender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	installation, clusterID := uuid.New(), uuid.New()
+	installation, appID := uuid.New(), uuid.New()
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	first, err := firstCoordinator.Campaign(ctx, installation, clusterID, "first", 3)
+	first, err := firstCoordinator.Campaign(ctx, installation, appID, "first", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestDisconnectedOwnerAndContender(t *testing.T) {
 	}
 	result := make(chan outcome, 1)
 	go func() {
-		leader, err := secondCoordinator.Campaign(ctx, installation, clusterID, "second", 3)
+		leader, err := secondCoordinator.Campaign(ctx, installation, appID, "second", 3)
 		result <- outcome{leader, err}
 	}()
 	select {
@@ -157,8 +157,8 @@ func TestAuthorityValueAndUnavailableClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	installationID, clusterID := uuid.New(), uuid.New()
-	leader, err := coord.Campaign(t.Context(), installationID, clusterID, "owner", 3)
+	installationID, appID := uuid.New(), uuid.New()
+	leader, err := coord.Campaign(t.Context(), installationID, appID, "owner", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestAuthorityValueAndUnavailableClient(t *testing.T) {
 	if err := leader.Verify(ctx); err == nil {
 		t.Fatal("unavailable verification succeeded")
 	}
-	if _, err := pool.Exec(t.Context(), `UPDATE cluster_leases SET owner_id = 'different-owner' WHERE installation_id = $1 AND cluster_id = $2`, installationID, clusterID); err != nil {
+	if _, err := pool.Exec(t.Context(), `UPDATE app_leases SET owner_id = 'different-owner' WHERE installation_id = $1 AND app_id = $2`, installationID, appID); err != nil {
 		t.Fatal(err)
 	}
 	if err := leader.Verify(t.Context()); !errors.Is(err, ErrNotLeader) {

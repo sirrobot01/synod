@@ -25,11 +25,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	root.SetErr(stderr)
 	app.bindFlags(root.PersistentFlags())
 	root.AddCommand(
-		newDBCommand(app),
+		newDatabaseCommand(app),
 		newAppCommand(app),
 		newOperationCommand(app),
-		newEndpointCommand(app),
-		newCredentialCommand(app),
 		newNodeCommand(app),
 		newEnrollmentTokenCommand(app),
 		newInstallationCommand(app),

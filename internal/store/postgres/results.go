@@ -24,7 +24,7 @@ func (s *Store) RecordAgentResult(ctx context.Context, installationID, nodeID uu
 	if epoch.InstallationId != installationID.String() || epoch.NodeId != nodeID.String() || epoch.ExecutionEpoch < 1 {
 		return operation.ErrStaleOwner
 	}
-	for _, id := range []string{result.CommandId, epoch.ClusterId, epoch.RecoveryGeneration} {
+	for _, id := range []string{result.CommandId, epoch.AppId, epoch.RecoveryGeneration} {
 		parsed, err := uuid.Parse(id)
 		if err != nil || parsed == uuid.Nil || parsed.String() != id {
 			return &AdmissionError{Code: InvalidRequest}
@@ -48,7 +48,7 @@ func (s *Store) RecordAgentResult(ctx context.Context, installationID, nodeID uu
 	var commandBytes []byte
 	err = tx.QueryRow(ctx, `SELECT command_bytes FROM command_dispatches
  WHERE command_id=$1 AND execution_epoch=$2 AND recovery_generation=$3
- AND installation_id=$4 AND node_id=$5 AND cluster_id=$6`, result.CommandId, epoch.ExecutionEpoch, epoch.RecoveryGeneration, installationID, nodeID, epoch.ClusterId).Scan(&commandBytes)
+ AND installation_id=$4 AND node_id=$5 AND app_id=$6`, result.CommandId, epoch.ExecutionEpoch, epoch.RecoveryGeneration, installationID, nodeID, epoch.AppId).Scan(&commandBytes)
 	if err != nil {
 		return admissionError(err)
 	}
@@ -100,7 +100,7 @@ func (s *Store) GetAgentResult(ctx context.Context, installationID, nodeID uuid.
 	if installationID == uuid.Nil || nodeID == uuid.Nil || commandID == uuid.Nil || epoch == nil || epoch.InstallationId != installationID.String() || epoch.NodeId != nodeID.String() || epoch.ExecutionEpoch < 1 {
 		return nil, &AdmissionError{Code: InvalidRequest}
 	}
-	for _, id := range []string{epoch.ClusterId, epoch.RecoveryGeneration} {
+	for _, id := range []string{epoch.AppId, epoch.RecoveryGeneration} {
 		parsed, err := uuid.Parse(id)
 		if err != nil || parsed == uuid.Nil || parsed.String() != id {
 			return nil, &AdmissionError{Code: InvalidRequest}
@@ -110,7 +110,7 @@ func (s *Store) GetAgentResult(ctx context.Context, installationID, nodeID uuid.
 	err := s.pool.QueryRow(ctx, `SELECT r.result_bytes FROM command_results r
  JOIN command_dispatches d USING (command_id,execution_epoch,recovery_generation)
  WHERE r.command_id=$1 AND r.execution_epoch=$2 AND r.recovery_generation=$3
- AND d.installation_id=$4 AND d.node_id=$5 AND d.cluster_id=$6`, commandID, epoch.ExecutionEpoch, epoch.RecoveryGeneration, installationID, nodeID, epoch.ClusterId).Scan(&data)
+ AND d.installation_id=$4 AND d.node_id=$5 AND d.app_id=$6`, commandID, epoch.ExecutionEpoch, epoch.RecoveryGeneration, installationID, nodeID, epoch.AppId).Scan(&data)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, &AdmissionError{Code: NotFound}
 	}

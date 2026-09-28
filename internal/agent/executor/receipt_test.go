@@ -13,12 +13,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 func TestRealPostgresReceiptReplaysAfterLostCommitReply(t *testing.T) {
@@ -62,11 +63,12 @@ func TestRealPostgresReceiptReplaysAfterLostCommitReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	installation := uuid.MustParse(f.epoch.InstallationId)
-	admission, err := store.CreateCluster(t.Context(), postgres.CreateClusterRequest{Identity: postgres.RequestIdentity{InstallationID: installation, ActorID: "task044", APIOperation: postgres.CreateClusterAPIOperation, IdempotencyKey: uuid.NewString()}, RequestID: uuid.NewString(), Spec: cluster.CreateSpec{SchemaVersion: 1, Name: "receipt", Engine: cluster.PostgreSQL, PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "standalone"}}})
+	admission, err := store.AdmitApp(t.Context(), postgres.CreateAppRequest{Identity: postgres.RequestIdentity{InstallationID: installation, ActorID: "task044", APIOperation: postgres.CreateAppAPIOperation, IdempotencyKey: uuid.NewString()}, RequestID: uuid.NewString(),
+		Spec: app.AppSpec{SchemaVersion: 1, Name: "receipt", Tier: app.TierParallel, Copies: 1, Service: app.ServiceSpec{Image: "nginx", Ports: []app.PortSpec{{ContainerPort: 80}}}, Router: app.RouterSpec{Protocol: "http", Port: 8080}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.epoch.ClusterId = admission.ClusterID.String()
+	f.epoch.AppId = admission.AppID.String()
 	generation := uuid.MustParse(f.epoch.RecoveryGeneration)
 	if err := store.InitializeGeneration(t.Context(), installation, generation); err != nil {
 		t.Fatal(err)
@@ -75,15 +77,17 @@ func TestRealPostgresReceiptReplaysAfterLostCommitReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := volumeCommand(t, f.epoch)
+	command := ensureCommand(t, f.epoch)
 	command.OperationId = admission.OperationID.String()
+	// A stop of an absent container is a definite result.
+	command.Input.Payload = &agentv1.CommandInput_StopContainer{StopContainer: &agentv1.StopContainer{GracePeriod: durationpb.New(time.Second)}}
 	command.Epoch.ExecutionEpoch = claim.ExecutionEpoch
 	hash, err := operation.CommandHash(command)
 	if err != nil {
 		t.Fatal(err)
 	}
 	command.InputHash = hash[:]
-	plan := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{{Command: command, MaxAttempts: 1, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS}}}
+	plan := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{{Command: command, MaxAttempts: 1, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED}}}
 	if err := store.InstallPlan(t.Context(), claim, plan); err != nil {
 		t.Fatal(err)
 	}

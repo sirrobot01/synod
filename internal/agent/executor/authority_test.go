@@ -39,7 +39,7 @@ func TestLateBarrierCannotActivateReplacementSession(t *testing.T) {
 	if _, err := f.e.Handle(old, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_PrepareEpoch{PrepareEpoch: &agentv1.PrepareEpoch{Epoch: f.epoch}}}); err != nil {
 		t.Fatal(err)
 	}
-	task := job{cluster: f.epoch.ClusterId, barrier: true, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]}
+	task := job{app: f.epoch.AppId, barrier: true, session: f.e.session, gate: f.e.session.gates[f.epoch.AppId]}
 	done := make(chan struct{})
 	go func() { f.e.inspectBarrier(t.Context(), task); close(done) }()
 	<-entered
@@ -60,7 +60,7 @@ func TestCancellationBeforeAndAfterStart(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once atomic.Bool
 	f := newFixture(t, func(request *http.Request, base http.RoundTripper) (*http.Response, error) {
-		if strings.HasSuffix(request.URL.Path, "/volumes/create") && once.CompareAndSwap(false, true) {
+		if strings.HasSuffix(request.URL.Path, "/containers/create") && once.CompareAndSwap(false, true) {
 			close(entered)
 			select {
 			case <-release:
@@ -72,7 +72,7 @@ func TestCancellationBeforeAndAfterStart(t *testing.T) {
 	})
 	ctx, _ := localSession(t, f.e)
 	activateLocal(t, f.e, ctx, f.epoch)
-	queued := volumeCommand(t, f.epoch)
+	queued := ensureCommand(t, f.epoch)
 	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: queued}}); err != nil {
 		t.Fatal(err)
 	}
@@ -83,14 +83,14 @@ func TestCancellationBeforeAndAfterStart(t *testing.T) {
 	if record, err := f.e.journal.Get(queued.CommandId); err != nil || record.State != journal.Terminal || record.Result.State != "cancelled" {
 		t.Fatal("cancellation was not durable", err)
 	}
-	if _, err := f.api.VolumeInspect(t.Context(), "synod-volume-"+queued.Input.ResourceId, client.VolumeInspectOptions{}); !errdefs.IsNotFound(err) {
+	if _, err := f.api.ContainerInspect(t.Context(), "synod-instance-"+queued.Input.ResourceId, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
 		t.Fatal("queued cancellation had native effect", err)
 	}
-	command := volumeCommand(t, f.epoch)
+	command := ensureCommand(t, f.epoch)
 	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}}); err != nil {
 		t.Fatal(err)
 	}
-	task := job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]}
+	task := job{app: f.epoch.AppId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.AppId]}
 	done := make(chan struct{})
 	go func() { f.e.execute(t.Context(), task); close(done) }()
 	<-entered
@@ -105,14 +105,14 @@ func TestCancellationBeforeAndAfterStart(t *testing.T) {
 	}
 }
 
-func TestWorkerAndClusterBounds(t *testing.T) {
+func TestWorkerAndAppBounds(t *testing.T) {
 	entered := make(chan struct{}, 8)
 	release := make(chan struct{})
 	var active, peak atomic.Int32
 	var lock sync.Mutex
 	seen := make(map[string]int)
 	f := newFixture(t, func(request *http.Request, base http.RoundTripper) (*http.Response, error) {
-		if strings.HasSuffix(request.URL.Path, "/volumes/create") {
+		if strings.HasSuffix(request.URL.Path, "/containers/create") {
 			n := active.Add(1)
 			for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
 			}
@@ -137,9 +137,9 @@ func TestWorkerAndClusterBounds(t *testing.T) {
 	commands := make([]*agentv1.Command, 0, 4)
 	for range 4 {
 		epoch := proto.Clone(f.epoch).(*agentv1.Epoch)
-		epoch.ClusterId = uuid.NewString()
+		epoch.AppId = uuid.NewString()
 		controller.activate(t, epoch)
-		commands = append(commands, volumeCommand(t, epoch))
+		commands = append(commands, ensureCommand(t, epoch))
 	}
 	for _, command := range commands {
 		controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
@@ -153,11 +153,11 @@ func TestWorkerAndClusterBounds(t *testing.T) {
 	if peak.Load() != 2 || cap(f.e.jobs) != 4 {
 		t.Fatal("worker or queue bound changed", peak.Load(), cap(f.e.jobs))
 	}
-	duplicate := volumeCommand(t, commands[0].Epoch)
+	duplicate := ensureCommand(t, commands[0].Epoch)
 	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: duplicate}})
 	ack := controller.wait(t, func(message *agentv1.AgentMessage) bool { return message.GetAdmissionAck() != nil })
 	if ack.GetAdmissionAck().ErrorCode != "agent_busy" {
-		t.Fatal("overlapping cluster command admitted", ack)
+		t.Fatal("overlapping app command admitted", ack)
 	}
 	close(release)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -190,11 +190,11 @@ func TestCancelledQueuedJobDoesNotInspectRuntime(t *testing.T) {
 	})
 	ctx, _ := localSession(t, f.e)
 	activateLocal(t, f.e, ctx, f.epoch)
-	command := volumeCommand(t, f.epoch)
+	command := ensureCommand(t, f.epoch)
 	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}}); err != nil {
 		t.Fatal(err)
 	}
-	queued := job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]}
+	queued := job{app: f.epoch.AppId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.AppId]}
 	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Cancel{Cancel: &agentv1.CancelCommand{CommandId: command.CommandId, Epoch: f.epoch}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestHigherEpochWaitsForStartedWorker(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once atomic.Bool
 	f := newFixture(t, func(request *http.Request, base http.RoundTripper) (*http.Response, error) {
-		if strings.HasSuffix(request.URL.Path, "/volumes/create") && once.CompareAndSwap(false, true) {
+		if strings.HasSuffix(request.URL.Path, "/containers/create") && once.CompareAndSwap(false, true) {
 			close(entered)
 			select {
 			case <-release:
@@ -235,7 +235,7 @@ func TestHigherEpochWaitsForStartedWorker(t *testing.T) {
 	})
 	controller := startController(t, f, nil)
 	controller.activate(t, f.epoch)
-	command := volumeCommand(t, f.epoch)
+	command := ensureCommand(t, f.epoch)
 	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
 	select {
 	case <-entered:
@@ -268,7 +268,7 @@ func TestHigherEpochWaitsForStartedWorker(t *testing.T) {
 	if rejected.ErrorCode != "stale_owner" {
 		t.Fatal("old epoch admitted after transfer", rejected)
 	}
-	fresh := volumeCommand(t, next)
+	fresh := ensureCommand(t, next)
 	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: fresh}})
 	result := controller.wait(t, func(message *agentv1.AgentMessage) bool {
 		return message.GetTerminalResult() != nil && message.GetTerminalResult().CommandId == fresh.CommandId

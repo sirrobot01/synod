@@ -34,11 +34,11 @@ func TestProgressFailurePersistsAndReleasesMutationSlot(t *testing.T) {
 			if err := s.UpdateProgress(t.Context(), claim, running); err != nil {
 				t.Fatal(err)
 			}
-			next := ClusterActionRequest{
-				Identity:  RequestIdentity{InstallationID: claim.InstallationID, ActorID: "test", APIOperation: StopClusterAPIOperation, IdempotencyKey: uuid.NewString()},
-				RequestID: uuid.NewString(), ClusterID: claim.ClusterID, ExpectedRevision: 1,
+			next := AppActionRequest{
+				Identity:  RequestIdentity{InstallationID: claim.InstallationID, ActorID: "test", APIOperation: StopAppAPIOperation, IdempotencyKey: uuid.NewString()},
+				RequestID: uuid.NewString(), AppID: claim.AppID, ExpectedRevision: 1,
 			}
-			_, err := s.AdmitClusterAction(t.Context(), next)
+			_, err := s.AdmitAppAction(t.Context(), next)
 			requireCode(t, err, OperationConflict)
 
 			failed := ProgressUpdate{Sequence: 2, Status: operation.Failed, Reason: "The engine storage is absent.", FailureCode: tc.code}
@@ -74,8 +74,8 @@ func TestProgressFailurePersistsAndReleasesMutationSlot(t *testing.T) {
 			if err := s.pool.QueryRow(t.Context(), `SELECT count(*) FROM operation_progress WHERE operation_id=$1`, claim.OperationID).Scan(&progressCount); err != nil || progressCount != 2 {
 				t.Fatalf("progress count=%d, err=%v, want two unchanged records", progressCount, err)
 			}
-			if _, err := s.AdmitClusterAction(t.Context(), next); err != nil {
-				t.Fatalf("known failure retained the cluster mutation slot: %v", err)
+			if _, err := s.AdmitAppAction(t.Context(), next); err != nil {
+				t.Fatalf("known failure retained the app mutation slot: %v", err)
 			}
 		})
 	}

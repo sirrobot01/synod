@@ -20,7 +20,7 @@ func readsPlan(t *testing.T, claim operation.Claim, node uuid.UUID, count int) *
 	plan := &agentv1.ExecutionPlan{Version: 1}
 	for range count {
 		command := &agentv1.Command{
-			Epoch:       &agentv1.Epoch{InstallationId: claim.InstallationID.String(), NodeId: node.String(), ClusterId: claim.ClusterID.String(), RecoveryGeneration: claim.RecoveryGeneration.String(), ExecutionEpoch: claim.ExecutionEpoch},
+			Epoch:       &agentv1.Epoch{InstallationId: claim.InstallationID.String(), NodeId: node.String(), AppId: claim.AppID.String(), RecoveryGeneration: claim.RecoveryGeneration.String(), ExecutionEpoch: claim.ExecutionEpoch},
 			OperationId: claim.OperationID.String(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1,
 			Input: &agentv1.CommandInput{ResourceId: uuid.NewString(), PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}},
 		}
@@ -37,7 +37,7 @@ func readsPlan(t *testing.T, claim operation.Claim, node uuid.UUID, count int) *
 // drainNode reports and reconciles one drained barrier, then activates the claim.
 func drainNode(t *testing.T, s *Store, claim operation.Claim, node, session uuid.UUID) {
 	t.Helper()
-	epoch := &agentv1.Epoch{InstallationId: claim.InstallationID.String(), NodeId: node.String(), ClusterId: claim.ClusterID.String(), RecoveryGeneration: claim.RecoveryGeneration.String(), ExecutionEpoch: claim.ExecutionEpoch}
+	epoch := &agentv1.Epoch{InstallationId: claim.InstallationID.String(), NodeId: node.String(), AppId: claim.AppID.String(), RecoveryGeneration: claim.RecoveryGeneration.String(), ExecutionEpoch: claim.ExecutionEpoch}
 	report := &agentv1.BarrierResult{Epoch: epoch, AdmissionsClosed: true, Drained: true}
 	if err := s.RecordSessionBarrier(t.Context(), claim, session, report); err != nil {
 		t.Fatal(err)

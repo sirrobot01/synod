@@ -47,7 +47,7 @@ func TestAppAdmission(t *testing.T) {
 		t.Fatalf("stored: %+v %v", stored, err)
 	}
 	operation, err := s.GetOperation(t.Context(), request.Identity.InstallationID, first.OperationID)
-	if err != nil || operation.ClusterID != first.AppID || operation.Kind != "app.deploy" || operation.Status != "pending" {
+	if err != nil || operation.AppID != first.AppID || operation.Kind != "app.deploy" || operation.Status != "pending" {
 		t.Fatalf("durable app operation: %+v %v", operation, err)
 	}
 	generation := uuid.New()
@@ -56,7 +56,7 @@ func TestAppAdmission(t *testing.T) {
 	}
 	claimRequest := ClaimRequest{ClaimID: uuid.New(), InstallationID: request.Identity.InstallationID, OperationID: first.OperationID, RecoveryGeneration: generation, OwnerID: "app-controller", TTL: time.Minute, LeaseID: 1, LeaseRevision: 1}
 	claim, err := s.AcquireClaim(t.Context(), claimRequest)
-	if err != nil || claim.ClusterID != first.AppID || claim.ExecutionEpoch != 1 {
+	if err != nil || claim.AppID != first.AppID || claim.ExecutionEpoch != 1 {
 		t.Fatalf("app claim: %+v %v", claim, err)
 	}
 	replayClaim, err := s.AcquireClaim(t.Context(), claimRequest)
@@ -119,5 +119,33 @@ func TestAppAdmissionRecoversLostCommitReply(t *testing.T) {
 	result, err := s.AdmitApp(t.Context(), request)
 	if err != nil || !result.Replayed {
 		t.Fatalf("recovery: %+v %v", result, err)
+	}
+}
+
+func TestTier1AppAdmission(t *testing.T) {
+	s := testStore(t)
+	replication := app.DefaultDatabaseReplication()
+	request := CreateAppRequest{
+		Identity: RequestIdentity{InstallationID: uuid.New(), ActorID: "operator", APIOperation: CreateAppAPIOperation, IdempotencyKey: "db"}, RequestID: "request",
+		Spec: app.AppSpec{SchemaVersion: 1, Name: "photos-db", Tier: app.TierDatabase, Copies: 1, Router: app.RouterSpec{Protocol: "tcp", Port: 5432, ReaderPort: 5433}, Replication: &replication,
+			Database: &app.DatabaseSpec{Engine: app.EnginePostgres, Version: "17", Databases: []string{"immich"}}},
+	}
+	admitted, err := s.AdmitApp(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.GetApp(t.Context(), request.Identity.InstallationID, admitted.AppID)
+	if err != nil || stored.Tier != app.TierDatabase || stored.Spec.Database == nil || stored.Spec.Database.Databases[0] != "immich" || stored.Spec.Router.ReaderPort != 5433 {
+		t.Fatalf("stored: %+v %v", stored, err)
+	}
+	operation, err := s.GetOperation(t.Context(), request.Identity.InstallationID, admitted.OperationID)
+	if err != nil || operation.Kind != "app.deploy" || operation.Status != "pending" {
+		t.Fatalf("durable database operation: %+v %v", operation, err)
+	}
+	request.Identity.IdempotencyKey = "service"
+	request.Spec.Name = "with-service"
+	request.Spec.Service.Image = "postgres:17"
+	if _, err := s.AdmitApp(t.Context(), request); err == nil {
+		t.Fatal("tier 1 app with a service admitted")
 	}
 }

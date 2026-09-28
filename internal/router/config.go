@@ -19,17 +19,17 @@ func Validate(routes []*agentv1.AppRoute) error {
 	if len(routes) > 256 {
 		return ErrConfiguration
 	}
-	ids, ports := map[string]bool{}, map[uint32]bool{}
+	ports := map[uint32]bool{}
 	total := 0
 	for _, route := range routes {
 		if route == nil {
 			return ErrConfiguration
 		}
 		id, err := uuid.Parse(route.AppId)
-		if err != nil || id == uuid.Nil || id.String() != route.AppId || ids[route.AppId] || ports[route.IngressPort] || route.IngressPort == 0 || route.IngressPort > 65535 || (route.Protocol != "http" && route.Protocol != "tcp") {
+		if err != nil || id == uuid.Nil || id.String() != route.AppId || ports[route.IngressPort] || route.IngressPort == 0 || route.IngressPort > 65535 || (route.Protocol != "http" && route.Protocol != "tcp") {
 			return ErrConfiguration
 		}
-		ids[route.AppId], ports[route.IngressPort] = true, true
+		ports[route.IngressPort] = true
 		if route.HealthPath != "" {
 			path, err := url.ParseRequestURI(route.HealthPath)
 			if err != nil || path.IsAbs() || path.Host != "" || len(route.HealthPath) > 2048 || route.HealthPath[0] != '/' {

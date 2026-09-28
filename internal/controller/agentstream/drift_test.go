@@ -19,7 +19,7 @@ func TestDriftPageIsRecordedAgainstThePeer(t *testing.T) {
 		Drift: []*agentv1.DriftItem{
 			{Kind: "container", NativeId: "aaaa", Name: "someone-elses-postgres", State: "running", Class: "unowned"},
 			{Kind: "volume", NativeId: "synod-volume-x", Name: "synod-volume-x", State: "present",
-				Class: "mislabelled", ClusterId: uuid.NewString(), ResourceId: resource.String(), Detail: "resource_label_unreadable"},
+				Class: "mislabelled", AppId: uuid.NewString(), ResourceId: resource.String(), Detail: "resource_label_unreadable"},
 		},
 	}
 	message := &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Inventory{Inventory: page}}

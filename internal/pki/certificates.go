@@ -4,7 +4,9 @@ package pki
 import (
 	"bytes"
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -55,12 +57,12 @@ type CA struct {
 	key            crypto.Signer
 }
 
-// CreateCA creates a self-signed Ed25519 installation CA in PEM form.
+// CreateCA uses ECDSA-SHA256 so node certificates support PostgreSQL channel binding.
 func CreateCA(installationID uuid.UUID, now time.Time, lifetime time.Duration) (certificatePEM, privateKeyPEM []byte, err error) {
 	if installationID == uuid.Nil || lifetime < time.Hour || lifetime > 10*365*24*time.Hour {
 		return nil, nil, fmt.Errorf("%w: create a CA for installation %s with a lifetime of %s", ErrCertificate, installationID, lifetime)
 	}
-	_, private, err := ed25519.GenerateKey(rand.Reader)
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: generate the CA key: %w", ErrCertificate, err)
 	}
@@ -124,7 +126,7 @@ func LoadCA(installationID uuid.UUID, certificatePEM, privateKeyPEM []byte) (*CA
 	if !ok {
 		return nil, ErrCertificate
 	}
-	if _, ok := key.(ed25519.PrivateKey); !ok {
+	if private, ok := key.(*ecdsa.PrivateKey); !ok || private.Curve != elliptic.P256() {
 		return nil, ErrCertificate
 	}
 	public, err := x509.MarshalPKIXPublicKey(key.Public())

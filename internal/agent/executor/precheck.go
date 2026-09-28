@@ -30,8 +30,6 @@ func (e *Executor) precheck(command *agentv1.Command) error {
 		return nil
 	}
 	switch payload := command.Input.Payload.(type) {
-	case *agentv1.CommandInput_EnsureVolume:
-		return e.checkSpace(0, 0)
 	case *agentv1.CommandInput_EnsureContainer:
 		container := payload.EnsureContainer
 		if container == nil {
@@ -42,8 +40,8 @@ func (e *Executor) precheck(command *agentv1.Command) error {
 		}
 		return checkPorts(container.Ports)
 	default:
-		// Stopping, removing, inspecting, and ensuring a network claim no pool
-		// space and no host port. A check would refuse work that frees capacity.
+		// Starting, stopping, and removing claim no pool space and no host port.
+		// A check would refuse work that frees capacity.
 		return nil
 	}
 }

@@ -28,7 +28,7 @@ func (w *Worker) pushSecrets(ctx context.Context, nodeID uuid.UUID, sessionID st
 	if w.config.Keyring == nil {
 		return fmt.Errorf("%w: this controller holds no keyring", ErrSecretUnresolvable)
 	}
-	clusterID, err := uuid.Parse(command.Epoch.ClusterId)
+	appID, err := uuid.Parse(command.Epoch.AppId)
 	if err != nil {
 		return err
 	}
@@ -37,12 +37,12 @@ func (w *Worker) pushSecrets(ctx context.Context, nodeID uuid.UUID, sessionID st
 		if err != nil || id.String() != reference.CredentialId {
 			return ErrSecretUnresolvable
 		}
-		credential, err := w.config.Store.ReadCredentialVersion(ctx, w.config.Claim.InstallationID, clusterID, id, reference.Version, reference.Purpose)
+		credential, err := w.config.Store.ReadCredentialVersion(ctx, w.config.Claim.InstallationID, appID, id, reference.Version, reference.Purpose)
 		if err != nil {
 			return fmt.Errorf("%w: %s", ErrSecretUnresolvable, reference.Purpose)
 		}
 		binding := secret.Binding{
-			InstallationID: w.config.Claim.InstallationID, OwnerType: "cluster", OwnerID: clusterID,
+			InstallationID: w.config.Claim.InstallationID, OwnerType: "app", OwnerID: appID,
 			CredentialID: credential.CredentialID, Version: credential.Version,
 		}
 		material, err := w.config.Keyring.Open(binding, credential.Envelope)

@@ -74,14 +74,10 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 	var result operation.Claim
 	// Lock the workload before its operation, as admission and completion do.
 	var kind string
-	if err := tx.QueryRow(ctx, `SELECT cluster_id,kind FROM operations WHERE id=$1 AND installation_id=$2`, r.OperationID, r.InstallationID).Scan(&result.ClusterID, &kind); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT app_id,kind FROM operations WHERE id=$1 AND installation_id=$2`, r.OperationID, r.InstallationID).Scan(&result.AppID, &kind); err != nil {
 		return operation.Claim{}, admissionError(err)
 	}
-	workloadTable := "clusters"
-	if strings.HasPrefix(kind, "app.") {
-		workloadTable = "apps"
-	}
-	if err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT execution_epoch FROM %s WHERE id=$1 AND installation_id=$2 FOR UPDATE`, workloadTable), result.ClusterID, r.InstallationID).Scan(&result.ExecutionEpoch); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT execution_epoch FROM apps WHERE id=$1 AND installation_id=$2 FOR UPDATE`, result.AppID, r.InstallationID).Scan(&result.ExecutionEpoch); err != nil {
 		return operation.Claim{}, admissionError(err)
 	}
 	var oldClaim, oldGeneration *uuid.UUID
@@ -121,14 +117,14 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 		result.ExecutionEpoch++
 		result.Active = false
 		result.ExpiresAt = now.Add(r.TTL)
-		if _, err := tx.Exec(ctx, `INSERT INTO execution_claims (claim_id,installation_id,cluster_id,operation_id,execution_epoch,recovery_generation,owner_id,lease_id,lease_revision)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, r.ClaimID, r.InstallationID, result.ClusterID, r.OperationID, result.ExecutionEpoch, generation, r.OwnerID, r.LeaseID, r.LeaseRevision); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO execution_claims (claim_id,installation_id,app_id,operation_id,execution_epoch,recovery_generation,owner_id,lease_id,lease_revision)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, r.ClaimID, r.InstallationID, result.AppID, r.OperationID, result.ExecutionEpoch, generation, r.OwnerID, r.LeaseID, r.LeaseRevision); err != nil {
 			if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "23505" && pgErr.ConstraintName == "execution_claims_pkey" {
 				return operation.Claim{}, operation.ErrStaleOwner
 			}
 			return operation.Claim{}, admissionError(err)
 		}
-		if _, err := tx.Exec(ctx, fmt.Sprintf(`UPDATE %s SET execution_epoch=$1 WHERE id=$2 AND installation_id=$3`, workloadTable), result.ExecutionEpoch, result.ClusterID, r.InstallationID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE apps SET execution_epoch=$1 WHERE id=$2 AND installation_id=$3`, result.ExecutionEpoch, result.AppID, r.InstallationID); err != nil {
 			return operation.Claim{}, admissionError(err)
 		}
 		if _, err := tx.Exec(ctx, `UPDATE operations SET claim_id=$1,owner_id=$2,execution_epoch=$3,claim_expires_at=$4,recovery_generation=$5,claim_active=false,
@@ -140,10 +136,17 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 		// expired writer lease fences it instead, so a failover waits only for the
 		// nodes in its own plan. The lost node drains in the next operation that
 		// reaches it.
-		if kind != "app.failover" {
-			if _, err := tx.Exec(ctx, `INSERT INTO claim_barriers (claim_id,installation_id,cluster_id,operation_id,node_id,execution_epoch,recovery_generation)
-				SELECT DISTINCT $1::uuid,installation_id,cluster_id,$2::uuid,node_id,$3::bigint,$4::uuid FROM command_dispatches WHERE installation_id=$5 AND cluster_id=$6`,
-				r.ClaimID, r.OperationID, result.ExecutionEpoch, generation, r.InstallationID, result.ClusterID); err != nil {
+		var databaseRollback bool
+		if kind == "app.start" {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM app_moves m JOIN apps a ON a.installation_id=m.installation_id AND a.id=m.app_id WHERE m.rollback_operation_id=$1 AND a.tier=1 AND m.promoted_at IS NULL)`, r.OperationID).Scan(&databaseRollback); err != nil {
+				return operation.Claim{}, admissionError(err)
+			}
+		}
+		// A database rollback restarts only its source. It cannot wait for the lost target.
+		if kind != "app.failover" && kind != "app.rejoin" && !databaseRollback {
+			if _, err := tx.Exec(ctx, `INSERT INTO claim_barriers (claim_id,installation_id,app_id,operation_id,node_id,execution_epoch,recovery_generation)
+				SELECT DISTINCT $1::uuid,installation_id,app_id,$2::uuid,node_id,$3::bigint,$4::uuid FROM command_dispatches WHERE installation_id=$5 AND app_id=$6`,
+				r.ClaimID, r.OperationID, result.ExecutionEpoch, generation, r.InstallationID, result.AppID); err != nil {
 				return operation.Claim{}, admissionError(err)
 			}
 		}
@@ -156,7 +159,7 @@ func (s *Store) AcquireClaim(ctx context.Context, r ClaimRequest) (operation.Cla
 				if step.Command == nil || step.Command.Epoch == nil {
 					return operation.Claim{}, admissionError(fmt.Errorf("persisted plan has no target"))
 				}
-				if _, err := tx.Exec(ctx, `INSERT INTO claim_barriers (claim_id,installation_id,cluster_id,operation_id,node_id,execution_epoch,recovery_generation) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, result.ID, result.InstallationID, result.ClusterID, result.OperationID, step.Command.Epoch.NodeId, result.ExecutionEpoch, generation); err != nil {
+				if _, err := tx.Exec(ctx, `INSERT INTO claim_barriers (claim_id,installation_id,app_id,operation_id,node_id,execution_epoch,recovery_generation) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, result.ID, result.InstallationID, result.AppID, result.OperationID, step.Command.Epoch.NodeId, result.ExecutionEpoch, generation); err != nil {
 					return operation.Claim{}, admissionError(err)
 				}
 			}
@@ -202,7 +205,7 @@ func lockClaim(ctx context.Context, tx pgx.Tx, claim operation.Claim) (bool, ope
 	var status operation.Status
 	var plan []byte
 	err := tx.QueryRow(ctx, `SELECT claim_id,recovery_generation,owner_id,execution_epoch,claim_expires_at,claim_active,status,plan_bytes
-		FROM operations WHERE id=$1 AND installation_id=$2 AND cluster_id=$3 AND claim_id IS NOT NULL FOR UPDATE`, claim.OperationID, claim.InstallationID, claim.ClusterID).
+		FROM operations WHERE id=$1 AND installation_id=$2 AND app_id=$3 AND claim_id IS NOT NULL FOR UPDATE`, claim.OperationID, claim.InstallationID, claim.AppID).
 		Scan(&id, &generation, &owner, &epoch, &expires, &active, &status, &plan)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, "", nil, operation.ErrStaleOwner
@@ -292,14 +295,14 @@ func validateInstalledPlan(claim operation.Claim, plan *agentv1.ExecutionPlan) (
 	stepIDs := make([]string, 0, len(plan.Steps))
 	commandIDs := make([]string, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
-		if step == nil || step.Command == nil || step.MaxAttempts < 1 || step.MaxAttempts > 10 || step.CancellationBoundary < agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION || step.CancellationBoundary > agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP || step.Postcondition < agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS || step.Postcondition > agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT {
+		if step == nil || step.Command == nil || step.MaxAttempts < 1 || step.MaxAttempts > 10 || step.CancellationBoundary < agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION || step.CancellationBoundary > agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP || step.Postcondition < agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS || step.Postcondition > agentv1.Postcondition_POSTCONDITION_DATABASE_SWITCHOVER_READY {
 			return nil, &AdmissionError{Code: InvalidRequest}
 		}
 		command := step.Command
 		if err := operation.ValidateCommand(command); err != nil {
 			return nil, err
 		}
-		if command.Epoch.InstallationId != claim.InstallationID.String() || command.Epoch.ClusterId != claim.ClusterID.String() || command.Epoch.RecoveryGeneration != claim.RecoveryGeneration.String() || command.Epoch.ExecutionEpoch != claim.ExecutionEpoch || command.OperationId != claim.OperationID.String() || command.PlanVersion != plan.Version || slices.Contains(stepIDs, command.StepId) || slices.Contains(commandIDs, command.CommandId) {
+		if command.Epoch.InstallationId != claim.InstallationID.String() || command.Epoch.AppId != claim.AppID.String() || command.Epoch.RecoveryGeneration != claim.RecoveryGeneration.String() || command.Epoch.ExecutionEpoch != claim.ExecutionEpoch || command.OperationId != claim.OperationID.String() || command.PlanVersion != plan.Version || slices.Contains(stepIDs, command.StepId) || slices.Contains(commandIDs, command.CommandId) {
 			return nil, operation.ErrCommandConflict
 		}
 		for _, dependency := range step.DependsOn {
@@ -335,25 +338,15 @@ func installPlanTx(ctx context.Context, tx pgx.Tx, claim operation.Claim, plan *
 	if err := tx.QueryRow(ctx, `SELECT desired_revision FROM operations WHERE id=$1`, claim.OperationID).Scan(&revision); err != nil {
 		return false, admissionError(err)
 	}
-	resources := make([]string, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
 		if step.Command.DesiredRevision != revision {
 			return false, operation.ErrCommandConflict
 		}
-		resources = append(resources, step.Command.Input.ResourceId)
-		if _, err := tx.Exec(ctx, `INSERT INTO claim_barriers (claim_id,installation_id,cluster_id,operation_id,node_id,execution_epoch,recovery_generation) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, claim.ID, claim.InstallationID, claim.ClusterID, claim.OperationID, step.Command.Epoch.NodeId, claim.ExecutionEpoch, claim.RecoveryGeneration); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO claim_barriers (claim_id,installation_id,app_id,operation_id,node_id,execution_epoch,recovery_generation) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, claim.ID, claim.InstallationID, claim.AppID, claim.OperationID, step.Command.Epoch.NodeId, claim.ExecutionEpoch, claim.RecoveryGeneration); err != nil {
 			return false, admissionError(err)
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE operations SET plan_version=$1,plan_bytes=$2,updated_at=clock_timestamp() WHERE id=$3`, plan.Version, encoded, claim.OperationID); err != nil {
-		return false, admissionError(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO operation_allocation_bindings
- (installation_id,cluster_id,operation_id,allocation_id)
- SELECT a.installation_id,a.cluster_id,o.id,a.id FROM resource_allocations a
- JOIN operations o ON o.installation_id=a.installation_id AND o.cluster_id=a.cluster_id
- WHERE o.id=$1 AND o.retry_of IS NOT NULL AND a.released_at IS NULL
- AND a.resource_id=ANY($2::uuid[]) ON CONFLICT DO NOTHING`, claim.OperationID, resources); err != nil {
 		return false, admissionError(err)
 	}
 	return true, nil
@@ -365,7 +358,7 @@ func (s *Store) RecordBarrier(ctx context.Context, claim operation.Claim, report
 		return &AdmissionError{Code: InvalidRequest}
 	}
 	epoch := report.Epoch
-	if epoch.InstallationId != claim.InstallationID.String() || epoch.ClusterId != claim.ClusterID.String() || epoch.RecoveryGeneration != claim.RecoveryGeneration.String() || epoch.ExecutionEpoch != claim.ExecutionEpoch {
+	if epoch.InstallationId != claim.InstallationID.String() || epoch.AppId != claim.AppID.String() || epoch.RecoveryGeneration != claim.RecoveryGeneration.String() || epoch.ExecutionEpoch != claim.ExecutionEpoch {
 		return operation.ErrStaleOwner
 	}
 	nodeID, err := uuid.Parse(epoch.NodeId)
@@ -536,7 +529,7 @@ func (s *Store) RecordDispatch(ctx context.Context, claim operation.Claim, comma
 	if err := operation.ValidateCommand(command); err != nil {
 		return err
 	}
-	if command.Epoch.InstallationId != claim.InstallationID.String() || command.Epoch.ClusterId != claim.ClusterID.String() || command.Epoch.RecoveryGeneration != claim.RecoveryGeneration.String() || command.Epoch.ExecutionEpoch != claim.ExecutionEpoch || command.OperationId != claim.OperationID.String() {
+	if command.Epoch.InstallationId != claim.InstallationID.String() || command.Epoch.AppId != claim.AppID.String() || command.Epoch.RecoveryGeneration != claim.RecoveryGeneration.String() || command.Epoch.ExecutionEpoch != claim.ExecutionEpoch || command.OperationId != claim.OperationID.String() {
 		return operation.ErrStaleOwner
 	}
 	encoded, err := (proto.MarshalOptions{Deterministic: true}).Marshal(command)
@@ -596,8 +589,8 @@ func (s *Store) RecordDispatch(ctx context.Context, claim operation.Claim, comma
 	if !bytes.Equal(hash, command.InputHash) {
 		return operation.ErrCommandConflict
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO command_dispatches (command_id,execution_epoch,installation_id,cluster_id,operation_id,recovery_generation,node_id,step_id,input_hash,command_bytes)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`, command.CommandId, claim.ExecutionEpoch, claim.InstallationID, claim.ClusterID, claim.OperationID, claim.RecoveryGeneration, command.Epoch.NodeId, command.StepId, command.InputHash, encoded); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO command_dispatches (command_id,execution_epoch,installation_id,app_id,operation_id,recovery_generation,node_id,step_id,input_hash,command_bytes)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`, command.CommandId, claim.ExecutionEpoch, claim.InstallationID, claim.AppID, claim.OperationID, claim.RecoveryGeneration, command.Epoch.NodeId, command.StepId, command.InputHash, encoded); err != nil {
 		return admissionError(err)
 	}
 	return s.commitMetadata(ctx, tx)
@@ -646,7 +639,7 @@ func (s *Store) UpdateProgress(ctx context.Context, claim operation.Claim, updat
 	}
 	defer tx.Rollback(ctx)
 	if update.Status == operation.Succeeded || update.Status == operation.Failed || update.Status == operation.Cancelled {
-		// Admission locks the cluster before its operation. Keep that order while
+		// Admission locks the app before its operation. Keep that order while
 		// finalizing lifecycle metadata, after the installation generation lock.
 		var generation uuid.UUID
 		if err := tx.QueryRow(ctx, `SELECT recovery_generation FROM installation_generations WHERE installation_id=$1 FOR SHARE`, claim.InstallationID).Scan(&generation); err != nil {
@@ -655,15 +648,7 @@ func (s *Store) UpdateProgress(ctx context.Context, claim operation.Claim, updat
 		if generation != claim.RecoveryGeneration {
 			return operation.ErrStaleOwner
 		}
-		var kind string
-		if err := tx.QueryRow(ctx, `SELECT kind FROM operations WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.OperationID).Scan(&kind); err != nil {
-			return admissionError(err)
-		}
-		workloadTable := "clusters"
-		if strings.HasPrefix(kind, "app.") {
-			workloadTable = "apps"
-		}
-		if _, err := tx.Exec(ctx, fmt.Sprintf(`SELECT 1 FROM %s WHERE installation_id=$1 AND id=$2 FOR UPDATE`, workloadTable), claim.InstallationID, claim.ClusterID); err != nil {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM apps WHERE installation_id=$1 AND id=$2 FOR UPDATE`, claim.InstallationID, claim.AppID); err != nil {
 			return admissionError(err)
 		}
 	}
@@ -725,12 +710,6 @@ func (s *Store) UpdateProgress(ctx context.Context, claim operation.Claim, updat
 	if update.Status == operation.Failed || update.Status == operation.Cancelled {
 		if _, _, _, err := lockClaim(ctx, tx, claim); err != nil {
 			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE cluster_members SET state='residual',updated_at=clock_timestamp()
- WHERE installation_id=$1 AND cluster_id=$2 AND state='pending' AND removed_at IS NULL
- AND role='replica' AND EXISTS (SELECT 1 FROM operations WHERE id=$3 AND kind='cluster.scale')`,
-			claim.InstallationID, claim.ClusterID, claim.OperationID); err != nil {
-			return admissionError(err)
 		}
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operation_progress (operation_id,execution_epoch,sequence,state,reason,unknown_effects) VALUES ($1,$2,$3,$4,$5,$6)`, claim.OperationID, claim.ExecutionEpoch, update.Sequence, update.Status, update.Reason, update.UnknownEffects); err != nil {

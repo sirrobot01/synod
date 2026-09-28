@@ -25,10 +25,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirrobot01/synod/internal/api"
+	appmodel "github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/auth"
 	"github.com/sirrobot01/synod/internal/cli"
 	"github.com/sirrobot01/synod/internal/client"
-	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/engine"
 	postgresengine "github.com/sirrobot01/synod/internal/engine/postgres"
 	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
@@ -68,11 +68,11 @@ func fixture(t *testing.T, handler http.Handler) []string {
 }
 
 func TestLostReplyRetainsKeyAndBody(t *testing.T) {
-	admission := client.Admission{ClusterID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1, AcceptedAt: time.Now().UTC()}
+	admission := appmodel.Admission{AppID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1, AcceptedAt: time.Now().UTC()}
 	var mutex sync.Mutex
 	var bodies, keys []string
 	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS == nil || r.Header.Get("Authorization") != "Bearer "+token || r.Method != "POST" || r.URL.Path != "/v1/clusters" {
+		if r.TLS == nil || r.Header.Get("Authorization") != "Bearer "+token || r.Method != "POST" || r.URL.Path != "/v1/apps" {
 			t.Error("wrong authenticated TLS request")
 		}
 		body, err := io.ReadAll(r.Body)
@@ -98,7 +98,7 @@ func TestLostReplyRetainsKeyAndBody(t *testing.T) {
 		json.NewEncoder(w).Encode(admission)
 	}))
 	var stdout, stderr bytes.Buffer
-	code := cli.Run(t.Context(), append(flags, "cluster", "create", "postgres", "--name", "photos", "--version", "17.11"), &stdout, &stderr)
+	code := cli.Run(t.Context(), append(flags, "db", "create", "photos", "--version", "17", "--writer-port", "5432"), &stdout, &stderr)
 	var result cli.Result
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("invalid JSON: %v: %s", err, stdout.String())
@@ -108,7 +108,7 @@ func TestLostReplyRetainsKeyAndBody(t *testing.T) {
 	if code != 0 || len(keys) != 2 || keys[0] == "" || keys[0] != keys[1] || bodies[0] != bodies[1] {
 		t.Fatalf("retry failure: code=%d requests=%d diagnostics=%s", code, len(keys), stderr.String())
 	}
-	if result.Admission == nil || result.Admission.OperationID != admission.OperationID || !result.Admission.Replayed || result.IdempotencyKey != keys[0] {
+	if result.AppAdmission == nil || result.AppAdmission.OperationID != admission.OperationID || !result.AppAdmission.Replayed || result.IdempotencyKey != keys[0] {
 		t.Fatalf("unstable admission: %s", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), keys[0]) || strings.Contains(stdout.String()+stderr.String(), token) {
@@ -129,7 +129,7 @@ func TestRetryLimitsManualKeyAndRedaction(t *testing.T) {
 				json.NewEncoder(w).Encode(map[string]string{"code": "outcome_unknown", "message": token, "request_id": token})
 			}))
 			var stdout, stderr bytes.Buffer
-			code := cli.Run(t.Context(), append(flags, "db", "create", "redis", "--name", "cache", "--version", "8.2.7", "--persistence", "aof", "--idempotency-key", "manual-recovery-key", "--attempts", "2"), &stdout, &stderr)
+			code := cli.Run(t.Context(), append(flags, "db", "create", "cache", "--engine", "redis", "--version", "8", "--writer-port", "6379", "--idempotency-key", "manual-recovery-key", "--attempts", "2"), &stdout, &stderr)
 			var result cli.Result
 			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != 1 || result.Error == nil || result.IdempotencyKey != "manual-recovery-key" {
 				t.Fatalf("wrong failure result: code=%d output=%s", code, stdout.String())
@@ -232,7 +232,7 @@ func TestWaitOutcomesNeverCancel(t *testing.T) {
 
 func TestHelpAndInvalidArguments(t *testing.T) {
 	t.Setenv("SYNOD_API_URL", "https://user:"+token+"@localhost:8443")
-	for _, command := range [][]string{{"--help"}, {"db", "create", "postgres", "--help"}, {"operation", "wait", "--help"}} {
+	for _, command := range [][]string{{"--help"}, {"db", "create", "--help"}, {"operation", "wait", "--help"}} {
 		var stdout, stderr bytes.Buffer
 		if code := cli.Run(t.Context(), command, &stdout, &stderr); code != 0 || stdout.Len() == 0 || stderr.Len() != 0 || strings.Contains(stdout.String()+stderr.String(), token) {
 			t.Fatalf("help failed: %d %s", code, stderr.String())
@@ -293,27 +293,28 @@ func TestPostgresAPIFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	flags := fixture(t, handler)
-	var first client.Admission
+	var first appmodel.Admission
 	for _, engine := range []string{"postgres", "redis"} {
-		version := "17.11"
+		version, port := "17", "5432"
 		if engine == "redis" {
-			version = "8.2.7"
+			version, port = "8", "6379"
 		}
+		name := engine + "-cli"
 		for attempt := range 2 {
 			var stdout, stderr bytes.Buffer
-			args := append(append([]string{}, flags...), "db", "create", engine, "--name", engine+"-cli", "--version", version, "--idempotency-key", engine+"-stable-key")
+			args := append(append([]string{}, flags...), "db", "create", name, "--engine", engine, "--version", version, "--writer-port", port, "--idempotency-key", engine+"-stable-key")
 			code := cli.Run(t.Context(), args, &stdout, &stderr)
 			var result cli.Result
-			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != 0 || result.Admission == nil || result.Admission.Replayed != (attempt == 1) {
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != 0 || result.AppAdmission == nil || result.AppAdmission.Replayed != (attempt == 1) {
 				t.Fatalf("admission: %d %s %s", code, stdout.String(), stderr.String())
 			}
 			if attempt == 0 {
-				first = *result.Admission
-			} else if result.Admission.ClusterID != first.ClusterID || result.Admission.OperationID != first.OperationID {
+				first = *result.AppAdmission
+			} else if result.AppAdmission.AppID != first.AppID || result.AppAdmission.OperationID != first.OperationID {
 				t.Fatal("replay changed resource IDs")
 			}
 		}
-		for _, action := range [][]string{{"cluster", "inspect", first.ClusterID.String()}, {"operation", "get", first.OperationID.String()}, {"operation", "wait", first.OperationID.String(), "--timeout", "70ms"}} {
+		for _, action := range [][]string{{"db", "get", name}, {"operation", "get", first.OperationID.String()}, {"operation", "wait", first.OperationID.String(), "--timeout", "70ms"}} {
 			var stdout, stderr bytes.Buffer
 			code := cli.Run(t.Context(), append(append([]string{}, flags...), action...), &stdout, &stderr)
 			want := 0
@@ -325,75 +326,9 @@ func TestPostgresAPIFlow(t *testing.T) {
 			}
 		}
 	}
-	var clusters, operations, cancelled int
-	var cursor string
-	var listed []uuid.UUID
-	for pageIndex := range 2 {
-		var stdout, stderr bytes.Buffer
-		args := append(append([]string{}, flags...), "db", "list", "--limit", "1")
-		if cursor != "" {
-			args = append(args, "--cursor", cursor)
-		}
-		code := cli.Run(t.Context(), args, &stdout, &stderr)
-		var result cli.Result
-		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != 0 || result.ClusterPage == nil || len(result.ClusterPage.Items) != 1 {
-			t.Fatalf("list page %d: code=%d output=%s error=%s", pageIndex, code, stdout.String(), stderr.String())
-		}
-		item := result.ClusterPage.Items[0]
-		wantEngine := cluster.Redis
-		if pageIndex == 1 {
-			wantEngine = cluster.PostgreSQL
-		}
-		if item.InstallationID != installation || item.Spec.Engine != wantEngine || item.DesiredRevision != 1 || item.ObservedRevision != 0 || item.ObservedLifecycle != cluster.ObservedProvisioning {
-			t.Fatalf("unexpected stored cluster: %+v", item)
-		}
-		listed = append(listed, item.ID)
-		cursor = result.ClusterPage.NextCursor
-		if (cursor != "") != (pageIndex == 0) {
-			t.Fatalf("page %d continuation=%q", pageIndex, cursor)
-		}
-	}
-	if listed[0] == listed[1] {
-		t.Fatal("continuation repeated a cluster")
-	}
-	if err := pool.QueryRow(t.Context(), "SELECT (SELECT count(*) FROM clusters), (SELECT count(*) FROM operations), (SELECT count(*) FROM operations WHERE cancellation_requested_at IS NOT NULL)").Scan(&clusters, &operations, &cancelled); err != nil || clusters != 2 || operations != 2 || cancelled != 0 {
-		t.Fatalf("resource or cancellation counts: %d %d %d %v", clusters, operations, cancelled, err)
-	}
-}
-
-func TestCreateWaitRetainsAdmission(t *testing.T) {
-	for _, finish := range []bool{true, false} {
-		t.Run(map[bool]string{true: "succeeded", false: "timeout"}[finish], func(t *testing.T) {
-			admission := client.Admission{ClusterID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1, AcceptedAt: time.Now().UTC()}
-			var writes, reads atomic.Int32
-			flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.Method == "POST" && r.URL.Path == "/v1/clusters":
-					writes.Add(1)
-					w.WriteHeader(202)
-					json.NewEncoder(w).Encode(admission)
-				case r.Method == "GET" && r.URL.Path == "/v1/operations/"+admission.OperationID.String():
-					status := operation.Pending
-					if reads.Add(1) > 1 && finish {
-						status = operation.Succeeded
-					}
-					json.NewEncoder(w).Encode(operation.Operation{ID: admission.OperationID, Status: status})
-				default:
-					t.Error("unexpected mutation while waiting")
-					w.WriteHeader(400)
-				}
-			}))
-			var stdout, stderr bytes.Buffer
-			code := cli.Run(t.Context(), append(flags, "db", "create", "postgres", "--name", "photos", "--version", "17.11", "--wait", "--timeout", "100ms"), &stdout, &stderr)
-			want := 2
-			if finish {
-				want = 0
-			}
-			var result cli.Result
-			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != want || result.Admission == nil || result.Admission.OperationID != admission.OperationID || result.Operation == nil || result.IdempotencyKey == "" || writes.Load() != 1 || reads.Load() < 2 {
-				t.Fatalf("lost admission after wait: code=%d output=%s", code, stdout.String())
-			}
-		})
+	var apps, operations, cancelled int
+	if err := pool.QueryRow(t.Context(), "SELECT (SELECT count(*) FROM apps WHERE tier=1), (SELECT count(*) FROM operations), (SELECT count(*) FROM operations WHERE cancellation_requested_at IS NOT NULL)").Scan(&apps, &operations, &cancelled); err != nil || apps != 2 || operations != 2 || cancelled != 0 {
+		t.Fatalf("resource or cancellation counts: %d %d %d %v", apps, operations, cancelled, err)
 	}
 }
 
@@ -549,120 +484,3 @@ func TestNodeJoinTokenPinsTheAPICA(t *testing.T) {
 // dropTimeout bounds one test database teardown. It exists to stop a hang, not to
 // assert how fast PostgreSQL drops a database under load.
 const dropTimeout = 60 * time.Second
-
-// A cluster that can be created and never removed holds its reservations, including its
-// host port, for as long as the installation lives. Each action reaches its own route
-// and carries the retry key the operator can repeat with.
-func TestClusterActionsReachTheirRoutes(t *testing.T) {
-	for _, action := range []string{"stop", "start", "delete"} {
-		t.Run(action, func(t *testing.T) {
-			var method, path, key, ifMatch string
-			id := uuid.New()
-			planToken := uuid.NewString()
-			flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				method, path = r.Method, r.URL.Path
-				key, ifMatch = r.Header.Get("Idempotency-Key"), r.Header.Get("If-Match")
-				w.WriteHeader(http.StatusAccepted)
-				json.NewEncoder(w).Encode(map[string]any{
-					"cluster_id": id, "operation_id": uuid.New(), "desired_revision": 4,
-				})
-			}))
-			var stdout, stderr bytes.Buffer
-			args := append(flags, "db", action, id.String(), "--idempotency-key", "retry-me", "--expected-revision", "3")
-			if action == "delete" {
-				args = append(args, "--yes", "--plan-token", planToken)
-			}
-			code := cli.Run(t.Context(), args, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-			}
-			wantMethod, wantPath := "POST", "/v1/clusters/"+id.String()+"/actions/"+action
-			if action == "delete" {
-				wantMethod, wantPath = "DELETE", "/v1/clusters/"+id.String()
-			}
-			if method != wantMethod || path != wantPath {
-				t.Fatalf("%s %s, want the %s route", method, path, action)
-			}
-			if key != "retry-me" || ifMatch != `"3"` {
-				t.Fatalf("key=%q if-match=%q, want the key and expectation to travel", key, ifMatch)
-			}
-			// The key is disclosed before the request, so an uncertain outcome is
-			// retryable by hand.
-			if !strings.Contains(stderr.String(), "retry-me") {
-				t.Fatalf("stderr=%q, want the retry key disclosed", stderr.String())
-			}
-		})
-	}
-}
-
-// An action needs a cluster to act on. A malformed one is refused before anything is sent.
-func TestClusterActionRefusesAMalformedID(t *testing.T) {
-	var reached bool
-	flags := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
-	var stdout, stderr bytes.Buffer
-	if code := cli.Run(t.Context(), append(flags, "db", "delete", "not-a-uuid"), &stdout, &stderr); code == 0 {
-		t.Fatalf("a malformed cluster ID was accepted: %s", stdout.String())
-	}
-	if reached {
-		t.Fatal("a malformed cluster ID reached the API")
-	}
-}
-
-// A read command that prints nothing reads as "this cluster has no members". The
-// default output is what an operator sees, so it must render what the API returned.
-func TestMembersRenderWithoutJSON(t *testing.T) {
-	id, member := uuid.New(), uuid.New()
-	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"members": []map[string]string{{"id": member.String(), "role": "primary", "state": "active"}},
-		})
-	}))
-	var human []string
-	for _, flag := range flags {
-		if flag != "--json" {
-			human = append(human, flag)
-		}
-	}
-	var stdout, stderr bytes.Buffer
-	if code := cli.Run(t.Context(), append(human, "db", "members", id.String()), &stdout, &stderr); code != 0 {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
-	}
-	for _, want := range []string{member.String(), "primary", "active"} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("stdout=%q, want it to name %q", stdout.String(), want)
-		}
-	}
-}
-
-// A create names its topology. A malformed topology or a removed flag is refused before any
-// request. The server decides which well-formed topologies it supports.
-func TestCreatePostgresSendsTopology(t *testing.T) {
-	var body []byte
-	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ = io.ReadAll(r.Body)
-		w.WriteHeader(202)
-		json.NewEncoder(w).Encode(map[string]any{"cluster_id": uuid.New(), "operation_id": uuid.New(), "desired_revision": 1})
-	}))
-	var stdout, stderr bytes.Buffer
-	code := cli.Run(t.Context(), append(flags, "db", "create", "postgres", "--name", "orders", "--version", "17.11"), &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-	}
-	var sent cluster.CreateSpec
-	if err := json.Unmarshal(body, &sent); err != nil || sent.PostgreSQL == nil || sent.PostgreSQL.Topology != "standalone" {
-		t.Fatalf("body=%s", body)
-	}
-	for name, extra := range map[string][]string{
-		"failure domain":     {"--failure-domain", "host"},
-		"malformed topology": {"--topology", "Primary Replica"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			var reached bool
-			flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
-			var stdout, stderr bytes.Buffer
-			if code := cli.Run(t.Context(), append(append(flags, "db", "create", "postgres", "--name", "orders", "--version", "17.11"), extra...), &stdout, &stderr); code == 0 || reached {
-				t.Fatalf("code=%d reached=%v", code, reached)
-			}
-		})
-	}
-}

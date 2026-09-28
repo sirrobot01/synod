@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,36 +9,27 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	appmodel "github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/client"
-	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/spf13/cobra"
 )
 
 // Result is the single JSON document that the CLI writes to stdout.
 type Result struct {
-	App                  *appmodel.App                 `json:"app,omitzero"`
-	AppAdmission         *appmodel.Admission           `json:"app_admission,omitzero"`
-	EnrollmentToken      *client.EnrollmentToken       `json:"enrollment_token,omitzero"`
-	Admission            *client.Admission             `json:"admission,omitzero"`
-	Cluster              *cluster.Cluster              `json:"cluster,omitzero"`
-	ClusterPage          *cluster.Page                 `json:"cluster_page,omitzero"`
-	Operation            *operation.Operation          `json:"operation,omitzero"`
-	User                 *client.User                  `json:"user,omitzero"`
-	Token                *client.APIToken              `json:"token,omitzero"`
-	Tokens               []client.APIToken             `json:"tokens,omitempty"`
-	NodePolicy           *client.NodePolicyResult      `json:"node_policy,omitzero"`
-	Error                *client.Error                 `json:"error,omitzero"`
-	IdempotencyKey       string                        `json:"idempotency_key,omitempty"`
-	ExpectedRevision     int64                         `json:"expected_revision,omitzero"`
-	ActionPlan           *cluster.ActionPlan           `json:"action_plan,omitzero"`
-	EndpointInspection   *cluster.EndpointInspection   `json:"endpoint_inspection,omitzero"`
-	CredentialInspection *cluster.CredentialInspection `json:"credential_inspection,omitzero"`
-	RevealedCredential   *cluster.RevealedCredential   `json:"revealed_credential,omitzero"`
-	Members              []client.ClusterMember        `json:"members,omitempty"`
-	Installation         *client.Installation          `json:"installation,omitzero"`
+	App                *appmodel.App            `json:"app,omitzero"`
+	AppAdmission       *appmodel.Admission      `json:"app_admission,omitzero"`
+	EnrollmentToken    *client.EnrollmentToken  `json:"enrollment_token,omitzero"`
+	Operation          *operation.Operation     `json:"operation,omitzero"`
+	User               *client.User             `json:"user,omitzero"`
+	Token              *client.APIToken         `json:"token,omitzero"`
+	Tokens             []client.APIToken        `json:"tokens,omitempty"`
+	NodePolicy         *client.NodePolicyResult `json:"node_policy,omitzero"`
+	Error              *client.Error            `json:"error,omitzero"`
+	IdempotencyKey     string                   `json:"idempotency_key,omitempty"`
+	ExpectedRevision   int64                    `json:"expected_revision,omitzero"`
+	DatabaseCredential *DatabaseCredential      `json:"database_credential,omitzero"`
+	Installation       *client.Installation     `json:"installation,omitzero"`
 	// JoinToken is the one secret an operator copies to the joining node.
 	JoinToken string `json:"join_token,omitempty"`
 }
@@ -47,12 +37,9 @@ type Result struct {
 // finish closes the connection and writes the result of a client command to stdout.
 // Progress and diagnostics stay on stderr. It returns the exit status.
 func (a *app) finish(selected *cobra.Command, err error) int {
-	// Endpoint and credential output is always JSON.
-	for command := selected; command != nil; command = command.Parent() {
-		if command.Name() == "endpoint" || command.Name() == "credential" {
-			a.json = true
-			break
-		}
+	// Credential output is always JSON.
+	if selected != nil && selected.Name() == "credentials" {
+		a.json = true
 	}
 	if a.api != nil {
 		a.api.Close()
@@ -110,7 +97,7 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			if item.Status.FailureCode != "" {
 				fmt.Fprintf(&output, "Failure: %s\n", item.Status.FailureCode)
 			}
-			if item.Tier == appmodel.TierSingleWriter {
+			if item.Tier != appmodel.TierParallel {
 				fmt.Fprintf(&output, "Active device: %s\nWriter epoch: %d\nPlacement: %s\n", item.Status.ActiveNodeID, item.Status.WriterEpoch, item.Status.Placement)
 				if item.Status.LossWindowSeconds != nil {
 					fmt.Fprintf(&output, "Loss window: %.1f seconds\n", *item.Status.LossWindowSeconds)
@@ -120,6 +107,9 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 				fmt.Fprintf(&output, "Snapshot pause: %.3f seconds (maximum %.3f)\nSkipped snapshots: %d\n", item.Status.LastPauseSeconds, item.Status.MaxPauseSeconds, item.Status.SkippedSnapshots)
 				for _, standby := range item.Status.Standbys {
 					fmt.Fprintf(&output, "Standby: %s (epoch %d, sequence %d, usable: %t)\n", standby.NodeID, standby.Epoch, standby.Sequence, standby.Usable)
+					if standby.State != "" {
+						fmt.Fprintf(&output, "  State: %s\n", standby.State)
+					}
 					if standby.CompletedAt != nil {
 						fmt.Fprintf(&output, "  Completed: %s\n", standby.CompletedAt.Format(time.RFC3339))
 					}
@@ -137,25 +127,6 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			for _, endpoint := range item.Status.Endpoints {
 				fmt.Fprintf(&output, "Endpoint: %s (ready: %t)\n", endpoint.Address, endpoint.Ready)
 			}
-		}
-	}
-	if a.result.Admission != nil {
-		fmt.Fprintf(&output, "Accepted cluster: %s\nOperation: %s\nIdempotency key: %s\n", a.result.Admission.ClusterID, a.result.Admission.OperationID, a.result.IdempotencyKey)
-	}
-	if a.result.Cluster != nil {
-		fmt.Fprintf(&output, "Cluster: %s\nName: %s\nDesired: %s (revision %d)\nObserved: %s (revision %d)\n", a.result.Cluster.ID, a.result.Cluster.Spec.Name, a.result.Cluster.DesiredLifecycle, a.result.Cluster.DesiredRevision, a.result.Cluster.ObservedLifecycle, a.result.Cluster.ObservedRevision)
-	}
-	if a.result.ClusterPage != nil {
-		if len(a.result.ClusterPage.Items) == 0 {
-			fmt.Fprintln(&output, "No clusters on this page.")
-		} else {
-			fmt.Fprintln(&output, "ID  NAME  ENGINE  DESIRED (REVISION)  OBSERVED (REVISION)")
-			for _, item := range a.result.ClusterPage.Items {
-				fmt.Fprintf(&output, "%s  %s  %s  %s (%d)  %s (%d)\n", item.ID, item.Spec.Name, item.Spec.Engine, item.DesiredLifecycle, item.DesiredRevision, item.ObservedLifecycle, item.ObservedRevision)
-			}
-		}
-		if a.result.ClusterPage.NextCursor != "" {
-			fmt.Fprintf(&output, "Next cursor: %q\n", a.result.ClusterPage.NextCursor)
 		}
 	}
 	if a.result.Installation != nil {
@@ -178,14 +149,6 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			state = "revoked"
 		}
 		fmt.Fprintf(&output, "%s  %-24s %-16s %s\n", token.ID, token.Name, token.ActorID, state)
-	}
-	for _, member := range a.result.Members {
-		node := "-"
-		if member.NodeID != uuid.Nil {
-			node = member.NodeID.String()
-		}
-		address := cmp.Or(member.Address, "-")
-		fmt.Fprintf(&output, "%s  %-8s %-9s %-36s %s\n", member.ID, member.Role, member.State, node, address)
 	}
 	if _, err := io.WriteString(a.stdout, output.String()); err != nil {
 		fmt.Fprintln(a.stderr, "Write the result failed: "+err.Error())

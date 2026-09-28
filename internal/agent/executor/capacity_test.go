@@ -43,8 +43,8 @@ func (m *measuredRuntime) Inventory(context.Context) ([]noderuntime.Resource, er
 	return m.resources, nil
 }
 func (m *measuredRuntime) Drift(context.Context) ([]noderuntime.Drift, error) { return m.drift, nil }
-func (m *measuredRuntime) InspectCluster(context.Context, uuid.UUID, []*agentv1.Effect) (noderuntime.ClusterInspection, error) {
-	return noderuntime.ClusterInspection{}, nil
+func (m *measuredRuntime) InspectApp(context.Context, uuid.UUID, []*agentv1.Effect) (noderuntime.AppInspection, error) {
+	return noderuntime.AppInspection{}, nil
 }
 func (m *measuredRuntime) Usage(_ context.Context, resources []uuid.UUID) ([]noderuntime.ResourceUsage, error) {
 	m.asked = append(m.asked, resources)

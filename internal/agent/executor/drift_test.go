@@ -24,16 +24,16 @@ func scan(t *testing.T, e *Executor, ctx context.Context, cursor string, size ui
 // Drift is a property of the host, not of a page, so it travels once. A later page
 // carrying it again would say the host holds twice what it holds.
 func TestInventoryCarriesDriftOnTheFirstPageOnly(t *testing.T) {
-	clusterID, resource := uuid.New(), uuid.New()
+	appID, resource := uuid.New(), uuid.New()
 	native := &measuredRuntime{
 		resources: []noderuntime.Resource{
-			{ClusterID: clusterID, ResourceID: uuid.New(), Kind: "volume", State: "present"},
-			{ClusterID: clusterID, ResourceID: uuid.New(), Kind: "container", State: "running"},
+			{AppID: appID, ResourceID: uuid.New(), Kind: "volume", State: "present"},
+			{AppID: appID, ResourceID: uuid.New(), Kind: "container", State: "running"},
 		},
 		drift: []noderuntime.Drift{
 			{Kind: "container", NativeID: "aaaa", Name: "someone-elses", State: "running", Class: noderuntime.DriftUnowned},
 			{Kind: "volume", NativeID: "synod-volume-x", Name: "synod-volume-x", State: "present",
-				Class: noderuntime.DriftMislabelled, ClusterID: clusterID, ResourceID: resource, Detail: "resource_label_unreadable"},
+				Class: noderuntime.DriftMislabelled, AppID: appID, ResourceID: resource, Detail: "resource_label_unreadable"},
 		},
 	}
 	e, ctx, _ := challenged(t, native)
@@ -54,10 +54,10 @@ func TestInventoryCarriesDriftOnTheFirstPageOnly(t *testing.T) {
 			mislabelled = item
 		}
 	}
-	if unowned == nil || unowned.ClusterId != "" || unowned.ResourceId != "" {
+	if unowned == nil || unowned.AppId != "" || unowned.ResourceId != "" {
 		t.Fatalf("item=%+v, want no identity claimed for an object that was never ours", unowned)
 	}
-	if mislabelled == nil || mislabelled.ResourceId != resource.String() || mislabelled.ClusterId != clusterID.String() {
+	if mislabelled == nil || mislabelled.ResourceId != resource.String() || mislabelled.AppId != appID.String() {
 		t.Fatalf("item=%+v, want the recovered identity carried", mislabelled)
 	}
 	second := scan(t, e, ctx, first.NextCursor, 1)

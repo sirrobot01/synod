@@ -261,7 +261,7 @@ func TestDecideRefusesWithoutMeasuredEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := placement.Request{Version: 1, InstallationID: n.InstallationID, ClusterID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1}
+	request := placement.Request{Version: 1, InstallationID: n.InstallationID, AppID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1}
 	// The node was challenged and never answered. The snapshot still carries no
 	// report, so the decision fails rather than guessing at the host.
 	if _, _, err := d.Decide(t.Context(), request); !errors.Is(err, ErrNoEvidence) {
@@ -289,7 +289,7 @@ func TestDecideStopsWaitingAtTheProbeWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := placement.Request{Version: 1, InstallationID: n.InstallationID, ClusterID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1}
+	request := placement.Request{Version: 1, InstallationID: n.InstallationID, AppID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1}
 	done := make(chan error, 1)
 	go func() { _, _, err := d.Decide(t.Context(), request); done <- err }()
 	select {
@@ -351,7 +351,7 @@ func TestEvidenceBoundToOtherStateIsRefused(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			request := placement.Request{Version: 1, InstallationID: n.InstallationID, ClusterID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1}
+			request := placement.Request{Version: 1, InstallationID: n.InstallationID, AppID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1}
 			if _, _, err := d.Decide(t.Context(), request); !errors.Is(err, ErrNoEvidence) {
 				t.Fatalf("err=%v, want ErrNoEvidence", err)
 			}

@@ -33,7 +33,7 @@ func TestFinalSnapshotKeepsProofAcrossLostReplyAndRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	command := &agentv1.Command{Epoch: &agentv1.Epoch{InstallationId: uuid.NewString(), NodeId: source, ClusterId: appID, RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1}, OperationId: uuid.NewString(), CommandId: uuid.NewString(), StepId: uuid.NewString(), DesiredRevision: 2, PlanVersion: 1, Input: &agentv1.CommandInput{ResourceId: resource, PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_FinalAppSnapshot{FinalAppSnapshot: &agentv1.FinalAppSnapshot{WriterEpoch: 3, TargetNodeId: target}}}}
+	command := &agentv1.Command{Epoch: &agentv1.Epoch{InstallationId: uuid.NewString(), NodeId: source, AppId: appID, RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1}, OperationId: uuid.NewString(), CommandId: uuid.NewString(), StepId: uuid.NewString(), DesiredRevision: 2, PlanVersion: 1, Input: &agentv1.CommandInput{ResourceId: resource, PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_FinalAppSnapshot{FinalAppSnapshot: &agentv1.FinalAppSnapshot{WriterEpoch: 3, TargetNodeId: target}}}}
 	hash, err := operation.CommandHash(command)
 	if err != nil {
 		t.Fatal(err)
@@ -151,5 +151,39 @@ func TestStaleLiveWaitsForCompleteCurrentReplica(t *testing.T) {
 	}
 	if err := store.Verify(t.Context()); err != nil {
 		t.Fatalf("cleanup damaged replica: %v", err)
+	}
+}
+
+func TestDatabaseRebuildRequiresAbsentContainerAndRemovesOldEpoch(t *testing.T) {
+	appID := uuid.NewString()
+	native := &writerTestRuntime{app: runtime.AppContainer{AppID: appID}}
+	e := &Executor{runtime: native, options: Options{AppsDir: t.TempDir(), Replication: &replication.Table{}}}
+	root := filepath.Join(e.options.AppsDir, appID)
+	if err := os.MkdirAll(filepath.Join(root, "engine", "data"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{"database-primary-epoch": "2", "database-write-pause": "2", "engine/data/divergent": "old primary writes"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := &agentv1.Command{Epoch: &agentv1.Epoch{AppId: appID}, CommandId: uuid.NewString(), Input: &agentv1.CommandInput{ResourceId: uuid.NewString(), Payload: &agentv1.CommandInput_RemoveAppData{RemoveAppData: &agentv1.RemoveAppData{WriterEpoch: 2}}}}
+	if _, err := e.removeAppData(t.Context(), command); !errors.Is(err, runtime.ErrBusy) {
+		t.Fatalf("removed mounted database data: %v", err)
+	}
+	native.app = runtime.AppContainer{}
+	command.Input.GetRemoveAppData().WriterEpoch = 1
+	if _, err := e.removeAppData(t.Context(), command); !errors.Is(err, operation.ErrStaleOwner) {
+		t.Fatalf("old command removed new data: %v", err)
+	}
+	command.Input.GetRemoveAppData().WriterEpoch = 2
+	if _, err := e.removeAppData(t.Context(), command); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old primary data remains: %v", err)
+	}
+	if _, err := e.recoverAppData(t.Context(), command); err != nil {
+		t.Fatalf("lost removal reply: %v", err)
 	}
 }

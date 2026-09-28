@@ -108,24 +108,28 @@ func (m *Manager) Apply(ctx context.Context, routes []*agentv1.AppRoute) error {
 			}
 		}
 	}()
+	// A route is one app port. A tier 1 app owns a writer port and a reader port.
+	key := func(config *agentv1.AppRoute) string {
+		return config.AppId + "/" + strconv.FormatUint(uint64(config.IngressPort), 10)
+	}
 	for _, config := range routes {
-		if old := m.routes[config.AppId]; old != nil && old.port == config.IngressPort && old.protocol == config.Protocol {
+		if old := m.routes[key(config)]; old != nil && old.protocol == config.Protocol {
 			continue
 		}
 		listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", net.JoinHostPort(m.options.ListenAddress, strconv.FormatUint(uint64(config.IngressPort), 10)))
 		if err != nil {
 			return errors.Join(ErrPortConflict, err)
 		}
-		staged[config.AppId] = &route{manager: m, protocol: config.Protocol, port: config.IngressPort, listener: &trackedListener{Listener: listener, manager: m}}
+		staged[key(config)] = &route{manager: m, protocol: config.Protocol, port: config.IngressPort, listener: &trackedListener{Listener: listener, manager: m}}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	next := make(map[string]*route, len(routes))
 	for _, config := range routes {
-		r := staged[config.AppId]
+		r := staged[key(config)]
 		if r == nil {
-			r = m.routes[config.AppId]
+			r = m.routes[key(config)]
 		}
 		r.mu.Lock()
 		existing := map[string]*backend{}
@@ -142,7 +146,7 @@ func (m *Manager) Apply(ctx context.Context, routes []*agentv1.AppRoute) error {
 		}
 		r.backends = backends
 		r.mu.Unlock()
-		next[config.AppId] = r
+		next[key(config)] = r
 	}
 	for id, old := range m.routes {
 		if next[id] != old {

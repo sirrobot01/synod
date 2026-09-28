@@ -103,7 +103,7 @@ func TestAgentResultValidation(t *testing.T) {
 	}{
 		{"missing epoch", func(r *agentv1.TerminalResult) { r.Epoch = nil }},
 		{"wrong node", func(r *agentv1.TerminalResult) { r.Epoch.NodeId = uuid.NewString() }},
-		{"wrong cluster", func(r *agentv1.TerminalResult) { r.Epoch.ClusterId = uuid.NewString() }},
+		{"wrong app", func(r *agentv1.TerminalResult) { r.Epoch.AppId = uuid.NewString() }},
 		{"wrong generation", func(r *agentv1.TerminalResult) { r.Epoch.RecoveryGeneration = uuid.NewString() }},
 		{"wrong epoch", func(r *agentv1.TerminalResult) { r.Epoch.ExecutionEpoch++ }},
 		{"unknown command", func(r *agentv1.TerminalResult) { r.CommandId = uuid.NewString() }},

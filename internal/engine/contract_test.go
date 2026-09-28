@@ -2,12 +2,10 @@ package engine_test
 
 import (
 	"encoding/json"
-	"errors"
 	"slices"
 	"strings"
 	"testing"
 
-	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/engine"
 	"github.com/sirrobot01/synod/internal/engine/postgres"
 	"github.com/sirrobot01/synod/internal/engine/redis"
@@ -23,25 +21,8 @@ func engines() map[string]engine.Engine {
 	}
 }
 
-// specFor builds one admissible spec for a combination an engine advertises.
-func specFor(t *testing.T, found engine.Capabilities) cluster.CreateSpec {
-	t.Helper()
-	spec := cluster.CreateSpec{SchemaVersion: 1, Name: "example", Engine: found.Combination.Engine}
-	switch found.Combination.Engine {
-	case cluster.PostgreSQL:
-		spec.PostgreSQL = &cluster.PostgreSQLSpec{Version: found.Combination.Version, Topology: found.Combination.Topology}
-	case cluster.Redis:
-		spec.Redis = &cluster.RedisSpec{
-			Version: found.Combination.Version, Topology: found.Combination.Topology,
-			Persistence: found.Combination.Persistence,
-		}
-	}
-	return spec
-}
-
-// Every engine must advertise at least one combination, and each must be answerable.
-// An advertisement nothing can resolve is a promise an installation cannot keep.
-func TestEveryAdvertisedCombinationResolves(t *testing.T) {
+// Every engine must advertise at least one combination, and each names its own engine.
+func TestEveryEngineAdvertisesItsOwnCombinations(t *testing.T) {
 	for name, found := range engines() {
 		t.Run(name, func(t *testing.T) {
 			advertised := found.Advertised()
@@ -49,97 +30,14 @@ func TestEveryAdvertisedCombinationResolves(t *testing.T) {
 				t.Fatal("an engine advertised nothing")
 			}
 			for _, one := range advertised {
-				if one.Combination.Engine != found.Identity() {
+				if one.Combination.Engine != found.Identity() || one.Combination.Engine != name {
 					t.Fatalf("combination=%s, want %s", one.Combination, found.Identity())
 				}
-				resolved, err := found.Resolve(specFor(t, one))
-				if err != nil {
-					t.Fatalf("%s was advertised and could not be resolved: %v", one.Combination, err)
-				}
-				if resolved.Combination != one.Combination {
-					t.Fatalf("resolved=%s, want %s", resolved.Combination, one.Combination)
-				}
 			}
 		})
 	}
 }
 
-// Capability comes from engine, version, topology, and persistence together.
-// Specification 06 states a single engine-wide boolean is not sufficient, so an
-// engine must answer differently for different combinations of its own.
-func TestCapabilityIsNotOneBooleanPerEngine(t *testing.T) {
-	// Redis persistence is the case the tree actually carries: an engine an operator
-	// asked not to persist has nothing to back up, and a backup format advertised for
-	// it would schedule a backup of data that does not survive a restart.
-	r := redis.New()
-	unpersisted, err := r.Resolve(specFor(t, engine.Capabilities{Combination: engine.Combination{
-		Engine: cluster.Redis, Version: "8.2.7", Topology: "standalone", Persistence: "none",
-	}}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	persisted, err := r.Resolve(specFor(t, engine.Capabilities{Combination: engine.Combination{
-		Engine: cluster.Redis, Version: "8.2.7", Topology: "standalone", Persistence: "rdb",
-	}}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(unpersisted.BackupFormats) != 0 {
-		t.Fatalf("formats=%v, want none for an engine that was asked not to persist", unpersisted.BackupFormats)
-	}
-	if len(persisted.BackupFormats) == 0 {
-		t.Fatal("a persisted engine advertised no backup format")
-	}
-}
-
-// A combination an engine does not serve is refused when the spec is validated, not
-// when a host is touched. An operator finds out before anything is created.
-func TestUnsupportedCombinationIsRefusedAtValidation(t *testing.T) {
-	catalog, err := engine.NewCatalog(postgres.New(), redis.New())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, spec := range map[string]cluster.CreateSpec{
-		"a version nobody serves": {SchemaVersion: 1, Name: "example", Engine: cluster.PostgreSQL,
-			PostgreSQL: &cluster.PostgreSQLSpec{Version: "9.6", Topology: "standalone"}},
-		"a redis version nobody serves": {SchemaVersion: 1, Name: "example", Engine: cluster.Redis,
-			Redis: &cluster.RedisSpec{Version: "6.2", Topology: "standalone", Persistence: "rdb"}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := catalog.Resolve(spec); !errors.Is(err, engine.ErrUnsupportedCombination) {
-				t.Fatalf("err=%v, want ErrUnsupportedCombination", err)
-			}
-		})
-	}
-}
-
-// A malformed spec is refused before any capability is read, so it can never be
-// answered for a combination other than the one it asked about.
-func TestAMalformedSpecNeverReachesACapability(t *testing.T) {
-	catalog, err := engine.NewCatalog(postgres.New(), redis.New())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, spec := range map[string]cluster.CreateSpec{
-		"no schema version": {Name: "example", Engine: cluster.PostgreSQL,
-			PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "standalone"}},
-		"a name no cluster may have": {SchemaVersion: 1, Name: "Example", Engine: cluster.PostgreSQL,
-			PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "standalone"}},
-		"two engines at once": {SchemaVersion: 1, Name: "example", Engine: cluster.PostgreSQL,
-			PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "standalone"},
-			Redis:      &cluster.RedisSpec{Version: "8.2.7", Topology: "standalone", Persistence: "rdb"}},
-		"no engine settings": {SchemaVersion: 1, Name: "example", Engine: cluster.PostgreSQL},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := catalog.Resolve(spec); err == nil {
-				t.Fatalf("a malformed spec was resolved: %s", name)
-			}
-		})
-	}
-}
-
-// Specification 36 states that no combination is qualified by documentation and that
-// passing evidence is never invented. Nothing may ship claiming otherwise.
 func TestNothingClaimsQualificationItDoesNotHave(t *testing.T) {
 	for name, found := range engines() {
 		t.Run(name, func(t *testing.T) {
@@ -193,16 +91,27 @@ func TestCapabilitiesAreMachineReadable(t *testing.T) {
 	}
 }
 
-// The catalog serves the engines it was given and refuses a spec for anything else.
+// Tier 1 admission names a major version. The catalog serves a release in it, and
+// refuses an engine it was not given.
 func TestCatalogServesOnlyWhatItWasGiven(t *testing.T) {
 	only, err := engine.NewCatalog(postgres.New())
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := cluster.CreateSpec{SchemaVersion: 1, Name: "cache", Engine: cluster.Redis,
-		Redis: &cluster.RedisSpec{Version: "8.2.7", Topology: "standalone", Persistence: "rdb"}}
-	if _, err := only.Resolve(spec); !errors.Is(err, engine.ErrUnknownEngine) {
-		t.Fatalf("err=%v, want ErrUnknownEngine", err)
+	for _, test := range []struct {
+		engine, version string
+		served          bool
+	}{
+		{engine.PostgreSQL, "17", true},
+		{engine.PostgreSQL, "17.11", true},
+		{engine.PostgreSQL, "1", false},
+		{engine.PostgreSQL, "16", false},
+		{engine.Redis, "8", false},
+		{"mysql", "8", false},
+	} {
+		if got := only.Serves(test.engine, test.version); got != test.served {
+			t.Fatalf("Serves(%s, %s)=%t, want %t", test.engine, test.version, got, test.served)
+		}
 	}
 	if _, err := engine.NewCatalog(); err == nil {
 		t.Fatal("an empty catalog was accepted")
@@ -210,95 +119,7 @@ func TestCatalogServesOnlyWhatItWasGiven(t *testing.T) {
 	if _, err := engine.NewCatalog(postgres.New(), postgres.New()); err == nil {
 		t.Fatal("two engines claiming the same identity were accepted")
 	}
-}
-
-// An engine answers for itself and refuses another engine's spec outright, so the
-// boundary admits a second engine without either reaching into the other.
-func TestAnEngineRefusesAnotherEnginesSpec(t *testing.T) {
-	postgresSpec := cluster.CreateSpec{SchemaVersion: 1, Name: "db", Engine: cluster.PostgreSQL,
-		PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "standalone"}}
-	redisSpec := cluster.CreateSpec{SchemaVersion: 1, Name: "cache", Engine: cluster.Redis,
-		Redis: &cluster.RedisSpec{Version: "8.2.7", Topology: "standalone", Persistence: "rdb"}}
-	if err := postgres.New().Validate(redisSpec); err == nil {
-		t.Fatal("the postgres engine accepted a redis spec")
-	}
-	if err := redis.New().Validate(postgresSpec); err == nil {
-		t.Fatal("the redis engine accepted a postgres spec")
-	}
-}
-
-// Topology is part of the key, not a field read afterwards. Admission refuses every
-// topology but standalone today, so this asks the engine directly: the dimension has
-// to work before HA becomes admissible, or an unqualified HA cluster would be created
-// the moment the earlier refusal is lifted.
-func TestTopologyDiscriminatesBeforeItIsAdmissible(t *testing.T) {
-	ha := cluster.CreateSpec{SchemaVersion: 1, Name: "db", Engine: cluster.PostgreSQL,
-		PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "ha"}}
-	if _, err := postgres.New().Resolve(ha); !errors.Is(err, engine.ErrUnsupportedCombination) {
-		t.Fatalf("err=%v, want an unadvertised topology refused", err)
-	}
-	// The same version in a topology the engine does advertise is served.
-	standalone := cluster.CreateSpec{SchemaVersion: 1, Name: "db", Engine: cluster.PostgreSQL,
-		PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "standalone"}}
-	if _, err := postgres.New().Resolve(standalone); err != nil {
-		t.Fatalf("an advertised combination was refused: %v", err)
-	}
-	// Redis Sentinel and Cluster are the same story on the other engine.
-	sentinel := cluster.CreateSpec{SchemaVersion: 1, Name: "cache", Engine: cluster.Redis,
-		Redis: &cluster.RedisSpec{Version: "8.2.7", Topology: "sentinel", Persistence: "rdb"}}
-	if _, err := redis.New().Resolve(sentinel); !errors.Is(err, engine.ErrUnsupportedCombination) {
-		t.Fatalf("err=%v, want an unadvertised topology refused", err)
-	}
-}
-
-func TestRedisReplicaLimitsMatchPersistence(t *testing.T) {
-	for _, persistence := range []string{"none", "rdb", "aof", "rdb+aof"} {
-		t.Run(persistence, func(t *testing.T) {
-			resolved, err := redis.New().Resolve(cluster.CreateSpec{SchemaVersion: 1, Name: "cache", Engine: cluster.Redis,
-				Redis: &cluster.RedisSpec{Version: "8.2.7", Topology: "standalone", Persistence: persistence}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			maximum := 1
-			if persistence == "none" {
-				maximum = 0
-			}
-			if resolved.Replicas.Minimum != 0 || resolved.Replicas.Maximum != maximum {
-				t.Fatalf("replica limits %+v, want 0..%d", resolved.Replicas, maximum)
-			}
-			if resolved.Status != engine.RequiredPending || resolved.NativeFailover || resolved.Sharding || resolved.ClientDiscovery {
-				t.Fatal("compact replicas must not claim qualification or HA")
-			}
-		})
-	}
-}
-
-func TestPostgresReplicaLimitsMatchImplementedVersion(t *testing.T) {
-	for _, version := range []string{"17.11", "18.6"} {
-		t.Run(version, func(t *testing.T) {
-			found, err := postgres.New().Resolve(cluster.CreateSpec{SchemaVersion: 1, Name: "db", Engine: cluster.PostgreSQL,
-				PostgreSQL: &cluster.PostgreSQLSpec{Version: version, Topology: "standalone"}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			// Standalone is one node.
-			if found.Replicas.Minimum != 0 || found.Replicas.Maximum != 0 {
-				t.Fatalf("replica limits %+v, want none", found.Replicas)
-			}
-			if found.Status != engine.RequiredPending || found.NativeFailover || found.ProxyRouting || found.TLS || len(found.UpgradePairs) != 0 {
-				t.Fatal("standalone claimed unqualified HA or routing")
-			}
-		})
-	}
-}
-
-// A retired topology is refused, not served.
-func TestPostgresPatroniTopologyIsRefused(t *testing.T) {
-	spec := cluster.CreateSpec{SchemaVersion: 1, Name: "ha", Engine: cluster.PostgreSQL, PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "patroni"}}
-	if err := spec.Validate(); err != nil {
-		t.Fatalf("a well-formed topology failed validation: %v", err)
-	}
-	if _, err := postgres.New().Resolve(spec); !errors.Is(err, engine.ErrUnsupportedCombination) {
-		t.Fatalf("a patroni topology resolved: %v", err)
+	if _, err := engine.NewCatalog(nil); err == nil {
+		t.Fatal("a nil engine was accepted")
 	}
 }

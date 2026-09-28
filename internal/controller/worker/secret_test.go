@@ -15,10 +15,13 @@ import (
 )
 
 // A plan may name a credential. It may never carry one.
-func TestPlanAcceptsSQLReferencesAndRestrictsNativePurposes(t *testing.T) {
+func TestPlanAcceptsCredentialReferencesAndRestrictsPurposes(t *testing.T) {
 	op, node := testOperation(), uuid.NewString()
 	resource := uuid.NewString()
-	step := planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_ENGINE_READY)
+	step := planStep(t, op, node, resource, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS)
+	container := step.Command.Input.GetEnsureContainer()
+	container.Generic.Mounts = []*agentv1.Mount{{Type: "engine", Source: "data", Target: "/data"}}
+	container.SecretEnv = []*agentv1.SecretEnv{{Name: "ENGINE_PASSWORD", Purpose: "superuser"}}
 	step.Command.Input.Secrets = []*agentv1.SecretReference{
 		{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"},
 	}
@@ -27,7 +30,7 @@ func TestPlanAcceptsSQLReferencesAndRestrictsNativePurposes(t *testing.T) {
 		t.Fatalf("a plan naming a credential was refused: %v", err)
 	}
 	for _, purpose := range []string{"root", "unknown"} {
-		step.Command.Input.Secrets[0].Purpose = purpose
+		step.Command.Input.Secrets[0].Purpose, container.SecretEnv[0].Purpose = purpose, purpose
 		rehash(t, step.Command)
 		if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{step}}, op); !errors.Is(err, operation.ErrUnsupportedPlan) {
 			t.Fatalf("purpose=%s err=%v, want refusal of an unknown purpose", purpose, err)
@@ -40,7 +43,7 @@ func TestPlanAcceptsSQLReferencesAndRestrictsNativePurposes(t *testing.T) {
 func TestDispatchRefusesWhatItCannotResolve(t *testing.T) {
 	w := &Worker{config: Config{}}
 	command := &agentv1.Command{
-		Epoch: &agentv1.Epoch{ClusterId: uuid.NewString()},
+		Epoch: &agentv1.Epoch{AppId: uuid.NewString()},
 		Input: &agentv1.CommandInput{Secrets: []*agentv1.SecretReference{
 			{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"},
 		}},
@@ -49,22 +52,22 @@ func TestDispatchRefusesWhatItCannotResolve(t *testing.T) {
 		t.Fatalf("err=%v, want ErrSecretUnresolvable", err)
 	}
 	// A command that needs nothing is sent by a controller with no keyring at all.
-	plain := &agentv1.Command{Epoch: &agentv1.Epoch{ClusterId: uuid.NewString()}, Input: &agentv1.CommandInput{}}
+	plain := &agentv1.Command{Epoch: &agentv1.Epoch{AppId: uuid.NewString()}, Input: &agentv1.CommandInput{}}
 	if err := w.pushSecrets(t.Context(), uuid.New(), "session", plain); err != nil {
 		t.Fatalf("a command needing no credential was refused: %v", err)
 	}
 }
 
 // A credential is bound to its owner, so a worker cannot open one that belongs to
-// another cluster even by accident.
-func TestACredentialIsBoundToItsCluster(t *testing.T) {
+// another app even by accident.
+func TestACredentialIsBoundToItsApp(t *testing.T) {
 	active := uuid.New()
 	ring, err := secret.NewKeyring(active, map[uuid.UUID][]byte{active: make([]byte, 32)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	binding := secret.Binding{
-		InstallationID: uuid.New(), OwnerType: "cluster", OwnerID: uuid.New(),
+		InstallationID: uuid.New(), OwnerType: "app", OwnerID: uuid.New(),
 		CredentialID: uuid.New(), Version: 1,
 	}
 	envelope, err := ring.Seal(binding, []byte("value"))
@@ -74,7 +77,7 @@ func TestACredentialIsBoundToItsCluster(t *testing.T) {
 	moved := binding
 	moved.OwnerID = uuid.New()
 	if _, err := ring.Open(moved, envelope); err == nil {
-		t.Fatal("a credential opened under another cluster's binding")
+		t.Fatal("a credential opened under another app's binding")
 	}
 }
 
@@ -84,30 +87,24 @@ func TestACredentialIsBoundToItsCluster(t *testing.T) {
 func TestEveryPostconditionCanBeProved(t *testing.T) {
 	op, node := testOperation(), uuid.NewString()
 	for postcondition, state := range map[agentv1.Postcondition]string{
-		agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS:            "present",
-		agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS:           "present",
-		agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS:         "created",
-		agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING:        "running",
-		agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED:        "exited",
-		agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT:         "absent",
-		agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED:      "running",
-		agentv1.Postcondition_POSTCONDITION_ENGINE_READY:             "ready",
-		agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED: "setup_recovered",
-		agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED: "snapshot_transferred",
-		agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT:          "app_data_absent",
+		agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS:          "created",
+		agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING:         "running",
+		agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED:         "exited",
+		agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT:          "absent",
+		agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED:  "snapshot_transferred",
+		agentv1.Postcondition_POSTCONDITION_DATABASE_SWITCHOVER_READY: "database_switchover_ready",
+		agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT:           "app_data_absent",
 	} {
 		t.Run(postcondition.String(), func(t *testing.T) {
 			step := planStep(t, op, node, uuid.NewString(), postcondition)
-			// A readiness step names its effect differently, because it is an
-			// observation over the network rather than a container action.
-			native := "docker-command:" + step.Command.CommandId
-			if postcondition == agentv1.Postcondition_POSTCONDITION_ENGINE_READY {
-				native = "readiness:" + step.Command.CommandId
-			}
-			effect := &agentv1.Effect{CommandId: step.Command.CommandId, ResourceId: step.Command.Input.ResourceId, NativeOperationId: native, State: state}
+			effect := &agentv1.Effect{CommandId: step.Command.CommandId, ResourceId: step.Command.Input.ResourceId, NativeOperationId: "docker-command:" + step.Command.CommandId, State: state}
 			if postcondition == agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED {
 				effect.NativeOperationId = "app-data:" + step.Command.CommandId
 				effect.AppSnapshot = &agentv1.AppSnapshotReceipt{WriterEpoch: 1, Sequence: 1, TargetNodeId: step.Command.Input.GetFinalAppSnapshot().TargetNodeId, ManifestHash: make([]byte, 32)}
+			}
+			if postcondition == agentv1.Postcondition_POSTCONDITION_DATABASE_SWITCHOVER_READY {
+				effect.NativeOperationId = "database-switch:" + step.Command.CommandId
+				effect.DatabaseSwitchover = &agentv1.DatabaseSwitchoverReceipt{WriterEpoch: 1, TargetNodeId: step.Command.Input.GetSwitchDatabase().TargetNodeId, PositionHash: make([]byte, 32)}
 			}
 			if postcondition == agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT {
 				effect.NativeOperationId = "app-data:" + step.Command.CommandId
@@ -119,7 +116,7 @@ func TestEveryPostconditionCanBeProved(t *testing.T) {
 	}
 	// Every postcondition in the enum is covered above, so a new one added without a
 	// rule here fails this test rather than a four-minute replay loop in production.
-	highest := agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT
+	highest := agentv1.Postcondition_POSTCONDITION_DATABASE_SWITCHOVER_READY
 	if _, known := agentv1.Postcondition_name[int32(highest)+1]; known {
 		t.Fatal("a postcondition was added to the protocol without a rule that proves it")
 	}
@@ -136,11 +133,14 @@ func TestWorkerDeliversExactCredentialVersion(t *testing.T) {
 	credential := postgres.Credential{CredentialID: uuid.New(), Version: 1, Purpose: postgres.SuperuserCredential, RoleName: "synod_admin"}
 	for version := int64(1); version <= 2; version++ {
 		credential.Version = version
-		credential.Envelope, err = ring.Seal(secret.Binding{InstallationID: h.claim.InstallationID, OwnerType: "cluster", OwnerID: h.claim.ClusterID, CredentialID: credential.CredentialID, Version: version}, []byte(fmt.Sprintf("material-%d", version)))
+		credential.Envelope, err = ring.Seal(secret.Binding{InstallationID: h.claim.InstallationID, OwnerType: "app", OwnerID: h.claim.AppID, CredentialID: credential.CredentialID, Version: version}, []byte(fmt.Sprintf("material-%d", version)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := h.store.RecordClusterIntent(t.Context(), postgres.ClusterIntent{InstallationID: h.claim.InstallationID, ClusterID: h.claim.ClusterID, Credentials: []postgres.Credential{credential}}); err != nil {
+		// The harness app is tier 3, so the credential row is written directly.
+		if _, err := h.pool.Exec(t.Context(), `INSERT INTO app_credentials (installation_id,app_id,credential_id,version,purpose,role_name,key_id,format_version,sealed)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, h.claim.InstallationID, h.claim.AppID, credential.CredentialID, version, credential.Purpose, credential.RoleName,
+			credential.Envelope.KeyID, credential.Envelope.FormatVersion, credential.Envelope.Sealed); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -163,7 +163,7 @@ func TestWorkerDeliversExactCredentialVersion(t *testing.T) {
 		t.Fatal("credential did not reach the authenticated session")
 	}
 	for name, change := range map[string]func(*agentv1.Command){
-		"other cluster":    func(c *agentv1.Command) { c.Epoch.ClusterId = uuid.NewString() },
+		"other app":        func(c *agentv1.Command) { c.Epoch.AppId = uuid.NewString() },
 		"missing identity": func(c *agentv1.Command) { c.Input.Secrets[0].CredentialId = uuid.NewString() },
 		"missing version":  func(c *agentv1.Command) { c.Input.Secrets[0].Version = 3 },
 		"wrong purpose":    func(c *agentv1.Command) { c.Input.Secrets[0].Purpose = postgres.ApplicationCredential },

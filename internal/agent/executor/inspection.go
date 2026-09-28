@@ -12,7 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// inspectCommand holds the cluster slot during a bounded read, without admitting work.
+// inspectCommand holds the app slot during a bounded read, without admitting work.
 // Handle owns the gate lock on entry and exit.
 func (e *Executor) inspectCommand(ctx context.Context, current *session, request *agentv1.CommandInspectionRequest) (*agentv1.AgentMessage, error) {
 	if !current.inspection {
@@ -23,20 +23,22 @@ func (e *Executor) inspectCommand(ctx context.Context, current *session, request
 		return nil, err
 	}
 	command := request.Command
-	cluster := command.Epoch.ClusterId
-	gate := current.gates[cluster]
+	app := command.Epoch.AppId
+	gate := current.gates[app]
 	if gate == nil || !gate.ready || !proto.Equal(gate.epoch, command.Epoch) {
 		return nil, operation.ErrBarrierPending
 	}
-	if e.inspectionBusy || e.active[cluster] {
+	if e.inspectionBusy || e.active[app] {
 		return nil, journal.ErrBusy
 	}
-	e.inspectionBusy, e.active[cluster] = true, true
+	e.inspectionBusy, e.active[app] = true, true
 	read, cancel := context.WithTimeout(ctx, e.options.InspectionTimeout)
 	e.mu.Unlock()
 	var result runtime.Result
 	var err error
-	if command.Input.GetFinalAppSnapshot() != nil || command.Input.GetRemoveAppData() != nil {
+	if command.Input.GetSwitchDatabase() != nil {
+		result, err = e.recoverDatabaseSwitch(read, command)
+	} else if command.Input.GetFinalAppSnapshot() != nil || command.Input.GetRemoveAppData() != nil {
 		result, err = e.recoverAppData(read, command)
 	} else {
 		result, err = e.runtime.Recover(read, command, request.PriorEffects)
@@ -44,8 +46,8 @@ func (e *Executor) inspectCommand(ctx context.Context, current *session, request
 	cancel()
 	e.mu.Lock()
 	e.inspectionBusy = false
-	delete(e.active, cluster)
-	if ctx.Err() != nil || e.session != current || current.gates[cluster] != gate || e.failure != nil {
+	delete(e.active, app)
+	if ctx.Err() != nil || e.session != current || current.gates[app] != gate || e.failure != nil {
 		return nil, operation.ErrStaleOwner
 	}
 	response := &agentv1.CommandInspectionResult{RequestId: request.RequestId, Epoch: proto.Clone(command.Epoch).(*agentv1.Epoch), CommandId: command.CommandId, InputHash: bytes.Clone(command.InputHash), Effects: result.Effects}

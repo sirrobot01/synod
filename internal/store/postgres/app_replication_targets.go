@@ -2,14 +2,17 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"net"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/app"
+	"github.com/sirrobot01/synod/internal/placement"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
@@ -45,7 +48,16 @@ func (s *Store) AppReplicationTargets(ctx context.Context, installation uuid.UUI
 		return nil, err
 	}
 	for _, item := range apps {
-		if item.Tier != app.TierSingleWriter || item.DesiredLifecycle != "running" {
+		if item.DesiredLifecycle != "running" {
+			continue
+		}
+		if item.Tier == app.TierDatabase {
+			if err := s.addDatabaseTargets(ctx, installation, item, snapshot, targets); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if item.Tier != app.TierSingleWriter {
 			continue
 		}
 		writer, err := s.GetAppWriter(ctx, installation, item.ID)
@@ -91,4 +103,56 @@ func (s *Store) AppReplicationTargets(ctx context.Context, installation uuid.UUI
 		}
 	}
 	return targets, nil
+}
+
+// addDatabaseTargets assigns each tier 1 copy its engine role. A standby follows the
+// primary at the primary node's client address and the primary copy's published port.
+func (s *Store) addDatabaseTargets(ctx context.Context, installation uuid.UUID, item app.App, snapshot placement.Snapshot, targets map[uuid.UUID]*agentv1.ReplicationTable) error {
+	writer, err := s.GetAppWriter(ctx, installation, item.ID)
+	if err != nil || writer.Epoch == 0 {
+		return err
+	}
+	copies, err := s.GetAppCopies(ctx, installation, item.ID)
+	if err != nil {
+		return err
+	}
+	primary := slices.IndexFunc(copies, func(c app.Copy) bool { return c.Role == replication.RoleActive && c.NodeID == writer.NodeID })
+	address := ""
+	for _, node := range snapshot.Nodes {
+		if node.ID == writer.NodeID && node.Policy != nil {
+			address = node.Policy.ClientAddress
+		}
+	}
+	if primary < 0 || address == "" || copies[primary].HostPort == 0 {
+		return nil
+	}
+	var hold, target uuid.UUID
+	err = s.pool.QueryRow(ctx, `SELECT m.operation_id,m.target_node_id FROM app_moves m JOIN operations o ON o.id=m.operation_id
+ WHERE m.installation_id=$1 AND m.app_id=$2 AND m.writer_epoch=$3 AND m.source_node_id=$4 AND m.promoted_at IS NULL
+ AND o.plan_version>0 AND o.status IN ('pending','running','waiting','cancelling')`, installation, item.ID, writer.Epoch, writer.NodeID).Scan(&hold, &target)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return admissionError(err)
+	}
+	rebuilding, err := s.DatabaseRebuildNodes(ctx, installation, item.ID)
+	if err != nil {
+		return err
+	}
+	for _, copy := range copies {
+		if slices.Contains(rebuilding, copy.NodeID) {
+			continue
+		}
+		table := targets[copy.NodeID]
+		if table == nil || (copy.Role != replication.RoleActive && copy.Role != replication.RoleStandby) || (copy.Role == replication.RoleActive && copy.NodeID != writer.NodeID) {
+			continue
+		}
+		database := &agentv1.DatabaseAssignment{Engine: item.Spec.Database.Engine, Databases: item.Spec.Database.Databases}
+		if copy.Role == replication.RoleStandby {
+			database.PrimaryHost, database.PrimaryPort = address, uint32(copies[primary].HostPort)
+			if copy.NodeID == target {
+				database.SwitchoverOperationId = hold.String()
+			}
+		}
+		table.Apps = append(table.Apps, &agentv1.AppReplication{AppId: item.ID.String(), Epoch: writer.Epoch, Role: copy.Role, Database: database})
+	}
+	return nil
 }

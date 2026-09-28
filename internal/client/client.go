@@ -11,14 +11,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/operation"
 )
 
@@ -56,15 +53,6 @@ func (e *Error) Error() string { return e.Message }
 // next and never repeats a server detail or a path back at them. The cause is not
 // serialized, so it reaches a caller and a debugger without changing the output.
 func (e *Error) Unwrap() error { return e.cause }
-
-// Admission is the accepted result of one create request.
-type Admission struct {
-	ClusterID       uuid.UUID `json:"cluster_id"`
-	OperationID     uuid.UUID `json:"operation_id"`
-	DesiredRevision int64     `json:"desired_revision"`
-	AcceptedAt      time.Time `json:"accepted_at"`
-	Replayed        bool      `json:"replayed"`
-}
 
 // New checks the API origin and returns a client that does not follow redirects.
 func New(config Config) (*Client, error) {
@@ -124,93 +112,6 @@ func New(config Config) (*Client, error) {
 }
 
 func (c *Client) Close() { c.http.CloseIdleConnections() }
-
-// Create submits one cluster request under an idempotency key.
-// Retry with the same key and body after an uncertain outcome.
-func (c *Client) Create(ctx context.Context, spec cluster.CreateSpec, key string) (Admission, error) {
-	var value Admission
-	if len(key) < 1 || len(key) > 128 || strings.ContainsFunc(key, func(r rune) bool { return r < '!' || r > '~' }) {
-		return value, &Error{Code: "invalid_request", Message: "Use an idempotency key with 1 to 128 visible ASCII bytes."}
-	}
-	err := c.request(ctx, http.MethodPost, "/v1/clusters", spec, key, http.StatusAccepted, &value)
-	if err == nil && (value.ClusterID == uuid.Nil || value.OperationID == uuid.Nil) {
-		err = &Error{Code: "invalid_response", Message: "The API returned an invalid admission response. Retry with the same key and body."}
-	}
-	return value, err
-}
-
-// PlanDelete requests a retained-data deletion plan without admitting an operation.
-func (c *Client) PlanDelete(ctx context.Context, id uuid.UUID) (cluster.ActionPlan, error) {
-	var value cluster.ActionPlan
-	if id == uuid.Nil {
-		return value, &Error{Code: "invalid_request", Message: "Use a nonzero cluster UUID."}
-	}
-	err := c.request(ctx, http.MethodPost, "/v1/clusters/"+id.String()+"/action-plans", struct {
-		Action string `json:"action"`
-	}{Action: "delete"}, "", http.StatusOK, &value)
-	if err == nil && (value.ClusterID != id || value.PlanToken == uuid.Nil || value.ClusterName == "" || value.ExpectedRevision < 1 || value.Action != "delete" || value.DataDisposition != "retain" || value.RetainedVolumes == nil || slices.Contains(value.RetainedVolumes, uuid.Nil) || value.Downtime == "" || value.ExpiresAt.IsZero()) {
-		err = &Error{Code: "invalid_response", Message: "The API returned an invalid deletion plan. No deletion request was sent."}
-	}
-	return value, err
-}
-
-// PlanScaleDown reviews the replica a removal would take away. The cluster names its own replica.
-func (c *Client) PlanScaleDown(ctx context.Context, id uuid.UUID) (cluster.ActionPlan, error) {
-	var value cluster.ActionPlan
-	if id == uuid.Nil {
-		return value, &Error{Code: "invalid_request", Message: "Name a cluster."}
-	}
-	err := c.request(ctx, http.MethodPost, "/v1/clusters/"+id.String()+"/action-plans", struct {
-		Action string `json:"action"`
-	}{Action: "scale_down"}, "", http.StatusOK, &value)
-	if err == nil && (value.ClusterID != id || value.PlanToken == uuid.Nil || value.MemberID == uuid.Nil ||
-		value.ExpectedRevision < 1 || value.Action != "scale_down" || value.DataDisposition != "retain" ||
-		value.Downtime == "" || value.ExpiresAt.IsZero()) {
-		err = &Error{Code: "invalid_response", Message: "The API returned an invalid replica action plan. No action request was sent."}
-	}
-	return value, err
-}
-
-// Act submits a lifecycle action with a fixed revision, retry key, and required confirmation.
-func (c *Client) Act(ctx context.Context, id uuid.UUID, action string, expected int64, key string, confirmation *cluster.ActionConfirmation) (Admission, error) {
-	var value Admission
-	reviewed := action == "delete" || action == "recover-setup"
-	if id == uuid.Nil || (action != "stop" && action != "start" && !reviewed) || expected < 1 {
-		return value, &Error{Code: "invalid_request", Message: "Name a cluster, a positive expected revision, and one of stop, start, delete, or recover-setup."}
-	}
-	if len(key) < 1 || len(key) > 128 || strings.ContainsFunc(key, func(r rune) bool { return r < '!' || r > '~' }) {
-		return value, &Error{Code: "invalid_request", Message: "Use an idempotency key with 1 to 128 visible ASCII bytes."}
-	}
-	method, path := http.MethodPost, "/v1/clusters/"+id.String()+"/actions/"+action
-	var body any = struct{}{}
-	if reviewed {
-		if confirmation == nil || confirmation.PlanToken == uuid.Nil || !confirmation.Confirm || confirmation.DataDisposition != "retain" {
-			return value, &Error{Code: "invalid_request", Message: "Confirm a reviewed plan with data_disposition set to retain."}
-		}
-		body = confirmation
-		if action == "delete" {
-			method, path = http.MethodDelete, "/v1/clusters/"+id.String()
-		}
-	} else if confirmation != nil {
-		return value, &Error{Code: "invalid_request", Message: "Use a plan confirmation only for delete or recover-setup."}
-	}
-	match := strconv.Quote(strconv.FormatInt(expected, 10))
-	err := c.requestWith(ctx, method, path, body, key, match, http.StatusAccepted, &value)
-	if err == nil && (value.ClusterID != id || value.OperationID == uuid.Nil) {
-		err = &Error{Code: "invalid_response", Message: "The API returned an invalid admission response. Retry with the same key."}
-	}
-	return value, err
-}
-
-// GetCluster reads one cluster and checks that the reply names it.
-func (c *Client) GetCluster(ctx context.Context, id uuid.UUID) (cluster.Cluster, error) {
-	var value cluster.Cluster
-	err := c.request(ctx, http.MethodGet, "/v1/clusters/"+id.String(), nil, "", http.StatusOK, &value)
-	if err == nil && (id == uuid.Nil || value.ID != id) {
-		err = &Error{Code: "invalid_response", Message: "The API returned an unexpected cluster identity."}
-	}
-	return value, err
-}
 
 // GetOperation reads one operation and checks that the reply names it.
 func (c *Client) GetOperation(ctx context.Context, id uuid.UUID) (operation.Operation, error) {
@@ -361,40 +262,4 @@ func (c *Client) requestWith(ctx context.Context, method, path string, body any,
 		}
 	}
 	return failure
-}
-
-// Scale submits a replica count with a fixed revision and retry key.
-//
-// It is separate from Act because it carries a body the other actions do not, and
-// because a count of zero is a request, not an absent field.
-func (c *Client) Scale(ctx context.Context, id uuid.UUID, replicas int, expected int64, key string, confirmation *cluster.ActionConfirmation) (Admission, error) {
-	var value Admission
-	if id == uuid.Nil || expected < 1 || replicas < 0 || replicas > 1 {
-		return value, &Error{Code: "invalid_request", Message: "Name a cluster, a positive expected revision, and zero or one replica."}
-	}
-	// Removing a replica is destructive, so it carries the plan the operator reviewed.
-	if replicas == 0 && confirmation == nil {
-		return value, &Error{Code: "invalid_request", Message: "Confirm a reviewed scale-down plan to remove a replica."}
-	}
-	if len(key) < 1 || len(key) > 128 || strings.ContainsFunc(key, func(r rune) bool { return r < '!' || r > '~' }) {
-		return value, &Error{Code: "invalid_request", Message: "Use an idempotency key with 1 to 128 visible ASCII bytes."}
-	}
-	var body any = struct {
-		Replicas int `json:"replicas"`
-	}{replicas}
-	if confirmation != nil {
-		if confirmation.PlanToken == uuid.Nil || !confirmation.Confirm || confirmation.DataDisposition != "retain" {
-			return value, &Error{Code: "invalid_request", Message: "Confirm a scale-down plan with data_disposition set to retain."}
-		}
-		body = struct {
-			Replicas int `json:"replicas"`
-			*cluster.ActionConfirmation
-		}{replicas, confirmation}
-	}
-	match := strconv.Quote(strconv.FormatInt(expected, 10))
-	err := c.requestWith(ctx, http.MethodPost, "/v1/clusters/"+id.String()+"/actions/scale", body, key, match, http.StatusAccepted, &value)
-	if err == nil && (value.ClusterID != id || value.OperationID == uuid.Nil) {
-		err = &Error{Code: "invalid_response", Message: "The API returned an invalid admission response. Retry with the same key."}
-	}
-	return value, err
 }

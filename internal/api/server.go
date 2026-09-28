@@ -7,14 +7,12 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
-	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/engine"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/secret"
@@ -117,31 +115,19 @@ func NewServer(store *postgres.Store, admin *auth.AdminToken, installationID uui
 			signed.Post("/users/{id}/actions/set-password", server.setUserPassword)
 			signed.Group(func(admin chi.Router) {
 				admin.Use(server.requireAdmin)
-				admin.Post("/clusters", server.createCluster)
+				admin.Get("/apps/by-name/{name}", server.getAppByName)
+				admin.Get("/nodes/by-name/{name}", server.getNodeByName)
 				admin.Post("/apps", server.createApp)
 				admin.Get("/apps/{id}", server.getApp)
+				admin.With(server.limitCredentialReveal).Post("/apps/{id}/credentials/reveal", server.revealAppCredential)
 				admin.Post("/apps/{id}/move", server.appAction(postgres.MoveAppAPIOperation))
 				admin.Post("/apps/{id}/actions/stop", server.appAction(postgres.StopAppAPIOperation))
 				admin.Post("/apps/{id}/actions/start", server.appAction(postgres.StartAppAPIOperation))
 				admin.Delete("/apps/{id}", server.appAction(postgres.DeleteAppAPIOperation))
 				admin.Head("/apps/{id}", server.getApp)
 				admin.Get("/installation", server.getInstallation)
-				admin.Get("/clusters", server.listClusters)
-				admin.Head("/clusters", server.listClusters)
-				admin.Get("/clusters/{id}", server.getCluster)
-				admin.Get("/clusters/{id}/endpoints", server.getClusterEndpoints)
-				admin.Get("/clusters/{id}/members", server.getClusterMembers)
-				admin.Get("/clusters/{id}/credentials", server.getClusterCredentials)
-				admin.With(server.limitCredentialReveal).Post("/clusters/{id}/credentials/{purpose}/reveal", server.revealClusterCredential)
-				admin.Post("/clusters/{id}/actions/stop", server.clusterAction(postgres.StopClusterAPIOperation))
-				admin.Post("/clusters/{id}/actions/start", server.clusterAction(postgres.StartClusterAPIOperation))
-				admin.Post("/clusters/{id}/actions/recover-setup", server.clusterAction(postgres.RecoverSetupAPIOperation))
-				admin.Post("/clusters/{id}/actions/scale", server.clusterAction(postgres.ScaleClusterAPIOperation))
-				admin.Delete("/clusters/{id}", server.clusterAction(postgres.DeleteClusterAPIOperation))
-				admin.Post("/clusters/{id}/action-plans", server.planClusterAction)
 				admin.Get("/operations/{id}", server.getOperation)
 				// net/http discards a HEAD body, so one handler serves both methods.
-				admin.Head("/clusters/{id}", server.getCluster)
 				admin.Head("/operations/{id}", server.getOperation)
 				admin.Post("/enrollment-tokens", server.registerEnrollmentToken)
 				admin.Post("/nodes/{id}/certificates/{certificate_id}/actions/revoke", server.revokeAgentCertificate)
@@ -201,75 +187,6 @@ func (s *Server) limitEnrollment(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) createCluster(w http.ResponseWriter, r *http.Request) {
-	identity := r.Context().Value(identityKey{}).(requestIdentity)
-	keys := r.Header.Values("Idempotency-Key")
-	if len(keys) != 1 || keys[0] == "" {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "One Idempotency-Key header is required.", uuid.Nil)
-		return
-	}
-	var spec cluster.CreateSpec
-	if !s.decodeJSON(w, r, &spec) {
-		return
-	}
-	if err := spec.Validate(); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "The cluster specification is invalid.", uuid.Nil)
-		return
-	}
-	request := postgres.CreateClusterRequest{
-		Identity:  postgres.RequestIdentity{InstallationID: s.installationID, ActorID: identity.actorID, APIOperation: postgres.CreateClusterAPIOperation, IdempotencyKey: keys[0]},
-		RequestID: identity.requestID,
-		Spec:      spec,
-	}
-	// Replays preserve accepted work even when the supported catalog changes.
-	admission, err := s.store.LookupAdmission(r.Context(), request.Identity, request.Spec)
-	if err != nil {
-		failure, ok := errors.AsType[*postgres.AdmissionError](err)
-		if !ok || failure.Code != postgres.NotFound {
-			s.storeError(w, r, err)
-			return
-		}
-		// Capability comes from engine, version, topology, and persistence together,
-		// so the refusal happens here rather than when a host is touched.
-		if s.catalog == nil {
-			s.writeError(w, r, http.StatusUnprocessableEntity, "unsupported_spec", "This server serves no engines.", uuid.Nil)
-			return
-		}
-		if _, err := s.catalog.Resolve(spec); err != nil {
-			s.writeError(w, r, http.StatusUnprocessableEntity, "unsupported_spec", "The requested engine, version, topology, and persistence are not supported by this server.", uuid.Nil)
-			return
-		}
-		admission, err = s.store.CreateCluster(r.Context(), request)
-		if err != nil {
-			s.storeError(w, r, err)
-			return
-		}
-	}
-	w.Header().Set("Location", "/v1/operations/"+admission.OperationID.String())
-	w.WriteHeader(http.StatusAccepted)
-	if err := json.NewEncoder(w).Encode(admission); err != nil {
-		s.logger.Warn("write admission response failed", "request_id", identity.requestID, "error", err)
-	}
-	s.logger.Info("cluster admission accepted", "request_id", identity.requestID, "actor_id", identity.actorID, "cluster_id", admission.ClusterID, "operation_id", admission.OperationID, "replayed", admission.Replayed)
-}
-
-func (s *Server) getCluster(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil || id == uuid.Nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a valid cluster ID.", uuid.Nil)
-		return
-	}
-	value, err := s.store.GetCluster(r.Context(), s.installationID, id)
-	if err != nil {
-		s.storeError(w, r, err)
-		return
-	}
-	w.Header().Set("ETag", `"`+strconv.FormatInt(value.DesiredRevision, 10)+`"`)
-	if err := json.NewEncoder(w).Encode(value); err != nil {
-		s.logger.Warn("write cluster response failed", "cluster_id", id, "error", err)
-	}
-}
-
 func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil || id == uuid.Nil {
@@ -304,7 +221,7 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 		case postgres.NameConflict:
 			status, message = http.StatusConflict, "The resource name is already in use."
 		case postgres.OperationConflict:
-			status, message = http.StatusConflict, "Active work or changed storage state prevents this action. Review the cluster before retrying."
+			status, message = http.StatusConflict, "Active work or changed storage state prevents this action. Review the app before retrying."
 		case postgres.RevisionConflict:
 			status, message = http.StatusPreconditionFailed, "The resource revision does not match this request."
 		case postgres.NotFound:

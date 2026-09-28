@@ -32,6 +32,16 @@ type writerTestRuntime struct {
 	once    sync.Once
 }
 
+func (r *writerTestRuntime) InspectApp(_ context.Context, id uuid.UUID, _ []*agentv1.Effect) (runtime.AppInspection, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var result runtime.AppInspection
+	if r.app.AppID == id.String() {
+		result.Resources = []runtime.Resource{{Kind: "container"}}
+	}
+	return result, nil
+}
+
 func (r *writerTestRuntime) AppContainers(context.Context) ([]runtime.AppContainer, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -161,7 +171,7 @@ func TestWriterPromotionRequiresCompletePreviousEpoch(t *testing.T) {
 					}
 				}
 			}
-			command := &agentv1.Command{Epoch: &agentv1.Epoch{ClusterId: appID}, Input: &agentv1.CommandInput{Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}}}
+			command := &agentv1.Command{Epoch: &agentv1.Epoch{AppId: appID}, Input: &agentv1.CommandInput{Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}}}
 			mounts := []*agentv1.Mount{{Type: "replicated", Source: "config", Target: "/config"}}
 			err := e.prepareWriter(t.Context(), command, mounts)
 			if mode == "missing" || mode == "stale" {
@@ -197,7 +207,7 @@ func TestWriterSnapshotReportsFailuresAndPersistsSequence(t *testing.T) {
 	table.Set([]*agentv1.AppReplication{assignment})
 	e := &Executor{options: Options{AppsDir: t.TempDir(), Replication: table, ReplicaStatus: &replication.Status{}, BootTime: func() (time.Duration, error) { return 0, nil }}, leases: map[string]writerLease{appID: {epoch: 1, expires: time.Minute}}}
 	root := filepath.Join(e.options.AppsDir, appID)
-	command := &agentv1.Command{Epoch: &agentv1.Epoch{ClusterId: appID}, Input: &agentv1.CommandInput{Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{}}}}
+	command := &agentv1.Command{Epoch: &agentv1.Epoch{AppId: appID}, Input: &agentv1.CommandInput{Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{}}}}
 	if err := e.prepareWriter(t.Context(), command, []*agentv1.Mount{{Type: "replicated", Source: "config", Target: "/config"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -285,19 +295,19 @@ func TestWriterLeaseStopsDockerContainer(t *testing.T) {
 	options.AppsDir = root
 	options.BootTime = func() (time.Duration, error) { return time.Duration(now.Load()), nil }
 	options.Replication = &replication.Table{}
-	options.Replication.Set([]*agentv1.AppReplication{{AppId: f.epoch.ClusterId, Epoch: 1, Role: replication.RoleActive}})
+	options.Replication.Set([]*agentv1.AppReplication{{AppId: f.epoch.AppId, Epoch: 1, Role: replication.RoleActive}})
 	f.e, err = New(f.e.journal, native, options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	session, disconnect := localSession(t, f.e, replication.Capability)
 	activateLocal(t, f.e, session, f.epoch)
-	if _, err := f.e.Handle(session, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_WriterLease{WriterLease: &agentv1.WriterLease{SessionId: f.e.session.id, AppId: f.epoch.ClusterId, Epoch: 1, Seconds: 30, ExpiresAtBootNanos: uint64(30 * time.Second)}}}); err != nil {
+	if _, err := f.e.Handle(session, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_WriterLease{WriterLease: &agentv1.WriterLease{SessionId: f.e.session.id, AppId: f.epoch.AppId, Epoch: 1, Seconds: 30, ExpiresAtBootNanos: uint64(30 * time.Second)}}}); err != nil {
 		t.Fatal(err)
 	}
 	image := "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3"
-	command := volumeCommand(t, f.epoch)
-	command.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{ImageDigest: image, Engine: "generic", NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "leased-writer", Mounts: []*agentv1.Mount{{Type: "replicated", Source: "config", Target: "/data"}}}}}
+	command := ensureCommand(t, f.epoch)
+	command.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{ImageDigest: image, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "leased-writer", Mounts: []*agentv1.Mount{{Type: "replicated", Source: "config", Target: "/data"}}}}}
 	for step := range 2 {
 		if step == 1 {
 			command.CommandId = uuid.NewString()
@@ -313,7 +323,7 @@ func TestWriterLeaseStopsDockerContainer(t *testing.T) {
 		if err != nil || ack.GetAdmissionAck().State != "queued" {
 			t.Fatalf("admission: %v %v", ack, err)
 		}
-		f.e.execute(t.Context(), job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]})
+		f.e.execute(t.Context(), job{app: f.epoch.AppId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.AppId]})
 		record, err := f.e.journal.Get(command.CommandId)
 		if err != nil || record.State != journal.Terminal || record.Result.State != "succeeded" {
 			t.Fatalf("step %d: %+v %v", step, record, err)
@@ -339,7 +349,7 @@ func TestWriterLeaseStopsDockerContainer(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, err := os.Stat(filepath.Join(root, f.epoch.ClusterId, "live", "config")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, f.epoch.AppId, "live", "config")); err != nil {
 		t.Fatal("fencing removed data", err)
 	}
 }
@@ -348,7 +358,7 @@ func TestWriterRefusesSecondLiveCopy(t *testing.T) {
 	appID := uuid.NewString()
 	native := &writerTestRuntime{app: runtime.AppContainer{AppID: appID, ResourceID: uuid.NewString(), Running: true}}
 	e := &Executor{runtime: native}
-	command := &agentv1.Command{Epoch: &agentv1.Epoch{ClusterId: appID}, Input: &agentv1.CommandInput{ResourceId: uuid.NewString(), Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{Generic: &agentv1.GenericContainerConfig{Mounts: []*agentv1.Mount{{Type: "replicated", Source: "config", Target: "/config"}}}}}}}
+	command := &agentv1.Command{Epoch: &agentv1.Epoch{AppId: appID}, Input: &agentv1.CommandInput{ResourceId: uuid.NewString(), Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{Generic: &agentv1.GenericContainerConfig{Mounts: []*agentv1.Mount{{Type: "replicated", Source: "config", Target: "/config"}}}}}}}
 	if _, err := e.executeWriter(t.Context(), command, nil); !errors.Is(err, runtime.ErrBusy) {
 		t.Fatalf("second live copy: %v", err)
 	}

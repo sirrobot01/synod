@@ -55,6 +55,9 @@ func TestCertificateIssuanceAndMutualTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if leaf.SignatureAlgorithm != x509.ECDSAWithSHA256 {
+		t.Fatalf("node certificate signature cannot support PostgreSQL channel binding: %s", leaf.SignatureAlgorithm)
+	}
 	if !agentPublic.Equal(leaf.PublicKey) || leaf.IsCA || len(leaf.DNSNames) != 0 || !slices.Equal(leaf.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}) {
 		t.Fatal("CSR overrode assigned identity or certificate policy")
 	}

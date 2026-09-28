@@ -5,9 +5,6 @@ describe("routing", () => {
   it("reads every screen from its path", () => {
     expect(match("/")).toEqual({ screen: "fleet", id: "" });
     expect(match("/nodes")).toEqual({ screen: "nodes", id: "" });
-    expect(match("/databases")).toEqual({ screen: "databases", id: "" });
-    expect(match("/databases/pg-core")).toEqual({ screen: "cluster", id: "pg-core" });
-    expect(match("/databases/pg-core/topology")).toEqual({ screen: "topology", id: "pg-core" });
     expect(match("/backups")).toEqual({ screen: "backups", id: "" });
     expect(match("/operations")).toEqual({ screen: "operations", id: "" });
     expect(match("/settings")).toEqual({ screen: "settings", id: "" });
@@ -27,9 +24,6 @@ describe("routing", () => {
       ["fleet", ""],
       ["nodes", ""],
       ["nodes", "node-1"],
-      ["databases", ""],
-      ["cluster", "pg-core"],
-      ["topology", "pg-core"],
       ["backups", ""],
       ["operations", ""],
       ["operation", "op-1"],
@@ -41,8 +35,8 @@ describe("routing", () => {
   });
 
   it("survives a trailing slash and an encoded identity", () => {
-    expect(match("/databases/pg-core/")).toEqual({ screen: "cluster", id: "pg-core" });
-    expect(match(path("cluster", "pg core/1"))).toEqual({ screen: "cluster", id: "pg core/1" });
+    expect(match("/nodes/node-1/")).toEqual({ screen: "nodes", id: "node-1" });
+    expect(match(path("operation", "op 1/2"))).toEqual({ screen: "operation", id: "op 1/2" });
   });
 });
 

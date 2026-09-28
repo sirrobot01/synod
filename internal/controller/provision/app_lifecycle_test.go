@@ -13,7 +13,7 @@ import (
 )
 
 func TestAppLifecycleKeepsPinsAndRetriesFailedCleanup(t *testing.T) {
-	f := newFixture(t, postgresSpec())
+	f := newFixture(t)
 	f.planner.config.Keyring = nil
 	f.planner.config.ResolveImage = func(_ context.Context, s app.ServiceSpec) (imageinspect.Resolution, error) {
 		s.Image = "nginx@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

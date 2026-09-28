@@ -17,7 +17,7 @@ const (
 	TierDatabase Tier = 1
 	// TierSingleWriter is Tier 2: single-writer apps with replicated state and failover.
 	TierSingleWriter Tier = 2
-	// TierParallel is Tier 3: stateless parallel apps behind a generic router.
+	// TierParallel is Tier 3: stateless parallel apps and workers.
 	TierParallel Tier = 3
 )
 
@@ -83,9 +83,59 @@ type ServiceSpec struct {
 }
 
 // RouterSpec defines ingress router settings.
+// For a tier 1 database, Port is the writer route and ReaderPort is the optional reader route.
 type RouterSpec struct {
-	Protocol string `json:"protocol"` // "http" or "tcp"
-	Port     uint16 `json:"port"`
+	Protocol   string `json:"protocol"` // "http" or "tcp"
+	Port       uint16 `json:"port"`
+	ReaderPort uint16 `json:"reader_port,omitempty"`
+}
+
+// Database engines for a tier 1 app.
+const (
+	EnginePostgres = "postgres"
+	EngineRedis    = "redis"
+)
+
+// DatabaseSpec names the engine of a tier 1 app and the databases Synod creates in it.
+// The engine catalog supplies the image, so a tier 1 app sets no service.
+type DatabaseSpec struct {
+	Engine    string   `json:"engine"`
+	Version   string   `json:"version"`
+	Databases []string `json:"databases,omitempty"`
+}
+
+var (
+	versionPattern  = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,2}$`)
+	databasePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+)
+
+func (d *DatabaseSpec) validate() error {
+	switch {
+	case d == nil:
+		return fmt.Errorf("tier 1 apps require database settings")
+	case !versionPattern.MatchString(d.Version):
+		return fmt.Errorf("database version must be a version number such as 17")
+	}
+	switch d.Engine {
+	case EnginePostgres:
+		if len(d.Databases) < 1 || len(d.Databases) > 16 {
+			return fmt.Errorf("postgres apps require 1 to 16 databases")
+		}
+		seen := map[string]bool{}
+		for _, name := range d.Databases {
+			if !databasePattern.MatchString(name) || seen[name] {
+				return fmt.Errorf("database names must be unique and match %s", databasePattern)
+			}
+			seen[name] = true
+		}
+	case EngineRedis:
+		if len(d.Databases) != 0 {
+			return fmt.Errorf("redis apps do not take database names")
+		}
+	default:
+		return fmt.Errorf("database engine must be postgres or redis")
+	}
+	return nil
 }
 
 // Failback modes for a tier 2 app.
@@ -106,18 +156,30 @@ type ReplicationSpec struct {
 	FailbackStableSeconds uint32 `json:"failback_stable_seconds"`
 }
 
+// DefaultDatabaseReplication returns the product defaults for a tier 1 app.
+// A database switchover interrupts clients, so fail-back is manual.
+func DefaultDatabaseReplication() ReplicationSpec {
+	return ReplicationSpec{Standbys: 1, FailoverAfterSeconds: 90, Failback: FailbackManual, FailbackStableSeconds: 600}
+}
+
 // DefaultReplication returns the product defaults for a tier 2 app.
 func DefaultReplication() ReplicationSpec {
 	return ReplicationSpec{Standbys: 1, IntervalSeconds: 60, FailoverAfterSeconds: 90, Failback: FailbackAuto, FailbackStableSeconds: 600}
 }
 
-func (r *ReplicationSpec) validate() error {
+// validate checks the settings of a tier 1 or tier 2 app. A database replicates
+// continuously, so it has no interval and may run without a standby.
+func (r *ReplicationSpec) validate(tier Tier) error {
 	switch {
 	case r == nil:
-		return fmt.Errorf("tier 2 apps require replication settings")
-	case r.Standbys < 1 || r.Standbys > 3:
+		return fmt.Errorf("tier %d apps require replication settings", tier)
+	case tier == TierDatabase && (r.Standbys < 0 || r.Standbys > 3):
+		return fmt.Errorf("replication standbys must be 0 to 3")
+	case tier == TierSingleWriter && (r.Standbys < 1 || r.Standbys > 3):
 		return fmt.Errorf("replication standbys must be 1 to 3")
-	case r.IntervalSeconds < 10 || r.IntervalSeconds > 3600:
+	case tier == TierDatabase && r.IntervalSeconds != 0:
+		return fmt.Errorf("tier 1 apps replicate continuously and take no interval")
+	case tier == TierSingleWriter && (r.IntervalSeconds < 10 || r.IntervalSeconds > 3600):
 		return fmt.Errorf("replication interval must be 10 to 3600 seconds")
 	case r.FailoverAfterSeconds < 2*LeaseSeconds:
 		return fmt.Errorf("failover delay must be at least %d seconds", 2*LeaseSeconds)
@@ -140,6 +202,7 @@ type AppSpec struct {
 	Service          ServiceSpec      `json:"service"`
 	Router           RouterSpec       `json:"router"`
 	Replication      *ReplicationSpec `json:"replication,omitempty"`
+	Database         *DatabaseSpec    `json:"database,omitempty"`
 }
 
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
@@ -151,6 +214,12 @@ func (s AppSpec) Validate() error {
 	}
 	if !namePattern.MatchString(s.Name) {
 		return fmt.Errorf("name must match %s", namePattern)
+	}
+	if s.Tier == TierDatabase {
+		return s.validateDatabase()
+	}
+	if s.Database != nil || s.Router.ReaderPort != 0 {
+		return fmt.Errorf("database settings and a reader port apply only to tier 1 apps")
 	}
 	if strings.TrimSpace(s.Service.Image) == "" {
 		return fmt.Errorf("service image is required")
@@ -208,11 +277,9 @@ func (s AppSpec) Validate() error {
 		if s.Copies != 1 || s.CopiesMode == CopiesModeAllCapable {
 			return fmt.Errorf("tier 2 apps must have exactly 1 active copy")
 		}
-		if err := s.Replication.validate(); err != nil {
+		if err := s.Replication.validate(s.Tier); err != nil {
 			return err
 		}
-	case TierDatabase:
-		return fmt.Errorf("tier 1 databases use dedicated database creation")
 	default:
 		return fmt.Errorf("unsupported tier: %d", s.Tier)
 	}
@@ -244,11 +311,48 @@ func (s AppSpec) Validate() error {
 	if s.Tier == TierSingleWriter && len(replicated) == 0 {
 		return fmt.Errorf("tier 2 apps require at least one replicated volume")
 	}
+	if s.Tier == TierParallel && len(s.Service.Ports) == 0 {
+		if s.Router != (RouterSpec{}) {
+			return fmt.Errorf("workers without service ports require an empty router")
+		}
+		if s.Service.HealthCheck != nil && s.Service.HealthCheck.Type != "exec" {
+			return fmt.Errorf("workers without service ports support exec health checks")
+		}
+		return nil
+	}
 	if s.Router.Port == 0 {
 		return fmt.Errorf("router port is required")
 	}
 	if s.Router.Protocol != "http" && s.Router.Protocol != "tcp" {
 		return fmt.Errorf("router protocol must be http or tcp")
+	}
+	return nil
+}
+
+// validateDatabase checks a tier 1 app. The catalog supplies the container, so the
+// user sets no service, and both routes are TCP.
+func (s AppSpec) validateDatabase() error {
+	service := s.Service
+	if service.Image != "" || len(service.Command) != 0 || len(service.Entrypoint) != 0 || len(service.Environment) != 0 || len(service.Ports) != 0 ||
+		len(service.Mounts) != 0 || service.Resources != (ResourceSpec{}) || service.HealthCheck != nil || len(service.SupportedArchitectures) != 0 {
+		return fmt.Errorf("tier 1 apps take their container from the engine catalog and set no service")
+	}
+	if s.Copies != 1 || s.CopiesMode == CopiesModeAllCapable {
+		return fmt.Errorf("tier 1 apps have exactly 1 primary")
+	}
+	if err := s.Database.validate(); err != nil {
+		return err
+	}
+	if err := s.Replication.validate(s.Tier); err != nil {
+		return err
+	}
+	switch {
+	case s.Router.Protocol != "tcp":
+		return fmt.Errorf("tier 1 routes use tcp")
+	case s.Router.Port == 0:
+		return fmt.Errorf("the writer port is required")
+	case s.Router.ReaderPort == s.Router.Port:
+		return fmt.Errorf("the reader port must differ from the writer port")
 	}
 	return nil
 }
@@ -319,4 +423,15 @@ type StandbyStatus struct {
 	LagSeconds  *float64   `json:"lag_seconds,omitempty"`
 	Usable      bool       `json:"usable"`
 	FailureCode string     `json:"failure_code,omitempty"`
+	// State is the engine replication state of a tier 1 standby.
+	State string `json:"state,omitempty"`
+}
+
+// Credential is the client login of a tier 1 app. Only an audited reveal returns it.
+type Credential struct {
+	AppID        uuid.UUID `json:"app_id"`
+	CredentialID uuid.UUID `json:"credential_id"`
+	Version      int64     `json:"version"`
+	Username     string    `json:"username"`
+	Password     string    `json:"password"`
 }

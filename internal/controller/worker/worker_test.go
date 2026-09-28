@@ -22,7 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/controller/agentstream"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/coordinator"
@@ -41,14 +41,14 @@ type staticAuthority struct{}
 
 func (staticAuthority) Verify(context.Context) error { return nil }
 
-// testLeadership elects this test as the owner of one cluster.
-func testLeadership(t *testing.T, pool *pgxpool.Pool, installation, clusterID uuid.UUID) *coordinator.Leadership {
+// testLeadership elects this test as the owner of one app.
+func testLeadership(t *testing.T, pool *pgxpool.Pool, installation, appID uuid.UUID) *coordinator.Leadership {
 	t.Helper()
 	elector, err := coordinator.New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	leader, err := elector.Campaign(t.Context(), installation, clusterID, "owner-1", 3)
+	leader, err := elector.Campaign(t.Context(), installation, appID, "owner-1", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,10 +124,10 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 		t.Fatal(err)
 	}
 	installation, node := uuid.New(), uuid.New()
-	admission, err := store.CreateCluster(t.Context(), postgres.CreateClusterRequest{
-		Identity:  postgres.RequestIdentity{InstallationID: installation, ActorID: "actor-1", APIOperation: postgres.CreateClusterAPIOperation, IdempotencyKey: uuid.NewString()},
+	admission, err := store.AdmitApp(t.Context(), postgres.CreateAppRequest{
+		Identity:  postgres.RequestIdentity{InstallationID: installation, ActorID: "actor-1", APIOperation: postgres.CreateAppAPIOperation, IdempotencyKey: uuid.NewString()},
 		RequestID: "request-1",
-		Spec:      cluster.CreateSpec{SchemaVersion: 1, Name: "db", Engine: cluster.PostgreSQL, PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "standalone"}},
+		Spec:      app.AppSpec{SchemaVersion: 1, Name: "web", Tier: app.TierParallel, Copies: 1, Service: app.ServiceSpec{Image: "nginx", Ports: []app.PortSpec{{ContainerPort: 80}}}, Router: app.RouterSpec{Protocol: "tcp", Port: 8080}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 	if err := store.InitializeGeneration(t.Context(), installation, generation); err != nil {
 		t.Fatal(err)
 	}
-	leader := testLeadership(t, pool, installation, admission.ClusterID)
+	leader := testLeadership(t, pool, installation, admission.AppID)
 	claim, err := store.AcquireClaim(t.Context(), postgres.ClaimRequest{
 		ClaimID: uuid.New(), InstallationID: installation, OperationID: admission.OperationID, RecoveryGeneration: generation,
 		OwnerID: leader.OwnerID, TTL: 2 * time.Minute, LeaseID: leader.LeaseID, LeaseRevision: leader.Revision,
@@ -144,12 +144,15 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 	if err != nil {
 		t.Fatal(err)
 	}
-	volume := harnessStep(t, claim, node, agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS)
-	start := harnessStep(t, claim, node, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, volume.Command.StepId)
-	ready := harnessStep(t, claim, node, agentv1.Postcondition_POSTCONDITION_ENGINE_READY, start.Command.StepId)
-	ready.Command.Input.ResourceId = start.Command.Input.ResourceId
+	// One copy is created, started, and started again. The repeat proves it still runs.
+	ensure := harnessStep(t, claim, node, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS)
+	start := harnessStep(t, claim, node, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, ensure.Command.StepId)
+	start.Command.Input.ResourceId = ensure.Command.Input.ResourceId
+	rehash(t, start.Command)
+	ready := harnessStep(t, claim, node, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, start.Command.StepId)
+	ready.Command.Input.ResourceId = ensure.Command.Input.ResourceId
 	rehash(t, ready.Command)
-	plan := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{volume, start, ready}}
+	plan := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{ensure, start, ready}}
 	for _, edit := range editPlan {
 		edit(plan)
 	}
@@ -164,9 +167,9 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 	h.transport = h.serve(t, installation, node)
 
 	allocation := placement.Allocation{
-		ID: uuid.New(), InstallationID: installation, NodeID: node, ClusterID: claim.ClusterID,
+		ID: uuid.New(), InstallationID: installation, NodeID: node, AppID: claim.AppID,
 		ResourceID: uuid.MustParse(start.Command.Input.ResourceId), CreatedByOperation: admission.OperationID, CreatedRevision: 1,
-		OwnedResourceIDs: []uuid.UUID{uuid.MustParse(start.Command.Input.ResourceId), uuid.MustParse(volume.Command.Input.ResourceId)},
+		OwnedResourceIDs: []uuid.UUID{uuid.MustParse(start.Command.Input.ResourceId)},
 		Budget:           placement.Vector{CPUMillis: 250, MemoryBytes: 64 << 20, DiskBytes: 1 << 30},
 		Ports:            []placement.Port{{Address: "0.0.0.0", Transport: "tcp", Number: 5432}},
 	}
@@ -174,18 +177,21 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(t.Context(), `INSERT INTO resource_allocations(id,installation_id,node_id,cluster_id,resource_id,created_operation_id,created_revision,allocation_bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, allocation.ID, installation, node, claim.ClusterID, allocation.ResourceID, admission.OperationID, allocation.CreatedRevision, allocationBytes); err != nil {
+	if _, err := pool.Exec(t.Context(), `INSERT INTO resource_allocations(id,installation_id,node_id,app_id,resource_id,created_operation_id,created_revision,allocation_bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, allocation.ID, installation, node, claim.AppID, allocation.ResourceID, admission.OperationID, allocation.CreatedRevision, allocationBytes); err != nil {
 		t.Fatal(err)
 	}
 	for _, resource := range allocation.OwnedResourceIDs {
-		if _, err := pool.Exec(t.Context(), `INSERT INTO allocation_resources(installation_id,cluster_id,node_id,allocation_id,resource_id) VALUES($1,$2,$3,$4,$5)`, installation, claim.ClusterID, node, allocation.ID, resource); err != nil {
+		if _, err := pool.Exec(t.Context(), `INSERT INTO allocation_resources(installation_id,app_id,node_id,allocation_id,resource_id) VALUES($1,$2,$3,$4,$5)`, installation, claim.AppID, node, allocation.ID, resource); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := pool.Exec(t.Context(), `INSERT INTO allocation_ports(installation_id,cluster_id,node_id,allocation_id,address,transport,port,name) VALUES($1,$2,$3,$4,$5,$6,$7,'')`, installation, claim.ClusterID, node, allocation.ID, allocation.Ports[0].Address, allocation.Ports[0].Transport, allocation.Ports[0].Number); err != nil {
+	if _, err := pool.Exec(t.Context(), `INSERT INTO allocation_ports(installation_id,app_id,node_id,allocation_id,address,transport,port,name) VALUES($1,$2,$3,$4,$5,$6,$7,'')`, installation, claim.AppID, node, allocation.ID, allocation.Ports[0].Address, allocation.Ports[0].Transport, allocation.Ports[0].Number); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(t.Context(), `INSERT INTO operation_allocation_bindings(installation_id,cluster_id,operation_id,allocation_id) VALUES($1,$2,$3,$4)`, installation, claim.ClusterID, admission.OperationID, allocation.ID); err != nil {
+	if _, err := pool.Exec(t.Context(), `INSERT INTO operation_allocation_bindings(installation_id,app_id,operation_id,allocation_id) VALUES($1,$2,$3,$4)`, installation, claim.AppID, admission.OperationID, allocation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO app_copies(id,installation_id,app_id,node_id,copy_index,host_port,observed_state,created_at,updated_at) VALUES($1,$2,$3,$4,0,5432,'pending',clock_timestamp(),clock_timestamp())`, allocation.ResourceID, installation, claim.AppID, node); err != nil {
 		t.Fatal(err)
 	}
 	h.worker, err = New(Config{Store: store, Transport: h.transport, Authority: h.leader, Claim: claim, Operation: op, EvidenceWait: 2 * time.Second, RetryDelay: 10 * time.Millisecond})
@@ -198,7 +204,7 @@ func newHarness(t *testing.T, reply func(*agentv1.ControllerMessage) []*agentv1.
 
 func harnessStep(t *testing.T, claim operation.Claim, node uuid.UUID, postcondition agentv1.Postcondition, dependsOn ...string) *agentv1.PlanStep {
 	t.Helper()
-	step := planStep(t, operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID, DesiredRevision: 1}, node.String(), uuid.NewString(), postcondition, dependsOn...)
+	step := planStep(t, operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, AppID: claim.AppID, DesiredRevision: 1}, node.String(), uuid.NewString(), postcondition, dependsOn...)
 	step.Command.Epoch.RecoveryGeneration = claim.RecoveryGeneration.String()
 	step.Command.Epoch.ExecutionEpoch = claim.ExecutionEpoch
 	rehash(t, step.Command)
@@ -453,14 +459,10 @@ func (s agentScript) terminal(command *agentv1.Command) *agentv1.TerminalResult 
 // nativeState is the Docker state that a finished command leaves behind.
 func nativeState(command *agentv1.Command) string {
 	switch command.Input.Payload.(type) {
-	case *agentv1.CommandInput_EnsureVolume, *agentv1.CommandInput_EnsureNetwork:
-		return "present"
 	case *agentv1.CommandInput_StartContainer:
 		return "running"
 	case *agentv1.CommandInput_RemoveContainer:
 		return "absent"
-	case *agentv1.CommandInput_CheckReadiness:
-		return "ready"
 	default:
 		return "created"
 	}
@@ -469,9 +471,9 @@ func nativeState(command *agentv1.Command) string {
 // receive commits one agent receipt for a step without the scripted agent.
 func (h *harness) receive(t *testing.T, command *agentv1.Command, state, failure string, unknown bool) {
 	t.Helper()
-	effect := &agentv1.Effect{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-command:" + command.CommandId, State: "present", OutcomeUnknown: unknown}
+	effect := &agentv1.Effect{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-command:" + command.CommandId, State: nativeState(command), OutcomeUnknown: unknown}
 	receipt := &agentv1.TerminalResult{
-		Epoch:     &agentv1.Epoch{InstallationId: h.claim.InstallationID.String(), NodeId: h.node.String(), ClusterId: h.claim.ClusterID.String(), RecoveryGeneration: h.claim.RecoveryGeneration.String(), ExecutionEpoch: h.claim.ExecutionEpoch},
+		Epoch:     &agentv1.Epoch{InstallationId: h.claim.InstallationID.String(), NodeId: h.node.String(), AppId: h.claim.AppID.String(), RecoveryGeneration: h.claim.RecoveryGeneration.String(), ExecutionEpoch: h.claim.ExecutionEpoch},
 		CommandId: command.CommandId, InputHash: command.InputHash, Sequence: 1, State: state, FailureCode: failure, Effects: []*agentv1.Effect{effect},
 	}
 	if err := h.store.RecordAgentResult(t.Context(), h.claim.InstallationID, h.node, receipt); err != nil {
@@ -629,10 +631,10 @@ func TestWorkerRunsPlanToSuccess(t *testing.T) {
 	if h.count(t, `SELECT count(*) FROM operation_progress WHERE operation_id=$1 AND state='succeeded'`, h.claim.OperationID) != 1 {
 		t.Fatal("the terminal status has no progress record")
 	}
-	if h.count(t, `SELECT count(*) FROM clusters WHERE id=$1 AND observed_revision=1 AND observed_lifecycle='running'`, h.claim.ClusterID) != 1 {
-		t.Fatal("success did not commit the proved cluster lifecycle")
+	if h.count(t, `SELECT count(*) FROM apps WHERE id=$1 AND observed_revision=1 AND observed_lifecycle='running'`, h.claim.AppID) != 1 {
+		t.Fatal("success did not commit the proved app lifecycle")
 	}
-	if h.count(t, `SELECT count(*) FROM resource_allocations WHERE cluster_id=$1 AND released_at IS NULL`, h.claim.ClusterID) != 1 {
+	if h.count(t, `SELECT count(*) FROM resource_allocations WHERE app_id=$1 AND released_at IS NULL`, h.claim.AppID) != 1 {
 		t.Fatal("create success released the live reservation")
 	}
 	// A dependent step must not reach the agent before its dependency is proved.
@@ -863,10 +865,10 @@ func TestWorkerDefersOnTransportBackpressure(t *testing.T) {
 
 // A reserved retry must bound the wait. An evidence deadline must not swallow it.
 func TestAwaitWakesForAReservedRetry(t *testing.T) {
-	claim := operation.Claim{ID: uuid.New(), InstallationID: uuid.New(), ClusterID: uuid.New(), OperationID: uuid.New(), RecoveryGeneration: uuid.New(), OwnerID: "owner-1", ExecutionEpoch: 1}
+	claim := operation.Claim{ID: uuid.New(), InstallationID: uuid.New(), AppID: uuid.New(), OperationID: uuid.New(), RecoveryGeneration: uuid.New(), OwnerID: "owner-1", ExecutionEpoch: 1}
 	w, err := New(Config{
 		Store: &postgres.Store{}, Transport: &controlstream.Server{}, Authority: staticAuthority{}, Claim: claim,
-		Operation:    operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID},
+		Operation:    operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, AppID: claim.AppID},
 		EvidenceWait: time.Minute,
 	})
 	if err != nil {
@@ -976,7 +978,7 @@ func TestWorkerFailsWhenDeliveryAttemptsRunOut(t *testing.T) {
 	}
 }
 
-// A revoked cluster lease ends the run. Operation claim ownership alone is not enough.
+// A revoked app lease ends the run. Operation claim ownership alone is not enough.
 func TestWorkerStopsWithoutElectedAuthority(t *testing.T) {
 	h := newHarness(t, agentScript{drained: true, admit: true}.answer)
 	if err := h.leader.Close(t.Context()); err != nil {
@@ -1102,9 +1104,9 @@ func TestWorkerRejectsUnboundEvidence(t *testing.T) {
 }
 
 func TestNewWorkerChecksInputs(t *testing.T) {
-	claim := operation.Claim{ID: uuid.New(), InstallationID: uuid.New(), ClusterID: uuid.New(), OperationID: uuid.New(), RecoveryGeneration: uuid.New(), OwnerID: "owner-1", ExecutionEpoch: 1}
+	claim := operation.Claim{ID: uuid.New(), InstallationID: uuid.New(), AppID: uuid.New(), OperationID: uuid.New(), RecoveryGeneration: uuid.New(), OwnerID: "owner-1", ExecutionEpoch: 1}
 	store, transport, authority := &postgres.Store{}, &controlstream.Server{}, staticAuthority{}
-	op := operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID}
+	op := operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, AppID: claim.AppID}
 	if _, err := New(Config{Store: store, Transport: transport, Authority: authority, Claim: claim, Operation: op}); err != nil {
 		t.Fatal(err)
 	}
@@ -1116,7 +1118,7 @@ func TestNewWorkerChecksInputs(t *testing.T) {
 		"no epoch":         func(c *Config) { c.Claim.ExecutionEpoch = 0 },
 		"no owner":         func(c *Config) { c.Claim.OwnerID = "" },
 		"other operation":  func(c *Config) { c.Operation.ID = uuid.New() },
-		"other cluster":    func(c *Config) { c.Operation.ClusterID = uuid.New() },
+		"other app":        func(c *Config) { c.Operation.AppID = uuid.New() },
 		"short wait":       func(c *Config) { c.EvidenceWait = time.Millisecond },
 		"long retry":       func(c *Config) { c.RetryDelay = time.Hour },
 		"long session age": func(c *Config) { c.SessionMaxAge = time.Hour },
@@ -1287,7 +1289,7 @@ func TestWorkerRefusesAMisboundCancellationAnswer(t *testing.T) {
 	h := newHarness(t, agentScript{drained: true, admit: true}.answer)
 	peer := controlstream.Peer{InstallationID: h.claim.InstallationID, NodeID: h.node, SessionID: uuid.NewString()}
 	epoch := h.worker.epoch(h.node)
-	epoch.ClusterId = uuid.NewString()
+	epoch.AppId = uuid.NewString()
 	for _, answer := range []*agentv1.CancellationResult{
 		{Epoch: epoch, CommandId: h.plan.Steps[0].Command.CommandId, State: "cancelled"},
 		{Epoch: h.worker.epoch(h.node), CommandId: h.plan.Steps[0].Command.CommandId, State: "made_up"},
@@ -1361,7 +1363,7 @@ func TestWorkerKeepsActiveEffectsAfterFailure(t *testing.T) {
 	for _, failureKind := range []string{"delivery_exhausted", "failed_receipt"} {
 		t.Run(failureKind, func(t *testing.T) {
 			// The start and its readiness check run beside the volume on a second node. One node
-			// never runs two commands of a cluster at once, so siblings are on different nodes.
+			// never runs two commands of a app at once, so siblings are on different nodes.
 			second := uuid.New()
 			reply := func(message *agentv1.ControllerMessage) []*agentv1.AgentMessage {
 				script := agentScript{drained: true, admit: true}

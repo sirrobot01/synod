@@ -14,7 +14,7 @@ import (
 
 func commandFixture() *agentv1.Command {
 	return &agentv1.Command{
-		Epoch:       &agentv1.Epoch{InstallationId: uuid.NewString(), NodeId: uuid.NewString(), ClusterId: uuid.NewString(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1},
+		Epoch:       &agentv1.Epoch{InstallationId: uuid.NewString(), NodeId: uuid.NewString(), AppId: uuid.NewString(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1},
 		OperationId: uuid.NewString(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1,
 		Input: &agentv1.CommandInput{ResourceId: uuid.NewString(), PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}},
 	}
@@ -80,7 +80,7 @@ func TestCommandHashAndDelayedEpoch(t *testing.T) {
 		t.Fatal("admitted old recovery generation")
 	}
 	for _, change := range []func(*agentv1.Command){
-		func(c *agentv1.Command) { c.Input.GetStartContainer().AllowInitialization = true },
+		func(c *agentv1.Command) { c.Input.ResourceId = uuid.NewString() },
 		func(c *agentv1.Command) { c.Input.Timeout = durationpb.New(2 * time.Minute) },
 		func(c *agentv1.Command) { c.Epoch.NodeId = uuid.NewString() },
 		func(c *agentv1.Command) { c.CommandId = uuid.NewString() },
@@ -123,37 +123,24 @@ func TestBarrierRetainsActiveNativeEffects(t *testing.T) {
 
 func TestContainerNetworkMode(t *testing.T) {
 	command := commandFixture()
+	image := "redis@sha256:" + strings.Repeat("a", 64)
 	config := &agentv1.EnsureContainer{
-		ImageDigest: "redis@sha256:" + strings.Repeat("a", 64), Engine: "redis", VolumeId: uuid.NewString(), NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST, MemoryBytes: 64 << 20,
-		Redis:     &agentv1.RedisContainerConfig{Port: 6379, Persistence: "none", MaxmemoryBytes: 48 << 20, EvictionPolicy: "noeviction"},
-		SecretEnv: []*agentv1.SecretEnv{{Name: "REDIS_ADMIN_PASSWORD", Purpose: "superuser"}, {Name: "REDIS_APP_PASSWORD", Purpose: "application"}, {Name: "REDIS_REPLICATION_PASSWORD", Purpose: "replication"}},
+		ImageDigest: image, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20,
+		Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "cache"},
 	}
-	command.Input.Secrets = []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "application"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "replication"}}
-	config.Redis.Credentials = command.Input.Secrets
 	command.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: config}
 	if _, err := CommandHash(command); err != nil {
 		t.Fatal(err)
 	}
-	config.NetworkId = uuid.NewString()
-	if _, err := CommandHash(command); err == nil {
-		t.Fatal("host mode accepted network ID")
-	}
-	config.NetworkId = ""
-	config.Ports = []*agentv1.PortBinding{{HostAddress: "127.0.0.1", HostPort: 6379, ContainerPort: 6379, Transport: "tcp"}}
-	if _, err := CommandHash(command); err == nil {
-		t.Fatal("host mode accepted published ports")
-	}
-	config.Ports = nil
-	config.NetworkMode = agentv1.NetworkMode_NETWORK_MODE_UNSPECIFIED
-	if _, err := CommandHash(command); err == nil {
-		t.Fatal("accepted unspecified network mode")
+	for _, mode := range []agentv1.NetworkMode{agentv1.NetworkMode_NETWORK_MODE_HOST, agentv1.NetworkMode_NETWORK_MODE_UNSPECIFIED} {
+		config.NetworkMode = mode
+		if _, err := CommandHash(command); err == nil {
+			t.Fatalf("accepted network mode %s", mode)
+		}
 	}
 	config.NetworkMode = agentv1.NetworkMode_NETWORK_MODE_BRIDGE
+	config.Generic = nil
 	if _, err := CommandHash(command); err == nil {
-		t.Fatal("bridge mode accepted absent network")
-	}
-	config.NetworkId = uuid.NewString()
-	if _, err := CommandHash(command); err != nil {
-		t.Fatal(err)
+		t.Fatal("accepted a container without generic settings")
 	}
 }

@@ -5,19 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"maps"
-	"reflect"
 	"slices"
 	"strings"
 
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
 	"github.com/moby/moby/api/types/container"
-	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/client"
-	"github.com/sirrobot01/synod/internal/engine/postgres"
-	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
-	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
@@ -32,7 +26,7 @@ const maxHostObjects = 10000
 // host path, because a drift report reaches an operator's screen.
 const (
 	driftKind            = "kind_label_disagrees"
-	driftCluster         = "cluster_label_unreadable"
+	driftApp             = "app_label_unreadable"
 	driftResource        = "resource_label_unreadable"
 	driftName            = "name_disagrees_with_label"
 	driftIdentityUnknown = "identity_unreadable"
@@ -47,7 +41,7 @@ const (
 	driftRestartPolicy    = "restart_policy_changed"
 	driftResources        = "resource_limits_changed"
 	driftPorts            = "port_bindings_changed"
-	driftEngineConfig     = "engine_configuration_changed"
+	driftEngineConfig     = "container_configuration_changed"
 )
 
 // Drift reports objects on the host that this node did not expect to find as they are.
@@ -163,10 +157,10 @@ func (r *Runtime) classify(labels map[string]string, kind, name, prefix string) 
 	// The object carries this node's labels, so its identity is recovered from
 	// whichever source is still intact rather than written off as foreign.
 	drift.Class = runtime.DriftMislabelled
-	if clusterID, err := uuid.Parse(labels[labelCluster]); err == nil && clusterID != uuid.Nil {
-		drift.ClusterID = clusterID
+	if appID, err := uuid.Parse(labels[labelApp]); err == nil && appID != uuid.Nil {
+		drift.AppID = appID
 	} else {
-		drift.Detail = driftCluster
+		drift.Detail = driftApp
 	}
 	fromLabel, labelled := readIdentity(labels[labelResource])
 	fromName, named := readIdentity(strings.TrimPrefix(name, prefix))
@@ -237,25 +231,8 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 	if proto.Unmarshal(encoded, &stored) != nil {
 		return driftConfigUnreadable, nil
 	}
-	if stored.Generic != nil {
-		// This envelope validates stored configuration. It grants no execution authority.
-		id := item.Config.Labels[labelResource]
-		command := &agentv1.Command{CommandId: id, OperationId: id, StepId: id, DesiredRevision: 1, PlanVersion: 1,
-			Epoch: &agentv1.Epoch{InstallationId: r.options.InstallationID.String(), NodeId: r.options.NodeID.String(), ClusterId: item.Config.Labels[labelCluster], RecoveryGeneration: r.options.InstallationID.String(), ExecutionEpoch: 1},
-			Input: &agentv1.CommandInput{ResourceId: id, PayloadVersion: 1, Timeout: durationpb.New(r.options.InspectionTimeout)},
-		}
-		if err := r.checkContainer(ctx, command, item, &stored); err != nil {
-			return driftEngineConfig, nil
-		}
-		return "", nil
-	}
-	if stored.Engine == "postgres" && stored.Postgres == nil {
+	if stored.Generic == nil {
 		return driftEngineConfig, nil
-	}
-	if stored.Engine == "redis" || stored.Redis != nil {
-		if stored.Redis == nil || operation.ValidateRedisContainer(&stored, stored.Redis.Credentials) != nil {
-			return driftEngineConfig, nil
-		}
 	}
 	memory, cpu := containerLimits(&stored)
 	host := item.HostConfig
@@ -264,59 +241,22 @@ func (r *Runtime) containerChanges(ctx context.Context, item container.InspectRe
 		len(host.CapAdd) != 0 || len(host.SecurityOpt) != 0 || host.AutoRemove || host.PublishAllPorts || host.ReadonlyRootfs:
 		// Each grants the container more of the host than this node gave it.
 		return driftHostConfig, nil
-	case (item.Config.Labels["synod.tier"] == "2" && host.RestartPolicy.Name != container.RestartPolicyDisabled) || (host.RestartPolicy.Name != container.RestartPolicyDisabled && host.RestartPolicy.Name != container.RestartPolicyUnlessStopped):
-		// Tier 2 always disables restart. Other containers may restart only while active.
+	case ((item.Config.Labels["synod.tier"] == "1" || item.Config.Labels["synod.tier"] == "2") && host.RestartPolicy.Name != container.RestartPolicyDisabled) || (host.RestartPolicy.Name != container.RestartPolicyDisabled && host.RestartPolicy.Name != container.RestartPolicyUnlessStopped):
+		// Tier 1 and tier 2 always disable restart. Other containers may restart only while active.
 		return driftRestartPolicy, nil
 	case host.Memory != memory || host.NanoCPUs != cpu*1000000:
 		return driftResources, nil
 	case len(host.PortBindings) != len(stored.Ports):
 		return driftPorts, nil
 	}
-	if stored.Redis != nil || stored.Postgres != nil {
-		image, err := r.api.ImageInspect(ctx, stored.ImageDigest)
-		if err != nil {
-			return "", &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
-		}
-		if image.Config == nil {
-			return driftEngineConfig, nil
-		}
-		var expectedCommand []string
-		target := "/data"
-		tmpfs := map[string]string{redisengine.ConfigDirectory: "rw,noexec,nosuid,size=1m"}
-		if stored.Postgres != nil {
-			expectedCommand, err = postgresCommand(stored.Postgres, item.Config.Labels[labelInstallation], item.Config.Labels[labelCluster], item.Config.Labels[labelResource])
-			if err != nil {
-				return driftEngineConfig, nil
-			}
-			target = postgres.DataDirectory
-			tmpfs = map[string]string{postgres.ConfigDirectory: postgresTmpfs}
-			if !reflect.DeepEqual(item.Config.Healthcheck, postgresHealthcheck()) || item.Config.StopSignal != image.Config.StopSignal {
-				return driftEngineConfig, nil
-			}
-		} else {
-			expectedCommand = redisengine.ContainerCommand(stored.Redis)
-		}
-		if item.Image != image.ID ||
-			!slices.Equal(item.Config.Cmd, expectedCommand) ||
-			!slices.Equal(item.Config.Entrypoint, image.Config.Entrypoint) ||
-			!maps.Equal(host.Tmpfs, tmpfs) || len(item.Mounts) != 1 {
-			return driftEngineConfig, nil
-		}
-		environment, err := plainEnvironment(image.Config.Env, &stored)
-		if err != nil || !sameEnvironment(item.Config.Env, environment, &stored) ||
-			item.Config.User != image.Config.User || item.Config.WorkingDir != image.Config.WorkingDir {
-			return driftEngineConfig, nil
-		}
-		for _, mounted := range item.Mounts {
-			switch mounted.Type {
-			case mount.TypeVolume:
-				if mounted.Name != "synod-volume-"+stored.VolumeId || mounted.Destination != target || !mounted.RW {
-					return driftEngineConfig, nil
-				}
-			default:
-				return driftEngineConfig, nil
-			}
-		}
+	// This envelope validates stored configuration. It grants no execution authority.
+	id := item.Config.Labels[labelResource]
+	command := &agentv1.Command{CommandId: id, OperationId: id, StepId: id, DesiredRevision: 1, PlanVersion: 1,
+		Epoch: &agentv1.Epoch{InstallationId: r.options.InstallationID.String(), NodeId: r.options.NodeID.String(), AppId: item.Config.Labels[labelApp], RecoveryGeneration: r.options.InstallationID.String(), ExecutionEpoch: 1},
+		Input: &agentv1.CommandInput{ResourceId: id, PayloadVersion: 1, Timeout: durationpb.New(r.options.InspectionTimeout)},
+	}
+	if err := r.checkContainer(ctx, command, item, &stored); err != nil {
+		return driftEngineConfig, nil
 	}
 	return "", nil
 }

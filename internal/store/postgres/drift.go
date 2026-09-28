@@ -29,7 +29,7 @@ type DriftItem struct {
 	Class    DriftClass
 	// An object that was ours keeps whatever identity survived, which separates
 	// losing track of our own from finding somebody else's.
-	ClusterID  uuid.UUID
+	AppID      uuid.UUID
 	ResourceID uuid.UUID
 	Detail     string
 }
@@ -86,10 +86,10 @@ func (s *Store) RecordNodeDrift(ctx context.Context, report DriftReport) error {
 	}
 	for _, item := range report.Items {
 		if _, err := tx.Exec(ctx, `INSERT INTO node_drift_items
- (installation_id,node_id,kind,native_id,name,state,class,cluster_id,resource_id,detail)
+ (installation_id,node_id,kind,native_id,name,state,class,app_id,resource_id,detail)
  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 			report.InstallationID, report.NodeID, item.Kind, item.NativeID, item.Name, item.State,
-			string(item.Class), nullUUID(item.ClusterID), nullUUID(item.ResourceID), item.Detail); err != nil {
+			string(item.Class), nullUUID(item.AppID), nullUUID(item.ResourceID), item.Detail); err != nil {
 			return admissionError(err)
 		}
 	}
@@ -108,7 +108,7 @@ func (s *Store) ReadNodeDrift(ctx context.Context, installationID, nodeID uuid.U
 	if err != nil {
 		return DriftReport{}, admissionError(err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT kind,native_id,name,state,class,cluster_id,resource_id,detail
+	rows, err := s.pool.Query(ctx, `SELECT kind,native_id,name,state,class,app_id,resource_id,detail
  FROM node_drift_items WHERE installation_id=$1 AND node_id=$2 ORDER BY kind,native_id`, installationID, nodeID)
 	if err != nil {
 		return DriftReport{}, admissionError(err)
@@ -117,14 +117,14 @@ func (s *Store) ReadNodeDrift(ctx context.Context, installationID, nodeID uuid.U
 	for rows.Next() {
 		var item DriftItem
 		var class string
-		var clusterID, resourceID *uuid.UUID
+		var appID, resourceID *uuid.UUID
 		if err := rows.Scan(&item.Kind, &item.NativeID, &item.Name, &item.State, &class,
-			&clusterID, &resourceID, &item.Detail); err != nil {
+			&appID, &resourceID, &item.Detail); err != nil {
 			return DriftReport{}, admissionError(err)
 		}
 		item.Class = DriftClass(class)
-		if clusterID != nil {
-			item.ClusterID = *clusterID
+		if appID != nil {
+			item.AppID = *appID
 		}
 		if resourceID != nil {
 			item.ResourceID = *resourceID
@@ -155,11 +155,11 @@ func (d DriftItem) validate() error {
 	default:
 		return &AdmissionError{Code: InvalidRequest}
 	}
-	if !boundedIdentityText(d.NativeID, 256) || len(d.Name) > 256 || len(d.State) > 64 || len(d.Detail) > 64 {
+	if !printableWithin(d.NativeID, 256) || len(d.Name) > 256 || len(d.State) > 64 || len(d.Detail) > 64 {
 		return &AdmissionError{Code: InvalidRequest}
 	}
 	// An object that was never ours carries no Synod identity.
-	if d.Class == DriftUnowned && (d.ClusterID != uuid.Nil || d.ResourceID != uuid.Nil) {
+	if d.Class == DriftUnowned && (d.AppID != uuid.Nil || d.ResourceID != uuid.Nil) {
 		return &AdmissionError{Code: InvalidRequest}
 	}
 	return nil

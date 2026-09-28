@@ -68,7 +68,7 @@ func TestEnvelopeIsolationAndRotation(t *testing.T) {
 		change func(*Binding)
 	}{
 		{"installation", func(b *Binding) { b.InstallationID = uuid.New() }},
-		{"owner type", func(b *Binding) { b.OwnerType = "cluster" }},
+		{"owner type", func(b *Binding) { b.OwnerType = "node" }},
 		{"owner", func(b *Binding) { b.OwnerID = uuid.New() }},
 		{"credential", func(b *Binding) { b.CredentialID = uuid.New() }},
 		{"version", func(b *Binding) { b.Version++ }},
@@ -107,7 +107,7 @@ func TestConcurrentNonceIndependence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding := Binding{uuid.New(), "cluster", uuid.New(), uuid.New(), 1}
+	binding := Binding{uuid.New(), "app", uuid.New(), uuid.New(), 1}
 	results := make(chan Envelope, 128)
 	var workers sync.WaitGroup
 	for range 128 {
@@ -145,7 +145,7 @@ func TestRejectMalformedEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding := Binding{uuid.New(), "cluster", uuid.New(), uuid.New(), 1}
+	binding := Binding{uuid.New(), "app", uuid.New(), uuid.New(), 1}
 	envelope, err := ring.Seal(binding, []byte("value"))
 	if err != nil {
 		t.Fatal(err)
@@ -185,7 +185,7 @@ func TestRejectMalformedEnvelope(t *testing.T) {
 	if got, err := ring.Open(binding, sealed); err != nil || !bytes.Equal(got, largest) {
 		t.Fatalf("maximum size round trip: %v", err)
 	}
-	for _, owner := range []string{"", "Cluster", "cluster:node", "bad owner", "bad\x00owner"} {
+	for _, owner := range []string{"", "App", "app:node", "bad owner", "bad\x00owner"} {
 		invalid := binding
 		invalid.OwnerType = owner
 		if _, err := ring.Seal(invalid, []byte("value")); !errors.Is(err, ErrInvalidBinding) {

@@ -64,3 +64,44 @@ func TestWriterLeaseRequiresBoundedShape(t *testing.T) {
 		t.Fatal("accepted zero epoch")
 	}
 }
+
+func TestDatabaseReportsPreserveTheControlSession(t *testing.T) {
+	for _, code := range []string{"", "copying", "drifted", "disconnected", "failed", "writer_lease_expired", "primary_setup_failed", "fence_failed"} {
+		t.Run(code, func(t *testing.T) {
+			status := &agentv1.ReplicaStatus{AppId: uuid.NewString(), Role: replication.RoleStandby, Epoch: 1, State: "failed", FailureCode: code, LagSeconds: -1}
+			message := &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Heartbeat{Heartbeat: &agentv1.Heartbeat{Replicas: []*agentv1.ReplicaStatus{status}}}}
+			if err := CheckAgentMessage(message, "", ""); err != nil {
+				t.Fatalf("database report ends the session: %v", err)
+			}
+			status.FailureCode = "raw database error text"
+			if err := CheckAgentMessage(message, "", ""); err == nil {
+				t.Fatal("unbounded error accepted")
+			}
+		})
+	}
+}
+
+func TestDatabaseSwitchoverHoldBinding(t *testing.T) {
+	id := uuid.NewString()
+	assignment := &agentv1.AppReplication{AppId: uuid.NewString(), Epoch: 1, Role: replication.RoleStandby, Database: &agentv1.DatabaseAssignment{Engine: "redis", PrimaryHost: "192.0.2.1", PrimaryPort: 6379, SwitchoverOperationId: id}}
+	if err := replication.Validate([]*agentv1.AppReplication{assignment}); err != nil {
+		t.Fatal(err)
+	}
+	assignment.Role, assignment.Database.PrimaryHost, assignment.Database.PrimaryPort = replication.RoleActive, "", 0
+	if err := replication.Validate([]*agentv1.AppReplication{assignment}); err == nil {
+		t.Fatal("primary accepted a standby hold")
+	}
+	status := &agentv1.ReplicaStatus{AppId: assignment.AppId, Role: replication.RoleStandby, Epoch: 1, State: "streaming", DatabaseHoldId: id}
+	message := &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Heartbeat{Heartbeat: &agentv1.Heartbeat{Replicas: []*agentv1.ReplicaStatus{status}}}}
+	if err := CheckAgentMessage(message, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	status.DatabaseHoldId = "invalid"
+	if err := CheckAgentMessage(message, "", ""); err == nil {
+		t.Fatal("invalid hold accepted")
+	}
+	status.DatabaseHoldId, status.Role = id, replication.RoleActive
+	if err := CheckAgentMessage(message, "", ""); err == nil {
+		t.Fatal("primary reported a standby hold")
+	}
+}

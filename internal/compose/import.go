@@ -22,6 +22,7 @@ import (
 )
 
 type Options struct {
+	Worker    bool
 	Service   string
 	Name      string
 	Tier      app.Tier
@@ -220,31 +221,38 @@ func Import(ctx context.Context, filename string, options Options) (app.AppSpec,
 			return app.AppSpec{}, fmt.Errorf("copies must be a positive integer or all_capable")
 		}
 	}
-	// One ingress route has one backend port. Refuse extra ports until the model can name their routes.
-	if len(svc.Ports) != 1 {
-		return app.AppSpec{}, fmt.Errorf("import requires exactly one TCP service port")
-	}
-	port := svc.Ports[0]
-	if port.Target == 0 || port.Target > 65535 || (port.Protocol != "" && port.Protocol != "tcp") {
-		return app.AppSpec{}, fmt.Errorf("the service port must be TCP in the range 1 to 65535")
-	}
-	if port.HostIP != "" && port.HostIP != "0.0.0.0" {
-		return app.AppSpec{}, fmt.Errorf("host_ip is unsupported; Synod ingress listens on every participating device")
-	}
-	if port.AppProtocol != "" && port.AppProtocol != "http" && port.AppProtocol != "tcp" {
-		return app.AppSpec{}, fmt.Errorf("app_protocol must be http or tcp")
-	}
-	spec.Router.Protocol = cmp.Or(port.AppProtocol, "tcp")
-	if port.Published != "" {
-		published, err := strconv.ParseUint(port.Published, 10, 16)
-		if err != nil || published == 0 {
-			return app.AppSpec{}, fmt.Errorf("published port must be one port in the range 1 to 65535")
+	if options.Worker {
+		spec.Router = app.RouterSpec{}
+		if spec.Tier != app.TierParallel || options.Port != 0 || len(svc.Ports) != 0 {
+			return app.AppSpec{}, fmt.Errorf("worker import requires tier 3 without published ports or an ingress override")
 		}
-		if spec.Router.Port == 0 {
-			spec.Router.Port = uint16(published)
+	} else {
+		// One ingress route has one backend port. Refuse extra ports until the model can name their routes.
+		if len(svc.Ports) != 1 {
+			return app.AppSpec{}, fmt.Errorf("import requires exactly one TCP service port")
 		}
+		port := svc.Ports[0]
+		if port.Target == 0 || port.Target > 65535 || (port.Protocol != "" && port.Protocol != "tcp") {
+			return app.AppSpec{}, fmt.Errorf("the service port must be TCP in the range 1 to 65535")
+		}
+		if port.HostIP != "" && port.HostIP != "0.0.0.0" {
+			return app.AppSpec{}, fmt.Errorf("host_ip is unsupported; Synod ingress listens on every participating device")
+		}
+		if port.AppProtocol != "" && port.AppProtocol != "http" && port.AppProtocol != "tcp" {
+			return app.AppSpec{}, fmt.Errorf("app_protocol must be http or tcp")
+		}
+		spec.Router.Protocol = cmp.Or(port.AppProtocol, "tcp")
+		if port.Published != "" {
+			published, err := strconv.ParseUint(port.Published, 10, 16)
+			if err != nil || published == 0 {
+				return app.AppSpec{}, fmt.Errorf("published port must be one port in the range 1 to 65535")
+			}
+			if spec.Router.Port == 0 {
+				spec.Router.Port = uint16(published)
+			}
+		}
+		spec.Service.Ports = []app.PortSpec{{ContainerPort: uint16(port.Target), Protocol: "tcp"}}
 	}
-	spec.Service.Ports = []app.PortSpec{{ContainerPort: uint16(port.Target), Protocol: "tcp"}}
 	for _, volume := range svc.Volumes {
 		mount := app.MountSpec{Type: volume.Type, Source: volume.Source, Target: volume.Target, ReadOnly: volume.ReadOnly}
 		switch {

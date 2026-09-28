@@ -5,12 +5,9 @@
   import Mark from "./ui/Mark.svelte";
   import Operations from "../routes/Operations.svelte";
   import Operation from "../routes/Operation.svelte";
-  import Cluster from "../routes/Cluster.svelte";
-  import Databases from "../routes/Databases.svelte";
   import Settings from "../routes/Settings.svelte";
   import Fleet from "../routes/Fleet.svelte";
   import Nodes from "../routes/Nodes.svelte";
-  import Topology from "../routes/Topology.svelte";
   import Backups from "../routes/Backups.svelte";
 
   let { session, busy, onSignOut }: { session: Session; busy: boolean; onSignOut: () => void } = $props();
@@ -19,22 +16,19 @@
 
   // The navigation names the screens that specification 17 requires, in the order
   // an operator works through them: what is wrong, then where, then what to change.
-  // The design puts a count beside each one. A count of clusters or nodes would be
+  // The design puts a count beside each one. A count of apps or nodes would be
   // an observation the API does not serve, so none is drawn rather than invented.
   const destinations: { screen: ScreenName; label: string }[] = [
     { screen: "fleet", label: "Dashboard" },
     { screen: "nodes", label: "Nodes" },
-    { screen: "databases", label: "Clusters" },
     { screen: "backups", label: "Backups" },
     { screen: "operations", label: "Operations" },
     { screen: "settings", label: "Settings" },
   ];
 
-  // A section stays marked while a screen below it is open, so an operator on a
-  // cluster still sees which part of the product they are in.
+  // A section stays marked while a screen below it is open, so an operator on an
+  // operation still sees which part of the product they are in.
   const sections: Partial<Record<ScreenName, ScreenName>> = {
-    cluster: "databases",
-    topology: "databases",
     operation: "operations",
   };
 
@@ -43,9 +37,6 @@
   let titles: Record<ScreenName, string> = {
     fleet: "Dashboard",
     nodes: "Nodes",
-    databases: "Clusters",
-    cluster: "Cluster",
-    topology: "Topology",
     backups: "Backups",
     operations: "Operations",
     operation: "Operation",
@@ -58,13 +49,6 @@
   let trail = $derived.by(() => {
     const steps: { label: string; screen: ScreenName; id: string }[] = [];
     switch (route.screen) {
-      case "cluster":
-        steps.push({ label: "Clusters", screen: "databases", id: "" });
-        break;
-      case "topology":
-        steps.push({ label: "Clusters", screen: "databases", id: "" });
-        steps.push({ label: route.id, screen: "cluster", id: route.id });
-        break;
       case "operation":
         steps.push({ label: "Operations", screen: "operations", id: "" });
         break;
@@ -129,10 +113,8 @@
             </li>
           {/each}
           {#if route.screen !== "fleet"}
-            <!-- The trail already names the cluster on a topology, so the last
-                 step names the screen rather than repeating the resource. -->
             <li aria-current="page">
-              {route.id === "" || route.screen === "topology" ? titles[route.screen] : route.id}
+              {route.id === "" ? titles[route.screen] : route.id}
             </li>
           {/if}
         </ol>
@@ -145,18 +127,12 @@
         <Fleet go={(screen, id) => router.go(screen, id)} />
       {:else if route.screen === "nodes"}
         <Nodes id={route.id} onOpen={(id) => router.go("nodes", id)} />
-      {:else if route.screen === "databases"}
-        <Databases onOpen={(id) => router.go("cluster", id)} onOpenOperation={(id) => router.go("operation", id)} />
-      {:else if route.screen === "cluster"}
-        <Cluster id={route.id} actorID={session.actor_id} onOpenTopology={(id) => router.go("topology", id)} onOpenOperation={(id) => router.go("operation", id)} />
-      {:else if route.screen === "topology"}
-        <Topology id={route.id} onOpenCluster={(id) => router.go("cluster", id)} />
       {:else if route.screen === "backups"}
         <Backups />
       {:else if route.screen === "operations"}
         <Operations onOpen={(id) => router.go("operation", id)} />
       {:else if route.screen === "operation"}
-        <Operation id={route.id} onOpenCluster={(id) => router.go("cluster", id)} />
+        <Operation id={route.id} />
       {:else if route.screen === "settings"}
         <Settings {session} />
       {:else}

@@ -34,7 +34,7 @@ CREATE TABLE node_drift_items (
  -- Null when the object no longer carries a readable Synod identity. There is no
  -- foreign key: the whole point is that these may name nothing Synod has a record
  -- of, and a report that refuses to store what it saw is not a report.
- cluster_id uuid,
+ app_id uuid,
  resource_id uuid,
  -- A stable code naming what disagrees. It never carries a label value or a path.
  detail text NOT NULL CHECK (octet_length(detail) <= 64),

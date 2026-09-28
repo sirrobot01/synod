@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"math"
@@ -63,7 +64,7 @@ func (s *Store) AppRouteTargets(ctx context.Context, installation uuid.UUID) (ma
 		return nil, err
 	}
 	for _, item := range apps {
-		if item.DesiredLifecycle != "running" {
+		if item.DesiredLifecycle != "running" || item.Spec.Router.Port == 0 {
 			continue
 		}
 		copies, err := s.GetAppCopies(ctx, installation, item.ID)
@@ -71,28 +72,52 @@ func (s *Store) AppRouteTargets(ctx context.Context, installation uuid.UUID) (ma
 			return nil, err
 		}
 		var writer AppWriter
-		if item.Tier == app.TierSingleWriter {
+		if item.Tier == app.TierSingleWriter || item.Tier == app.TierDatabase {
 			writer, err = s.GetAppWriter(ctx, installation, item.ID)
 			if err != nil {
 				return nil, err
 			}
 		}
-		var backends []string
+		// A tier 1 reader route also reaches standbys whose engine streams from the primary.
+		streaming := map[uuid.UUID]bool{}
+		if item.Tier == app.TierDatabase && item.Spec.Router.ReaderPort != 0 {
+			rows, err := s.pool.Query(ctx, `SELECT r.node_id FROM app_replicas r JOIN agent_presence p USING(installation_id,node_id) WHERE r.installation_id=$1 AND r.app_id=$2 AND r.role='standby' AND r.state='streaming' AND r.failure_code='' AND r.sequence>0 AND r.session_id=p.session_id AND r.writer_epoch=$3 AND r.observed_at>clock_timestamp()-interval '20 seconds'`, installation, item.ID, int64(writer.Epoch))
+			if err != nil {
+				return nil, admissionError(err)
+			}
+			nodes, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+			if err != nil {
+				return nil, admissionError(err)
+			}
+			for _, node := range nodes {
+				streaming[node] = true
+			}
+		}
+		var backends, readers []string
 		for _, copy := range copies {
-			if item.Tier == app.TierSingleWriter && (copy.NodeID != writer.NodeID || writer.LastGrantAt == nil || !writer.LastGrantAt.Add(app.LeaseSeconds*time.Second).After(snapshot.ObservedAt)) {
+			node, ok := nodes[copy.NodeID]
+			if !ok || copy.ObservedState != "running" || copy.Health != "healthy" {
 				continue
 			}
-			node, ok := nodes[copy.NodeID]
-			if ok && copy.Role != "standby" && copy.ObservedState == "running" && copy.Health == "healthy" {
-				backends = append(backends, net.JoinHostPort(node.Policy.ClientAddress, strconv.Itoa(int(copy.HostPort))))
+			address := net.JoinHostPort(node.Policy.ClientAddress, strconv.Itoa(int(copy.HostPort)))
+			leased := copy.NodeID == writer.NodeID && writer.LastGrantAt != nil && writer.LastGrantAt.Add(app.LeaseSeconds*time.Second).After(snapshot.ObservedAt)
+			if (copy.Role == "active" && leased) || (copy.Role == "standby" && streaming[copy.NodeID]) {
+				readers = append(readers, address)
+			}
+			if (item.Tier == app.TierSingleWriter || item.Tier == app.TierDatabase) && !leased {
+				continue
+			}
+			if copy.Role != "standby" {
+				backends = append(backends, address)
 			}
 		}
 		slices.Sort(backends)
+		slices.Sort(readers)
 		for _, allocation := range snapshot.Allocations {
 			if _, eligible := nodes[allocation.NodeID]; !eligible {
 				continue
 			}
-			if allocation.ClusterID != item.ID || allocation.Released {
+			if allocation.AppID != item.ID || allocation.Released {
 				continue
 			}
 			target, ok := targets[allocation.NodeID]
@@ -100,10 +125,13 @@ func (s *Store) AppRouteTargets(ctx context.Context, installation uuid.UUID) (ma
 				continue
 			}
 			for _, port := range allocation.Ports {
-				if port.Name != "ingress" || port.Number != item.Spec.Router.Port {
+				routed := backends
+				if item.Tier == app.TierDatabase && port.Name == "reader" && port.Number == item.Spec.Router.ReaderPort {
+					routed = readers
+				} else if port.Name != "ingress" || port.Number != item.Spec.Router.Port {
 					continue
 				}
-				route := &agentv1.AppRoute{AppId: item.ID.String(), Protocol: item.Spec.Router.Protocol, IngressPort: uint32(port.Number), Backends: backends}
+				route := &agentv1.AppRoute{AppId: item.ID.String(), Protocol: item.Spec.Router.Protocol, IngressPort: uint32(port.Number), Backends: routed}
 				if health := item.Spec.Service.HealthCheck; health != nil && health.Type == "http" {
 					route.HealthPath = health.Path
 				}
@@ -112,7 +140,9 @@ func (s *Store) AppRouteTargets(ctx context.Context, installation uuid.UUID) (ma
 		}
 	}
 	for _, target := range targets {
-		slices.SortFunc(target.Table.Routes, func(a, b *agentv1.AppRoute) int { return strings.Compare(a.AppId, b.AppId) })
+		slices.SortFunc(target.Table.Routes, func(a, b *agentv1.AppRoute) int {
+			return cmp.Or(strings.Compare(a.AppId, b.AppId), cmp.Compare(a.IngressPort, b.IngressPort))
+		})
 		if err := router.Validate(target.Table.Routes); err != nil {
 			return nil, err
 		}
@@ -141,35 +171,56 @@ func (s *Store) PrepareAppRoutes(ctx context.Context, installation, node uuid.UU
 		ids = append(ids, route.AppId)
 	}
 	slices.Sort(ids)
-	for _, id := range ids {
+	for _, id := range slices.Compact(ids) {
 		var lifecycle string
 		var tier int
-		err := tx.QueryRow(ctx, `SELECT desired_lifecycle,tier FROM apps WHERE installation_id=$1 AND id=$2 FOR SHARE`, installation, id).Scan(&lifecycle, &tier)
+		var writerPort, readerPort uint16
+		err := tx.QueryRow(ctx, `SELECT desired_lifecycle,tier,(spec->'router'->>'port')::integer,COALESCE((spec->'router'->>'reader_port')::integer,0) FROM apps WHERE installation_id=$1 AND id=$2 FOR SHARE`, installation, id).Scan(&lifecycle, &tier, &writerPort, &readerPort)
 		if err != nil {
 			return nil, false, admissionError(err)
 		}
 		if lifecycle != "running" {
 			return nil, false, operation.ErrCommandConflict
 		}
-		if tier == 2 {
-			route := desired.Routes[slices.IndexFunc(desired.Routes, func(r *agentv1.AppRoute) bool { return r.AppId == id })]
-			if len(route.Backends) > 1 {
+		if tier != 1 && tier != 2 {
+			continue
+		}
+		for _, route := range desired.Routes {
+			if route.AppId != id {
+				continue
+			}
+			reader := tier == 1 && readerPort != 0 && route.IngressPort == uint32(readerPort)
+			if !reader && (route.IngressPort != uint32(writerPort) || len(route.Backends) > 1) {
 				return nil, false, operation.ErrCommandConflict
 			}
-			if len(route.Backends) == 1 {
+			rows, err := tx.Query(ctx, `SELECT (convert_from(policy.policy_bytes,'UTF8')::jsonb)->>'client_address',c.host_port
+ FROM apps a JOIN app_copies c ON c.installation_id=a.installation_id AND c.app_id=a.id
+ JOIN node_placement_policies policy ON policy.installation_id=c.installation_id AND policy.node_id=c.node_id
+ JOIN agent_presence p ON p.installation_id=c.installation_id AND p.node_id=c.node_id
+ LEFT JOIN app_replicas r ON r.installation_id=c.installation_id AND r.app_id=c.app_id AND r.node_id=c.node_id
+ WHERE a.installation_id=$1 AND a.id=$2 AND c.desired AND
+ ((c.role='active' AND c.node_id=a.writer_node_id AND a.writer_last_grant_at>clock_timestamp()-interval '30 seconds') OR
+ ($3 AND c.role='standby' AND r.role='standby' AND r.state='streaming' AND r.failure_code='' AND r.sequence>0
+ AND r.writer_epoch=a.writer_epoch AND r.session_id=p.session_id AND r.observed_at>clock_timestamp()-interval '20 seconds'))`, installation, id, reader)
+			if err != nil {
+				return nil, false, admissionError(err)
+			}
+			var allowed []string
+			for rows.Next() {
 				var address string
 				var port uint16
-				err := tx.QueryRow(ctx, `SELECT (convert_from(policy.policy_bytes,'UTF8')::jsonb)->>'client_address',c.host_port
- FROM apps a JOIN app_copies c ON c.installation_id=a.installation_id AND c.app_id=a.id AND c.node_id=a.writer_node_id
- JOIN node_placement_policies policy ON policy.installation_id=c.installation_id AND policy.node_id=c.node_id
- WHERE a.installation_id=$1 AND a.id=$2 AND c.desired AND c.role='active' AND a.writer_last_grant_at>clock_timestamp()-interval '30 seconds'`, installation, id).Scan(&address, &port)
-				if errors.Is(err, pgx.ErrNoRows) {
-					return nil, false, operation.ErrCommandConflict
-				}
-				if err != nil {
+				if err := rows.Scan(&address, &port); err != nil {
+					rows.Close()
 					return nil, false, admissionError(err)
 				}
-				if route.Backends[0] != net.JoinHostPort(address, strconv.Itoa(int(port))) {
+				allowed = append(allowed, net.JoinHostPort(address, strconv.Itoa(int(port))))
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, false, admissionError(err)
+			}
+			for _, backend := range route.Backends {
+				if !slices.Contains(allowed, backend) {
 					return nil, false, operation.ErrCommandConflict
 				}
 			}
@@ -272,7 +323,7 @@ func (s *Store) GetAppStatus(ctx context.Context, installation, id uuid.UUID) (a
 		} else {
 			status.State = "stopping"
 		}
-		if item.Tier == app.TierSingleWriter {
+		if item.Tier == app.TierSingleWriter || item.Tier == app.TierDatabase {
 			if err := s.appWriterStatus(ctx, &item); err != nil {
 				return app.App{}, err
 			}
@@ -298,8 +349,12 @@ func (s *Store) GetAppStatus(ctx context.Context, installation, id uuid.UUID) (a
 			healthy++
 		}
 	}
-	ready := false
+	worker := item.Tier == app.TierParallel && item.Spec.Router.Port == 0
+	ready := worker
 	routedHealthy := 0
+	if worker {
+		routedHealthy = healthy
+	}
 	for node, target := range targets {
 		index := slices.IndexFunc(target.Table.Routes, func(r *agentv1.AppRoute) bool { return r.AppId == id.String() })
 		if index < 0 {
@@ -333,7 +388,7 @@ func (s *Store) GetAppStatus(ctx context.Context, installation, id uuid.UUID) (a
 	case healthy > 0 && ready:
 		status.State = "degraded"
 	}
-	if item.Tier == app.TierSingleWriter {
+	if item.Tier == app.TierSingleWriter || item.Tier == app.TierDatabase {
 		if err := s.appWriterStatus(ctx, &item); err != nil {
 			return app.App{}, err
 		}

@@ -26,14 +26,14 @@ func writeLegacy(t *testing.T, j *Journal, path string) {
 	legacy := j.state
 	legacy.Version = 1
 	legacy.Commands = maps.Clone(legacy.Commands)
-	legacy.Clusters = maps.Clone(legacy.Clusters)
+	legacy.Apps = maps.Clone(legacy.Apps)
 	for id, record := range legacy.Commands {
 		record.CommandLimit, record.ResultLimit, record.ReservedBytes = 0, 0, 0
 		legacy.Commands[id] = record
 	}
-	for id, cluster := range legacy.Clusters {
-		cluster.InventoryLimit, cluster.ReservedBytes = 0, 0
-		legacy.Clusters[id] = cluster
+	for id, app := range legacy.Apps {
+		app.InventoryLimit, app.ReservedBytes = 0, 0
+		legacy.Apps[id] = app
 	}
 	data, err := json.Marshal(legacy)
 	if err != nil {
@@ -204,7 +204,7 @@ func TestMigrationPreservesReplayAndAccounting(t *testing.T) {
 	var commands []*agentv1.Command
 	for _, state := range []State{Compacted, Terminal, Running, Queued} {
 		c := proto.Clone(command).(*agentv1.Command)
-		c.CommandId, c.Epoch.ClusterId = uuid.NewString(), uuid.NewString()
+		c.CommandId, c.Epoch.AppId = uuid.NewString(), uuid.NewString()
 		hash, _ := operation.CommandHash(c)
 		c.InputHash = hash[:]
 		activate(t, j, c.Epoch)
@@ -338,7 +338,7 @@ func TestStorageProcessInterruption(t *testing.T) {
 			if err := j.prepareMigration(); err != nil {
 				t.Fatal(err)
 			}
-			batch, err := j.makeBatch(j.state.Commands, j.state.Clusters, true)
+			batch, err := j.makeBatch(j.state.Commands, j.state.Apps, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -523,11 +523,11 @@ func TestRecordGrowth(t *testing.T) {
 	}
 }
 
-func TestStoredAndClusterCapacity(t *testing.T) {
+func TestStoredAndAppCapacity(t *testing.T) {
 	j, _, command, _ := fixture(t)
 	u, _ := j.Usage()
 	j.options.MaxStoredBytes = u.ReservedBytes + commandReservation(j.options.MaxCommandBytes, j.options.MaxResultBytes) + 4096
-	j.options.MaxClusters = 1
+	j.options.MaxApps = 1
 	if _, err := j.Admit(command); err != nil {
 		t.Fatal(err)
 	}
@@ -553,9 +553,9 @@ func TestStoredAndClusterCapacity(t *testing.T) {
 		t.Fatalf("admission failure changed evidence: %+v", u)
 	}
 	foreign := proto.Clone(command.Epoch).(*agentv1.Epoch)
-	foreign.ClusterId = uuid.NewString()
+	foreign.AppId = uuid.NewString()
 	if err := j.Prepare(foreign); !errors.Is(err, ErrBusy) {
-		t.Fatalf("cluster capacity ignored: %v", err)
+		t.Fatalf("app capacity ignored: %v", err)
 	}
 	if err := j.Complete(result); err != nil {
 		t.Fatalf("capacity blocked result replay: %v", err)

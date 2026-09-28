@@ -10,11 +10,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/auth"
+	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
+	"golang.org/x/time/rate"
 )
 
 func TestAppAPIAdmission(t *testing.T) {
@@ -203,5 +206,138 @@ func TestAppMoveAPIKeepsTargetAndRetryIdentity(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTier1AppAPIChecksTheEngineCatalog(t *testing.T) {
+	store, _, _ := apiTestStore(t)
+	token := strings.Repeat("token-", 8)
+	verifier, err := auth.NewAdminToken(token, "test-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	served, err := NewServer(store, verifier, uuid.New(), testCatalog(t), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := NewServer(store, verifier, uuid.New(), nil, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"schema_version":1,"name":"photos-db","tier":1,"copies":1,"router":{"protocol":"tcp","port":5432,"reader_port":5433},"replication":{"standbys":1,"interval_seconds":0,"failover_after_seconds":90,"failback":"manual","failback_stable_seconds":600},"database":{"engine":"postgres","version":"17","databases":["immich"]},"service":{"image":"","command":null,"entrypoint":null}}`
+	for _, test := range []struct {
+		name, body string
+		server     *Server
+		status     int
+	}{
+		{"served major version", body, served, 202},
+		{"served redis release", strings.NewReplacer(`"name":"photos-db"`, `"name":"cache"`, `"engine":"postgres","version":"17","databases":["immich"]`, `"engine":"redis","version":"8.2.7"`).Replace(body), served, 202},
+		{"unknown version", strings.NewReplacer(`"name":"photos-db"`, `"name":"old-db"`, `"version":"17"`, `"version":"9"`).Replace(body), served, 422},
+		{"no catalog", body, empty, 422},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest("POST", "/v1/apps", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Idempotency-Key", strings.ReplaceAll(test.name, " ", "-"))
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			test.server.ServeHTTP(response, request)
+			if response.Code != test.status {
+				t.Fatalf("status %d: %s", response.Code, response.Body)
+			}
+		})
+	}
+}
+
+func TestTier1CredentialRevealIsAuditedAndScoped(t *testing.T) {
+	store, pool, _ := apiTestStore(t)
+	token := strings.Repeat("token-", 8)
+	verifier, err := auth.NewAdminToken(token, "test-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation := uuid.New()
+	server, err := NewServer(store, verifier, installation, testCatalog(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyID := uuid.New()
+	ring, err := secret.NewKeyring(keyID, map[uuid.UUID][]byte{keyID: bytes.Repeat([]byte{7}, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The outcome checks run without the reveal budget. The end of the test checks it.
+	server.SecretKeyring, server.credentialRevealLimit = ring, rate.NewLimiter(rate.Inf, 0)
+	send := func(method, path, body, key string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+token)
+		if key != "" {
+			request.Header.Set("Idempotency-Key", key)
+		}
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		return response
+	}
+	admit := func(body string) app.Admission {
+		t.Helper()
+		response := send("POST", "/v1/apps", body, uuid.NewString())
+		var admitted app.Admission
+		if response.Code != http.StatusAccepted || json.Unmarshal(response.Body.Bytes(), &admitted) != nil {
+			t.Fatalf("admission: %d %s", response.Code, response.Body)
+		}
+		return admitted
+	}
+	database := admit(`{"schema_version":1,"name":"photos-db","tier":1,"copies":1,"router":{"protocol":"tcp","port":5432},"replication":{"standbys":1,"interval_seconds":0,"failover_after_seconds":90,"failback":"manual","failback_stable_seconds":600},"database":{"engine":"postgres","version":"17","databases":["photos"]}}`)
+	web := admit(`{"schema_version":1,"name":"web","tier":3,"copies":1,"service":{"image":"nginx","ports":[{"container_port":80,"protocol":"tcp"}]},"router":{"protocol":"tcp","port":8080}}`)
+	reveal := "/v1/apps/" + database.AppID.String() + "/credentials/reveal"
+	if response := send("POST", reveal, "{}", ""); response.Code != http.StatusNotFound {
+		t.Fatalf("a database with no stored credential revealed: %d %s", response.Code, response.Body)
+	}
+	password := "reveal-" + uuid.NewString()
+	credential := postgres.Credential{CredentialID: uuid.New(), Version: 1, Purpose: postgres.ApplicationCredential, RoleName: "app"}
+	credential.Envelope, err = ring.Seal(secret.Binding{InstallationID: installation, OwnerType: "app", OwnerID: database.AppID, CredentialID: credential.CredentialID, Version: 1}, []byte(password))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAppCredentials(t.Context(), installation, database.AppID, []postgres.Credential{credential}); err != nil {
+		t.Fatal(err)
+	}
+	response := send("POST", reveal, "{}", "")
+	var revealed app.Credential
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &revealed) != nil {
+		t.Fatalf("reveal: %d %s", response.Code, response.Body)
+	}
+	if revealed.AppID != database.AppID || revealed.CredentialID != credential.CredentialID || revealed.Username != "app" || revealed.Password != password {
+		t.Fatalf("revealed %+v", revealed)
+	}
+	var audited int
+	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM audit_events WHERE action='credential.reveal.accepted' AND app_id=$1 AND actor_id='test-admin' AND request_id=$2 AND credential_id=$3`,
+		database.AppID, response.Header().Get("X-Request-ID"), credential.CredentialID).Scan(&audited); err != nil || audited != 1 {
+		t.Fatalf("reveal was not audited: %d %v", audited, err)
+	}
+	for name, path := range map[string]string{
+		"a tier 3 app":  "/v1/apps/" + web.AppID.String() + "/credentials/reveal",
+		"an absent app": "/v1/apps/" + uuid.NewString() + "/credentials/reveal",
+	} {
+		if response := send("POST", path, "{}", ""); response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), password) {
+			t.Fatalf("%s: %d %s", name, response.Code, response.Body)
+		}
+	}
+	if response := send("POST", reveal, "", ""); response.Code != http.StatusBadRequest {
+		t.Fatalf("a reveal without a body: %d", response.Code)
+	}
+	server.credentialRevealLimit = rate.NewLimiter(rate.Every(time.Hour), 1)
+	if response := send("POST", reveal, "{}", ""); response.Code != http.StatusOK {
+		t.Fatalf("the first budgeted reveal: %d %s", response.Code, response.Body)
+	}
+	if response := send("POST", reveal, "{}", ""); response.Code != http.StatusTooManyRequests || strings.Contains(response.Body.String(), password) {
+		t.Fatalf("a reveal over budget: %d %s", response.Code, response.Body)
+	}
+	server.SecretKeyring, server.credentialRevealLimit = nil, rate.NewLimiter(rate.Inf, 0)
+	if response := send("POST", reveal, "{}", ""); response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), password) {
+		t.Fatalf("a reveal without a keyring: %d %s", response.Code, response.Body)
 	}
 }

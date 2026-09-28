@@ -25,8 +25,6 @@ import (
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sirrobot01/synod/internal/engine/postgres"
-	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -35,7 +33,7 @@ import (
 
 const labelInstallation = "io.synod.installation"
 const labelNode = "io.synod.node"
-const labelCluster = "io.synod.cluster"
+const labelApp = "io.synod.app"
 const labelResource = "io.synod.resource"
 const labelKind = "io.synod.kind"
 const labelConfig = "io.synod.configuration"
@@ -46,11 +44,10 @@ var _ runtime.Runtime = (*Runtime)(nil)
 
 // Options binds a runtime to one node and bounds its inspections.
 type Options struct {
-	AppsDir            string
-	InstallationID     uuid.UUID
-	NodeID             uuid.UUID
-	AllowBridgeFixture bool
-	InspectionTimeout  time.Duration
+	AppsDir           string
+	InstallationID    uuid.UUID
+	NodeID            uuid.UUID
+	InspectionTimeout time.Duration
 }
 
 // Runtime performs owned Docker actions for one node.
@@ -87,7 +84,7 @@ func (r *Runtime) validate(command *agentv1.Command) error {
 }
 
 func (r *Runtime) labels(command *agentv1.Command, kind, resourceID string) map[string]string {
-	return map[string]string{labelInstallation: r.options.InstallationID.String(), labelNode: r.options.NodeID.String(), labelCluster: command.Epoch.ClusterId, labelResource: resourceID, labelKind: kind}
+	return map[string]string{labelInstallation: r.options.InstallationID.String(), labelNode: r.options.NodeID.String(), labelApp: command.Epoch.AppId, labelResource: resourceID, labelKind: kind}
 }
 
 func (r *Runtime) checkLabels(command *agentv1.Command, labels map[string]string, kind, resourceID string) error {
@@ -100,7 +97,7 @@ func (r *Runtime) checkLabels(command *agentv1.Command, labels map[string]string
 }
 
 // Execute requires durable journal admission and Start before this call.
-// The journal owner must serialize commands for each cluster and enforce plan dependencies.
+// The journal owner must serialize commands for each app and enforce plan dependencies.
 func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets runtime.Secrets) (runtime.Result, error) {
 	if err := r.validate(command); err != nil {
 		return runtime.Result{}, err
@@ -110,45 +107,6 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 	id := command.Input.ResourceId
 	var mutationErr error
 	switch payload := command.Input.Payload.(type) {
-	case *agentv1.CommandInput_VerifyContainerAbsent:
-		return r.inspectCommand(ctx, command)
-	case *agentv1.CommandInput_RecoverPostgresSetup:
-		return r.executePostgresRecovery(ctx, command, secrets)
-	case *agentv1.CommandInput_EnsureVolume:
-		name := "synod-volume-" + id
-		current, err := r.api.VolumeInspect(ctx, name, client.VolumeInspectOptions{})
-		if err == nil {
-			// An existing volume must be ours and must still be where it says it
-			// is, before this command treats it as the one to keep.
-			if err := checkVolumePath(current.Volume); err != nil {
-				return runtime.Result{}, err
-			}
-			if err := r.checkLabels(command, current.Volume.Labels, "volume", id); err != nil {
-				return runtime.Result{}, err
-			}
-		} else if !errdefs.IsNotFound(err) {
-			return runtime.Result{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
-		}
-
-		_, mutationErr = r.api.VolumeCreate(ctx, client.VolumeCreateOptions{Name: name, Driver: "local", Labels: r.labels(command, "volume", id)})
-	case *agentv1.CommandInput_EnsureNetwork:
-		if !r.options.AllowBridgeFixture {
-			return runtime.Result{}, runtime.ErrUnsupportedConfiguration
-		}
-		name := "synod-network-" + id
-		current, err := r.api.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
-		if err == nil {
-			if err := r.checkLabels(command, current.Network.Labels, "network", id); err != nil {
-				return runtime.Result{}, err
-			}
-			if current.Network.Driver != "bridge" {
-				return runtime.Result{}, runtime.ErrConfigurationConflict
-			}
-		} else if !errdefs.IsNotFound(err) {
-			return runtime.Result{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
-		}
-
-		_, mutationErr = r.api.NetworkCreate(ctx, name, client.NetworkCreateOptions{Driver: "bridge", Labels: r.labels(command, "network", id)})
 	case *agentv1.CommandInput_EnsureContainer:
 		p := payload.EnsureContainer
 		options, err := r.containerOptions(ctx, command, p, true)
@@ -172,7 +130,7 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 		}
 
 		_, mutationErr = r.api.ContainerCreate(ctx, options)
-	case *agentv1.CommandInput_StartContainer, *agentv1.CommandInput_StopContainer, *agentv1.CommandInput_RemoveContainer, *agentv1.CommandInput_InspectContainer:
+	case *agentv1.CommandInput_StartContainer, *agentv1.CommandInput_StopContainer, *agentv1.CommandInput_RemoveContainer:
 		current, err := r.api.ContainerInspect(ctx, "synod-instance-"+id, client.ContainerInspectOptions{})
 		if errdefs.IsNotFound(err) {
 			// A missing container runs nothing, so it is stopped as well as absent.
@@ -197,25 +155,18 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 				if r.writerLeaseCheck == nil {
 					return runtime.Result{}, runtime.ErrUnsupportedConfiguration
 				}
-				if err := r.writerLeaseCheck(command.Epoch.ClusterId); err != nil {
+				if err := r.writerLeaseCheck(command.Epoch.AppId); err != nil {
 					return runtime.Result{}, err
 				}
 			}
-			if err := r.checkStartStorage(ctx, command, current.Container); err != nil {
-				if current.Container.State.Running || current.Container.State.Restarting || len(current.Container.ExecIDs) != 0 {
-					result := r.containerResult(command, current.Container)
-					result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
-					return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
-				}
-				return runtime.Result{}, err
-			}
+			// A tier 1 or tier 2 copy must not restart without Synod after a host reboot.
 			policy := container.RestartPolicyUnlessStopped
-			if current.Container.Config.Labels["synod.tier"] == "2" {
+			if tier := current.Container.Config.Labels["synod.tier"]; tier == "1" || tier == "2" {
 				policy = container.RestartPolicyDisabled
 			}
 			_, mutationErr = r.api.ContainerUpdate(ctx, current.Container.ID, client.ContainerUpdateOptions{RestartPolicy: &container.RestartPolicy{Name: policy}})
 			if mutationErr == nil && current.Container.Config.Labels["synod.tier"] == "2" {
-				mutationErr = r.writerLeaseCheck(command.Epoch.ClusterId)
+				mutationErr = r.writerLeaseCheck(command.Epoch.AppId)
 			}
 			if mutationErr == nil {
 				_, mutationErr = r.api.ContainerStart(ctx, current.Container.ID, client.ContainerStartOptions{})
@@ -232,8 +183,6 @@ func (r *Runtime) Execute(ctx context.Context, command *agentv1.Command, secrets
 				return runtime.Result{}, runtime.ErrBusy
 			}
 			_, mutationErr = r.api.ContainerRemove(ctx, current.Container.ID, client.ContainerRemoveOptions{Force: false, RemoveVolumes: false})
-		case *agentv1.CommandInput_InspectContainer:
-			return r.containerResult(command, current.Container), nil
 		}
 	default:
 		return runtime.Result{}, runtime.ErrUnsupportedConfiguration
@@ -258,40 +207,6 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 	id := command.Input.ResourceId
 	result := runtime.Result{Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: id, NativeOperationId: "docker-command:" + command.CommandId, OutcomeUnknown: true, Active: true, State: "unknown"}}}
 	switch p := command.Input.Payload.(type) {
-	case *agentv1.CommandInput_VerifyContainerAbsent:
-		_, err := r.api.ContainerInspect(ctx, "synod-instance-"+id, client.ContainerInspectOptions{})
-		if errdefs.IsNotFound(err) {
-			result.Effects[0].State = "absent"
-			break
-		}
-		if err != nil {
-			return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
-		}
-		result.Effects[0].State = "present"
-		result.Effects[0].Active, result.Effects[0].OutcomeUnknown = false, false
-		return result, runtime.ErrConfigurationConflict
-	case *agentv1.CommandInput_RecoverPostgresSetup:
-		return r.inspectPostgresRecovery(ctx, command)
-	case *agentv1.CommandInput_EnsureVolume:
-		if err := r.verifyVolume(ctx, command, id); err != nil {
-			return result, err
-		}
-		result.Effects[0].State = "present"
-	case *agentv1.CommandInput_EnsureNetwork:
-		if !r.options.AllowBridgeFixture {
-			return result, runtime.ErrUnsupportedConfiguration
-		}
-		item, err := r.api.NetworkInspect(ctx, "synod-network-"+id, client.NetworkInspectOptions{})
-		if err != nil {
-			return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
-		}
-		if err := r.checkLabels(command, item.Network.Labels, "network", id); err != nil {
-			return result, err
-		}
-		if item.Network.Driver != "bridge" {
-			return result, runtime.ErrConfigurationConflict
-		}
-		result.Effects[0].State = "present"
 	default:
 		item, err := r.api.ContainerInspect(ctx, "synod-instance-"+id, client.ContainerInspectOptions{})
 		if errdefs.IsNotFound(err) {
@@ -325,25 +240,13 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 		if state == nil {
 			return result, runtime.ErrOutcomeUnknown
 		}
-		phase, phaseErr := postgresPhase(item.Container)
 		matched := false
 		switch p.(type) {
-		case *agentv1.CommandInput_EnsureContainer, *agentv1.CommandInput_InspectContainer:
+		case *agentv1.CommandInput_EnsureContainer:
 			matched = true
 		case *agentv1.CommandInput_StartContainer:
-			// The first start can be running while initdb still creates the data files.
-			if !command.Input.GetStartContainer().AllowInitialization || !state.Running || state.Restarting || state.Dead {
-				if err := r.checkStartStorage(ctx, command, item.Container); err != nil {
-					if errors.Is(err, runtime.ErrStorageLost) && !state.Running && !state.Restarting && len(item.Container.ExecIDs) == 0 {
-						result.Effects[0].State = "storage_lost"
-						return result, err
-					}
-					result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
-					return result, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
-				}
-			}
 			policy := container.RestartPolicyUnlessStopped
-			if item.Container.Config.Labels["synod.tier"] == "2" {
+			if tier := item.Container.Config.Labels["synod.tier"]; tier == "1" || tier == "2" {
 				policy = container.RestartPolicyDisabled
 			}
 			matched = state.Running && !state.Restarting && !state.Dead && item.Container.HostConfig.RestartPolicy.Name == policy
@@ -354,16 +257,6 @@ func (r *Runtime) inspectCommand(ctx context.Context, command *agentv1.Command) 
 			result.Effects[0].OutcomeUnknown = true
 			result.Effects[0].Active = true
 			return result, runtime.ErrOutcomeUnknown
-		}
-		if phaseErr != nil {
-			result.Effects[0].State = phase
-			result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
-			return result, phaseErr
-		}
-		if (phase == "bootstrap_failed" || phase == "bootstrap_recovered") && command.Input.GetStartContainer() != nil {
-			result.Effects[0].State = phase
-			result.Effects[0].Active, result.Effects[0].OutcomeUnknown = false, false
-			return result, runtime.ErrConfigurationConflict
 		}
 	}
 	result.Effects[0].OutcomeUnknown = false
@@ -377,10 +270,6 @@ func (r *Runtime) containerResult(command *agentv1.Command, item container.Inspe
 		state = string(item.State.Status)
 	}
 	result := runtime.Result{Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-command:" + command.CommandId, State: state, OutcomeUnknown: item.State == nil}}}
-	if phase, err := postgresPhase(item); err != nil {
-		result.Effects[0].State = phase
-		result.Effects[0].Active, result.Effects[0].OutcomeUnknown = true, true
-	}
 	for _, execID := range item.ExecIDs {
 		result.Effects = append(result.Effects, &agentv1.Effect{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-exec:" + item.ID + ":" + execID, Active: true, State: "native_exec_active"})
 	}
@@ -388,86 +277,40 @@ func (r *Runtime) containerResult(command *agentv1.Command, item container.Inspe
 }
 
 func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command, p *agentv1.EnsureContainer, allowPull bool) (client.ContainerCreateOptions, error) {
-	// Stored labels must pass the same typed checks as a new container command.
-	validation := proto.Clone(command).(*agentv1.Command)
-	validation.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: p}
-	if p.Postgres != nil {
-		validation.Input.Secrets = []*agentv1.SecretReference{
-			{CredentialId: p.Postgres.SuperuserCredentialId, Version: p.Postgres.SuperuserCredentialVersion, Purpose: "superuser"},
-			{CredentialId: p.Postgres.ApplicationCredentialId, Version: p.Postgres.ApplicationCredentialVersion, Purpose: "application"},
-		}
-	}
-	if p.Redis != nil {
-		validation.Input.Secrets = p.Redis.Credentials
-	}
-	if _, err := operation.CommandHash(validation); err != nil {
+	// A saved configuration has no command credential references. The original
+	// ensure command passes full validation before Docker stores it.
+	if err := operation.ValidateGenericContainer(p); err != nil {
 		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrConfigurationConflict, Cause: err}
-	}
-	if p.Generic == nil && p.NetworkMode == agentv1.NetworkMode_NETWORK_MODE_BRIDGE && !r.options.AllowBridgeFixture {
-		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
-	}
-	if p.NetworkMode != agentv1.NetworkMode_NETWORK_MODE_HOST && p.NetworkMode != agentv1.NetworkMode_NETWORK_MODE_BRIDGE {
-		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 	}
 	if len(p.Ports) > 64 {
 		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 	}
 	var mounts []mount.Mount
-	if p.Generic != nil {
-		for _, m := range p.Generic.Mounts {
-			kind, source := mount.Type(m.Type), m.Source
-			if m.Type == "replicated" {
-				if !filepath.IsAbs(r.options.AppsDir) {
-					return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
-				}
-				kind, source = mount.TypeBind, filepath.Join(r.options.AppsDir, command.Epoch.ClusterId, "live", m.Source)
+	for _, m := range p.Generic.Mounts {
+		kind, source := mount.Type(m.Type), m.Source
+		if m.Type == "replicated" || m.Type == "engine" {
+			if !filepath.IsAbs(r.options.AppsDir) {
+				return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 			}
-			mounts = append(mounts, mount.Mount{Type: kind, Source: source, Target: m.Target, ReadOnly: m.ReadOnly})
+			directory := "live"
+			if m.Type == "engine" {
+				directory = "engine"
+			}
+			kind, source = mount.TypeBind, filepath.Join(r.options.AppsDir, command.Epoch.AppId, directory, m.Source)
 		}
-	} else {
-		if err := r.verifyVolume(ctx, command, p.VolumeId); err != nil {
-			return client.ContainerCreateOptions{}, err
-		}
-		volume, err := r.api.VolumeInspect(ctx, "synod-volume-"+p.VolumeId, client.VolumeInspectOptions{})
-		if err != nil {
-			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
-		}
-		mounts = []mount.Mount{{Type: mount.TypeVolume, Source: volume.Volume.Name, Target: dataTarget(p)}}
+		mounts = append(mounts, mount.Mount{Type: kind, Source: source, Target: m.Target, ReadOnly: m.ReadOnly})
 	}
-	mode := container.NetworkMode("host")
-	if p.Generic != nil {
-		mode = "bridge"
-	} else if p.NetworkMode == agentv1.NetworkMode_NETWORK_MODE_BRIDGE {
-		mode = container.NetworkMode("synod-network-" + p.NetworkId)
-		net, err := r.api.NetworkInspect(ctx, string(mode), client.NetworkInspectOptions{})
-		if err != nil {
-			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
-		}
-		if err := r.checkLabels(command, net.Network.Labels, "network", p.NetworkId); err != nil {
-			return client.ContainerCreateOptions{}, err
-		}
-		if net.Network.Driver != "bridge" {
-			return client.ContainerCreateOptions{}, runtime.ErrConfigurationConflict
-		}
+	version, err := r.api.ServerVersion(ctx, client.ServerVersionOptions{})
+	if err != nil {
+		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
 	}
-	var platform *ocispec.Platform
-	if p.Generic != nil {
-		version, err := r.api.ServerVersion(ctx, client.ServerVersionOptions{})
-		if err != nil {
-			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
-		}
-		if version.Os != "linux" || (version.Arch != "amd64" && version.Arch != "arm64") {
-			return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
-		}
-		platform = &ocispec.Platform{OS: "linux", Architecture: version.Arch}
+	if version.Os != "linux" || (version.Arch != "amd64" && version.Arch != "arm64") {
+		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 	}
+	platform := &ocispec.Platform{OS: "linux", Architecture: version.Arch}
 	image, err := r.api.ImageInspect(ctx, p.ImageDigest)
 	if errdefs.IsNotFound(err) && allowPull {
-		pullOptions := client.ImagePullOptions{}
-		if platform != nil {
-			pullOptions.Platforms = []ocispec.Platform{*platform}
-		}
-		pull, pullErr := r.api.ImagePull(ctx, p.ImageDigest, pullOptions)
+		pull, pullErr := r.api.ImagePull(ctx, p.ImageDigest, client.ImagePullOptions{Platforms: []ocispec.Platform{*platform}})
 		// A pull creates no container, so a failed pull is a definite outcome.
 		if pullErr != nil {
 			return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrNotApplied, Cause: pullErr}
@@ -484,19 +327,11 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	if err != nil {
 		return client.ContainerCreateOptions{}, &runtime.Error{Kind: runtime.ErrOutcomeUnknown, Cause: err}
 	}
-	if platform != nil && (image.Os != platform.OS || image.Architecture != platform.Architecture) {
-		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
-	}
-	target := dataTarget(p)
-	if image.Config == nil {
+	if image.Os != platform.OS || image.Architecture != platform.Architecture || image.Config == nil {
 		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 	}
 	for declared := range image.Config.Volumes {
-		if p.Generic != nil {
-			if !slices.ContainsFunc(mounts, func(m mount.Mount) bool { return m.Target == declared }) {
-				return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
-			}
-		} else if declared != target {
+		if !slices.ContainsFunc(mounts, func(m mount.Mount) bool { return m.Target == declared }) {
 			return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 		}
 	}
@@ -509,21 +344,23 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	labels[labelConfig] = base64.RawStdEncoding.EncodeToString(encoded)
 	labels[labelHash] = hex.EncodeToString(hash[:])
 	labels["io.synod.image-id"] = image.ID
-	if g := p.Generic; g != nil {
-		labels["synod.managed"] = "true"
-		labels["synod.app_id"] = command.Epoch.ClusterId
-		labels["synod.app_name"] = g.AppName
-		labels["synod.copy_index"] = strconv.FormatUint(uint64(g.CopyIndex), 10)
-		labels["synod.tier"] = "3"
-		if slices.ContainsFunc(g.Mounts, func(m *agentv1.Mount) bool { return m.Type == "replicated" }) {
-			labels["synod.tier"] = "2"
-		}
+	g := p.Generic
+	labels["synod.managed"] = "true"
+	labels["synod.app_id"] = command.Epoch.AppId
+	labels["synod.app_name"] = g.AppName
+	labels["synod.copy_index"] = strconv.FormatUint(uint64(g.CopyIndex), 10)
+	labels["synod.tier"] = "3"
+	if slices.ContainsFunc(g.Mounts, func(m *agentv1.Mount) bool { return m.Type == "replicated" }) {
+		labels["synod.tier"] = "2"
+	}
+	if slices.ContainsFunc(g.Mounts, func(m *agentv1.Mount) bool { return m.Type == "engine" }) {
+		labels["synod.tier"] = "1"
 	}
 	memory, cpu := containerLimits(p)
 	if memory < 16<<20 || cpu < 1 || cpu > 1000000 {
 		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 	}
-	host := &container.HostConfig{NetworkMode: mode, RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}, Resources: container.Resources{Memory: memory, NanoCPUs: cpu * 1000000, PidsLimit: new(int64(256))}, Mounts: mounts, LogConfig: container.LogConfig{Type: "local", Config: map[string]string{"max-size": "1m", "max-file": "2"}}, PortBindings: network.PortMap{}}
+	host := &container.HostConfig{NetworkMode: "bridge", RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}, Resources: container.Resources{Memory: memory, NanoCPUs: cpu * 1000000, PidsLimit: new(int64(256))}, Mounts: mounts, LogConfig: container.LogConfig{Type: "local", Config: map[string]string{"max-size": "1m", "max-file": "2"}}, PortBindings: network.PortMap{}}
 	// Pin the Linux namespace and path protections instead of inheriting daemon overrides.
 	host.IpcMode = "private"
 	host.CgroupnsMode = "private"
@@ -534,66 +371,47 @@ func (r *Runtime) containerOptions(ctx context.Context, command *agentv1.Command
 	// The non-secret environment goes in here, where a verification rebuild can
 	// reproduce it. The credentials are applied by Execute, after this payload has
 	// been encoded into the configuration label.
-	plain, err := plainEnvironment(image.Config.Env, p)
-	if err != nil {
-		return client.ContainerCreateOptions{}, err
+	config := &container.Config{Image: p.ImageDigest, Labels: labels, StopTimeout: new(10), ExposedPorts: network.PortSet{}, Cmd: image.Config.Cmd, Entrypoint: image.Config.Entrypoint, Env: plainEnvironment(image.Config.Env, p), User: image.Config.User, WorkingDir: image.Config.WorkingDir}
+	if g.CommandOverride {
+		config.Cmd = append([]string{}, g.Command...)
 	}
-	config := &container.Config{Image: p.ImageDigest, Labels: labels, StopTimeout: new(10), ExposedPorts: network.PortSet{}, Cmd: image.Config.Cmd, Entrypoint: image.Config.Entrypoint, Env: plain, User: image.Config.User, WorkingDir: image.Config.WorkingDir}
-	if g := p.Generic; g != nil {
-		if g.CommandOverride {
-			config.Cmd = append([]string{}, g.Command...)
-		}
-		if g.EntrypointOverride {
-			config.Entrypoint = append([]string{}, g.Entrypoint...)
-			if !g.CommandOverride {
-				config.Cmd = []string{}
-			}
-		}
-		if len(config.Cmd) == 0 && len(config.Entrypoint) == 0 {
-			return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
-		}
-		config.StopSignal = image.Config.StopSignal
-		config.Healthcheck = image.Config.Healthcheck
-		if h := g.HealthCheck; h != nil {
-			config.Healthcheck = &container.HealthConfig{}
-			if image.Config.Healthcheck != nil {
-				*config.Healthcheck = *image.Config.Healthcheck
-			}
-			config.Healthcheck.Test = []string{"NONE"}
-			if h.Type == "exec" {
-				interval, timeout, retries := h.IntervalSeconds, h.TimeoutSeconds, h.UnhealthyThreshold
-				if interval == 0 {
-					interval = 30
-				}
-				if timeout == 0 {
-					timeout = 30
-				}
-				if retries == 0 {
-					retries = 3
-				}
-				config.Healthcheck.Test = append([]string{"CMD"}, h.Command...)
-				config.Healthcheck.Interval = time.Duration(interval) * time.Second
-				config.Healthcheck.Timeout = time.Duration(timeout) * time.Second
-				config.Healthcheck.Retries = int(retries)
-			}
+	if g.EntrypointOverride {
+		config.Entrypoint = append([]string{}, g.Entrypoint...)
+		if !g.CommandOverride {
+			config.Cmd = []string{}
 		}
 	}
-	if p.Redis != nil {
-		config.Cmd = redisengine.ContainerCommand(p.Redis)
-		host.Tmpfs = map[string]string{redisengine.ConfigDirectory: "rw,noexec,nosuid,size=1m"}
+	if len(config.Cmd) == 0 && len(config.Entrypoint) == 0 {
+		return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 	}
-	if p.Postgres != nil {
-		config.Cmd, err = postgresCommand(p.Postgres, command.Epoch.InstallationId, command.Epoch.ClusterId, command.Input.ResourceId)
-		if err != nil {
-			return client.ContainerCreateOptions{}, runtime.ErrConfigurationConflict
+	config.StopSignal = image.Config.StopSignal
+	config.Healthcheck = image.Config.Healthcheck
+	if h := g.HealthCheck; h != nil {
+		config.Healthcheck = &container.HealthConfig{}
+		if image.Config.Healthcheck != nil {
+			*config.Healthcheck = *image.Config.Healthcheck
 		}
-		config.Healthcheck = postgresHealthcheck()
-		config.StopSignal = image.Config.StopSignal
-		host.Tmpfs = map[string]string{postgres.ConfigDirectory: postgresTmpfs}
+		config.Healthcheck.Test = []string{"NONE"}
+		if h.Type == "exec" {
+			interval, timeout, retries := h.IntervalSeconds, h.TimeoutSeconds, h.UnhealthyThreshold
+			if interval == 0 {
+				interval = 30
+			}
+			if timeout == 0 {
+				timeout = 30
+			}
+			if retries == 0 {
+				retries = 3
+			}
+			config.Healthcheck.Test = append([]string{"CMD"}, h.Command...)
+			config.Healthcheck.Interval = time.Duration(interval) * time.Second
+			config.Healthcheck.Timeout = time.Duration(timeout) * time.Second
+			config.Healthcheck.Retries = int(retries)
+		}
 	}
 	for _, binding := range p.Ports {
 		address, err := netip.ParseAddr(binding.HostAddress)
-		if err != nil || (p.Generic == nil && !address.IsLoopback()) {
+		if err != nil {
 			return client.ContainerCreateOptions{}, runtime.ErrUnsupportedConfiguration
 		}
 		port, err := network.ParsePort(strconv.Itoa(int(binding.ContainerPort)) + "/" + binding.Transport)
@@ -649,23 +467,21 @@ func (r *Runtime) checkContainer(ctx context.Context, command *agentv1.Command, 
 	if err != nil {
 		return err
 	}
-	if (stored.Postgres != nil || stored.Generic != nil) && (!reflect.DeepEqual(item.Config.Healthcheck, options.Config.Healthcheck) || item.Config.StopSignal != options.Config.StopSignal) {
+	if !reflect.DeepEqual(item.Config.Healthcheck, options.Config.Healthcheck) || item.Config.StopSignal != options.Config.StopSignal {
 		return runtime.ErrConfigurationConflict
 	}
 	if item.Image != options.Config.Labels["io.synod.image-id"] || !slices.Equal(item.Config.Cmd, options.Config.Cmd) || !slices.Equal(item.Config.Entrypoint, options.Config.Entrypoint) || !sameEnvironment(item.Config.Env, options.Config.Env, &stored) || item.Config.User != options.Config.User || item.Config.WorkingDir != options.Config.WorkingDir || item.HostConfig.PidsLimit == nil || *item.HostConfig.PidsLimit != 256 || item.Config.Image != options.Config.Image || item.HostConfig.NetworkMode != options.HostConfig.NetworkMode || item.HostConfig.Memory != options.HostConfig.Memory || item.HostConfig.NanoCPUs != options.HostConfig.NanoCPUs || !reflect.DeepEqual(item.HostConfig.PortBindings, options.HostConfig.PortBindings) || !reflect.DeepEqual(item.HostConfig.LogConfig, options.HostConfig.LogConfig) {
 		return runtime.ErrConfigurationConflict
 	}
-	if stored.Generic != nil {
-		if options.Config.Labels["synod.tier"] == "2" && item.HostConfig.RestartPolicy.Name != container.RestartPolicyDisabled {
-			return runtime.ErrConfigurationConflict
-		}
-		if item.HostConfig.RestartPolicy.Name != container.RestartPolicyDisabled && item.HostConfig.RestartPolicy.Name != container.RestartPolicyUnlessStopped {
-			return runtime.ErrConfigurationConflict
-		}
-		for _, key := range []string{"synod.managed", "synod.app_id", "synod.app_name", "synod.copy_index", "synod.tier"} {
-			if item.Config.Labels[key] != options.Config.Labels[key] {
-				return runtime.ErrOwnershipConflict
-			}
+	if tier := options.Config.Labels["synod.tier"]; (tier == "1" || tier == "2") && item.HostConfig.RestartPolicy.Name != container.RestartPolicyDisabled {
+		return runtime.ErrConfigurationConflict
+	}
+	if item.HostConfig.RestartPolicy.Name != container.RestartPolicyDisabled && item.HostConfig.RestartPolicy.Name != container.RestartPolicyUnlessStopped {
+		return runtime.ErrConfigurationConflict
+	}
+	for _, key := range []string{"synod.managed", "synod.app_id", "synod.app_name", "synod.copy_index", "synod.tier"} {
+		if item.Config.Labels[key] != options.Config.Labels[key] {
+			return runtime.ErrOwnershipConflict
 		}
 	}
 	if len(item.Mounts) != len(options.HostConfig.Mounts) {
@@ -686,7 +502,7 @@ func (r *Runtime) checkContainer(ctx context.Context, command *agentv1.Command, 
 				return runtime.ErrConfigurationConflict
 			}
 		case mount.TypeBind:
-			if stored.Generic == nil || mounted.Propagation != mount.PropagationRPrivate {
+			if mounted.Propagation != mount.PropagationRPrivate {
 				return runtime.ErrConfigurationConflict
 			}
 			if mounted.Source != wanted.Source {
@@ -700,9 +516,6 @@ func (r *Runtime) checkContainer(ctx context.Context, command *agentv1.Command, 
 				}
 			}
 		case mount.TypeTmpfs:
-			if stored.Generic == nil {
-				return runtime.ErrConfigurationConflict
-			}
 		default:
 			return runtime.ErrConfigurationConflict
 		}
@@ -741,12 +554,4 @@ func (r *Runtime) Logs(ctx context.Context, command *agentv1.Command, maxBytes i
 	}
 	defer logs.Close()
 	return io.ReadAll(io.LimitReader(logs, maxBytes))
-}
-
-// dataTarget is where a container's data volume is mounted.
-func dataTarget(p *agentv1.EnsureContainer) string {
-	if p.Engine == "postgres" {
-		return postgres.DataDirectory
-	}
-	return "/data"
 }

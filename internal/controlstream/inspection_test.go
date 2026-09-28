@@ -18,9 +18,9 @@ func inspectionRequest(t *testing.T) *agentv1.CommandInspectionRequest {
 	t.Helper()
 	resourceID := uuid.NewString()
 	command := &agentv1.Command{
-		Epoch:       &agentv1.Epoch{InstallationId: uuid.NewString(), NodeId: uuid.NewString(), ClusterId: uuid.NewString(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1},
+		Epoch:       &agentv1.Epoch{InstallationId: uuid.NewString(), NodeId: uuid.NewString(), AppId: uuid.NewString(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1},
 		OperationId: uuid.NewString(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1,
-		Input: &agentv1.CommandInput{ResourceId: resourceID, PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: resourceID}}},
+		Input: &agentv1.CommandInput{ResourceId: resourceID, PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}},
 	}
 	hash, err := operation.CommandHash(command)
 	if err != nil {
@@ -91,6 +91,32 @@ func TestInspectionResultValidation(t *testing.T) {
 			mutate(changed)
 			if err := CheckCommandInspectionResult(changed, epoch.InstallationId, epoch.NodeId); !errors.Is(err, ErrMessage) {
 				t.Fatalf("accepted invalid result: %v", err)
+			}
+		})
+	}
+}
+
+func TestDatabaseSwitchoverInspectionProof(t *testing.T) {
+	request := inspectionRequest(t)
+	effect := request.PriorEffects[0]
+	effect.Active, effect.OutcomeUnknown = false, false
+	effect.NativeOperationId = "database-switch:" + effect.CommandId
+	effect.State = "database_switchover_ready"
+	effect.DatabaseSwitchover = &agentv1.DatabaseSwitchoverReceipt{WriterEpoch: 1, TargetNodeId: uuid.NewString(), PositionHash: make([]byte, 32)}
+	result := &agentv1.CommandInspectionResult{RequestId: request.RequestId, Epoch: request.Command.Epoch, CommandId: effect.CommandId, InputHash: request.Command.InputHash, Effects: request.PriorEffects}
+	if err := CheckCommandInspectionResult(result, result.Epoch.InstallationId, result.Epoch.NodeId); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*agentv1.DatabaseSwitchoverReceipt){
+		"epoch":  func(r *agentv1.DatabaseSwitchoverReceipt) { r.WriterEpoch = 0 },
+		"target": func(r *agentv1.DatabaseSwitchoverReceipt) { r.TargetNodeId = "invalid" },
+		"hash":   func(r *agentv1.DatabaseSwitchoverReceipt) { r.PositionHash = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := proto.Clone(result).(*agentv1.CommandInspectionResult)
+			mutate(changed.Effects[0].DatabaseSwitchover)
+			if err := CheckCommandInspectionResult(changed, result.Epoch.InstallationId, result.Epoch.NodeId); err == nil {
+				t.Fatal("invalid proof crossed wire validation")
 			}
 		})
 	}

@@ -3,9 +3,6 @@ package executor
 import (
 	"errors"
 	"testing"
-	"time"
-
-	"github.com/sirrobot01/synod/internal/engine"
 
 	"github.com/google/uuid"
 	noderuntime "github.com/sirrobot01/synod/internal/runtime"
@@ -115,65 +112,5 @@ func TestResolvedMaterialIsNeverPartOfACommand(t *testing.T) {
 	reference := command.Input.Secrets[0]
 	if reference.ProtoReflect().Descriptor().Fields().Len() != 3 {
 		t.Fatal("SecretReference gained a field; a credential must never be one of them")
-	}
-}
-
-// An effect state is a short stable token, not a payload: the store bounds it to 64
-// characters of [a-z0-9_] and rejects a receipt carrying anything else. A readiness
-// effect that carried its observation was refused by the controller and replayed by
-// this agent thousands of times, because a refused result is never acknowledged.
-func TestReadinessEffectStateFitsWhatAReceiptAccepts(t *testing.T) {
-	command := &agentv1.Command{
-		CommandId: uuid.NewString(),
-		Input:     &agentv1.CommandInput{ResourceId: uuid.NewString()},
-	}
-	healthy := engine.Probe{State: engine.ProbePassed}
-	result, err := readinessResult(command, engine.Observation{
-		Reachable: healthy, ProcessLive: healthy, Ready: healthy, Endpoint: healthy,
-		ObservedAt: time.Now(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.Effects) != 1 {
-		t.Fatalf("effects=%d, want one", len(result.Effects))
-	}
-	state := result.Effects[0].State
-	if len(state) < 1 || len(state) > 64 {
-		t.Fatalf("state=%q is %d bytes, want the 1 to 64 a receipt accepts", state, len(state))
-	}
-	for _, r := range state {
-		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
-			t.Fatalf("state %q contains %q, which a receipt refuses", state, r)
-		}
-	}
-}
-
-// The failure code names the probe that did not pass, so an operator learns which one
-// rather than only that something did. Every reason must also fit a receipt.
-func TestReadinessFailureNamesTheProbeThatFailed(t *testing.T) {
-	for name, observed := range map[string]engine.Observation{
-		"unreachable": {Reachable: engine.Probe{State: engine.ProbeFailed, Reason: "endpoint_refused_connection"}},
-		"rejected": {
-			Reachable: engine.Probe{State: engine.ProbePassed}, ProcessLive: engine.Probe{State: engine.ProbePassed},
-			Ready: engine.Probe{State: engine.ProbeFailed, Reason: "authentication_rejected"},
-		},
-		"nothing said why": {Reachable: engine.Probe{State: engine.ProbeFailed}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := readinessResult(&agentv1.Command{Input: &agentv1.CommandInput{}}, observed)
-			if !errors.Is(err, ErrEngineNotReady) {
-				t.Fatalf("err=%v, want ErrEngineNotReady", err)
-			}
-			code := failureCode(err)
-			if code == "" || len(code) > 128 {
-				t.Fatalf("code=%q, want a stable code a receipt accepts", code)
-			}
-			for _, r := range code {
-				if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
-					t.Fatalf("code %q contains %q, which a receipt refuses", code, r)
-				}
-			}
-		})
 	}
 }

@@ -51,12 +51,25 @@ func (s *Store) PrepareAppReplication(ctx context.Context, installation, node uu
 		}
 		assignment := desired.Apps[slices.IndexFunc(desired.Apps, func(a *agentv1.AppReplication) bool { return a.AppId == id })]
 		var role string
-		err := tx.QueryRow(ctx, `SELECT role FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND node_id=$3 AND desired`, installation, id, node).Scan(&role)
+		err := tx.QueryRow(ctx, `SELECT role FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND node_id=$3 AND desired AND NOT (rebuild_required AND NOT rebuild_data_removed)`, installation, id, node).Scan(&role)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, false, admissionError(err)
 		}
-		if tier != 2 || lifecycle != "running" || active == nil || epoch != assignment.Epoch || role != assignment.Role || (role == replication.RoleActive) != (*active == node) {
+		// A tier 2 entry names snapshot peers. A tier 1 entry names its engine role.
+		kind := (tier == 2 && assignment.Database == nil) || (tier == 1 && assignment.Database != nil)
+		if !kind || lifecycle != "running" || active == nil || epoch != assignment.Epoch || role != assignment.Role || (role == replication.RoleActive) != (*active == node) {
 			return nil, false, operation.ErrCommandConflict
+		}
+		if tier == 1 {
+			var hold string
+			if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT m.operation_id::text FROM app_moves m JOIN operations o ON o.id=m.operation_id
+    WHERE m.installation_id=$1 AND m.app_id=$2 AND m.target_node_id=$3 AND m.source_node_id=$4 AND m.writer_epoch=$5
+    AND m.promoted_at IS NULL AND o.plan_version>0 AND o.status IN ('pending','running','waiting','cancelling')), '')`, installation, id, node, active, epoch).Scan(&hold); err != nil {
+				return nil, false, admissionError(err)
+			}
+			if assignment.Database.SwitchoverOperationId != hold {
+				return nil, false, operation.ErrCommandConflict
+			}
 		}
 	}
 	var current uuid.UUID
@@ -161,7 +174,7 @@ func recordAppReplicas(ctx context.Context, tx pgx.Tx, installation, node, sessi
 			continue
 		}
 		assignment := table.Apps[index]
-		if report.Role != assignment.Role || (report.Epoch != assignment.Epoch && report.Epoch != 0) {
+		if report.DatabaseHoldId != assignment.Database.GetSwitchoverOperationId() || report.Role != assignment.Role || (report.Epoch != assignment.Epoch && report.Epoch != 0) {
 			continue
 		}
 		var completed *time.Time
@@ -180,8 +193,16 @@ func recordAppReplicas(ctx context.Context, tx pgx.Tx, installation, node, sessi
 		} else if report.FailureCode == "" {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO app_replicas(installation_id,app_id,node_id,session_id,role,writer_epoch,sequence,completed_at,observed_at,failure_code,last_pause_nanos,max_pause_nanos,skipped_snapshots)
- VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		if !slices.Contains([]string{"", "copying", "streaming", "disconnected", "drifted", "failed"}, report.State) {
+			continue
+		}
+		// An engine reports a negative lag when it has not applied anything yet.
+		var lag *float64
+		if report.LagSeconds >= 0 && report.LagSeconds < 1e9 {
+			lag = &report.LagSeconds
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO app_replicas(installation_id,app_id,node_id,session_id,role,writer_epoch,sequence,completed_at,observed_at,failure_code,last_pause_nanos,max_pause_nanos,skipped_snapshots,state,lag_seconds,database_hold_id)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,'')::uuid)
  ON CONFLICT(installation_id,app_id,node_id) DO UPDATE SET session_id=EXCLUDED.session_id,role=EXCLUDED.role,
  writer_epoch=EXCLUDED.writer_epoch,
  sequence=CASE WHEN EXCLUDED.writer_epoch>app_replicas.writer_epoch OR EXCLUDED.sequence>app_replicas.sequence THEN EXCLUDED.sequence ELSE app_replicas.sequence END,
@@ -189,8 +210,8 @@ func recordAppReplicas(ctx context.Context, tx pgx.Tx, installation, node, sessi
  last_pause_nanos=EXCLUDED.last_pause_nanos,
  max_pause_nanos=GREATEST(app_replicas.max_pause_nanos,EXCLUDED.max_pause_nanos),
  skipped_snapshots=GREATEST(app_replicas.skipped_snapshots,EXCLUDED.skipped_snapshots),
- observed_at=EXCLUDED.observed_at,failure_code=EXCLUDED.failure_code
- WHERE EXCLUDED.writer_epoch>app_replicas.writer_epoch OR (EXCLUDED.writer_epoch=app_replicas.writer_epoch AND (EXCLUDED.sequence>=app_replicas.sequence OR EXCLUDED.sequence=0))`, installation, report.AppId, node, session, report.Role, assignment.Epoch, report.Sequence, completed, now, report.FailureCode, report.LastPauseNanos, report.MaxPauseNanos, report.SkippedSnapshots); err != nil {
+ observed_at=EXCLUDED.observed_at,failure_code=EXCLUDED.failure_code,state=EXCLUDED.state,lag_seconds=EXCLUDED.lag_seconds,database_hold_id=EXCLUDED.database_hold_id
+ WHERE EXCLUDED.writer_epoch>app_replicas.writer_epoch OR (EXCLUDED.writer_epoch=app_replicas.writer_epoch AND (EXCLUDED.sequence>=app_replicas.sequence OR EXCLUDED.sequence=0))`, installation, report.AppId, node, session, report.Role, assignment.Epoch, report.Sequence, completed, now, report.FailureCode, report.LastPauseNanos, report.MaxPauseNanos, report.SkippedSnapshots, report.State, lag, report.DatabaseHoldId); err != nil {
 			return admissionError(err)
 		}
 	}

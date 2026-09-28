@@ -22,7 +22,7 @@ func (j *Journal) Prepare(epoch *agentv1.Epoch) error {
 	if err := j.checkTarget(epoch); err != nil {
 		return err
 	}
-	previous, exists := j.state.Clusters[epoch.ClusterId]
+	previous, exists := j.state.Apps[epoch.AppId]
 	if exists {
 		if epoch.ExecutionEpoch < previous.Prepared.ExecutionEpoch {
 			return operation.ErrStaleOwner
@@ -31,7 +31,7 @@ func (j *Journal) Prepare(epoch *agentv1.Epoch) error {
 			return nil
 		}
 	}
-	prepared := clusterState{Prepared: proto.Clone(epoch).(*agentv1.Epoch), InventoryLimit: previous.InventoryLimit, ReservedBytes: previous.ReservedBytes}
+	prepared := appState{Prepared: proto.Clone(epoch).(*agentv1.Epoch), InventoryLimit: previous.InventoryLimit, ReservedBytes: previous.ReservedBytes}
 	if !exists {
 		prepared.InventoryLimit = j.options.MaxInventoryBytes
 		prepared.ReservedBytes = inventoryReservation(j.options.MaxInventoryBytes)
@@ -50,21 +50,21 @@ func (j *Journal) Prepare(epoch *agentv1.Epoch) error {
 			return err
 		}
 	}
-	return j.persist(nil, map[string]clusterState{epoch.ClusterId: prepared})
+	return j.persist(nil, map[string]appState{epoch.AppId: prepared})
 }
 
 func (j *Journal) barrier(epoch *agentv1.Epoch) (*agentv1.BarrierResult, error) {
 	if err := j.checkTarget(epoch); err != nil {
 		return nil, err
 	}
-	cluster, exists := j.state.Clusters[epoch.ClusterId]
-	if !exists || cluster.Active || !proto.Equal(epoch, cluster.Prepared) {
+	app, exists := j.state.Apps[epoch.AppId]
+	if !exists || app.Active || !proto.Equal(epoch, app.Prepared) {
 		return nil, operation.ErrBarrierPending
 	}
 	result := &agentv1.BarrierResult{Epoch: proto.Clone(epoch).(*agentv1.Epoch), AdmissionsClosed: true, Drained: true}
-	if len(cluster.Barrier) != 0 {
+	if len(app.Barrier) != 0 {
 		var previous agentv1.BarrierResult
-		if proto.Unmarshal(cluster.Barrier, &previous) != nil {
+		if proto.Unmarshal(app.Barrier, &previous) != nil {
 			return nil, ErrRecoveryRequired
 		}
 		result.Effects = previous.Effects
@@ -73,7 +73,7 @@ func (j *Journal) barrier(epoch *agentv1.Epoch) (*agentv1.BarrierResult, error) 
 	}
 	size := proto.Size(result)
 	for record := range maps.Values(j.state.Commands) {
-		if record.Epoch.ClusterId != epoch.ClusterId {
+		if record.Epoch.AppId != epoch.AppId {
 			continue
 		}
 		current := make([]*agentv1.Effect, 0, len(record.Effects)+1)
@@ -94,7 +94,7 @@ func (j *Journal) barrier(epoch *agentv1.Epoch) (*agentv1.BarrierResult, error) 
 			if index >= 0 {
 				size -= protowire.SizeTag(4) + protowire.SizeBytes(proto.Size(result.Effects[index]))
 			}
-			if size > cluster.InventoryLimit {
+			if size > app.InventoryLimit {
 				return nil, j.blockExecution(ErrBusy)
 			}
 			if index >= 0 {
@@ -134,8 +134,8 @@ func (j *Journal) RecordBarrier(result *agentv1.BarrierResult) error {
 	if err := j.checkTarget(result.Epoch); err != nil {
 		return err
 	}
-	cluster, exists := j.state.Clusters[result.Epoch.ClusterId]
-	if !exists || cluster.Active || !proto.Equal(cluster.Prepared, result.Epoch) || !result.AdmissionsClosed {
+	app, exists := j.state.Apps[result.Epoch.AppId]
+	if !exists || app.Active || !proto.Equal(app.Prepared, result.Epoch) || !result.AdmissionsClosed {
 		return operation.ErrBarrierPending
 	}
 	for _, effect := range result.Effects {
@@ -143,7 +143,7 @@ func (j *Journal) RecordBarrier(result *agentv1.BarrierResult) error {
 			return operation.ErrBarrierPending
 		}
 	}
-	if proto.Size(result) > cluster.InventoryLimit {
+	if proto.Size(result) > app.InventoryLimit {
 		return j.blockExecution(ErrBusy)
 	}
 	encoded, err := proto.Marshal(result)
@@ -153,13 +153,13 @@ func (j *Journal) RecordBarrier(result *agentv1.BarrierResult) error {
 	// Keep room for the largest later epoch number when Prepare retains inventory.
 	future := proto.Clone(result).(*agentv1.BarrierResult)
 	future.Epoch.ExecutionEpoch = math.MaxInt64
-	if proto.Size(future) > cluster.InventoryLimit {
+	if proto.Size(future) > app.InventoryLimit {
 		return j.blockExecution(ErrBusy)
 	}
 	// Previously observed native work must be accounted for, even when it was unjournaled.
-	if len(cluster.Barrier) != 0 {
+	if len(app.Barrier) != 0 {
 		var previous agentv1.BarrierResult
-		if proto.Unmarshal(cluster.Barrier, &previous) != nil {
+		if proto.Unmarshal(app.Barrier, &previous) != nil {
 			return ErrRecoveryRequired
 		}
 		for _, old := range previous.Effects {
@@ -180,7 +180,7 @@ func (j *Journal) RecordBarrier(result *agentv1.BarrierResult) error {
 	}
 	if result.Drained {
 		for record := range maps.Values(j.state.Commands) {
-			if record.Epoch.ClusterId != result.Epoch.ClusterId {
+			if record.Epoch.AppId != result.Epoch.AppId {
 				continue
 			}
 			if record.State == Running {
@@ -196,9 +196,9 @@ func (j *Journal) RecordBarrier(result *agentv1.BarrierResult) error {
 			return operation.ErrBarrierPending
 		}
 	}
-	cluster.Barrier = encoded
-	cluster.Reconciled = false
-	return j.persist(nil, map[string]clusterState{result.Epoch.ClusterId: cluster})
+	app.Barrier = encoded
+	app.Reconciled = false
+	return j.persist(nil, map[string]appState{result.Epoch.AppId: app})
 }
 
 // Activate requires an authenticated controller confirmation that all reported
@@ -215,14 +215,14 @@ func (j *Journal) Activate(epoch *agentv1.Epoch, reconciled bool) error {
 	if err := j.checkTarget(epoch); err != nil {
 		return err
 	}
-	cluster, exists := j.state.Clusters[epoch.ClusterId]
-	if !exists || !proto.Equal(epoch, cluster.Prepared) {
+	app, exists := j.state.Apps[epoch.AppId]
+	if !exists || !proto.Equal(epoch, app.Prepared) {
 		return operation.ErrStaleOwner
 	}
-	if cluster.Active && cluster.Reconciled {
+	if app.Active && app.Reconciled {
 		return nil
 	}
-	if !reconciled || len(cluster.Barrier) == 0 {
+	if !reconciled || len(app.Barrier) == 0 {
 		return operation.ErrBarrierPending
 	}
 	result, err := j.barrier(epoch)
@@ -232,7 +232,7 @@ func (j *Journal) Activate(epoch *agentv1.Epoch, reconciled bool) error {
 	if err := operation.BarrierDrained(result); err != nil {
 		return err
 	}
-	cluster.Active = true
-	cluster.Reconciled = true
-	return j.persist(nil, map[string]clusterState{epoch.ClusterId: cluster})
+	app.Active = true
+	app.Reconciled = true
+	return j.persist(nil, map[string]appState{epoch.AppId: app})
 }

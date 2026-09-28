@@ -37,9 +37,9 @@ func fixture(t *testing.T) (*Journal, Options, *agentv1.Command, string) {
 	})
 	resource := uuid.NewString()
 	command := &agentv1.Command{
-		Epoch:       &agentv1.Epoch{InstallationId: options.Identity.InstallationID, NodeId: options.Identity.NodeID, RecoveryGeneration: options.Identity.RecoveryGeneration, ClusterId: uuid.NewString(), ExecutionEpoch: 1},
+		Epoch:       &agentv1.Epoch{InstallationId: options.Identity.InstallationID, NodeId: options.Identity.NodeID, RecoveryGeneration: options.Identity.RecoveryGeneration, AppId: uuid.NewString(), ExecutionEpoch: 1},
 		OperationId: uuid.NewString(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1,
-		Input: &agentv1.CommandInput{ResourceId: resource, PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: resource}}},
+		Input: &agentv1.CommandInput{ResourceId: resource, PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}},
 	}
 	hash, err := operation.CommandHash(command)
 	if err != nil {
@@ -315,7 +315,7 @@ func TestConcurrentAdmissionAndCapacity(t *testing.T) {
 	}
 	other := proto.Clone(command).(*agentv1.Command)
 	other.CommandId = uuid.NewString()
-	other.Epoch.ClusterId = uuid.NewString()
+	other.Epoch.AppId = uuid.NewString()
 	hash, _ := operation.CommandHash(other)
 	other.InputHash = hash[:]
 	activate(t, j, other.Epoch)
@@ -514,7 +514,7 @@ func TestByteBoundsAndRetainedPayloads(t *testing.T) {
 	}
 	other := proto.Clone(command).(*agentv1.Command)
 	other.CommandId = uuid.NewString()
-	other.Epoch.ClusterId = uuid.NewString()
+	other.Epoch.AppId = uuid.NewString()
 	hash, _ := operation.CommandHash(other)
 	other.InputHash = hash[:]
 	activate(t, j, other.Epoch)

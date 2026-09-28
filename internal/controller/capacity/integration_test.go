@@ -166,7 +166,7 @@ func TestDecideRefusesWhenTheRealNodeStaysSilent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := placement.Request{Version: 1, InstallationID: installation, ClusterID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1}
+	request := placement.Request{Version: 1, InstallationID: installation, AppID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1}
 	if _, _, err := d.Decide(t.Context(), request); !errors.Is(err, ErrNoEvidence) {
 		t.Fatalf("err=%v, want ErrNoEvidence rather than a guess", err)
 	}

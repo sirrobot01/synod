@@ -1,12 +1,7 @@
 // Package postgres is the PostgreSQL engine's knowledge of itself.
 package postgres
 
-import (
-	"fmt"
-
-	"github.com/sirrobot01/synod/internal/cluster"
-	"github.com/sirrobot01/synod/internal/engine"
-)
+import "github.com/sirrobot01/synod/internal/engine"
 
 const DataDirectory = "/var/lib/postgresql/data"
 const DataVersionFile = DataDirectory + "/PG_VERSION"
@@ -18,60 +13,19 @@ type Engine struct{}
 func New() Engine { return Engine{} }
 
 // Identity names the engine this implementation speaks for.
-func (Engine) Identity() cluster.Engine { return cluster.PostgreSQL }
+func (Engine) Identity() string { return engine.PostgreSQL }
 
-// Validate checks the PostgreSQL rules a stored spec cannot express.
-func (Engine) Validate(spec cluster.CreateSpec) error {
-	if spec.Engine != cluster.PostgreSQL || spec.PostgreSQL == nil {
-		return fmt.Errorf("%w: not a postgres spec", engine.ErrUnknownEngine)
-	}
-	if spec.Redis != nil {
-		return fmt.Errorf("%w: a postgres spec carries redis settings", engine.ErrUnsupportedCombination)
-	}
-	return nil
-}
-
-// Resolve answers what one PostgreSQL spec can do.
-func (e Engine) Resolve(spec cluster.CreateSpec) (engine.Capabilities, error) {
-	if err := e.Validate(spec); err != nil {
-		return engine.Capabilities{}, err
-	}
-	combination := engine.Combination{
-		Engine: cluster.PostgreSQL, Version: spec.PostgreSQL.Version, Topology: spec.PostgreSQL.Topology,
-	}
-	for _, advertised := range e.Advertised() {
-		if advertised.Combination == combination {
-			return advertised, nil
-		}
-	}
-	return engine.Capabilities{}, fmt.Errorf("%w: %s", engine.ErrUnsupportedCombination, combination)
-}
-
-// Advertised lists every PostgreSQL combination this engine knows. Nothing is
-// qualified, because specification 36 forbids claiming it without evidence and Q02 has
-// not closed. Upgrade pairs are empty for the same reason.
+// Advertised lists the PostgreSQL release that tier 1 apps run. A primary publishes
+// every table and up to three standbys subscribe. Synod promotes a standby, so the
+// engine elects nothing itself. Nothing is qualified, because specification 36 forbids
+// claiming it without evidence. Upgrade pairs are empty for the same reason.
 func (Engine) Advertised() []engine.Capabilities {
-	var all []engine.Capabilities
-	for _, version := range []string{"17.11", "18.6"} {
-		found := engine.Capabilities{
-			Combination: engine.Combination{Engine: cluster.PostgreSQL, Version: version, Topology: "standalone"},
-			Status:      engine.RequiredPending,
-			// Standalone is one node. PITR needs pgBackRest.
-			Replicas:           engine.Replicas{Minimum: 0, Maximum: 0},
-			NativeFailover:     false,
-			Sharding:           false,
-			ProxyRouting:       false,
-			ClientDiscovery:    false,
-			PITR:               false,
-			BackupFormats:      []string{"logical"},
-			RestoreScopes:      []string{"cluster"},
-			ScaleActions:       nil,
-			CredentialRotation: true,
-			UpgradePairs:       nil,
-			EndpointType:       "direct",
-			TLS:                false,
-		}
-		all = append(all, found)
-	}
-	return all
+	return []engine.Capabilities{{
+		Combination:  engine.Combination{Engine: engine.PostgreSQL, Version: "17.11", Topology: "primary-standby"},
+		Status:       engine.RequiredPending,
+		Replicas:     engine.Replicas{Minimum: 0, Maximum: 3},
+		ProxyRouting: true,
+		EndpointType: "router",
+		TLS:          true,
+	}}
 }

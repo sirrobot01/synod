@@ -2,13 +2,12 @@
   import { api, detail, type Operation } from "../lib/api";
   import { accepted, age, ageSeconds, canCancel, canRetry, errorView, finished, operationMark, type APIError } from "../lib/state";
   import { gaps, residual, steps, attention as attentionMark } from "../lib/mock";
-  import { follow, path } from "../lib/router.svelte";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
   import Mark from "../lib/ui/Mark.svelte";
   import Mocked from "../lib/ui/Mocked.svelte";
   import Panel from "../lib/ui/Panel.svelte";
 
-  let { id, onOpenCluster }: { id: string; onOpenCluster: (id: string) => void } = $props();
+  let { id }: { id: string } = $props();
 
   let operation = $state<Operation | null>(null);
   let failure = $state<APIError | null>(null);
@@ -65,7 +64,6 @@
 
   {#if operation && mark}
     {@const current = operation}
-    {@const cluster = current.cluster_id}
     <section class="panel detail" style="border-color: var(--{mark.tone})">
       <div class="strip">
         <Mark {mark} text={false} decorative />
@@ -77,10 +75,10 @@
       <div class="body">
         {#if accepted(current.status, current.plan_version)}
           <!-- Acceptance is its own state, with its own weight. It says nothing
-               about any database yet. -->
+               about any app yet. -->
           <p class="claim">
             The controller has durably recorded this request. Nothing has been provisioned yet, and
-            no claim is made about <span class="mono">{cluster}</span>.
+            no claim is made about app <span class="mono">{current.app_id}</span>.
           </p>
         {:else if current.status === "waiting"}
           <p class="claim">
@@ -102,12 +100,7 @@
           <dt>created_at</dt><dd>{current.created_at}</dd>
           <dt>updated_at</dt><dd>{current.updated_at}</dd>
           <dt>finished_at</dt><dd>{current.finished_at ?? "not finished"}</dd>
-          <dt>cluster_id</dt>
-          <dd>
-            <a class="mono" href={path("cluster", cluster)} onclick={(event) => follow(event, () => onOpenCluster(cluster))}>
-              {cluster}
-            </a>
-          </dd>
+          <dt>app_id</dt><dd>{current.app_id}</dd>
         </dl>
 
         <div class="actions">

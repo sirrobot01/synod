@@ -9,12 +9,8 @@ vi.mock("./api", async () => {
   return {
     ...real,
     api: {
-      cluster: () => new Promise(() => {}),
-      clusters: () => new Promise(() => {}),
       operation: () => new Promise(() => {}),
       tokens: () => new Promise(() => {}),
-      clusterEndpoints: () => new Promise(() => {}),
-      clusterCredentials: () => new Promise(() => {}),
     },
   };
 });
@@ -36,21 +32,21 @@ describe("the shell", () => {
   });
 
   it("keeps the section marked while a screen below it is open", () => {
-    at("/databases/abc/topology");
-    // The breadcrumb names Clusters too, so the mark is read from the navigation.
+    at("/operations/abc");
+    // The breadcrumb names Operations too, so the mark is read from the navigation.
     const navigation = within(screen.getByLabelText("Screens"));
-    const databases = navigation.getByRole("link", { name: "Clusters" });
-    // The mark says which part of the product the reader is in. A cluster and its
-    // topology both belong to Clusters, so the mark must not move to the dashboard.
-    expect(databases.getAttribute("aria-current")).toBe("page");
+    const operations = navigation.getByRole("link", { name: "Operations" });
+    // The mark says which part of the product the reader is in. An operation
+    // belongs to Operations, so the mark must not move to the dashboard.
+    expect(operations.getAttribute("aria-current")).toBe("page");
     expect(navigation.getByRole("link", { name: "Dashboard" }).getAttribute("aria-current")).toBe(null);
   });
 
   it("names every step back to the dashboard in the breadcrumb", () => {
-    at("/databases/abc/topology");
+    at("/operations/abc");
     const trail = screen.getByLabelText("Breadcrumb");
     expect(trail.textContent).toContain("Dashboard");
-    expect(trail.textContent).toContain("Clusters");
+    expect(trail.textContent).toContain("Operations");
     expect(trail.textContent).toContain("abc");
   });
 

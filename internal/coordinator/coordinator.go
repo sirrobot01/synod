@@ -1,4 +1,4 @@
-// Package coordinator manages PostgreSQL cluster ownership leases. A lease does not fence native effects.
+// Package coordinator manages PostgreSQL app ownership leases. A lease does not fence native effects.
 package coordinator
 
 import (
@@ -16,7 +16,7 @@ import (
 // ErrNotLeader reports that this process no longer holds elected ownership.
 var ErrNotLeader = errors.New("not_leader")
 
-// Coordinator elects one cluster owner in metadata PostgreSQL.
+// Coordinator elects one app owner in metadata PostgreSQL.
 type Coordinator struct {
 	pool *pgxpool.Pool
 }
@@ -39,39 +39,39 @@ type Leadership struct {
 	closeOnce      sync.Once
 	pool           *pgxpool.Pool
 	installationID uuid.UUID
-	clusterID      uuid.UUID
+	appID          uuid.UUID
 	ttlSeconds     int
 	cancelRenew    context.CancelFunc
 }
 
 const acquireQuery = `
-INSERT INTO cluster_leases (installation_id, cluster_id, owner_id, lease_id, revision, expires_at)
-VALUES ($1, $2, $3, nextval('cluster_lease_id_seq'), 1, clock_timestamp() + $4 * interval '1 second')
-ON CONFLICT (installation_id, cluster_id) DO UPDATE
+INSERT INTO app_leases (installation_id, app_id, owner_id, lease_id, revision, expires_at)
+VALUES ($1, $2, $3, nextval('app_lease_id_seq'), 1, clock_timestamp() + $4 * interval '1 second')
+ON CONFLICT (installation_id, app_id) DO UPDATE
 SET owner_id = EXCLUDED.owner_id,
     lease_id = EXCLUDED.lease_id,
-    revision = cluster_leases.revision + 1,
+    revision = app_leases.revision + 1,
     expires_at = EXCLUDED.expires_at
-WHERE cluster_leases.expires_at <= clock_timestamp()
+WHERE app_leases.expires_at <= clock_timestamp()
 RETURNING lease_id, revision;
 `
 
 // Campaign waits for elected ownership. Its context controls the wait lifetime.
-func (c *Coordinator) Campaign(ctx context.Context, installationID, clusterID uuid.UUID, ownerID string, ttlSeconds int) (*Leadership, error) {
-	if installationID == uuid.Nil || clusterID == uuid.Nil || ownerID == "" || len(ownerID) > 256 || ttlSeconds < 3 || ttlSeconds > 300 {
+func (c *Coordinator) Campaign(ctx context.Context, installationID, appID uuid.UUID, ownerID string, ttlSeconds int) (*Leadership, error) {
+	if installationID == uuid.Nil || appID == uuid.Nil || ownerID == "" || len(ownerID) > 256 || ttlSeconds < 3 || ttlSeconds > 300 {
 		return nil, fmt.Errorf("invalid election identity or lease TTL")
 	}
 
 	var leaseID, revision int64
-	err := c.pool.QueryRow(ctx, acquireQuery, installationID, clusterID, ownerID, ttlSeconds).Scan(&leaseID, &revision)
+	err := c.pool.QueryRow(ctx, acquireQuery, installationID, appID, ownerID, ttlSeconds).Scan(&leaseID, &revision)
 	if err == nil {
-		return c.newLeadership(installationID, clusterID, ownerID, leaseID, revision, ttlSeconds), nil
+		return c.newLeadership(installationID, appID, ownerID, leaseID, revision, ttlSeconds), nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("campaign for cluster %s: %w", clusterID, err)
+		return nil, fmt.Errorf("campaign for app %s: %w", appID, err)
 	}
 
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -81,21 +81,21 @@ func (c *Coordinator) Campaign(ctx context.Context, installationID, clusterID uu
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-ticker.C:
-			err := c.pool.QueryRow(ctx, acquireQuery, installationID, clusterID, ownerID, ttlSeconds).Scan(&leaseID, &revision)
+			err := c.pool.QueryRow(ctx, acquireQuery, installationID, appID, ownerID, ttlSeconds).Scan(&leaseID, &revision)
 			if err == nil {
-				return c.newLeadership(installationID, clusterID, ownerID, leaseID, revision, ttlSeconds), nil
+				return c.newLeadership(installationID, appID, ownerID, leaseID, revision, ttlSeconds), nil
 			}
 			if !errors.Is(err, pgx.ErrNoRows) {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
-				return nil, fmt.Errorf("campaign for cluster %s: %w", clusterID, err)
+				return nil, fmt.Errorf("campaign for app %s: %w", appID, err)
 			}
 		}
 	}
 }
 
-func (c *Coordinator) newLeadership(installationID, clusterID uuid.UUID, ownerID string, leaseID, revision int64, ttlSeconds int) *Leadership {
+func (c *Coordinator) newLeadership(installationID, appID uuid.UUID, ownerID string, leaseID, revision int64, ttlSeconds int) *Leadership {
 	done := make(chan struct{})
 	renewCtx, cancelRenew := context.WithCancel(context.Background())
 	l := &Leadership{
@@ -106,7 +106,7 @@ func (c *Coordinator) newLeadership(installationID, clusterID uuid.UUID, ownerID
 		done:           done,
 		pool:           c.pool,
 		installationID: installationID,
-		clusterID:      clusterID,
+		appID:          appID,
 		ttlSeconds:     ttlSeconds,
 		cancelRenew:    cancelRenew,
 	}
@@ -138,10 +138,10 @@ func (l *Leadership) renewLoop(ctx context.Context) {
 }
 
 const renewQuery = `
-UPDATE cluster_leases
+UPDATE app_leases
 SET expires_at = clock_timestamp() + $1 * interval '1 second'
 WHERE installation_id = $2
-  AND cluster_id = $3
+  AND app_id = $3
   AND owner_id = $4
   AND lease_id = $5
   AND revision = $6
@@ -151,7 +151,7 @@ RETURNING expires_at;
 
 func (l *Leadership) renew(ctx context.Context) error {
 	var expires time.Time
-	return l.pool.QueryRow(ctx, renewQuery, l.ttlSeconds, l.installationID, l.clusterID, l.OwnerID, l.LeaseID, l.Revision).Scan(&expires)
+	return l.pool.QueryRow(ctx, renewQuery, l.ttlSeconds, l.installationID, l.appID, l.OwnerID, l.LeaseID, l.Revision).Scan(&expires)
 }
 
 func (l *Leadership) closeDone() {
@@ -162,9 +162,9 @@ func (l *Leadership) closeDone() {
 
 const verifyQuery = `
 SELECT EXISTS(
-	SELECT 1 FROM cluster_leases
+	SELECT 1 FROM app_leases
 	WHERE installation_id = $1
-	  AND cluster_id = $2
+	  AND app_id = $2
 	  AND owner_id = $3
 	  AND lease_id = $4
 	  AND revision = $5
@@ -181,7 +181,7 @@ func (l *Leadership) Verify(ctx context.Context) error {
 	default:
 	}
 	var exists bool
-	if err := l.pool.QueryRow(ctx, verifyQuery, l.installationID, l.clusterID, l.OwnerID, l.LeaseID, l.Revision).Scan(&exists); err != nil {
+	if err := l.pool.QueryRow(ctx, verifyQuery, l.installationID, l.appID, l.OwnerID, l.LeaseID, l.Revision).Scan(&exists); err != nil {
 		return fmt.Errorf("verify election authority: %w", err)
 	}
 	if !exists {
@@ -192,10 +192,10 @@ func (l *Leadership) Verify(ctx context.Context) error {
 }
 
 const releaseQuery = `
-UPDATE cluster_leases
+UPDATE app_leases
 SET expires_at = clock_timestamp() - interval '1 second'
 WHERE installation_id = $1
-  AND cluster_id = $2
+  AND app_id = $2
   AND owner_id = $3
   AND lease_id = $4
   AND revision = $5;
@@ -205,7 +205,7 @@ WHERE installation_id = $1
 func (l *Leadership) Close(ctx context.Context) error {
 	l.cancelRenew()
 	l.closeDone()
-	if _, err := l.pool.Exec(ctx, releaseQuery, l.installationID, l.clusterID, l.OwnerID, l.LeaseID, l.Revision); err != nil {
+	if _, err := l.pool.Exec(ctx, releaseQuery, l.installationID, l.appID, l.OwnerID, l.LeaseID, l.Revision); err != nil {
 		return fmt.Errorf("revoke election lease: %w", err)
 	}
 	return nil

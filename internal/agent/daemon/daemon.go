@@ -24,11 +24,7 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/agent/transport"
-	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/controlstream"
-	"github.com/sirrobot01/synod/internal/engine"
-	postgresengine "github.com/sirrobot01/synod/internal/engine/postgres"
-	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
 	"github.com/sirrobot01/synod/internal/router"
 	noderuntime "github.com/sirrobot01/synod/internal/runtime"
 	docker "github.com/sirrobot01/synod/internal/runtime/docker"
@@ -92,11 +88,6 @@ func Initialize(ctx context.Context, config Config, diagnostics io.Writer) (jour
 	}
 	return identity, nil
 }
-
-// Readiness is a network question about a live engine, so the agent holds the probers
-// rather than the controller. An engine missing from here cannot prove its readiness
-// postcondition, so every engine the control plane can create must appear.
-var probers = map[string]engine.Prober{string(cluster.PostgreSQL): postgresengine.New(), string(cluster.Redis): redisengine.New()}
 
 // Run retains both state locks until all management loops and workers stop.
 // testBootID is allowed only for explicit local macOS fixture execution.
@@ -174,7 +165,8 @@ func Run(ctx context.Context, config Config, testBootID string, diagnostics io.W
 		StorageID:      config.StorageID,
 		RuntimeVersion: version,
 		MinFreeBytes:   config.MinFreeBytes,
-		Probers:        probers,
+		EngineTLS:      &identity.Certificate,
+		EngineCA:       []byte(identity.CACertificatePEM),
 	}
 	transportConfig := transport.Config{Endpoints: config.ControllerEndpoints, TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{identity.Certificate}}, Logger: logger, Hello: &agentv1.Hello{InstallationId: config.InstallationID, NodeId: config.NodeID, BootId: bootID, JournalGeneration: j.Identity().JournalGeneration, Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, Capabilities: capabilities, RuntimeVersion: version, ActivePayloadVersions: []uint32{1}}}
 	if replicas != nil {

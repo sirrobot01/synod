@@ -21,7 +21,7 @@ import (
 func TestAppMoveRequiresFinalProofAndKeepsRollbackBoundary(t *testing.T) {
 	for _, outcome := range []string{"success", "rollback", "stop_failure", "promoted_failure", "new_target", "retired_target", "target_lost", "report_timeout"} {
 		t.Run(outcome, func(t *testing.T) {
-			f := newFixture(t, postgresSpec())
+			f := newFixture(t)
 			installation := f.claim.InstallationID
 			target := uuid.New()
 			if _, err := f.pool.Exec(t.Context(), `INSERT INTO nodes(id,installation_id,public_key_hash,enrolled_at) VALUES($1,$2,$3,clock_timestamp())`, target, installation, make([]byte, 32)); err != nil {
@@ -387,7 +387,7 @@ func TestAppMoveRequiresFinalProofAndKeepsRollbackBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			var held int
-			if err := f.pool.QueryRow(t.Context(), `SELECT count(*) FROM resource_allocations WHERE cluster_id=$1 AND released_at IS NULL`, created.AppID).Scan(&held); err != nil || held != 0 {
+			if err := f.pool.QueryRow(t.Context(), `SELECT count(*) FROM resource_allocations WHERE app_id=$1 AND released_at IS NULL`, created.AppID).Scan(&held); err != nil || held != 0 {
 				t.Fatalf("cleanup kept reservations: %d %v", held, err)
 			}
 

@@ -13,8 +13,9 @@ CREATE TABLE apps (
     writer_epoch bigint NOT NULL DEFAULT 0 CHECK (writer_epoch >= 0),
     writer_node_id uuid,
     writer_last_grant_at timestamptz,
+    failover_loss_window_seconds double precision CHECK (failover_loss_window_seconds >= 0 AND failover_loss_window_seconds < 'Infinity'::double precision),
     CHECK ((writer_epoch = 0 AND writer_node_id IS NULL AND writer_last_grant_at IS NULL)
-        OR (tier = 2 AND writer_epoch > 0 AND writer_node_id IS NOT NULL)),
+        OR (tier IN (1, 2) AND writer_epoch > 0 AND writer_node_id IS NOT NULL)),
     FOREIGN KEY (installation_id, writer_node_id) REFERENCES nodes (installation_id, id),
     desired_revision bigint NOT NULL CHECK (desired_revision > 0),
     desired_lifecycle text NOT NULL CHECK (desired_lifecycle IN ('running', 'stopped', 'deleted')),
@@ -39,6 +40,9 @@ CREATE TABLE app_copies (
     role text NOT NULL DEFAULT 'parallel' CHECK (role IN ('parallel','active','standby')),
     host_port integer NOT NULL CHECK (host_port >= 0 AND host_port <= 65535),
     desired boolean NOT NULL DEFAULT true,
+    rebuild_required boolean NOT NULL DEFAULT false,
+    rebuild_data_removed boolean NOT NULL DEFAULT false,
+    CHECK (NOT rebuild_data_removed OR rebuild_required),
     desired_revision bigint NOT NULL DEFAULT 1 CHECK (desired_revision > 0),
     health text NOT NULL DEFAULT 'unknown' CHECK (health IN ('unknown','starting','healthy','unhealthy')),
     observed_at timestamptz,
@@ -74,7 +78,7 @@ CREATE TABLE app_admissions (
     desired_revision bigint NOT NULL CHECK (desired_revision > 0),
     accepted_at timestamptz NOT NULL,
     PRIMARY KEY (installation_id, actor_id, api_operation, idempotency_key),
-    FOREIGN KEY (installation_id,app_id,operation_id) REFERENCES operations (installation_id,cluster_id,id) DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (installation_id,app_id,operation_id) REFERENCES operations (installation_id,app_id,id) DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (installation_id, app_id) REFERENCES apps (installation_id, id) DEFERRABLE INITIALLY DEFERRED
 );
 
@@ -116,6 +120,10 @@ CREATE TABLE app_replicas (
  skipped_snapshots bigint NOT NULL DEFAULT 0 CHECK(skipped_snapshots>=0),
  observed_at timestamptz NOT NULL,
  failure_code text NOT NULL DEFAULT '',
+ -- Tier 1 only: the engine's replication state and the age of its last applied change.
+ state text NOT NULL DEFAULT '' CHECK (state IN ('','copying','streaming','disconnected','drifted','failed')),
+ database_hold_id uuid,
+ lag_seconds double precision CHECK (lag_seconds IS NULL OR (lag_seconds >= 0 AND lag_seconds < 1e9)),
  PRIMARY KEY (installation_id,app_id,node_id),
  FOREIGN KEY (installation_id,app_id) REFERENCES apps (installation_id,id) ON DELETE CASCADE,
  FOREIGN KEY (installation_id,node_id) REFERENCES nodes (installation_id,id),
@@ -136,6 +144,17 @@ CREATE TABLE app_moves (
  CHECK(source_node_id<>target_node_id),
  FOREIGN KEY(installation_id,source_node_id) REFERENCES nodes(installation_id,id),
  FOREIGN KEY(installation_id,target_node_id) REFERENCES nodes(installation_id,id),
- FOREIGN KEY(installation_id,app_id,rollback_operation_id) REFERENCES operations(installation_id,cluster_id,id),
- FOREIGN KEY(installation_id,app_id,operation_id) REFERENCES operations(installation_id,cluster_id,id)
+ FOREIGN KEY(installation_id,app_id,rollback_operation_id) REFERENCES operations(installation_id,app_id,id),
+ FOREIGN KEY(installation_id,app_id,operation_id) REFERENCES operations(installation_id,app_id,id)
+);
+
+-- A rejoin rebuilds one standby without waiting for the other devices.
+CREATE TABLE app_rejoins (
+ installation_id uuid NOT NULL,
+ app_id uuid NOT NULL,
+ operation_id uuid PRIMARY KEY,
+ copy_id uuid NOT NULL REFERENCES app_copies(id),
+ writer_epoch bigint NOT NULL CHECK(writer_epoch>0),
+ remove_data boolean NOT NULL,
+ FOREIGN KEY(installation_id,app_id,operation_id) REFERENCES operations(installation_id,app_id,id)
 );

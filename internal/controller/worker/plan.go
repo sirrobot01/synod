@@ -11,7 +11,7 @@ import (
 // An intentional later removal supersedes earlier existence and running checks.
 func recoveryFrontier(plan *agentv1.ExecutionPlan, completed map[string]bool) ([]*agentv1.PlanStep, [32]byte, error) {
 	type resource struct{ node, id string }
-	type obligations struct{ configuration, lifecycle, inspection *agentv1.PlanStep }
+	type obligations struct{ configuration, lifecycle *agentv1.PlanStep }
 	resources := make(map[resource]obligations)
 	for _, step := range plan.Steps {
 		if !completed[step.Command.StepId] {
@@ -20,7 +20,7 @@ func recoveryFrontier(plan *agentv1.ExecutionPlan, completed map[string]bool) ([
 		key := resource{step.Command.Epoch.NodeId, step.Command.Input.ResourceId}
 		current := resources[key]
 		switch step.Postcondition {
-		case agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS, agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS:
+		case agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS:
 			current.configuration = step
 			if current.lifecycle != nil && current.lifecycle.Postcondition == agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT {
 				current.lifecycle = nil
@@ -29,15 +29,13 @@ func recoveryFrontier(plan *agentv1.ExecutionPlan, completed map[string]bool) ([
 			current.lifecycle = step
 		case agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT:
 			current = obligations{lifecycle: step}
-		case agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED:
-			current.inspection = step
 		}
 		resources[key] = current
 	}
 	var frontier []*agentv1.PlanStep
 	for _, step := range plan.Steps {
 		current := resources[resource{step.Command.Epoch.NodeId, step.Command.Input.ResourceId}]
-		if current.configuration == step || current.lifecycle == step || (current.configuration == nil && current.lifecycle == nil && current.inspection == step) {
+		if current.configuration == step || current.lifecycle == step {
 			frontier = append(frontier, step)
 		}
 	}

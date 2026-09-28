@@ -66,15 +66,6 @@ func (a *app) connect(*cobra.Command, []string) error {
 	return err
 }
 
-// admitted records an admission. With wait, it also waits for the operation.
-func (a *app) admitted(ctx context.Context, admission client.Admission, wait bool) error {
-	a.result.Admission = &admission
-	if !wait {
-		return nil
-	}
-	return a.wait(ctx, admission.OperationID)
-}
-
 // wait reads the operation until it ends or --timeout passes. The timeout never
 // cancels the server work.
 func (a *app) wait(ctx context.Context, id uuid.UUID) error {

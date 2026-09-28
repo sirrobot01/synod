@@ -13,6 +13,9 @@ func (s *Store) appWriterStatus(ctx context.Context, item *app.App) error {
 		return err
 	}
 	status := item.Status
+	if item.Tier == app.TierDatabase {
+		status.LossWindowSeconds = writer.LossWindowSeconds
+	}
 	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(MAX(last_pause_nanos) FILTER(WHERE node_id=$3),0)::double precision/1e9,COALESCE(MAX(max_pause_nanos),0)::double precision/1e9,LEAST(COALESCE(SUM(skipped_snapshots),0),9223372036854775807) FROM app_replicas WHERE installation_id=$1 AND app_id=$2`, item.InstallationID, item.ID, writer.NodeID).Scan(&status.LastPauseSeconds, &status.MaxPauseSeconds, &status.SkippedSnapshots); err != nil {
 		return admissionError(err)
 	}
@@ -21,8 +24,9 @@ func (s *Store) appWriterStatus(ctx context.Context, item *app.App) error {
 	if err != nil {
 		return err
 	}
+	// A tier 1 standby reports its engine's lag. The age of that report adds to it.
 	rows, err := s.pool.Query(ctx, `SELECT c.node_id,COALESCE(r.writer_epoch,0),COALESCE(r.sequence,0),r.completed_at,
- CASE WHEN r.completed_at IS NOT NULL THEN GREATEST(0,EXTRACT(EPOCH FROM clock_timestamp()-r.completed_at)) END,COALESCE(r.failure_code,'')
+ CASE WHEN r.completed_at IS NOT NULL THEN GREATEST(0,EXTRACT(EPOCH FROM clock_timestamp()-r.completed_at))+COALESCE(r.lag_seconds,0) END,COALESCE(r.failure_code,''),COALESCE(r.state,'')
  FROM app_copies c LEFT JOIN app_replicas r USING(installation_id,app_id,node_id)
  WHERE c.installation_id=$1 AND c.app_id=$2 AND c.desired AND c.role='standby' ORDER BY c.copy_index`, item.InstallationID, item.ID)
 	if err != nil {
@@ -30,12 +34,12 @@ func (s *Store) appWriterStatus(ctx context.Context, item *app.App) error {
 	}
 	for rows.Next() {
 		var replica app.StandbyStatus
-		if err := rows.Scan(&replica.NodeID, &replica.Epoch, &replica.Sequence, &replica.CompletedAt, &replica.LagSeconds, &replica.FailureCode); err != nil {
+		if err := rows.Scan(&replica.NodeID, &replica.Epoch, &replica.Sequence, &replica.CompletedAt, &replica.LagSeconds, &replica.FailureCode, &replica.State); err != nil {
 			rows.Close()
 			return admissionError(err)
 		}
 		replica.Usable = slices.ContainsFunc(candidates, func(c AppFailoverCandidate) bool { return c.NodeID == replica.NodeID })
-		if replica.Usable && replica.LagSeconds != nil {
+		if replica.Usable && replica.LagSeconds != nil && (item.Tier != app.TierDatabase || writer.LossWindowSeconds == nil) {
 			window := *replica.LagSeconds + float64(item.Spec.Replication.IntervalSeconds)
 			if status.LossWindowSeconds == nil || window > *status.LossWindowSeconds {
 				status.LossWindowSeconds = new(window)

@@ -119,13 +119,13 @@ func (r *Runtime) inventoryIdentity(labels map[string]string, kind, name, prefix
 	if labels[labelInstallation] != r.options.InstallationID.String() || labels[labelNode] != r.options.NodeID.String() || labels[labelKind] != kind {
 		return runtime.Resource{}, runtime.ErrOwnershipConflict
 	}
-	clusterID, err := uuid.Parse(labels[labelCluster])
-	if err != nil || clusterID == uuid.Nil {
+	appID, err := uuid.Parse(labels[labelApp])
+	if err != nil || appID == uuid.Nil {
 		return runtime.Resource{}, runtime.ErrOwnershipConflict
 	}
 	resourceID, err := uuid.Parse(labels[labelResource])
 	if err != nil || resourceID == uuid.Nil || labels[labelResource] != resourceID.String() || name != prefix+resourceID.String() {
 		return runtime.Resource{}, &runtime.Error{Kind: runtime.ErrOwnershipConflict, Cause: fmt.Errorf("invalid owned %s identity", kind)}
 	}
-	return runtime.Resource{ClusterID: clusterID, ResourceID: resourceID, Kind: kind, Name: name}, nil
+	return runtime.Resource{AppID: appID, ResourceID: resourceID, Kind: kind, Name: name}, nil
 }

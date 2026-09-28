@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/moby/moby/client"
 	agentcapacity "github.com/sirrobot01/synod/internal/agent/capacity"
 	"github.com/sirrobot01/synod/internal/agent/executor"
@@ -33,26 +34,45 @@ import (
 	"github.com/sirrobot01/synod/internal/controller/capacity"
 	"github.com/sirrobot01/synod/internal/controller/provision"
 	"github.com/sirrobot01/synod/internal/controlstream"
-	"github.com/sirrobot01/synod/internal/engine"
-	postgresengine "github.com/sirrobot01/synod/internal/engine/postgres"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/placement"
 	"github.com/sirrobot01/synod/internal/router"
 	"github.com/sirrobot01/synod/internal/runtime/docker"
+	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
 )
 
 func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
-	for _, tier := range []app.Tier{app.TierParallel, app.TierSingleWriter} {
-		t.Run(fmt.Sprint(tier), func(t *testing.T) {
+	for _, scenario := range []struct {
+		name   string
+		tier   app.Tier
+		worker bool
+	}{
+		{"3", app.TierParallel, false}, {"2", app.TierSingleWriter, false}, {"1", app.TierDatabase, false}, {"worker", app.TierParallel, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			tier, worker := scenario.tier, scenario.worker
+			if tier == app.TierDatabase && goruntime.GOOS != "linux" {
+				t.Skip("PostgreSQL bind mounts need Linux ownership; run this case in the Linux test container")
+			}
 			host := os.Getenv("SYNOD_TEST_DOCKER_HOST")
 			if host == "" {
 				t.Skip("set SYNOD_TEST_DOCKER_HOST")
 			}
 			inst := newInstallation(t)
 			inst.runner.config.Logger = slog.Default()
+			keyID := uuid.New()
+			ring, err := secret.NewKeyring(keyID, map[uuid.UUID][]byte{keyID: make([]byte, 32)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inst.runner.config.Keyring = ring
+			caPath := filepath.Join(t.TempDir(), "ca.crt")
+			if err := os.WriteFile(caPath, inst.ca.CertificatePEM(), 0600); err != nil {
+				t.Fatal(err)
+			}
 			generation := uuid.New()
 			if err := inst.store.InitializeGeneration(t.Context(), inst.id, generation); err != nil {
 				t.Fatal(err)
@@ -135,7 +155,7 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 			pushClient := &replication.Client{InstallationID: inst.id, Certificate: inst.agentTLS, Roots: inst.roots}
 			started := time.Now()
 			boot := uuid.NewString()
-			agent, err := executor.New(j, native, executor.Options{Host: agentcapacity.Host{ProcRoot: proc, StoragePath: t.TempDir()}, BootID: boot, StorageID: "app-test", RuntimeVersion: "test", PollInterval: 20 * time.Millisecond, Router: routes, AppsDir: appsDir, Replication: &replication.Table{}, PushSnapshot: pushClient.Push, BootTime: func() (time.Duration, error) { return time.Hour + time.Since(started), nil }})
+			agent, err := executor.New(j, native, executor.Options{Host: agentcapacity.Host{ProcRoot: proc, StoragePath: t.TempDir()}, BootID: boot, StorageID: "app-test", RuntimeVersion: "test", PollInterval: 20 * time.Millisecond, Router: routes, AppsDir: appsDir, Replication: &replication.Table{}, PushSnapshot: pushClient.Push, EngineTLS: &inst.agentTLS, EngineCA: inst.ca.CertificatePEM(), BootTime: func() (time.Duration, error) { return time.Hour + time.Since(started), nil }})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -168,7 +188,11 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 				t.Fatal(err)
 			}
 			var ports []uint16
-			for range 2 {
+			portCount := 2
+			if tier == app.TierDatabase {
+				portCount++
+			}
+			for range portCount {
 				listener, err := net.Listen("tcp", "0.0.0.0:0")
 				if err != nil {
 					t.Fatal(err)
@@ -180,11 +204,7 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			catalog, err := engine.NewCatalog(postgresengine.New())
-			if err != nil {
-				t.Fatal(err)
-			}
-			planner, err := provision.New(provision.Config{Store: inst.store, Decider: driver, Catalog: catalog, Images: []provision.Image{{Digest: "unused"}}, Budget: placement.Vector{CPUMillis: 500, MemoryBytes: 256 << 20, DiskBytes: 1}, EndpointPorts: placement.PortRange{First: ports[0], Last: ports[0]}})
+			planner, err := provision.New(provision.Config{Store: inst.store, Decider: driver, Keyring: ring, DatabaseImages: []provision.DatabaseImage{{Engine: "postgres", Version: "17.11", Digest: "postgres@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f"}}, Budget: placement.Vector{CPUMillis: 500, MemoryBytes: 256 << 20, DiskBytes: 1}, EndpointPorts: placement.PortRange{First: ports[0], Last: ports[0]}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -201,6 +221,12 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 				t.Fatal(err)
 			}
 			request := postgres.CreateAppRequest{Identity: postgres.RequestIdentity{InstallationID: inst.id, ActorID: "operator", APIOperation: postgres.CreateAppAPIOperation, IdempotencyKey: uuid.NewString()}, RequestID: uuid.NewString(), Spec: app.AppSpec{SchemaVersion: 1, Name: "echo", Tier: app.TierParallel, Copies: 1, Service: app.ServiceSpec{Image: "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3", Ports: []app.PortSpec{{ContainerPort: 6379}}, Mounts: []app.MountSpec{{Type: "tmpfs", Target: "/data"}, {Type: "bind", Source: external, Target: "/external", ReadOnly: true}}, HealthCheck: &app.HealthCheckSpec{Type: "tcp", Port: 6379, IntervalSeconds: 1}}, Router: app.RouterSpec{Protocol: "tcp", Port: ports[1]}}}
+			if worker {
+				request.Spec.Router = app.RouterSpec{}
+				request.Spec.Service.Ports = nil
+				request.Spec.Service.Command = []string{"sh", "-c", "trap 'exit 0' TERM; echo processed > /tmp/worker-proof; while :; do sleep 1; done"}
+				request.Spec.Service.HealthCheck = &app.HealthCheckSpec{Type: "exec", Command: []string{"test", "-s", "/tmp/worker-proof"}, IntervalSeconds: 1}
+			}
 			journals := map[string]*journal.Journal{inst.node.String(): j}
 			var standbyNode uuid.UUID
 			var standbyRoot, standbyAddress string
@@ -276,13 +302,21 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 				request.Spec.DevicePreference.Preferred = []string{inst.node.String()}
 				request.Spec.Service.Mounts = []app.MountSpec{{Type: "replicated", Source: "config", Target: "/data"}}
 			}
+			if tier == app.TierDatabase {
+				request.Spec.Tier = tier
+				request.Spec.Service = app.ServiceSpec{}
+				request.Spec.Database = &app.DatabaseSpec{Engine: app.EnginePostgres, Version: "17", Databases: []string{"echo"}}
+				request.Spec.Replication = new(app.DefaultDatabaseReplication())
+				request.Spec.Replication.Standbys = 0
+				request.Spec.Router.ReaderPort = ports[2]
+			}
 			admitted, err := inst.store.AdmitApp(t.Context(), request)
 			if err != nil {
 				t.Fatal(err)
 			}
 			publishReplication := func() {
 				t.Helper()
-				if tier == app.TierSingleWriter {
+				if tier == app.TierSingleWriter || tier == app.TierDatabase {
 					tables, err := inst.store.AppReplicationTargets(t.Context(), inst.id)
 					if err != nil {
 						t.Fatal(err)
@@ -304,6 +338,23 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 							}
 						} else {
 							for _, assignment := range table.Apps {
+								if assignment.Database != nil {
+									for purpose, name := range map[string]string{postgres.SuperuserCredential: "admin", postgres.ReplicationCredential: "replication", postgres.ApplicationCredential: "app"} {
+										credential, err := inst.store.ReadAppCredential(t.Context(), inst.id, admitted.AppID, purpose)
+										if err != nil || credential == nil {
+											t.Fatalf("database credential %s: %v", purpose, err)
+										}
+										material, err := ring.Open(secret.Binding{InstallationID: inst.id, OwnerType: "app", OwnerID: admitted.AppID, CredentialID: credential.CredentialID, Version: credential.Version}, credential.Envelope)
+										if err != nil {
+											t.Fatal(err)
+										}
+										err = inst.runner.config.Transport.Send(node, table.SessionId, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Secret{Secret: &agentv1.SecretMaterial{CredentialId: credential.CredentialID.String(), Version: credential.Version, Purpose: "db:" + admitted.AppID.String() + ":" + name, Material: material}}})
+										clear(material)
+										if err != nil && !errors.Is(err, controlstream.ErrBusy) && !errors.Is(err, controlstream.ErrDisconnected) {
+											t.Fatal(err)
+										}
+									}
+								}
 								if assignment.Role == replication.RoleActive {
 									grant, err := inst.store.PrepareAppWriterLease(t.Context(), inst.id, admitted.AppID, node, uuid.MustParse(table.SessionId), assignment.Epoch, false)
 									if errors.Is(err, operation.ErrCommandConflict) || errors.Is(err, postgres.ErrStaleSession) {
@@ -358,7 +409,7 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if found.Status.State == "failed" {
+				if found.Status.State == "failed" || found.Status.OperationState == "failed" {
 					t.Fatalf("failed: %+v", found.Status)
 				}
 				if found.Status.State == "running" {
@@ -371,24 +422,73 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 				t.Fatalf("app never ran: %+v operation %+v", found.Status, op)
 			}
 			ingress := net.JoinHostPort(address, strconv.Itoa(int(ports[1])))
-			var response string
-			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
-				connection, err := net.DialTimeout("tcp", ingress, time.Second)
-				if err == nil {
-					connection.SetDeadline(time.Now().Add(time.Second))
-					_, err = connection.Write([]byte("PING\r\n"))
+			var databaseConfig *pgx.ConnConfig
+			if tier == app.TierDatabase {
+				credential, err := inst.store.ReadAppCredential(t.Context(), inst.id, admitted.AppID, postgres.ApplicationCredential)
+				if err != nil || credential == nil {
+					t.Fatalf("application credential: %v", err)
+				}
+				password, err := ring.Open(secret.Binding{InstallationID: inst.id, OwnerType: "app", OwnerID: admitted.AppID, CredentialID: credential.CredentialID, Version: credential.Version}, credential.Envelope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				databaseConfig, err = pgx.ParseConfig(fmt.Sprintf("host=%s port=%d user=app password=%s dbname=echo sslmode=verify-ca sslrootcert=%s channel_binding=require connect_timeout=2", address, ports[1], password, caPath))
+				clear(password)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var connected bool
+				var connectionErr error
+				for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+					publishRoutes()
+					connection, err := pgx.ConnectConfig(t.Context(), databaseConfig)
+					connectionErr = err
 					if err == nil {
-						response, err = bufio.NewReader(connection).ReadString('\n')
-					}
-					connection.Close()
-					if response == "+PONG\r\n" {
+						_, err = connection.Exec(t.Context(), "CREATE TABLE proof (id integer PRIMARY KEY, value text); INSERT INTO proof VALUES (1, 'retained')")
+						connection.Close(t.Context())
+						if err != nil {
+							t.Fatal(err)
+						}
+						connected = true
 						break
 					}
+					time.Sleep(100 * time.Millisecond)
 				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			if response != "+PONG\r\n" {
-				t.Fatalf("router response %q", response)
+				if !connected {
+					t.Fatalf("database never accepted an authenticated write through the router: %v", connectionErr)
+				}
+				readerConfig := databaseConfig.Copy()
+				readerConfig.Port = ports[2]
+				connection, err := pgx.ConnectConfig(t.Context(), readerConfig)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var value string
+				err = connection.QueryRow(t.Context(), "SELECT value FROM proof WHERE id=1").Scan(&value)
+				connection.Close(t.Context())
+				if err != nil || value != "retained" {
+					t.Fatalf("reader route lost the write: %q %v", value, err)
+				}
+			} else if !worker {
+				var response string
+				for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+					connection, err := net.DialTimeout("tcp", ingress, time.Second)
+					if err == nil {
+						connection.SetDeadline(time.Now().Add(time.Second))
+						_, err = connection.Write([]byte("PING\r\n"))
+						if err == nil {
+							response, err = bufio.NewReader(connection).ReadString('\n')
+						}
+						connection.Close()
+						if response == "+PONG\r\n" {
+							break
+						}
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+				if response != "+PONG\r\n" {
+					t.Fatalf("router response %q", response)
+				}
 			}
 			replay, err := postgres.New(inst.pool).AdmitApp(t.Context(), request)
 			if err != nil || !replay.Replayed || replay.OperationID != admitted.OperationID {
@@ -412,6 +512,19 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 			if err != nil || len(list.Items) != 1 {
 				t.Fatalf("duplicate containers: %v %v", list, err)
 			}
+			if worker {
+				if len(found.Status.Endpoints) != 0 || found.Status.Copies[0].HostPort != 0 {
+					t.Fatalf("worker has ingress: %+v", found.Status)
+				}
+				current, err := api.ContainerInspect(t.Context(), list.Items[0].ID, client.ContainerInspectOptions{})
+				if err != nil || len(current.Container.HostConfig.PortBindings) != 0 {
+					t.Fatalf("worker published ports: %+v %v", current, err)
+				}
+				var count int
+				if err := inst.pool.QueryRow(t.Context(), `SELECT count(*) FROM allocation_ports WHERE app_id=$1 AND released_at IS NULL`, admitted.AppID).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("worker reserved ports: %d %v", count, err)
+				}
+			}
 			// A completed start receipt does not freeze health after the container stops.
 			for _, want := range []string{"failed", "running"} {
 				if want == "failed" {
@@ -422,7 +535,7 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if tier == app.TierSingleWriter && want == "failed" {
+				if tier != app.TierParallel && want == "failed" {
 					want = "down"
 				}
 				for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
@@ -439,7 +552,7 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 					t.Fatalf("health state %q, want %q: %+v", found.Status.State, want, found.Status)
 				}
 			}
-			if !strings.Contains(found.Status.Endpoints[0].Address, strconv.Itoa(int(ports[1]))) {
+			if !worker && !strings.Contains(found.Status.Endpoints[0].Address, strconv.Itoa(int(ports[1]))) {
 				t.Fatalf("endpoint: %+v", found.Status.Endpoints)
 			}
 			copyID := found.Status.Copies[0].ID
@@ -448,6 +561,24 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, action := range []string{"stop", "start", "delete"} {
+				if action == "delete" && tier == app.TierDatabase {
+					// Withhold writer grants. The real agent must fence the database.
+					fenced := false
+					for deadline := time.Now().Add(40 * time.Second); time.Now().Before(deadline); {
+						current, err := api.ContainerInspect(t.Context(), list.Items[0].ID, client.ContainerInspectOptions{})
+						if err != nil {
+							t.Fatal(err)
+						}
+						if !current.Container.State.Running {
+							fenced = true
+							break
+						}
+						time.Sleep(100 * time.Millisecond)
+					}
+					if !fenced {
+						t.Fatal("database kept running after its writer lease expired")
+					}
+				}
 				if action == "delete" && tier == app.TierSingleWriter {
 					// Seed the initial replica before new writes. The final copy must retain the later Redis write.
 					staging := t.TempDir()
@@ -526,7 +657,7 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 				if err != nil || !retry.Replayed || retry.OperationID != accepted.OperationID {
 					t.Fatalf("action retry: %+v %v", retry, err)
 				}
-				if action != "start" {
+				if action != "start" && !worker {
 					for node, target := range originalRoutes {
 						if len(target.Table.Routes) > 0 {
 							if _, _, err := inst.store.PrepareAppRoutes(t.Context(), inst.id, node, target.Table); !errors.Is(err, operation.ErrCommandConflict) {
@@ -566,10 +697,10 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 					}
 					var live int
 					expected := 2
-					if tier == app.TierSingleWriter {
+					if tier != app.TierParallel {
 						expected++
 					}
-					if err := inst.pool.QueryRow(t.Context(), `SELECT count(*) FROM resource_allocations WHERE cluster_id=$1 AND released_at IS NULL`, admitted.AppID).Scan(&live); err != nil || live != expected {
+					if err := inst.pool.QueryRow(t.Context(), `SELECT count(*) FROM resource_allocations WHERE app_id=$1 AND released_at IS NULL`, admitted.AppID).Scan(&live); err != nil || live != expected {
 						t.Fatalf("released held ports: %d %v", live, err)
 					}
 				}
@@ -589,12 +720,24 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 					time.Sleep(100 * time.Millisecond)
 				}
 				if found.Status.State != want || found.ObservedRevision != accepted.DesiredRevision {
-					t.Fatalf("%s did not finish: %+v", action, found)
+					t.Fatalf("%s did not finish: %+v status %+v", action, found, found.Status)
 				}
 				if action == "stop" && found.Status.Copies[0].ObservedState != "stopped" {
 					t.Fatalf("stopped copy status: %+v", found.Status.Copies)
 				}
 				if action == "start" {
+					if databaseConfig != nil {
+						connection, err := pgx.ConnectConfig(t.Context(), databaseConfig)
+						if err != nil {
+							t.Fatal(err)
+						}
+						var value string
+						err = connection.QueryRow(t.Context(), "SELECT value FROM proof WHERE id=1").Scan(&value)
+						connection.Close(t.Context())
+						if err != nil || value != "retained" {
+							t.Fatalf("database restart lost data: %q %v", value, err)
+						}
+					}
 					if found.Status.Copies[0].ID != copyID {
 						t.Fatal("start changed copy identity")
 					}
@@ -615,11 +758,15 @@ func TestAppAdmissionRunsThroughRealAgentAndRouter(t *testing.T) {
 				t.Fatalf("delete left containers: %+v %v", list, err)
 			}
 			var live int
-			if err := inst.pool.QueryRow(t.Context(), `SELECT count(*) FROM resource_allocations WHERE cluster_id=$1 AND released_at IS NULL`, admitted.AppID).Scan(&live); err != nil || live != 0 {
+			if err := inst.pool.QueryRow(t.Context(), `SELECT count(*) FROM resource_allocations WHERE app_id=$1 AND released_at IS NULL`, admitted.AppID).Scan(&live); err != nil || live != 0 {
 				t.Fatalf("delete held reservations: %d %v", live, err)
 			}
-			if tier == app.TierSingleWriter {
-				for _, root := range []string{appsDir, standbyRoot} {
+			if tier != app.TierParallel {
+				roots := []string{appsDir}
+				if standbyRoot != "" {
+					roots = append(roots, standbyRoot)
+				}
+				for _, root := range roots {
 					if _, err := os.Lstat(filepath.Join(root, admitted.AppID.String())); !errors.Is(err, os.ErrNotExist) {
 						t.Fatalf("delete left app data on %s: %v", root, err)
 					}

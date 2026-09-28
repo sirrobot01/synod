@@ -1,14 +1,15 @@
 # Synod
 
-Synod is a self-hosted database control plane for ordinary Linux servers.
-It provisions and operates dedicated PostgreSQL and Redis clusters without Kubernetes.
-Applications use normal database protocols.
+Synod pools the devices of a home lab and runs any container on them.
+Devices can be amd64 or arm64, and some devices are online only part of the time.
+Apps run in three tiers: databases (tier 1), single-writer apps (tier 2), and parallel apps (tier 3).
+Clients use normal protocols through a router on every device.
 
 ## Status
 
 Synod is under active development. v0.1 is not released.
-The required release includes distributed controllers and agents, native database HA, backups,
-restore, PostgreSQL PITR and upgrades, Redis Cluster, an API, a CLI, and a minimal web UI.
+The plan for v0.1 is in the product brief. It includes the three app tiers, backups,
+upgrades, an install script, and a web UI around apps and devices.
 A completed development milestone does not imply that the release is ready.
 
 ## Development
@@ -33,7 +34,7 @@ the direct form.
 | `task dev` | Run the controller on `https://127.0.0.1:8443` |
 | `task dev:web` | Serve the browser application with hot reload |
 | `task dev:user -- alice` | Create the first operator account |
-| `task cli -- db get ID` | Run the command line against the development controller |
+| `task cli -- db get NAME` | Run the command line against the development controller |
 | `task dev:reset` | Empty the development metadata database |
 | `task dev:down` | Stop the development containers and keep their data |
 
@@ -95,11 +96,11 @@ A test that needs a dependency skips when its variable is absent.
 
 ## Development controller
 
-The current controller accepts standalone PostgreSQL and Redis requests.
+The controller accepts app requests.
 It records desired state and a pending operation in PostgreSQL.
-A configured worker provisions dedicated database containers on approved agents.
+A configured worker runs the app containers on approved agents.
 The API-only development command leaves operations pending.
-The development version catalog contains PostgreSQL 17.11 and 18.6, and Redis 8.2.7.
+The database catalog contains PostgreSQL 17 (17.11) and Redis 8.2 (8.2.7).
 These versions are local test candidates. They are not a qualified release matrix.
 
 Build Synod with `go build -o dist/synod ./cmd/synod`.
@@ -132,29 +133,32 @@ The JSON keys use the names shown in [the controller configuration](internal/con
 Use a protected file or environment for a database URL that contains a password.
 Startup applies the metadata schema migrations.
 
-See [the initial API schema](api/openapi.json).
+See [the initial API schema](api/openapi.json). It does not describe the app endpoints yet.
 Send the administrator token in `Authorization: Bearer <token>`.
 Send one `Idempotency-Key` header with every create request.
 Use 1 to 128 visible ASCII bytes for the key.
 Keep that key and the same request body until the result is known.
-A retry returns the original cluster and operation IDs.
+A retry returns the original app and operation IDs.
 A changed request with the same key returns HTTP 409.
 An uncertain commit returns HTTP 503 with `outcome_unknown`.
 Retry that result with the same key and body.
 An accepted request returns HTTP 202 and an operation URL in `Location`.
 
-Example request body for `POST /v1/clusters`:
+Example request body for `POST /v1/apps` that creates a database:
 
 ```json
 {
   "schema_version": 1,
-  "name": "example",
-  "engine": "postgres",
-  "postgresql": {"version": "17.11", "topology": "standalone"}
+  "name": "photos-db",
+  "tier": 1,
+  "copies": 1,
+  "database": {"engine": "postgres", "version": "17", "databases": ["immich"]},
+  "replication": {"standbys": 1, "interval_seconds": 0, "failover_after_seconds": 90, "failback": "manual", "failback_stable_seconds": 600},
+  "router": {"protocol": "tcp", "port": 5432, "reader_port": 5433}
 }
 ```
 
-Read `GET /v1/clusters/{id}` to inspect the cluster and its revision ETag.
+Read `GET /v1/apps/{id}` to inspect the app, its copies, and its routes.
 Read `GET /v1/operations/{id}` to inspect its operation.
 An operation with `plan_version: 0` has no executable plan.
 An operation stays pending until a configured worker can produce and run its plan.
@@ -184,48 +188,66 @@ A session request that changes state must prove its origin.
 
 The controller runs an operation only when you supply the agent transport.
 Without it the controller admits requests and records desired state, and no worker starts.
-Controllers elect cluster owners in the metadata PostgreSQL database.
+Controllers elect app owners in the metadata PostgreSQL database.
 
-One controller elects itself owner of a cluster, claims that cluster's operation,
+One controller elects itself owner of an app, claims that app's operation,
 and runs one worker for it.
 A second controller waits for the election and takes over after the claim expires.
 Shutdown stops management dispatch. It never stops native work that an agent accepted.
 
-The controller produces standalone PostgreSQL and Redis plans when it has a credential
-wrapping key. Use `--secret-key-file` and `--secret-key-id` to configure it.
+Database apps need a credential wrapping key.
+Use `--secret-key-file` and `--secret-key-id` to configure it.
 Placement reads the node shape from the approved node records.
-The `--placement-*` flags are optional. Use them only to limit placement.
-`--placement-architecture` accepts `amd64`, `arm64`, or both separated by a comma, in preference order.
-The default is `amd64,arm64`.
-`--placement-runtime-version` and `--placement-storage-id` limit placement to nodes that report those values.
-A Redis replica currently runs on the architecture of its primary.
-Use `--engine-endpoint-first-port` and `--engine-endpoint-last-port` to set the reserved port range.
+Use `--engine-endpoint-first-port` and `--engine-endpoint-last-port` to set the host ports of database copies.
 
-New Redis clusters have separate admin, application, and replication credentials.
-The replication role can only run the native replication handshake commands and PING.
-The compact Redis profile supports one native replica with RDB, AOF, or combined persistence.
-It does not provide automatic failover.
-Standalone PostgreSQL is one node and has no replicas.
-PostgreSQL replicas and Synod-driven failover are planned work.
-Use `synod db scale CLUSTER_ID --replicas 1` to add a Redis replica:
+## Databases
+
+A database is a tier 1 app. The engine replicates its data to standby copies.
+PostgreSQL uses logical replication. Redis uses replica mode.
+A primary and its standbys can run on different architectures.
+
+Create a PostgreSQL database with one standby:
 
 ```sh
-synod db scale CLUSTER_ID --replicas 1 --wait
-synod db members CLUSTER_ID
+synod db create photos-db --version 17 --standbys 1 --prefer server --allow odin --writer-port 5432 --reader-port 5433
 ```
 
-If an add fails or is cancelled, correct its cause and run the scale command again.
-Use a new idempotency key after a terminal failure.
-The new operation reports the prior operation ID in `retry_of`.
-It keeps the existing member, volume, node, port, image, and credential versions.
-A retry after a dispatched start requires existing storage.
-A `storage_lost` result requires explicit recovery. The retry does not initialize replacement data.
-This retry applies to the current failed add. An intervening lifecycle change ends this retry path.
+The version is a major version that the engine catalog serves.
+The default engine is `postgres`. Use `--engine redis` for Redis.
+`--database` names a PostgreSQL database. The default is the app name with `-` replaced by `_`.
+The writer route and the optional reader route listen on every device.
 
-For an uncertain response, keep the original key and expected revision.
-That request returns the original operation.
-Use `synod db scale CLUSTER_ID --replicas 0` to preview replica removal.
-Review the plan before you confirm it. Removal retains the replica volume.
+Read the primary, the standbys, and the routes:
+
+```sh
+synod db get photos-db
+```
+
+Each standby reports its state and its lag.
+A standby that copies its data is not usable for failover.
+
+Read the client login and the connection URLs:
+
+```sh
+synod db credentials photos-db
+```
+
+The result is always JSON and contains a password. Keep that output private.
+Do not copy it into logs or shared files.
+The server records the actor and the credential version before it returns the password.
+PostgreSQL clients log in as `app`. Redis clients log in as `default`.
+Engine TLS uses the node certificate, which carries no host name.
+Clients verify the installation CA only. PostgreSQL URLs use `sslmode=verify-ca`.
+
+Move the primary to another device after the standby catches up:
+
+```sh
+synod db switchover photos-db --to odin
+```
+
+Use `synod db stop`, `synod db start`, and `synod db delete` with the app ID.
+Add `--yes` to confirm a delete.
+Delete removes the containers and the app data directories.
 
 ## Join a node
 
@@ -289,7 +311,7 @@ Unknown fields are refused.
 | `min_free_bytes` | no | The free space that new work must leave on `storage_path`. |
 | `docker_socket` | no | The Docker socket path. The default is `/var/run/docker.sock`. |
 
-Put `storage_path` on the filesystem that holds the Docker volumes.
+Put `storage_path` on the filesystem that holds the Docker data and the app directories.
 Without `storage_id`, the agent cannot report capacity, so it refuses to start.
 
 `synod installation get` shows `installation_id` and `recovery_generation`.
@@ -305,112 +327,25 @@ Other errors print fixed text only, because an argument error can repeat raw inp
 Before the first release, the agent protocol can change without a migration.
 A new agent refuses a journal that holds commands from an older build.
 It reports `journal_recovery_required`, and `detail` names the saved command it refused.
-Upgrade an agent only when its node has no cluster. Then create a new journal directory.
+Upgrade an agent only when its node has no app copy. Then create a new journal directory.
 
-## Find a database cluster
-
-List one page of clusters:
-
-```sh
-synod db list --limit 50
-synod db list --limit 50 --json
-```
-
-The `cluster` command is an alias for `db`.
-Use `--cursor TOKEN` with the returned `next_cursor` to read the next page.
-Use `--include-deleted` to include completed deletion records.
-Keep the same deletion filter when you use a cursor.
-Each command reads one page. The maximum page size is 200.
-
-The list shows stored desired and observed states.
-It does not run a live database probe.
-Concurrent changes can affect later pages.
-Start a new list without a cursor to see newer clusters.
-The web **Clusters** screen uses the same public API.
-
-## Database connections
+## Client addresses
 
 Set the node's client address with `synod node approve --client-address ADDRESS`.
 Supply the other required node policy flags with that command.
 Use a canonical IPv4 or IPv6 address that clients can reach.
 Private LAN addresses are valid. Loopback and wildcard addresses are refused.
-A node with no client address can run work, but endpoint inspection reports that the address is missing.
-
-After a create operation succeeds, inspect its connection metadata:
-
-```sh
-synod endpoint get CLUSTER_ID
-synod credential list CLUSTER_ID
-```
-
-The endpoint command reports the reserved address and port.
-It also reports the stored desired and observed lifecycle state.
-It does not run a live connection probe.
-The current direct standalone profile has one node and no database TLS.
-The response reports `availability_profile: single_node` and `tls_mode: disabled`.
-Router failover and secure database endpoints remain required release work.
-
-Credential inspection returns names and versions. It returns no password.
-Use an explicit reveal when a client needs the password:
-
-```sh
-synod credential reveal CLUSTER_ID --purpose application
-```
-
-Reveal prints a JSON response with a plaintext password.
-Keep that output private. Do not copy it into logs or shared files.
-The server records the actor and credential version before it returns the secret.
-Both engines use `synod_app` for application access.
-The PostgreSQL application role owns the `app` database.
-It can create tables and manage data in that database.
-It cannot create roles, create other databases, or read server files.
-Use `--purpose superuser` for explicit administrative access.
-PostgreSQL verifies its stored setup before each start.
-It refuses to replace a missing application database after setup has completed.
-A confirmed setup failure stays failed across container restarts.
-Ordinary start does not clear that failure.
-Recovery for that state is not yet available in the CLI.
-
-Use the reported host, port, database, and username with a native database client.
-Supply its password through the client's protected input mechanism.
-Do not put the password in a command-line URL.
-
-## Cluster lifecycle
-
-Use `synod db stop CLUSTER_ID --wait` to stop a cluster.
-Use `synod db start CLUSTER_ID --wait` to start it again.
-Both commands read the current revision before admission.
-Use `--expected-revision` to supply a revision explicitly.
-
-Use `synod db delete CLUSTER_ID` to see the deletion plan.
-This preview exits without deleting the cluster.
-Review the target and retained volumes.
-Run the command again with the displayed retry flags and `--yes` to confirm.
-Deletion retains data. It releases reservations only after removal is confirmed.
-Purge is a separate action.
-
-Keep the reported idempotency key, expected revision, and plan token after an uncertain reply.
-Use the same values for the retry. An accepted delete can replay after its preview expires.
-A new deletion needs an unexpired preview.
+App endpoints and database URLs use this address.
 
 ## Web application
 
 The controller serves a browser application from its own API origin.
 Open the API address in a browser and sign in with an operator account.
 
-The Clusters screen lists actual clusters with **Refresh**, **Load more**, and **Show deleted** controls.
-The cluster screen shows declared endpoints and credential metadata.
-Select **Reveal** to make an audited request for a password.
-Select **Hide** to clear the displayed password.
-Navigation also clears it.
-
-Start, stop, and delete requests return an operation link.
-Deletion requires a server preview and the exact cluster name.
-Deletion retains data.
-The browser saves lifecycle request identities in session storage.
-After an uncertain reply, select **Retry same request**.
-Do not clear that storage before you resolve the request outcome.
-Unsupported views and upgrade previews remain marked as examples.
+Settings manages accounts and API tokens through the API.
+An operation link opens the live state of that operation.
+The other screens show examples. Each example is marked.
+The web UI has no app screens yet. Use the command line for apps and databases.
 
 The application is built from `web/` and committed under `internal/web/dist`.
 Building the controller therefore needs no JavaScript toolchain.

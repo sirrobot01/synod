@@ -212,7 +212,7 @@ func TestEnrollmentAuthenticationAndRateLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/v1/enrollment-tokens", "/v1/enrollments?token=" + strings.Repeat("a", 43), "/v1/clusters"} {
+	for _, path := range []string{"/v1/enrollment-tokens", "/v1/enrollments?token=" + strings.Repeat("a", 43), "/v1/apps"} {
 		req := httptest.NewRequest("POST", path, strings.NewReader("invalid"))
 		rec := httptest.NewRecorder()
 		server.ServeHTTP(rec, req)

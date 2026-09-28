@@ -65,7 +65,7 @@ func TestGenericPlacementUsesBothArchitecturesAndSoftSpread(t *testing.T) {
 	for _, assignment := range decision.Assignments {
 		resource := request.Resources[slices.IndexFunc(request.Resources, func(r Resource) bool { return r.ID == assignment.ResourceID })]
 		budget, _ := resource.Budgets.Total()
-		snapshot.Allocations = append(snapshot.Allocations, Allocation{ID: resource.ReservationID, InstallationID: request.InstallationID, NodeID: assignment.NodeID, ClusterID: request.ClusterID, ResourceID: resource.ID, Budget: budget, OwnedResourceIDs: resource.OwnedResourceIDs, Groups: map[string]string{group.ID: group.DomainKey}})
+		snapshot.Allocations = append(snapshot.Allocations, Allocation{ID: resource.ReservationID, InstallationID: request.InstallationID, NodeID: assignment.NodeID, AppID: request.AppID, ResourceID: resource.ID, Budget: budget, OwnedResourceIDs: resource.OwnedResourceIDs, Groups: map[string]string{group.ID: group.DomainKey}})
 	}
 	again, err = Plan(request, snapshot)
 	if err != nil || !reflect.DeepEqual(decision, again) {

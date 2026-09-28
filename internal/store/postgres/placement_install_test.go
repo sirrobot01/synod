@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,8 @@ type placementHost struct {
 	node       uuid.UUID
 	generation uuid.UUID
 	policy     placement.NodePolicy
+	// ports counts default backend ports, so two placements never share one.
+	ports uint16
 }
 
 func placementFixture(t *testing.T) *placementHost {
@@ -36,23 +39,17 @@ func placementFixture(t *testing.T) *placementHost {
 	return host
 }
 
-// claimCluster admits one PostgreSQL cluster and takes its operation claim.
-func (h *placementHost) claimCluster(t *testing.T, name string) operation.Claim {
+// claimApp admits one tier 3 app and takes its operation claim.
+func (h *placementHost) claimApp(t *testing.T, name string) operation.Claim {
 	t.Helper()
 	return h.claim(t, name, testRequest())
 }
 
-// claimRedis admits one Redis cluster and takes its operation claim.
-func (h *placementHost) claimRedis(t *testing.T, name string) operation.Claim {
-	t.Helper()
-	return h.claim(t, name, redisRequest())
-}
-
-func (h *placementHost) claim(t *testing.T, name string, request CreateClusterRequest) operation.Claim {
+func (h *placementHost) claim(t *testing.T, name string, request CreateAppRequest) operation.Claim {
 	t.Helper()
 	request.Identity.InstallationID = h.id
 	request.Spec.Name = name
-	admission, err := h.store.CreateCluster(t.Context(), request)
+	admission, err := h.store.AdmitApp(t.Context(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,8 +63,8 @@ func (h *placementHost) claim(t *testing.T, name string, request CreateClusterRe
 	return claim
 }
 
-// reclaim finishes the current operation and claims a new one for the same cluster.
-// A later lifecycle operation reuses the cluster's allocations, so it must share its cluster.
+// reclaim finishes the current operation and claims a start for the same app.
+// A later lifecycle operation reuses the app's allocations, so it must share its app.
 func (h *placementHost) reclaim(t *testing.T, previous operation.Claim, status string) operation.Claim {
 	t.Helper()
 	if _, err := h.store.pool.Exec(t.Context(), `UPDATE operations SET status=$1,finished_at=clock_timestamp(),claim_active=false WHERE id=$2`, status, previous.OperationID); err != nil {
@@ -75,9 +72,9 @@ func (h *placementHost) reclaim(t *testing.T, previous operation.Claim, status s
 	}
 	next := uuid.New()
 	if _, err := h.store.pool.Exec(t.Context(), `INSERT INTO operations
- (id,installation_id,cluster_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at)
- VALUES ($1,$2,$3,'actor-1','clusters.create.v1',$4,$5,1,'cluster.create',1,'pending',0,0,0,clock_timestamp(),clock_timestamp())`,
-		next, h.id, previous.ClusterID, uuid.NewString(), make([]byte, 32)); err != nil {
+ (id,installation_id,app_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at)
+ VALUES ($1,$2,$3,'actor-1','app.start',$4,$5,1,'app.start',1,'pending',0,0,0,clock_timestamp(),clock_timestamp())`,
+		next, h.id, previous.AppID, uuid.NewString(), make([]byte, 32)); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := h.store.AcquireClaim(t.Context(), ClaimRequest{
@@ -90,29 +87,54 @@ func (h *placementHost) reclaim(t *testing.T, previous operation.Claim, status s
 	return claim
 }
 
-// planFor builds one immutable plan that creates the placed volume.
-func planFor(t *testing.T, claim operation.Claim, node, resource uuid.UUID, revision int64) *agentv1.ExecutionPlan {
+// planFor builds one immutable plan that creates and starts the placed app copy.
+func (h *placementHost) planFor(t *testing.T, claim operation.Claim, resource uuid.UUID, port placement.Port, revision int64) *agentv1.ExecutionPlan {
 	t.Helper()
-	command := &agentv1.Command{
-		Epoch:       &agentv1.Epoch{InstallationId: claim.InstallationID.String(), NodeId: node.String(), ClusterId: claim.ClusterID.String(), RecoveryGeneration: claim.RecoveryGeneration.String(), ExecutionEpoch: claim.ExecutionEpoch},
-		OperationId: claim.OperationID.String(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: revision, PlanVersion: 1,
-		Input: &agentv1.CommandInput{ResourceId: resource.String(), PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: resource.String()}}},
-	}
-	hash, err := operation.CommandHash(command)
-	if err != nil {
+	var name string
+	if err := h.store.pool.QueryRow(t.Context(), `SELECT name FROM apps WHERE id=$1`, claim.AppID).Scan(&name); err != nil {
 		t.Fatal(err)
 	}
-	command.InputHash = hash[:]
-	return &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{{
-		Command: command, MaxAttempts: 3, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION,
-		Postcondition: agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS,
-	}}}
+	image := "nginx@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	plan := &agentv1.ExecutionPlan{Version: 1}
+	for _, input := range []*agentv1.CommandInput{
+		{ResourceId: resource.String(), PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
+			ImageDigest: image, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE,
+			Ports:   []*agentv1.PortBinding{{HostAddress: port.Address, HostPort: uint32(port.Number), ContainerPort: 80, Transport: "tcp"}},
+			Generic: &agentv1.GenericContainerConfig{Image: image, AppName: name},
+		}}},
+		{ResourceId: resource.String(), PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}},
+	} {
+		command := &agentv1.Command{
+			Epoch:       &agentv1.Epoch{InstallationId: claim.InstallationID.String(), NodeId: h.node.String(), AppId: claim.AppID.String(), RecoveryGeneration: claim.RecoveryGeneration.String(), ExecutionEpoch: claim.ExecutionEpoch},
+			OperationId: claim.OperationID.String(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: revision, PlanVersion: 1, Input: input,
+		}
+		hash, err := operation.CommandHash(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		command.InputHash = hash[:]
+		step := &agentv1.PlanStep{Command: command, MaxAttempts: 3, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS}
+		if input.GetStartContainer() != nil {
+			step.Postcondition, step.DependsOn = agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, []string{plan.Steps[0].Command.StepId}
+		}
+		plan.Steps = append(plan.Steps, step)
+	}
+	return plan
 }
 
-// place plans one resource for a claim and returns everything the install needs.
+// place plans one app copy for a claim and returns everything the install needs.
+// The first port is the copy's backend. A placement without ports gets a fresh one.
 func (h *placementHost) place(t *testing.T, claim operation.Claim, budget placement.Vector, ports []placement.Port) (placement.Request, placement.Decision, *agentv1.ExecutionPlan) {
 	t.Helper()
-	request := placementRequest(h.id, claim.ClusterID, claim.OperationID, h.policy, ports)
+	ports = slices.Clone(ports)
+	if len(ports) == 0 {
+		h.ports++
+		ports = []placement.Port{{Address: "0.0.0.0", Transport: "tcp", Number: 20000 + h.ports}}
+	}
+	if ports[0].Name == "" {
+		ports[0].Name = "backend"
+	}
+	request := placementRequest(h.id, claim.AppID, claim.OperationID, h.policy, ports)
 	request.Resources[0].Budgets.Workload = &budget
 	snapshot, err := h.store.ReadPlacementSnapshot(t.Context(), h.id)
 	if err != nil {
@@ -122,7 +144,7 @@ func (h *placementHost) place(t *testing.T, claim operation.Claim, budget placem
 	if err != nil {
 		t.Fatal(err)
 	}
-	return request, decision, planFor(t, claim, h.node, request.Resources[0].ID, request.DesiredRevision)
+	return request, decision, h.planFor(t, claim, request.Resources[0].ID, ports[0], request.DesiredRevision)
 }
 
 func (h *placementHost) count(t *testing.T, query string, args ...any) int {
@@ -139,10 +161,10 @@ var halfBudget = placement.Vector{CPUMillis: 4000, MemoryBytes: 1 << 32, DiskByt
 
 func TestInstallPlacementPlanCommitsReservationsAndPlanTogether(t *testing.T) {
 	host := placementFixture(t)
-	claim := host.claimCluster(t, "db")
+	claim := host.claimApp(t, "db")
 	ports := []placement.Port{{Address: "127.0.0.1", Transport: "tcp", Number: 5432}}
 	request, decision, plan := host.place(t, claim, smallBudget, ports)
-	record, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil)
+	record, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +187,7 @@ func TestInstallPlacementPlanCommitsReservationsAndPlanTogether(t *testing.T) {
 		}
 	}
 	// An immutable retry returns the committed placement without new reservations.
-	replay, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil)
+	replay, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +200,7 @@ func TestInstallPlacementPlanCommitsReservationsAndPlanTogether(t *testing.T) {
 	// A changed request for the same operation is a conflict.
 	changed := request
 	changed.Profile = "ha"
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, changed, decision, plan, nil); err == nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, changed, decision, plan); err == nil {
 		t.Fatal("a changed request was accepted")
 	}
 	// An uncertain commit resolves by the original operation identity.
@@ -191,14 +213,14 @@ func TestInstallPlacementPlanCommitsReservationsAndPlanTogether(t *testing.T) {
 // A plan that the claim rejects must leave no reservation behind.
 func TestInstallPlacementPlanRollsBackWithThePlan(t *testing.T) {
 	host := placementFixture(t)
-	claim := host.claimCluster(t, "db")
+	claim := host.claimApp(t, "db")
 	request, decision, _ := host.place(t, claim, smallBudget, nil)
 	// The operation wants revision one, so a plan for revision two cannot install.
-	wrong := planFor(t, claim, host.node, request.Resources[0].ID, 2)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, wrong, nil); err == nil {
+	wrong := host.planFor(t, claim, request.Resources[0].ID, request.Resources[0].Ports[0], 2)
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, wrong); err == nil {
 		t.Fatal("a plan for another revision was installed")
 	}
-	for _, table := range []string{"resource_allocations", "allocation_resources", "allocation_ports", "operation_allocation_bindings", "operation_placements", "cluster_members"} {
+	for _, table := range []string{"resource_allocations", "allocation_resources", "allocation_ports", "operation_allocation_bindings", "operation_placements", "app_copies"} {
 		if total := host.count(t, `SELECT count(*) FROM `+table); total != 0 {
 			t.Fatalf("%s kept %d rows after rollback", table, total)
 		}
@@ -207,8 +229,8 @@ func TestInstallPlacementPlanRollsBackWithThePlan(t *testing.T) {
 		t.Fatal("a rejected plan was installed")
 	}
 	// The same host still accepts a correct plan afterwards.
-	correct := planFor(t, claim, host.node, request.Resources[0].ID, 1)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, correct, nil); err != nil {
+	correct := host.planFor(t, claim, request.Resources[0].ID, request.Resources[0].Ports[0], 1)
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, correct); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -216,7 +238,7 @@ func TestInstallPlacementPlanRollsBackWithThePlan(t *testing.T) {
 // Two independent transactions must not both reserve the same capacity.
 func TestConcurrentPlacementReservesCapacityOnce(t *testing.T) {
 	host := placementFixture(t)
-	first, second := host.claimCluster(t, "one"), host.claimCluster(t, "two")
+	first, second := host.claimApp(t, "one"), host.claimApp(t, "two")
 	firstRequest, firstDecision, firstPlan := host.place(t, first, halfBudget, nil)
 	secondRequest, secondDecision, secondPlan := host.place(t, second, halfBudget, nil)
 	results := make(chan error, 2)
@@ -224,12 +246,12 @@ func TestConcurrentPlacementReservesCapacityOnce(t *testing.T) {
 	var racing sync.WaitGroup
 	racing.Go(func() {
 		<-start
-		_, err := host.store.InstallPlacementPlan(t.Context(), first, firstRequest, firstDecision, firstPlan, nil)
+		_, err := host.store.InstallPlacementPlan(t.Context(), first, firstRequest, firstDecision, firstPlan)
 		results <- err
 	})
 	racing.Go(func() {
 		<-start
-		_, err := host.store.InstallPlacementPlan(t.Context(), second, secondRequest, secondDecision, secondPlan, nil)
+		_, err := host.store.InstallPlacementPlan(t.Context(), second, secondRequest, secondDecision, secondPlan)
 		results <- err
 	})
 	close(start)
@@ -256,7 +278,7 @@ func TestConcurrentPlacementReservesCapacityOnce(t *testing.T) {
 // Two independent transactions must not both reserve the same host port.
 func TestConcurrentPlacementReservesAPortOnce(t *testing.T) {
 	host := placementFixture(t)
-	first, second := host.claimCluster(t, "one"), host.claimCluster(t, "two")
+	first, second := host.claimApp(t, "one"), host.claimApp(t, "two")
 	ports := []placement.Port{{Address: "0.0.0.0", Transport: "tcp", Number: 6432}}
 	firstRequest, firstDecision, firstPlan := host.place(t, first, smallBudget, ports)
 	secondRequest, secondDecision, secondPlan := host.place(t, second, smallBudget, ports)
@@ -265,12 +287,12 @@ func TestConcurrentPlacementReservesAPortOnce(t *testing.T) {
 	var racing sync.WaitGroup
 	racing.Go(func() {
 		<-start
-		_, err := host.store.InstallPlacementPlan(t.Context(), first, firstRequest, firstDecision, firstPlan, nil)
+		_, err := host.store.InstallPlacementPlan(t.Context(), first, firstRequest, firstDecision, firstPlan)
 		results <- err
 	})
 	racing.Go(func() {
 		<-start
-		_, err := host.store.InstallPlacementPlan(t.Context(), second, secondRequest, secondDecision, secondPlan, nil)
+		_, err := host.store.InstallPlacementPlan(t.Context(), second, secondRequest, secondDecision, secondPlan)
 		results <- err
 	})
 	close(start)
@@ -293,7 +315,7 @@ func TestConcurrentPlacementReservesAPortOnce(t *testing.T) {
 // An uncertain commit must be resolvable without a second decision.
 func TestPlacementUnknownCommitResolvesByIdentity(t *testing.T) {
 	host := placementFixture(t)
-	claim := host.claimCluster(t, "db")
+	claim := host.claimApp(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, nil)
 	host.store.commitTx = func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.Commit(ctx); err != nil {
@@ -301,7 +323,7 @@ func TestPlacementUnknownCommitResolvesByIdentity(t *testing.T) {
 		}
 		return io.ErrUnexpectedEOF
 	}
-	_, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil)
+	_, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan)
 	requireCode(t, err, OutcomeUnknown)
 	host.store.commitTx = nil
 	record, err := host.store.ReadPlacement(t.Context(), host.id, claim.OperationID)
@@ -309,7 +331,7 @@ func TestPlacementUnknownCommitResolvesByIdentity(t *testing.T) {
 		t.Fatalf("the uncertain commit is unreadable: %v", err)
 	}
 	// The exact retry returns the same committed placement.
-	replay, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil)
+	replay, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan)
 	if err != nil || replay.RequestHash != record.RequestHash {
 		t.Fatalf("retry after an uncertain commit: %v", err)
 	}
@@ -318,110 +340,19 @@ func TestPlacementUnknownCommitResolvesByIdentity(t *testing.T) {
 	}
 }
 
-func TestReleaseUnusedPlacementRequiresProof(t *testing.T) {
-	host := placementFixture(t)
-	claim := host.claimCluster(t, "db")
-	request, decision, plan := host.place(t, claim, smallBudget, []placement.Port{{Address: "127.0.0.1", Transport: "tcp", Number: 5432}})
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	reservation := request.Resources[0].ReservationID
-	// An unfinished operation holds its reservation.
-	if err := host.store.ReleaseUnusedPlacement(t.Context(), host.id, claim.OperationID, reservation); !errors.Is(err, ErrPlacementHeld) {
-		t.Fatalf("an unfinished operation released its reservation: %v", err)
-	}
-	// A succeeded operation holds it too. Success is not removal evidence.
-	if _, err := host.store.pool.Exec(t.Context(), `UPDATE operations SET status='succeeded',finished_at=clock_timestamp(),claim_active=false WHERE id=$1`, claim.OperationID); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.store.ReleaseUnusedPlacement(t.Context(), host.id, claim.OperationID, reservation); !errors.Is(err, ErrPlacementHeld) {
-		t.Fatalf("a succeeded operation released its reservation: %v", err)
-	}
-	// Only a failed or cancelled operation with no dispatch history can release.
-	if _, err := host.store.pool.Exec(t.Context(), `UPDATE operations SET status='failed' WHERE id=$1`, claim.OperationID); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.store.ReleaseUnusedPlacement(t.Context(), host.id, claim.OperationID, reservation); err != nil {
-		t.Fatal(err)
-	}
-	if total := host.count(t, `SELECT count(*) FROM resource_allocations WHERE released_at IS NOT NULL`); total != 1 {
-		t.Fatalf("released allocations=%d", total)
-	}
-	if total := host.count(t, `SELECT count(*) FROM allocation_ports WHERE released_at IS NULL`); total != 0 {
-		t.Fatalf("live ports after release=%d", total)
-	}
-	// Release is idempotent and never deletes the record.
-	if err := host.store.ReleaseUnusedPlacement(t.Context(), host.id, claim.OperationID, reservation); err != nil {
-		t.Fatalf("repeat release: %v", err)
-	}
-	if total := host.count(t, `SELECT count(*) FROM resource_allocations`); total != 1 {
-		t.Fatal("release deleted the reservation record")
-	}
-}
-
-// Dispatch history for the cluster blocks release, even with a failed operation.
-func TestReleaseUnusedPlacementRespectsDispatchHistory(t *testing.T) {
-	host := placementFixture(t)
-	claim := host.claimCluster(t, "db")
-	request, decision, plan := host.place(t, claim, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	reconcilePlan(t, host.store, claim, plan)
-	if err := host.store.ActivateClaim(t.Context(), claim); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.store.RecordDispatch(t.Context(), claim, plan.Steps[0].Command); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := host.store.pool.Exec(t.Context(), `UPDATE operations SET status='failed',finished_at=clock_timestamp(),claim_active=false WHERE id=$1`, claim.OperationID); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.store.ReleaseUnusedPlacement(t.Context(), host.id, claim.OperationID, request.Resources[0].ReservationID); !errors.Is(err, ErrPlacementHeld) {
-		t.Fatalf("a dispatched cluster released its reservation: %v", err)
-	}
-}
-
-// Other unfinished work on the cluster blocks release, even when the reserver failed.
-func TestReleaseUnusedPlacementWaitsForOtherClusterWork(t *testing.T) {
-	host := placementFixture(t)
-	claim := host.claimCluster(t, "db")
-	request, decision, plan := host.place(t, claim, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	// The operation that reserved the allocation failed, so its own binding permits release.
-	if _, err := host.store.pool.Exec(t.Context(), `UPDATE operations SET status='failed',finished_at=clock_timestamp(),claim_active=false WHERE id=$1`, claim.OperationID); err != nil {
-		t.Fatal(err)
-	}
-	// A later operation for the same cluster has not finished and holds no binding.
-	if _, err := host.store.pool.Exec(t.Context(), `INSERT INTO operations
- (id,installation_id,cluster_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at)
- VALUES ($1,$2,$3,'actor-1','clusters.create.v1',$4,$5,1,'cluster.create',1,'pending',0,0,0,clock_timestamp(),clock_timestamp())`,
-		uuid.New(), host.id, claim.ClusterID, uuid.NewString(), make([]byte, 32)); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.store.ReleaseUnusedPlacement(t.Context(), host.id, claim.OperationID, request.Resources[0].ReservationID); !errors.Is(err, ErrPlacementHeld) {
-		t.Fatalf("release ignored other unfinished cluster work: %v", err)
-	}
-	if total := host.count(t, `SELECT count(*) FROM resource_allocations WHERE released_at IS NOT NULL`); total != 0 {
-		t.Fatal("the allocation was released while work remained")
-	}
-}
-
 // A reused reservation that grows must store the larger budget.
 // The planner charges the growth, so an unrecorded one lets the node be oversold.
 func TestInstallPlacementPlanStoresAGrownBudget(t *testing.T) {
 	host := placementFixture(t)
-	first := host.claimCluster(t, "db")
+	first := host.claimApp(t, "db")
 	request, decision, plan := host.place(t, first, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), first, request, decision, plan, nil); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), first, request, decision, plan); err != nil {
 		t.Fatal(err)
 	}
-	// A later operation on the same cluster asks for more of the same node.
+	// A later operation on the same app asks for more of the same node.
 	second := host.reclaim(t, first, "succeeded")
 	// Reuse the same resource and reservation identity on the same node.
-	grown := placementRequest(host.id, second.ClusterID, second.OperationID, host.policy, nil)
+	grown := placementRequest(host.id, second.AppID, second.OperationID, host.policy, request.Resources[0].Ports)
 	grown.Resources[0].ID = request.Resources[0].ID
 	grown.Resources[0].ReservationID = request.Resources[0].ReservationID
 	grown.Resources[0].OwnedResourceIDs = request.Resources[0].OwnedResourceIDs
@@ -434,8 +365,8 @@ func TestInstallPlacementPlanStoresAGrownBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grownPlan := planFor(t, second, host.node, grown.Resources[0].ID, 1)
-	record, err := host.store.InstallPlacementPlan(t.Context(), second, grown, grownDecision, grownPlan, nil)
+	grownPlan := host.planFor(t, second, grown.Resources[0].ID, grown.Resources[0].Ports[0], 1)
+	record, err := host.store.InstallPlacementPlan(t.Context(), second, grown, grownDecision, grownPlan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,17 +389,17 @@ func TestInstallPlacementPlanStoresAGrownBudget(t *testing.T) {
 // A reordered port list is the same set of bindings on a host.
 func TestInstallPlacementPlanAcceptsReorderedPorts(t *testing.T) {
 	host := placementFixture(t)
-	first := host.claimCluster(t, "db")
+	first := host.claimApp(t, "db")
 	ports := []placement.Port{
-		{Address: "127.0.0.1", Transport: "tcp", Number: 5432},
-		{Address: "127.0.0.1", Transport: "tcp", Number: 5433},
+		{Name: "backend", Address: "127.0.0.1", Transport: "tcp", Number: 5432},
+		{Name: "admin", Address: "127.0.0.1", Transport: "tcp", Number: 5433},
 	}
 	request, decision, plan := host.place(t, first, smallBudget, ports)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), first, request, decision, plan, nil); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), first, request, decision, plan); err != nil {
 		t.Fatal(err)
 	}
 	second := host.reclaim(t, first, "succeeded")
-	reordered := placementRequest(host.id, second.ClusterID, second.OperationID, host.policy, []placement.Port{ports[1], ports[0]})
+	reordered := placementRequest(host.id, second.AppID, second.OperationID, host.policy, []placement.Port{ports[1], ports[0]})
 	reordered.Resources[0].ID = request.Resources[0].ID
 	reordered.Resources[0].ReservationID = request.Resources[0].ReservationID
 	reordered.Resources[0].OwnedResourceIDs = request.Resources[0].OwnedResourceIDs
@@ -480,7 +411,7 @@ func TestInstallPlacementPlanAcceptsReorderedPorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := host.store.InstallPlacementPlan(t.Context(), second, reordered, reorderedDecision, planFor(t, second, host.node, reordered.Resources[0].ID, 1), nil); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), second, reordered, reorderedDecision, host.planFor(t, second, reordered.Resources[0].ID, ports[0], 1)); err != nil {
 		t.Fatalf("a reordered port list was refused: %v", err)
 	}
 }
@@ -488,12 +419,12 @@ func TestInstallPlacementPlanAcceptsReorderedPorts(t *testing.T) {
 // A terminal operation keeps its claim row for the rest of its lease. It must reserve nothing.
 func TestInstallPlacementPlanRefusesATerminalOperation(t *testing.T) {
 	host := placementFixture(t)
-	claim := host.claimCluster(t, "db")
+	claim := host.claimApp(t, "db")
 	request, decision, plan := host.place(t, claim, smallBudget, nil)
 	if _, err := host.store.pool.Exec(t.Context(), `UPDATE operations SET status='failed',finished_at=clock_timestamp(),claim_active=false WHERE id=$1`, claim.OperationID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); !errors.Is(err, operation.ErrStaleOwner) {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); !errors.Is(err, operation.ErrStaleOwner) {
 		t.Fatalf("a failed operation reserved capacity: %v", err)
 	}
 	if total := host.count(t, `SELECT count(*) FROM resource_allocations`); total != 0 {

@@ -61,7 +61,7 @@ type Options struct {
 	RecoveryWindow   time.Duration
 	// MaxRecords includes all command tombstones.
 	MaxRecords        int
-	MaxClusters       int
+	MaxApps           int
 	MaxRecordBytes    int
 	MaxInventoryBytes int
 	MaxStoredBytes    int64
@@ -95,7 +95,7 @@ type commandRecord struct {
 	AcknowledgedAt time.Time         `json:"acknowledged_at,omitzero"`
 }
 
-type clusterState struct {
+type appState struct {
 	Prepared       *agentv1.Epoch `json:"prepared"`
 	Active         bool           `json:"active"`
 	Barrier        []byte         `json:"barrier,omitempty"`
@@ -108,7 +108,7 @@ type diskState struct {
 	ExecutionBlocked bool                     `json:"execution_blocked,omitzero"`
 	Version          int                      `json:"version"`
 	Identity         Identity                 `json:"identity"`
-	Clusters         map[string]clusterState  `json:"clusters"`
+	Apps             map[string]appState      `json:"apps"`
 	Commands         map[string]commandRecord `json:"commands"`
 }
 
@@ -136,11 +136,11 @@ func Open(path string, options Options) (*Journal, error) {
 	options.MaxRetainedBytes = cmp.Or(options.MaxRetainedBytes, int64(256<<20))
 	options.RecoveryWindow = cmp.Or(options.RecoveryWindow, 24*time.Hour)
 	options.MaxRecords = cmp.Or(options.MaxRecords, 100000)
-	options.MaxClusters = cmp.Or(options.MaxClusters, 1024)
+	options.MaxApps = cmp.Or(options.MaxApps, 1024)
 	options.MaxRecordBytes = cmp.Or(options.MaxRecordBytes, 8<<20)
 	options.MaxInventoryBytes = cmp.Or(options.MaxInventoryBytes, 1<<20)
 	options.MaxStoredBytes = cmp.Or(options.MaxStoredBytes, int64(1<<30))
-	if options.MaxRecords < 1 || options.MaxClusters < 1 || options.MaxRecordBytes < 4096 || options.MaxRecordBytes > maxFormatRecordBytes || options.MaxInventoryBytes < 1 || options.MaxInventoryBytes > maxFormatRecordBytes || options.MaxStoredBytes < metadataReservation || options.MaxCommandBytes > maxFormatRecordBytes || options.MaxResultBytes > maxFormatRecordBytes || commandReservation(options.MaxCommandBytes, options.MaxResultBytes) > int64(options.MaxRecordBytes) || inventoryReservation(options.MaxInventoryBytes) > int64(options.MaxRecordBytes) {
+	if options.MaxRecords < 1 || options.MaxApps < 1 || options.MaxRecordBytes < 4096 || options.MaxRecordBytes > maxFormatRecordBytes || options.MaxInventoryBytes < 1 || options.MaxInventoryBytes > maxFormatRecordBytes || options.MaxStoredBytes < metadataReservation || options.MaxCommandBytes > maxFormatRecordBytes || options.MaxResultBytes > maxFormatRecordBytes || commandReservation(options.MaxCommandBytes, options.MaxResultBytes) > int64(options.MaxRecordBytes) || inventoryReservation(options.MaxInventoryBytes) > int64(options.MaxRecordBytes) {
 		return nil, fmt.Errorf("invalid journal storage limits")
 	}
 	if options.MaxCommands < 1 || options.MaxCommandBytes < 1 || options.MaxResultBytes < 1 || options.MaxRetainedBytes < 1 || options.RecoveryWindow < 0 || int64(options.MaxResultBytes) > options.MaxRetainedBytes/2 {
@@ -176,7 +176,7 @@ func Open(path string, options Options) (*Journal, error) {
 		if identity.JournalGeneration == "" {
 			identity.JournalGeneration = uuid.NewString()
 		}
-		j.state = diskState{Version: 2, Identity: identity, Clusters: make(map[string]clusterState), Commands: make(map[string]commandRecord)}
+		j.state = diskState{Version: 2, Identity: identity, Apps: make(map[string]appState), Commands: make(map[string]commandRecord)}
 		if err := j.initialize(false); err != nil {
 			return nil, errors.Join(err, db.Close())
 		}
@@ -191,7 +191,7 @@ func Open(path string, options Options) (*Journal, error) {
 func (j *Journal) validate() error {
 	s := j.state
 	want := j.options.Identity
-	if (s.Version != 1 && s.Version != 2) || s.Clusters == nil || s.Commands == nil || s.Identity.InstallationID != want.InstallationID || s.Identity.NodeID != want.NodeID || s.Identity.RecoveryGeneration != want.RecoveryGeneration || (want.JournalGeneration != "" && s.Identity.JournalGeneration != want.JournalGeneration) {
+	if (s.Version != 1 && s.Version != 2) || s.Apps == nil || s.Commands == nil || s.Identity.InstallationID != want.InstallationID || s.Identity.NodeID != want.NodeID || s.Identity.RecoveryGeneration != want.RecoveryGeneration || (want.JournalGeneration != "" && s.Identity.JournalGeneration != want.JournalGeneration) {
 		return fmt.Errorf("the journal holds version %d of %+v and this agent is %+v: %w", s.Version, s.Identity, want, ErrRecoveryRequired)
 	}
 	id, err := uuid.Parse(s.Identity.JournalGeneration)
@@ -201,29 +201,29 @@ func (j *Journal) validate() error {
 	if id == uuid.Nil || id.String() != s.Identity.JournalGeneration {
 		return fmt.Errorf("the journal generation %q is not a canonical non-nil UUID: %w", s.Identity.JournalGeneration, ErrRecoveryRequired)
 	}
-	for clusterID, cluster := range s.Clusters {
-		if err := j.checkTarget(cluster.Prepared); err != nil {
-			return fmt.Errorf("check the prepared epoch of cluster %s: %w: %w", clusterID, ErrRecoveryRequired, err)
+	for appID, app := range s.Apps {
+		if err := j.checkTarget(app.Prepared); err != nil {
+			return fmt.Errorf("check the prepared epoch of app %s: %w: %w", appID, ErrRecoveryRequired, err)
 		}
-		if clusterID != cluster.Prepared.ClusterId {
-			return fmt.Errorf("cluster %s is filed under the prepared epoch of cluster %s: %w", clusterID, cluster.Prepared.ClusterId, ErrRecoveryRequired)
+		if appID != app.Prepared.AppId {
+			return fmt.Errorf("app %s is filed under the prepared epoch of app %s: %w", appID, app.Prepared.AppId, ErrRecoveryRequired)
 		}
-		if len(cluster.Barrier) != 0 {
+		if len(app.Barrier) != 0 {
 			var barrier agentv1.BarrierResult
-			if err := proto.Unmarshal(cluster.Barrier, &barrier); err != nil {
-				return fmt.Errorf("decode the barrier of cluster %s: %w: %w", clusterID, ErrRecoveryRequired, err)
+			if err := proto.Unmarshal(app.Barrier, &barrier); err != nil {
+				return fmt.Errorf("decode the barrier of app %s: %w: %w", appID, ErrRecoveryRequired, err)
 			}
-			if !proto.Equal(barrier.Epoch, cluster.Prepared) {
-				return fmt.Errorf("the barrier of cluster %s answers another epoch: %w", clusterID, ErrRecoveryRequired)
+			if !proto.Equal(barrier.Epoch, app.Prepared) {
+				return fmt.Errorf("the barrier of app %s answers another epoch: %w", appID, ErrRecoveryRequired)
 			}
-			if cluster.Active {
+			if app.Active {
 				if err := operation.BarrierDrained(&barrier); err != nil {
-					return fmt.Errorf("cluster %s is active behind an undrained barrier: %w: %w", clusterID, ErrRecoveryRequired, err)
+					return fmt.Errorf("app %s is active behind an undrained barrier: %w: %w", appID, ErrRecoveryRequired, err)
 				}
 			}
 		}
-		if cluster.Active && (!cluster.Reconciled || len(cluster.Barrier) == 0) {
-			return fmt.Errorf("cluster %s is active but not reconciled or carries no barrier: %w", clusterID, ErrRecoveryRequired)
+		if app.Active && (!app.Reconciled || len(app.Barrier) == 0) {
+			return fmt.Errorf("app %s is active but not reconciled or carries no barrier: %w", appID, ErrRecoveryRequired)
 		}
 	}
 	for commandID, record := range s.Commands {
@@ -242,10 +242,10 @@ func (j *Journal) validate() error {
 		if err := j.checkTarget(record.Epoch); err != nil {
 			return fmt.Errorf("check the epoch of command %s: %w: %w", commandID, ErrRecoveryRequired, err)
 		}
-		cluster, exists := s.Clusters[record.Epoch.ClusterId]
-		if !exists || record.Epoch.ExecutionEpoch > cluster.Prepared.ExecutionEpoch {
-			return fmt.Errorf("command %s names execution epoch %d of cluster %s, which this journal has not prepared: %w",
-				commandID, record.Epoch.ExecutionEpoch, record.Epoch.ClusterId, ErrRecoveryRequired)
+		app, exists := s.Apps[record.Epoch.AppId]
+		if !exists || record.Epoch.ExecutionEpoch > app.Prepared.ExecutionEpoch {
+			return fmt.Errorf("command %s names execution epoch %d of app %s, which this journal has not prepared: %w",
+				commandID, record.Epoch.ExecutionEpoch, record.Epoch.AppId, ErrRecoveryRequired)
 		}
 		view, err := record.view()
 		if err != nil {
@@ -302,12 +302,12 @@ func (j *Journal) checkTarget(epoch *agentv1.Epoch) error {
 	if epoch == nil || epoch.InstallationId != j.state.Identity.InstallationID || epoch.NodeId != j.state.Identity.NodeID || epoch.RecoveryGeneration != j.state.Identity.RecoveryGeneration || epoch.ExecutionEpoch < 1 {
 		return operation.ErrStaleOwner
 	}
-	id, err := uuid.Parse(epoch.ClusterId)
+	id, err := uuid.Parse(epoch.AppId)
 	if err != nil {
-		return fmt.Errorf("parse the cluster of the epoch (%q): %w: %w", epoch.ClusterId, operation.ErrStaleOwner, err)
+		return fmt.Errorf("parse the app of the epoch (%q): %w: %w", epoch.AppId, operation.ErrStaleOwner, err)
 	}
-	if id == uuid.Nil || id.String() != epoch.ClusterId {
-		return fmt.Errorf("the epoch names cluster %q, which is not a canonical non-nil UUID: %w", epoch.ClusterId, operation.ErrStaleOwner)
+	if id == uuid.Nil || id.String() != epoch.AppId {
+		return fmt.Errorf("the epoch names app %q, which is not a canonical non-nil UUID: %w", epoch.AppId, operation.ErrStaleOwner)
 	}
 	return nil
 }

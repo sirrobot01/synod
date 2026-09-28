@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -41,10 +40,10 @@ func (h *placementHost) placeable(t *testing.T) bool {
 // Cordon stops new placement and leaves everything already placed exactly where it is.
 func TestCordonStopsNewPlacementAndMovesNothing(t *testing.T) {
 	host := placementFixture(t)
-	claim := host.claimCluster(t, "db")
+	claim := host.claimApp(t, "db")
 	port := placement.Port{Address: "127.0.0.1", Transport: "tcp", Number: 5432}
 	request, decision, plan := host.place(t, claim, smallBudget, []placement.Port{port})
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
+	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
 		t.Fatal(err)
 	}
 	if !host.placeable(t) {
@@ -108,80 +107,5 @@ func TestCordonIsIdempotent(t *testing.T) {
 	// A node with no policy carries no work, so there is nothing to cordon.
 	if _, err := host.store.SetNodeCordon(t.Context(), host.id, host.enroll(t), true); err == nil {
 		t.Fatal("a node with no placement policy was cordoned")
-	}
-}
-
-// Node removal requires workload and retained-storage disposition. Each refusal names
-// which one is missing, because "cannot remove node" tells an operator nothing.
-func TestRemoveNodeRequiresWorkloadAndStorageDisposition(t *testing.T) {
-	host := placementFixture(t)
-	claim := host.claimCluster(t, "db")
-	request, decision, plan := host.place(t, claim, smallBudget, nil)
-	if _, err := host.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	identity := declared(host, claim.ClusterID)
-	if err := host.store.RecordVolumeIdentity(t.Context(), identity); err != nil {
-		t.Fatal(err)
-	}
-	// A node that still takes new placement cannot be removed: work would arrive
-	// while it was being taken away.
-	if err := host.store.RemoveNode(t.Context(), host.id, host.node, nil); !errors.Is(err, ErrNodeNotCordoned) {
-		t.Fatalf("err=%v, want ErrNodeNotCordoned", err)
-	}
-	if _, err := host.store.SetNodeCordon(t.Context(), host.id, host.node, true); err != nil {
-		t.Fatal(err)
-	}
-	// A live reservation means a cluster still expects to run here.
-	if err := host.store.RemoveNode(t.Context(), host.id, host.node, []uuid.UUID{identity.ResourceID}); !errors.Is(err, ErrWorkloadOnNode) {
-		t.Fatalf("err=%v, want ErrWorkloadOnNode", err)
-	}
-	if _, err := host.store.pool.Exec(t.Context(), `UPDATE resource_allocations SET released_at=clock_timestamp()
- WHERE installation_id=$1 AND node_id=$2`, host.id, host.node); err != nil {
-		t.Fatal(err)
-	}
-	// Storage nobody has accounted for holds the removal open.
-	if err := host.store.RemoveNode(t.Context(), host.id, host.node, nil); !errors.Is(err, ErrStorageUndisposed) {
-		t.Fatalf("err=%v, want ErrStorageUndisposed", err)
-	}
-	// A list that names storage the node does not hold is a stale list, and a stale
-	// list is how storage is signed off without anybody looking at it.
-	if err := host.store.RemoveNode(t.Context(), host.id, host.node, []uuid.UUID{identity.ResourceID, uuid.New()}); !errors.Is(err, ErrStorageUndisposed) {
-		t.Fatalf("err=%v, want a stale acknowledgement refused", err)
-	}
-	if err := host.store.RemoveNode(t.Context(), host.id, host.node, []uuid.UUID{identity.ResourceID}); err != nil {
-		t.Fatal(err)
-	}
-	// The node is gone from placement, and the storage it held is still on record so
-	// an operator can still find that data.
-	if revoked := host.count(t, `SELECT count(*) FROM nodes
- WHERE installation_id=$1 AND id=$2 AND revoked_at IS NOT NULL`, host.id, host.node); revoked != 1 {
-		t.Fatal("the node was not revoked")
-	}
-	stored, err := host.store.ReadVolumeIdentity(t.Context(), host.id, identity.ResourceID)
-	if err != nil || stored != identity {
-		t.Fatalf("stored=%+v err=%v, want the storage record kept", stored, err)
-	}
-	if err := host.store.RemoveNode(t.Context(), host.id, host.node, nil); err != nil {
-		t.Fatalf("a repeated removal was refused: %v", err)
-	}
-}
-
-// Storage that is already purged holds nothing, so it needs no disposition.
-func TestRemoveNodeIgnoresPurgedStorage(t *testing.T) {
-	host := placementFixture(t)
-	claim := host.claimCluster(t, "db")
-	identity := declared(host, claim.ClusterID)
-	if err := host.store.RecordVolumeIdentity(t.Context(), identity); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := host.store.SetNodeCordon(t.Context(), host.id, host.node, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.store.SetVolumeRetention(t.Context(), host.id, identity.ResourceID, Purged); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.store.RemoveNode(t.Context(), host.id, host.node, nil); err != nil {
-		t.Fatal(err)
 	}
 }

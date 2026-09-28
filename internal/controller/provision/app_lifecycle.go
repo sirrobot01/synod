@@ -3,6 +3,8 @@ package provision
 import (
 	"context"
 	"fmt"
+	"github.com/google/uuid"
+	"slices"
 
 	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/operation"
@@ -11,6 +13,9 @@ import (
 )
 
 func (p *Planner) appLifecycle(ctx context.Context, claim operation.Claim, op operation.Operation) error {
+	if op.Kind == "app.rejoin" {
+		return p.rejoinDatabase(ctx, claim, op)
+	}
 	if op.Kind == "app.move" {
 		return p.moveApp(ctx, claim, op)
 	}
@@ -20,9 +25,9 @@ func (p *Planner) appLifecycle(ctx context.Context, claim operation.Claim, op op
 	if op.Kind == "app.deploy" {
 		return p.deployApp(ctx, claim)
 	}
-	copies, err := p.config.Store.GetAppCopies(ctx, claim.InstallationID, claim.ClusterID)
+	copies, err := p.config.Store.GetAppCopies(ctx, claim.InstallationID, claim.AppID)
 	if op.Kind == "app.delete" {
-		copies, err = p.config.Store.GetAllAppCopies(ctx, claim.InstallationID, claim.ClusterID)
+		copies, err = p.config.Store.GetAllAppCopies(ctx, claim.InstallationID, claim.AppID)
 	}
 	if err != nil {
 		return err
@@ -33,7 +38,7 @@ func (p *Planner) appLifecycle(ctx context.Context, claim operation.Claim, op op
 		}
 		return ErrNoWorkload
 	}
-	found, err := p.config.Store.GetApp(ctx, claim.InstallationID, claim.ClusterID)
+	found, err := p.config.Store.GetApp(ctx, claim.InstallationID, claim.AppID)
 	if err != nil {
 		return err
 	}
@@ -44,7 +49,7 @@ func (p *Planner) appLifecycle(ctx context.Context, claim operation.Claim, op op
 		if err != nil {
 			return err
 		}
-		deployment, err = p.config.Store.ReadAppDeployment(ctx, claim.InstallationID, claim.ClusterID)
+		deployment, err = p.config.Store.ReadAppDeployment(ctx, claim.InstallationID, claim.AppID)
 		if err != nil {
 			return err
 		}
@@ -52,12 +57,23 @@ func (p *Planner) appLifecycle(ctx context.Context, claim operation.Claim, op op
 			return ErrNoWorkload
 		}
 	}
+	var rebuilding []uuid.UUID
+	if found.Tier == app.TierDatabase && op.Kind == "app.start" {
+		rebuilding, err = p.config.Store.DatabaseRebuildNodes(ctx, claim.InstallationID, claim.AppID)
+		if err != nil {
+			return err
+		}
+	}
 	var steps []*agentv1.PlanStep
 	for _, copy := range copies {
-		if copy.Role == "standby" && op.Kind != "app.delete" {
+		if slices.Contains(rebuilding, copy.NodeID) {
 			continue
 		}
-		each := member{NodeID: copy.NodeID, ResourceID: copy.ID, Port: copy.HostPort}
+		// A tier 2 standby only holds data. A tier 1 standby runs its engine.
+		if copy.Role == "standby" && op.Kind != "app.delete" && (found.Tier != app.TierDatabase || rollback) {
+			continue
+		}
+		each := member{NodeID: copy.NodeID, ResourceID: copy.ID}
 		var next []*agentv1.PlanStep
 		switch op.Kind {
 		case "app.stop":
@@ -116,8 +132,8 @@ func (p *Planner) appLifecycle(ctx context.Context, claim operation.Claim, op op
 		}
 		steps = append(steps, next...)
 	}
-	if op.Kind == "app.delete" && found.Tier == app.TierSingleWriter {
-		writer, err := p.config.Store.GetAppWriter(ctx, claim.InstallationID, claim.ClusterID)
+	if op.Kind == "app.delete" && (found.Tier == app.TierSingleWriter || found.Tier == app.TierDatabase) {
+		writer, err := p.config.Store.GetAppWriter(ctx, claim.InstallationID, claim.AppID)
 		if err != nil {
 			return err
 		}

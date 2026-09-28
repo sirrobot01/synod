@@ -37,14 +37,14 @@ func (s *Store) AdmitApp(ctx context.Context, request CreateAppRequest) (app.Adm
 	if err := request.Spec.Validate(); err != nil {
 		return app.Admission{}, &AdmissionError{Code: InvalidRequest, Cause: err}
 	}
-	if request.Spec.Tier != app.TierParallel && request.Spec.Tier != app.TierSingleWriter {
-		return app.Admission{}, &AdmissionError{Code: UnsupportedSpec}
-	}
-	if len(request.Spec.Service.SupportedArchitectures) != 0 {
-		return app.Admission{}, &AdmissionError{Code: InvalidRequest}
-	}
-	if len(request.Spec.Service.Ports) != 1 || request.Spec.Service.Ports[0].Protocol == "udp" {
-		return app.Admission{}, &AdmissionError{Code: UnsupportedSpec}
+	// A tier 1 app takes its container from the engine catalog, so it has no service to check.
+	if request.Spec.Tier != app.TierDatabase {
+		if len(request.Spec.Service.SupportedArchitectures) != 0 {
+			return app.Admission{}, &AdmissionError{Code: InvalidRequest}
+		}
+		if !(request.Spec.Tier == app.TierParallel && request.Spec.Router.Port == 0) && (len(request.Spec.Service.Ports) != 1 || request.Spec.Service.Ports[0].Protocol == "udp") {
+			return app.Admission{}, &AdmissionError{Code: UnsupportedSpec}
+		}
 	}
 	body, err := json.Marshal(request.Spec)
 	if err != nil {
@@ -86,11 +86,11 @@ func (s *Store) AdmitApp(ctx context.Context, request CreateAppRequest) (app.Adm
 		return app.Admission{}, admissionError(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operations
- (id,installation_id,cluster_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at)
+ (id,installation_id,app_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at)
  VALUES ($1,$2,$3,$4,'app.create',$5,$6,1,'app.deploy',1,'pending',0,0,0,transaction_timestamp(),transaction_timestamp())`, result.OperationID, identity.InstallationID, id, identity.ActorID, identity.IdempotencyKey, hash[:]); err != nil {
 		return app.Admission{}, admissionError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO outbox (event_id,installation_id,cluster_id,operation_id,kind,schema_version,created_at)
+	if _, err := tx.Exec(ctx, `INSERT INTO outbox (event_id,installation_id,app_id,operation_id,kind,schema_version,created_at)
  VALUES ($1,$2,$3,$4,'operation.ready',1,transaction_timestamp())`, uuid.New(), identity.InstallationID, id, result.OperationID); err != nil {
 		return app.Admission{}, admissionError(err)
 	}

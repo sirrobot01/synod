@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/runtime"
@@ -20,14 +21,13 @@ import (
 
 func TestGenericContainerLifecycle(t *testing.T) {
 	r, api, appID := runtimeFixture(t)
-	r.options.AllowBridgeFixture = false
 	id := uuid.NewString()
 	source, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	command := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
-		ImageDigest: redisFixture, Engine: "generic", NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
+		ImageDigest: redisFixture, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
 		Generic: &agentv1.GenericContainerConfig{Image: redisFixture, AppName: "redis-web", CopyIndex: 2, CommandOverride: true, Command: []string{"redis-server", "--save", "", "--appendonly", "no"}, EntrypointOverride: true, Mounts: []*agentv1.Mount{{Type: "tmpfs", Target: "/data"}}, HealthCheck: &agentv1.HealthCheckConfig{Type: "exec", Command: []string{"redis-cli", "ping"}, IntervalSeconds: 1, TimeoutSeconds: 1, UnhealthyThreshold: 1}},
 		Ports:   []*agentv1.PortBinding{{ContainerPort: 6379, HostPort: 0, HostAddress: "127.0.0.1", Transport: "tcp"}}, PlainEnv: []*agentv1.PlainEnv{{Name: "lowercase", Value: ""}, {Name: "REDIS_VERSION", Value: "override"}},
 	}}})
@@ -56,7 +56,6 @@ func TestGenericContainerLifecycle(t *testing.T) {
 	}
 	for _, input := range []*agentv1.CommandInput{
 		{ResourceId: id, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}},
-		{ResourceId: id, Payload: &agentv1.CommandInput_InspectContainer{InspectContainer: &agentv1.InspectContainer{}}},
 	} {
 		if _, err := r.Execute(t.Context(), runtimeCommand(t, r, appID, input), nil); err != nil {
 			t.Fatalf("lifecycle: %v / %v", err, errors.Unwrap(err))
@@ -145,7 +144,7 @@ func TestTier2ContainerUsesLiveStorageAndFences(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := uuid.NewString()
-	command := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{ImageDigest: redisFixture, Engine: "generic", NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, Generic: &agentv1.GenericContainerConfig{Image: redisFixture, AppName: "writer", CommandOverride: true, Command: []string{"redis-server", "--save", "", "--appendonly", "no"}, Mounts: []*agentv1.Mount{{Type: "replicated", Source: "config", Target: "/data"}}}}}})
+	command := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{ImageDigest: redisFixture, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, Generic: &agentv1.GenericContainerConfig{Image: redisFixture, AppName: "writer", CommandOverride: true, Command: []string{"redis-server", "--save", "", "--appendonly", "no"}, Mounts: []*agentv1.Mount{{Type: "replicated", Source: "config", Target: "/data"}}}}}})
 	if _, err := r.Execute(t.Context(), command, nil); err != nil {
 		t.Fatalf("ensure: %v / %v", err, errors.Unwrap(err))
 	}
@@ -199,12 +198,11 @@ func TestTier2ContainerUsesLiveStorageAndFences(t *testing.T) {
 
 func TestFailedPullIsNotAppliedAndRecoversAsAbsent(t *testing.T) {
 	r, _, appID := runtimeFixture(t)
-	r.options.AllowBridgeFixture = false
 	// No registry listens on port 1, so the pull fails without creating anything.
 	image := "127.0.0.1:1/synod-missing@sha256:" + strings.Repeat("0", 64)
 	id := uuid.NewString()
 	command := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
-		ImageDigest: image, Engine: "generic", NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
+		ImageDigest: image, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
 		Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "missing", Mounts: []*agentv1.Mount{{Type: "tmpfs", Target: "/data"}}},
 	}}})
 	result, err := r.Execute(t.Context(), command, nil)
@@ -216,4 +214,93 @@ func TestFailedPullIsNotAppliedAndRecoversAsAbsent(t *testing.T) {
 	if !errors.Is(err, runtime.ErrNotApplied) || len(result.Effects) != 1 || result.Effects[0].State != "absent" || result.Effects[0].Active || result.Effects[0].OutcomeUnknown {
 		t.Fatalf("missing container did not resolve the ensure: %+v %v", result, err)
 	}
+}
+
+func TestTier1ContainerUsesEngineStorageAndRunsEngineSteps(t *testing.T) {
+	r, api, appID := runtimeFixture(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.options.AppsDir = root
+	data := filepath.Join(root, appID.String(), "engine", "data")
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.NewString()
+	ensure := &agentv1.EnsureContainer{ImageDigest: redisFixture, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, SecretEnv: []*agentv1.SecretEnv{{Name: "SYNOD_TEST_SECRET", Purpose: "superuser"}},
+		Generic: &agentv1.GenericContainerConfig{Image: redisFixture, AppName: "cache", CommandOverride: true, Command: []string{"redis-server", "--save", "", "--appendonly", "no"}, Mounts: []*agentv1.Mount{{Type: "engine", Source: "data", Target: "/data"}}}}
+	command := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: id, Secrets: []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"}}, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: ensure}})
+	secrets := runtime.Secrets{"superuser": []byte("private-value")}
+	if _, err := r.Execute(t.Context(), command, secrets); err != nil {
+		t.Fatalf("ensure: %v / %v", err, errors.Unwrap(err))
+	}
+	current, err := api.ContainerInspect(t.Context(), "synod-instance-"+id, client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Container.Config.Labels["synod.tier"] != "1" || len(current.Container.Mounts) != 1 || current.Container.Mounts[0].Source != data {
+		t.Fatalf("mounts: %+v labels: %v", current.Container.Mounts, current.Container.Config.Labels)
+	}
+	// A database copy starts without a writer lease. Standbys run too.
+	start := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}})
+	if _, err := r.Execute(t.Context(), start, secrets); err != nil {
+		t.Fatalf("start: %v / %v", err, errors.Unwrap(err))
+	}
+	current, err = api.ContainerInspect(t.Context(), "synod-instance-"+id, client.ContainerInspectOptions{})
+	if err != nil || !current.Container.State.Running || current.Container.HostConfig.RestartPolicy.Name != container.RestartPolicyDisabled {
+		t.Fatalf("running copy: %+v %v", current.Container.HostConfig.RestartPolicy, err)
+	}
+	out, err := r.EngineExec(t.Context(), appID, []string{"SYNOD_STEP=step"}, "from-stdin", "sh", "-c", `cat; echo " $SYNOD_STEP $SYNOD_TEST_SECRET"`)
+	if err != nil || string(out) != "from-stdin step private-value\n" {
+		t.Fatalf("engine step: %q %v", out, err)
+	}
+	if _, err := r.EngineExec(t.Context(), appID, nil, "", "sh", "-c", "echo broken >&2; exit 3"); err == nil || !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("failed step: %v", err)
+	}
+	if _, err := r.EngineExec(t.Context(), uuid.New(), nil, "", "true"); !errors.Is(err, runtime.ErrNotApplied) {
+		t.Fatalf("step for an absent copy: %v", err)
+	}
+	apps, err := r.EngineApps(t.Context())
+	if err != nil || !slices.Equal(apps, []uuid.UUID{appID}) {
+		t.Fatalf("running database inventory: %v %v", apps, err)
+	}
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := r.EngineExec(t.Context(), appID, nil, "", "sh", "-c", "touch /tmp/fence-test; sleep 60")
+		blocked <- err
+	}()
+	started := false
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if _, err := r.EngineExec(t.Context(), appID, nil, "", "test", "-e", "/tmp/fence-test"); err == nil {
+			started = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !started {
+		t.Fatal("engine command did not start")
+	}
+	if err := r.FenceEngine(t.Context(), appID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-blocked:
+		if err == nil {
+			t.Fatal("killed engine command reported success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fencing waited for the engine command")
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		apps, err = r.EngineApps(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(apps) == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("stopped database remains active: %v", apps)
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -44,6 +45,12 @@ func Validate(apps []*agentv1.AppReplication) error {
 			return ErrTable
 		}
 		seen[app.AppId] = true
+		if app.Database != nil {
+			if err := validateDatabase(app); err != nil {
+				return err
+			}
+			continue
+		}
 		switch app.Role {
 		case RoleActive:
 			if len(app.Peers) < 1 || len(app.Peers) > 3 || app.IntervalSeconds < 10 || app.IntervalSeconds > 3600 {
@@ -66,6 +73,48 @@ func Validate(apps []*agentv1.AppReplication) error {
 				return ErrTable
 			}
 		}
+	}
+	return nil
+}
+
+var (
+	databaseName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+	hostName     = regexp.MustCompile(`^[A-Za-z0-9.:-]{1,253}$`)
+)
+
+// validateDatabase checks a tier 1 entry. The engine replicates the data, so the entry
+// names no snapshot peers. Only a standby names the primary it follows.
+func validateDatabase(app *agentv1.AppReplication) error {
+	d := app.Database
+	if len(app.Peers) != 0 || app.IntervalSeconds != 0 {
+		return ErrTable
+	}
+	switch d.Engine {
+	case "postgres":
+		if len(d.Databases) < 1 || len(d.Databases) > 16 || slices.ContainsFunc(d.Databases, func(name string) bool { return !databaseName.MatchString(name) }) {
+			return ErrTable
+		}
+	case "redis":
+		if len(d.Databases) != 0 {
+			return ErrTable
+		}
+	default:
+		return ErrTable
+	}
+	switch app.Role {
+	case RoleActive:
+		if d.PrimaryHost != "" || d.PrimaryPort != 0 || d.SwitchoverOperationId != "" {
+			return ErrTable
+		}
+	case RoleStandby:
+		if d.SwitchoverOperationId != "" && !canonical(d.SwitchoverOperationId) {
+			return ErrTable
+		}
+		if !hostName.MatchString(d.PrimaryHost) || d.PrimaryPort == 0 || d.PrimaryPort > 65535 {
+			return ErrTable
+		}
+	default:
+		return ErrTable
 	}
 	return nil
 }
@@ -102,6 +151,17 @@ func (t *Table) Lookup(appID string) (*agentv1.AppReplication, bool) {
 		return nil, false
 	}
 	return proto.Clone(app).(*agentv1.AppReplication), true
+}
+
+// Apps returns a copy of every assignment.
+func (t *Table) Apps() []*agentv1.AppReplication {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	apps := make([]*agentv1.AppReplication, 0, len(t.apps))
+	for _, app := range t.apps {
+		apps = append(apps, proto.Clone(app).(*agentv1.AppReplication))
+	}
+	return apps
 }
 
 // Status records the newest replica state per app for heartbeats. It is safe for concurrent use.

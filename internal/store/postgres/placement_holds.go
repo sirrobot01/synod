@@ -17,7 +17,7 @@ import (
 type Hold struct {
 	ReservationID  uuid.UUID
 	InstallationID uuid.UUID
-	ClusterID      uuid.UUID
+	AppID          uuid.UUID
 	NodeID         uuid.UUID
 	ResourceID     uuid.UUID
 	// OperationID created the reservation.
@@ -49,7 +49,7 @@ func (s *Store) ReadPlacementHolds(ctx context.Context, installationID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT a.id, a.cluster_id, a.node_id, a.resource_id,
+	rows, err := s.pool.Query(ctx, `SELECT a.id, a.app_id, a.node_id, a.resource_id,
  a.allocation_bytes, a.created_operation_id, o.kind, o.status
  FROM resource_allocations a
  JOIN operations o ON o.installation_id=a.installation_id AND o.id=a.created_operation_id
@@ -64,7 +64,7 @@ func (s *Store) ReadPlacementHolds(ctx context.Context, installationID uuid.UUID
 		var hold Hold
 		var encoded []byte
 		var status string
-		if err := rows.Scan(&hold.ReservationID, &hold.ClusterID, &hold.NodeID, &hold.ResourceID,
+		if err := rows.Scan(&hold.ReservationID, &hold.AppID, &hold.NodeID, &hold.ResourceID,
 			&encoded, &hold.OperationID, &hold.Kind, &status); err != nil {
 			return nil, admissionError(err)
 		}

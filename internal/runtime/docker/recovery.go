@@ -34,7 +34,7 @@ func (r *Runtime) Recover(ctx context.Context, command *agentv1.Command, prior [
 		if !effect.Active && !effect.OutcomeUnknown {
 			continue
 		}
-		if err := r.inspectRetainedExec(ctx, command.Epoch.ClusterId, effect); err != nil && inspectErr == nil {
+		if err := r.inspectRetainedExec(ctx, command.Epoch.AppId, effect); err != nil && inspectErr == nil {
 			inspectErr = err
 		}
 	}
@@ -42,7 +42,7 @@ func (r *Runtime) Recover(ctx context.Context, command *agentv1.Command, prior [
 }
 
 // inspectRetainedExec mutates only a detached effect after scoped native inspection.
-func (r *Runtime) inspectRetainedExec(ctx context.Context, clusterID string, effect *agentv1.Effect) error {
+func (r *Runtime) inspectRetainedExec(ctx context.Context, appID string, effect *agentv1.Effect) error {
 	effect.Active, effect.OutcomeUnknown = true, true
 	effect.State = "native_inspection_required"
 	identity, ok := strings.CutPrefix(effect.NativeOperationId, "docker-exec:")
@@ -61,7 +61,7 @@ func (r *Runtime) inspectRetainedExec(ctx context.Context, clusterID string, eff
 		return runtime.ErrOutcomeUnknown
 	}
 	owned, err := r.inventoryIdentity(item.Container.Config.Labels, "container", strings.TrimPrefix(item.Container.Name, "/"), "synod-instance-")
-	if err != nil || owned.ClusterID.String() != clusterID || owned.ResourceID.String() != effect.ResourceId {
+	if err != nil || owned.AppID.String() != appID || owned.ResourceID.String() != effect.ResourceId {
 		return runtime.ErrOwnershipConflict
 	}
 	if slices.Contains(item.Container.ExecIDs, execID) {

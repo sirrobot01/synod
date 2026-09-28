@@ -18,7 +18,7 @@ func fixture() (Request, Snapshot) {
 	installation := uuid.New()
 	resource := Resource{ID: uuid.New(), ReservationID: uuid.New(), Kind: "instance", Role: "primary", Engine: "postgres", Version: "17.11", Architecture: "arm64", RuntimeVersion: "docker-29.1.3", StorageID: "local-data", Budgets: Budgets{Workload: new(Vector{1000, 1000, 1000}), Supporting: new(Vector{100, 100, 100}), Backup: new(Vector{0, 0, 100})}}
 	resource.OwnedResourceIDs = []uuid.UUID{resource.ID}
-	request := Request{Version: 1, InstallationID: installation, ClusterID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1, Profile: "compact", Resources: []Resource{resource}}
+	request := Request{Version: 1, InstallationID: installation, AppID: uuid.New(), OperationID: uuid.New(), DesiredRevision: 1, Profile: "compact", Resources: []Resource{resource}}
 	snapshot := Snapshot{InstallationID: installation, ObservedAt: now}
 	for range 3 {
 		id, session, boot, journal := uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -175,7 +175,7 @@ func TestReservationAccountingAndStatefulReuse(t *testing.T) {
 	node.Report.Capacity = Vector{3000, 3000, 3000}
 	node.Report.Used = Vector{1500, 1500, 1500}
 	node.Policy.Headroom = Vector{100, 100, 100}
-	held := Allocation{ID: resource.ReservationID, InstallationID: request.InstallationID, ClusterID: request.ClusterID, NodeID: node.ID, ResourceID: resource.ID, OwnedResourceIDs: resource.OwnedResourceIDs, Budget: Vector{2000, 2000, 2000}}
+	held := Allocation{ID: resource.ReservationID, InstallationID: request.InstallationID, AppID: request.AppID, NodeID: node.ID, ResourceID: resource.ID, OwnedResourceIDs: resource.OwnedResourceIDs, Budget: Vector{2000, 2000, 2000}}
 	snapshot.Allocations = []Allocation{held}
 	node.Report.Reservations = []Usage{{ReservationID: held.ID, ResourceID: held.ResourceID, Used: Vector{1000, 1000, 1000}}}
 	if _, err := Plan(request, snapshot); err != nil {
@@ -267,7 +267,7 @@ func TestPortsAndInvalidBudgets(t *testing.T) {
 	request, snapshot := fixture()
 	snapshot.Nodes = snapshot.Nodes[:1]
 	request.Resources[0].Ports = []Port{{"127.0.0.1", "tcp", 5432, ""}}
-	snapshot.Allocations = []Allocation{{ID: uuid.New(), InstallationID: request.InstallationID, NodeID: snapshot.Nodes[0].ID, ClusterID: uuid.New(), ResourceID: uuid.New(), Budget: Vector{}, Ports: []Port{{"0.0.0.0", "tcp", 5432, ""}}}}
+	snapshot.Allocations = []Allocation{{ID: uuid.New(), InstallationID: request.InstallationID, NodeID: snapshot.Nodes[0].ID, AppID: uuid.New(), ResourceID: uuid.New(), Budget: Vector{}, Ports: []Port{{"0.0.0.0", "tcp", 5432, ""}}}}
 	if _, err := Plan(request, snapshot); !errors.Is(err, ErrUnsatisfied) {
 		t.Fatal("occupied reservation ignored", err)
 	}
@@ -289,7 +289,7 @@ func TestPortsAndInvalidBudgets(t *testing.T) {
 }
 
 // This profile publishes on the host's own network, so a port is a host resource. Every
-// cluster asking for the same number means one cluster per node: the second is refused
+// app asking for the same number means one app per node: the second is refused
 // while the node has room for it. Placement knows what each node holds, so it chooses.
 func TestPlanChoosesAFreePortForEachResource(t *testing.T) {
 	request, snapshot := fixture()
@@ -335,7 +335,7 @@ func TestPlanChoosesAFreePortForEachResource(t *testing.T) {
 		request.Resources[0].Ports = []Port{{Address: "0.0.0.0", Transport: "tcp"}}
 		snapshot.Allocations = []Allocation{{
 			ID: uuid.New(), InstallationID: request.InstallationID, NodeID: node,
-			ClusterID: uuid.New(), ResourceID: uuid.New(), Budget: Vector{1, 1, 1},
+			AppID: uuid.New(), ResourceID: uuid.New(), Budget: Vector{1, 1, 1},
 			Ports: []Port{{Address: "0.0.0.0", Transport: "tcp", Number: 5432}},
 		}}
 		decision, err := Plan(request, snapshot)
@@ -348,7 +348,7 @@ func TestPlanChoosesAFreePortForEachResource(t *testing.T) {
 		snapshot.Allocations[0].Ports[0].Number = 5433
 		snapshot.Allocations = append(snapshot.Allocations, Allocation{
 			ID: uuid.New(), InstallationID: request.InstallationID, NodeID: node,
-			ClusterID: uuid.New(), ResourceID: uuid.New(), Budget: Vector{1, 1, 1},
+			AppID: uuid.New(), ResourceID: uuid.New(), Budget: Vector{1, 1, 1},
 			Ports: []Port{{Address: "0.0.0.0", Transport: "tcp", Number: 5432}},
 		})
 		if _, err := Plan(request, snapshot); !errors.Is(err, ErrUnsatisfied) {
@@ -366,7 +366,7 @@ func TestPlanChoosesAFreePortForEachResource(t *testing.T) {
 		request.Resources[0].Ports = []Port{{Address: "0.0.0.0", Transport: "tcp"}}
 		snapshot.Allocations = []Allocation{{
 			ID: request.Resources[0].ReservationID, InstallationID: request.InstallationID, NodeID: node,
-			ClusterID: request.ClusterID, ResourceID: request.Resources[0].ID, Budget: Vector{1, 1, 1},
+			AppID: request.AppID, ResourceID: request.Resources[0].ID, Budget: Vector{1, 1, 1},
 			OwnedResourceIDs: request.Resources[0].OwnedResourceIDs,
 			Ports:            []Port{{Address: "0.0.0.0", Transport: "tcp", Number: 5479}},
 		}}
@@ -406,7 +406,7 @@ func TestAutomaticPortPreservesFixedBindings(t *testing.T) {
 		slices.SortFunc(held, func(a, b Port) int { return int(a.Number) - int(b.Number) })
 		snapshot.Allocations = []Allocation{{
 			ID: request.Resources[0].ReservationID, InstallationID: request.InstallationID,
-			NodeID: decision.Assignments[0].NodeID, ClusterID: request.ClusterID,
+			NodeID: decision.Assignments[0].NodeID, AppID: request.AppID,
 			ResourceID: request.Resources[0].ID, Budget: Vector{1, 1, 1},
 			OwnedResourceIDs: request.Resources[0].OwnedResourceIDs, Ports: held,
 		}}
@@ -423,7 +423,7 @@ func TestAutomaticPortPreservesFixedBindings(t *testing.T) {
 	}
 }
 
-// An instance is a member of the cluster, so it must name which member it is. Nothing
+// An instance is a member of the app, so it must name which member it is. Nothing
 // else is a member, so nothing else may carry a role.
 func TestInstanceMustDeclareItsMemberRole(t *testing.T) {
 	for name, role := range map[string]string{"missing": "", "unknown": "arbiter", "wrong case": "Primary"} {
@@ -467,7 +467,7 @@ func TestNamedPortsKeepTheirNumbersOnRetry(t *testing.T) {
 	}
 	snapshot.Allocations = []Allocation{{
 		ID: request.Resources[0].ReservationID, InstallationID: request.InstallationID,
-		NodeID: decision.Assignments[0].NodeID, ClusterID: request.ClusterID,
+		NodeID: decision.Assignments[0].NodeID, AppID: request.AppID,
 		ResourceID: request.Resources[0].ID, Budget: Vector{1, 1, 1},
 		OwnedResourceIDs: request.Resources[0].OwnedResourceIDs, Ports: decision.Assignments[0].Ports,
 	}}

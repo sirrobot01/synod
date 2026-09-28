@@ -12,16 +12,26 @@ import (
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/placement"
+	"github.com/sirrobot01/synod/internal/store/postgres"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
 func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
-	found, err := p.config.Store.GetApp(ctx, claim.InstallationID, claim.ClusterID)
+	found, err := p.config.Store.GetApp(ctx, claim.InstallationID, claim.AppID)
 	if err != nil {
 		return err
 	}
 	spec := found.Spec
-	if (spec.Tier != app.TierParallel && spec.Tier != app.TierSingleWriter) || len(spec.Service.Ports) != 1 || (spec.Service.Ports[0].Protocol != "" && spec.Service.Ports[0].Protocol != "tcp") {
+	database := spec.Tier == app.TierDatabase
+	worker := spec.Tier == app.TierParallel && spec.Router == (app.RouterSpec{}) && len(spec.Service.Ports) == 0
+	// A writer tier runs one primary copy and standbys that can take over.
+	writer := database || spec.Tier == app.TierSingleWriter
+	if database {
+		if spec.Service, err = p.databaseService(spec); err != nil {
+			return err
+		}
+	}
+	if (!database && spec.Tier != app.TierParallel && spec.Tier != app.TierSingleWriter) || (!worker && (len(spec.Service.Ports) != 1 || (spec.Service.Ports[0].Protocol != "" && spec.Service.Ports[0].Protocol != "tcp"))) {
 		return fmt.Errorf("unsupported app configuration")
 	}
 	resolved, err := p.config.ResolveImage(ctx, spec.Service)
@@ -65,7 +75,7 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 		if err != nil {
 			return err
 		}
-		if (!slices.Contains(presence.Hello.Capabilities, "runtime.docker") || (spec.Tier == app.TierSingleWriter && !slices.Contains(presence.Hello.Capabilities, replication.Capability))) && !slices.Contains(preferences[2], node.ID) {
+		if (!slices.Contains(presence.Hello.Capabilities, "runtime.docker") || (writer && !slices.Contains(presence.Hello.Capabilities, replication.Capability))) && !slices.Contains(preferences[2], node.ID) {
 			preferences[2] = append(preferences[2], node.ID)
 		}
 	}
@@ -82,7 +92,10 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 	resourceID := uuid.New()
 	resource := placement.Resource{ID: resourceID, ReservationID: uuid.New(), OwnedResourceIDs: []uuid.UUID{resourceID}, Kind: "service", Engine: "generic", SupportedArchitectures: service.SupportedArchitectures,
 		PreferredNodes: preferences[0], AllowedNodes: preferences[1], ExcludedNodes: preferences[2], Budgets: placement.Budgets{Workload: &budget, Supporting: &placement.Vector{}, Backup: &placement.Vector{}}, Ports: []placement.Port{{Name: "backend", Address: "0.0.0.0", Transport: "tcp"}}}
-	if spec.Tier == app.TierSingleWriter {
+	if worker {
+		resource.Ports = nil
+	}
+	if writer {
 		resource.Role = "active"
 		for _, mount := range service.Mounts {
 			if mount.Type == "bind" {
@@ -90,7 +103,7 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 			}
 		}
 	}
-	request := placement.Request{Version: 1, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID, OperationID: claim.OperationID, DesiredRevision: found.DesiredRevision, Profile: "compact", PortRange: p.config.EndpointPorts, Resources: []placement.Resource{resource}}
+	request := placement.Request{Version: 1, InstallationID: claim.InstallationID, AppID: claim.AppID, OperationID: claim.OperationID, DesiredRevision: found.DesiredRevision, Profile: "compact", PortRange: p.config.EndpointPorts, Resources: []placement.Resource{resource}}
 	// Refresh measured capacity before counting capable devices or reserving ingress.
 	_, snapshot, err = p.config.Decider.Decide(ctx, request)
 	if err != nil {
@@ -98,7 +111,7 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 	}
 	request.Resources = nil
 	count := spec.Copies
-	if spec.Tier == app.TierSingleWriter {
+	if writer {
 		count += spec.Replication.Standbys
 	}
 	var capable []uuid.UUID
@@ -122,9 +135,12 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 		copy := resource
 		copy.ID, copy.ReservationID = uuid.New(), uuid.New()
 		copy.OwnedResourceIDs = []uuid.UUID{copy.ID}
-		if spec.Tier == app.TierSingleWriter && index > 0 {
+		if writer && index > 0 {
 			copy.Role = "standby"
-			copy.Budgets = placement.Budgets{Workload: &placement.Vector{DiskBytes: budget.DiskBytes}, Supporting: &placement.Vector{}, Backup: &placement.Vector{}}
+			// A tier 2 standby only holds data. A tier 1 standby runs its engine.
+			if !database {
+				copy.Budgets = placement.Budgets{Workload: &placement.Vector{DiskBytes: budget.DiskBytes}, Supporting: &placement.Vector{}, Backup: &placement.Vector{}}
+			}
 			copy.PreferredNodes = nil
 			if len(copy.AllowedNodes) > 0 {
 				copy.AllowedNodes = slices.Clone(copy.AllowedNodes)
@@ -143,33 +159,43 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 	}
 	if count > 1 {
 		request.Groups = []placement.Group{group}
-		if spec.Tier == app.TierSingleWriter {
+		if writer {
 			request.Groups = append(request.Groups, placement.Group{ID: "app-nodes", DomainKey: "node", Members: group.Members})
 		}
 	}
-	for _, node := range snapshot.Nodes {
-		if node.Policy == nil || node.Policy.ClientAddress == "" || node.SessionID == uuid.Nil {
-			continue
+	if !worker {
+		for _, node := range snapshot.Nodes {
+			if node.Policy == nil || node.Policy.ClientAddress == "" || node.SessionID == uuid.Nil {
+				continue
+			}
+			presence, err := p.config.Store.GetAgentPresence(ctx, claim.InstallationID, node.ID)
+			if err != nil {
+				return err
+			}
+			if !slices.Contains(presence.Hello.Capabilities, controlstream.RouterCapability) {
+				continue
+			}
+			id := uuid.New()
+			ingress := placement.Resource{ID: id, ReservationID: uuid.New(), OwnedResourceIDs: []uuid.UUID{id}, Kind: "service", Engine: "generic", SupportedArchitectures: []string{"amd64", "arm64"}, NodeAffinity: node.ID,
+				Budgets: placement.Budgets{Workload: &placement.Vector{CPUMillis: 10, MemoryBytes: 8 << 20}, Supporting: &placement.Vector{}, Backup: &placement.Vector{}}, Ports: []placement.Port{{Name: "ingress", Address: "0.0.0.0", Transport: "tcp", Number: spec.Router.Port}}}
+			probe := request
+			probe.Resources, probe.Groups = []placement.Resource{ingress}, nil
+			if database && spec.Router.ReaderPort != 0 {
+				// A database with a reader route reserves both ports on each router device.
+				reader := ingress
+				reader.ID, reader.ReservationID = uuid.New(), uuid.New()
+				reader.OwnedResourceIDs = []uuid.UUID{reader.ID}
+				reader.Ports = []placement.Port{{Name: "reader", Address: "0.0.0.0", Transport: "tcp", Number: spec.Router.ReaderPort}}
+				probe.Resources = append(probe.Resources, reader)
+			}
+			if _, err := placement.Plan(probe, snapshot); err != nil {
+				continue
+			}
+			request.Resources = append(request.Resources, probe.Resources...)
 		}
-		presence, err := p.config.Store.GetAgentPresence(ctx, claim.InstallationID, node.ID)
-		if err != nil {
-			return err
+		if len(request.Resources) == count {
+			return fmt.Errorf("no approved router device can reserve ingress port %d", spec.Router.Port)
 		}
-		if !slices.Contains(presence.Hello.Capabilities, controlstream.RouterCapability) {
-			continue
-		}
-		id := uuid.New()
-		ingress := placement.Resource{ID: id, ReservationID: uuid.New(), OwnedResourceIDs: []uuid.UUID{id}, Kind: "service", Engine: "generic", SupportedArchitectures: []string{"amd64", "arm64"}, NodeAffinity: node.ID,
-			Budgets: placement.Budgets{Workload: &placement.Vector{CPUMillis: 10, MemoryBytes: 8 << 20}, Supporting: &placement.Vector{}, Backup: &placement.Vector{}}, Ports: []placement.Port{{Name: "ingress", Address: "0.0.0.0", Transport: "tcp", Number: spec.Router.Port}}}
-		probe := request
-		probe.Resources, probe.Groups = []placement.Resource{ingress}, nil
-		if _, err := placement.Plan(probe, snapshot); err != nil {
-			continue
-		}
-		request.Resources = append(request.Resources, ingress)
-	}
-	if len(request.Resources) == count {
-		return fmt.Errorf("no approved router device can reserve ingress port %d", spec.Router.Port)
 	}
 	if len(request.Resources) > placement.MaxResources {
 		return fmt.Errorf("app copies and ingress exceed %d reservations", placement.MaxResources)
@@ -178,10 +204,16 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 	if err != nil {
 		return err
 	}
+	var credentials []postgres.Credential
+	if database {
+		if credentials, err = p.databaseCredentials(ctx, found); err != nil {
+			return err
+		}
+	}
 	plan := &agentv1.ExecutionPlan{Version: 1}
 	previous := map[uuid.UUID]string{}
 	for index, resource := range request.Resources[:count] {
-		if resource.Role == "standby" {
+		if resource.Role == "standby" && !database {
 			continue
 		}
 		at := slices.IndexFunc(decision.Assignments, func(a placement.Assignment) bool { return a.ResourceID == resource.ID })
@@ -189,7 +221,7 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 			return fmt.Errorf("app placement omitted copy %d", index)
 		}
 		assignment := decision.Assignments[at]
-		if len(assignment.Ports) != 1 {
+		if (!worker && len(assignment.Ports) != 1) || (worker && len(assignment.Ports) != 0) {
 			return fmt.Errorf("app placement omitted backend port")
 		}
 		generic := &agentv1.GenericContainerConfig{Image: service.Image, AppName: found.Name, CopyIndex: uint32(index), Command: service.Command, CommandOverride: service.Command != nil, Entrypoint: service.Entrypoint, EntrypointOverride: service.Entrypoint != nil}
@@ -199,15 +231,22 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 		if health := service.HealthCheck; health != nil {
 			generic.HealthCheck = &agentv1.HealthCheckConfig{Type: health.Type, Path: health.Path, Port: uint32(health.Port), Command: health.Command, IntervalSeconds: health.IntervalSeconds, TimeoutSeconds: health.TimeoutSeconds, UnhealthyThreshold: health.UnhealthyThreshold}
 		}
-		container := &agentv1.EnsureContainer{Engine: "generic", ImageDigest: service.Image, Generic: generic, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: budget.MemoryBytes, CpuMillis: budget.CPUMillis, Ports: []*agentv1.PortBinding{{ContainerPort: uint32(service.Ports[0].ContainerPort), HostPort: uint32(assignment.Ports[0].Number), HostAddress: assignment.Ports[0].Address, Transport: "tcp"}}}
+		container := &agentv1.EnsureContainer{ImageDigest: service.Image, Generic: generic, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: budget.MemoryBytes, CpuMillis: budget.CPUMillis}
+		if !worker {
+			container.Ports = []*agentv1.PortBinding{{ContainerPort: uint32(service.Ports[0].ContainerPort), HostPort: uint32(assignment.Ports[0].Number), HostAddress: assignment.Ports[0].Address, Transport: "tcp"}}
+		}
 		for _, name := range slices.Sorted(maps.Keys(service.Environment)) {
 			container.PlainEnv = append(container.PlainEnv, &agentv1.PlainEnv{Name: name, Value: service.Environment[name]})
+		}
+		var secrets []*agentv1.SecretReference
+		if database {
+			container, secrets = databaseContainer(spec, service, uint32(index), assignment.Ports[0].Address, assignment.Ports[0].Number, credentials)
 		}
 		var dependencies []string
 		if id := previous[assignment.NodeID]; id != "" {
 			dependencies = []string{id}
 		}
-		ensure, err := p.step(claim, epochFor(claim, assignment.NodeID), found.DesiredRevision, &agentv1.CommandInput{ResourceId: resource.ID.String(), Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: container}}, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, dependencies, beforeExecution)
+		ensure, err := p.step(claim, epochFor(claim, assignment.NodeID), found.DesiredRevision, &agentv1.CommandInput{ResourceId: resource.ID.String(), Secrets: secrets, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: container}}, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, dependencies, beforeExecution)
 		if err != nil {
 			return err
 		}
@@ -218,6 +257,6 @@ func (p *Planner) deployApp(ctx context.Context, claim operation.Claim) error {
 		plan.Steps = append(plan.Steps, ensure, start)
 		previous[assignment.NodeID] = start.Command.StepId
 	}
-	_, err = p.config.Store.InstallPlacementPlan(ctx, claim, request, decision, plan, nil)
+	_, err = p.config.Store.InstallPlacementPlan(ctx, claim, request, decision, plan)
 	return err
 }

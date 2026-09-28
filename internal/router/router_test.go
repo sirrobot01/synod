@@ -74,7 +74,7 @@ func TestHTTPBalancesAndRemovesUnhealthyCopies(t *testing.T) {
 	deadline = time.Now().Add(3 * time.Second)
 	for {
 		m.mu.Lock()
-		r := m.routes[route.AppId]
+		r := m.routes[route.AppId+"/"+strconv.FormatUint(uint64(route.IngressPort), 10)]
 		m.mu.Unlock()
 		r.mu.RLock()
 		healthy := r.backends[0].healthy.Load()
@@ -261,7 +261,7 @@ func TestRoutePortConflictRollsBackSnapshot(t *testing.T) {
 	if err := m.Apply(ctx, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled update: %v", err)
 	}
-	if m.routes[first.AppId].protocol != "tcp" {
+	if m.routes[first.AppId+"/"+strconv.FormatUint(uint64(first.IngressPort), 10)].protocol != "tcp" {
 		t.Fatal("failed snapshot changed prior routes")
 	}
 }
@@ -287,6 +287,12 @@ func TestRouteValidation(t *testing.T) {
 	}
 	if err := Validate([]*agentv1.AppRoute{valid, valid}); !errors.Is(err, ErrConfiguration) {
 		t.Fatal("duplicate ingress accepted")
+	}
+	// A database routes writers and readers on two ports of one app.
+	reader := proto.Clone(valid).(*agentv1.AppRoute)
+	reader.IngressPort = 8081
+	if err := Validate([]*agentv1.AppRoute{valid, reader}); err != nil {
+		t.Fatalf("second port of one app refused: %v", err)
 	}
 }
 

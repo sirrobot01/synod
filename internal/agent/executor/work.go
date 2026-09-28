@@ -34,7 +34,7 @@ func (e *Executor) execute(ctx context.Context, task job) {
 	start := record.State == journal.Queued
 	if start {
 		current := e.session
-		if current == nil || current != task.session || current.ctx.Err() != nil || current.gates[task.cluster] != task.gate || task.gate == nil || !task.gate.active {
+		if current == nil || current != task.session || current.ctx.Err() != nil || current.gates[task.app] != task.gate || task.gate == nil || !task.gate.active {
 			e.mu.Unlock()
 			return
 		}
@@ -48,14 +48,6 @@ func (e *Executor) execute(ctx context.Context, task job) {
 		return
 	}
 	if start {
-		// The host is rechecked immediately before the effect, because a
-		// reservation taken at planning time does not stop another process from
-		// filling the disk or taking the port. A refusal happens before the
-		// runtime is called, so it leaves no native object behind.
-		if err := e.precheck(record.Command); err != nil {
-			e.recordOutcome(record, runtime.Result{}, err)
-			return
-		}
 		// The credential is resolved from session memory immediately before the
 		// effect. A command whose secret this session was never sent is refused
 		// rather than run against an engine with no credential.
@@ -64,11 +56,24 @@ func (e *Executor) execute(ctx context.Context, task job) {
 			e.recordOutcome(record, runtime.Result{}, err)
 			return
 		}
-		// A readiness check is an observation over the network, not a container
-		// action, so it does not go to the runtime at all.
-		if record.Command.Input.GetCheckReadiness() != nil {
-			result, err := e.readiness(ctx, record.Command, secrets)
-			e.recordOutcome(record, result, err)
+		if record.Command.Input.GetEnsureContainer() != nil {
+			// An existing container can hold its own port and capacity.
+			read, cancel := context.WithTimeout(ctx, e.options.InspectionTimeout)
+			result, err := e.runtime.Recover(read, record.Command, nil)
+			cancel()
+			if err == nil && len(result.Effects) != 0 {
+				e.recordOutcome(record, result, nil)
+				return
+			}
+			if err != nil && !errors.Is(err, runtime.ErrNotApplied) {
+				// This command has made no changes. Do not claim foreign effects.
+				e.recordOutcome(record, runtime.Result{}, err)
+				return
+			}
+		}
+		// Recheck the host before creation. Another process can consume space or ports.
+		if err := e.precheck(record.Command); err != nil {
+			e.recordOutcome(record, runtime.Result{}, err)
 			return
 		}
 		result, err := e.executeWriter(ctx, record.Command, secrets)
@@ -83,7 +88,9 @@ func (e *Executor) recoverRecord(ctx context.Context, record journal.Record) {
 	defer cancel()
 	var result runtime.Result
 	var err error
-	if record.Command.Input.GetFinalAppSnapshot() != nil || record.Command.Input.GetRemoveAppData() != nil {
+	if record.Command.Input.GetSwitchDatabase() != nil {
+		result, err = e.recoverDatabaseSwitch(read, record.Command)
+	} else if record.Command.Input.GetFinalAppSnapshot() != nil || record.Command.Input.GetRemoveAppData() != nil {
 		result, err = e.recoverAppData(read, record.Command)
 	} else {
 		result, err = e.runtime.Recover(read, record.Command, record.Effects)
@@ -113,10 +120,10 @@ func (e *Executor) recordOutcome(record journal.Record, result runtime.Result, r
 	}
 }
 
-// inspectBarrier runs under the cluster slot, without holding the session gate lock.
+// inspectBarrier runs under the app slot, without holding the session gate lock.
 func (e *Executor) inspectBarrier(ctx context.Context, task job) {
 	e.mu.Lock()
-	valid := e.session == task.session && task.session.ctx.Err() == nil && task.session.gates[task.cluster] == task.gate && !task.gate.active && e.failure == nil
+	valid := e.session == task.session && task.session.ctx.Err() == nil && task.session.gates[task.app] == task.gate && !task.gate.active && e.failure == nil
 	e.mu.Unlock()
 	if !valid || ctx.Err() != nil {
 		return
@@ -130,7 +137,7 @@ func (e *Executor) inspectBarrier(ctx context.Context, task job) {
 		if ctx.Err() != nil || task.session.ctx.Err() != nil {
 			return
 		}
-		if record.Epoch.ClusterId == task.cluster {
+		if record.Epoch.AppId == task.app {
 			e.recoverRecord(ctx, record)
 		}
 	}
@@ -151,7 +158,7 @@ func (e *Executor) inspectBarrier(ctx context.Context, task job) {
 		}
 		current := proto.Clone(effect).(*agentv1.Effect)
 		record, err := e.journal.Get(effect.CommandId)
-		if err == nil && record.Epoch.ClusterId == task.cluster && record.Command != nil && record.Command.Input.ResourceId == effect.ResourceId {
+		if err == nil && record.Epoch.AppId == task.app && record.Command != nil && record.Command.Input.ResourceId == effect.ResourceId {
 			if effect.NativeOperationId == "" && record.State == journal.Terminal {
 				current.Active, current.OutcomeUnknown, current.State = false, false, "command_terminal"
 			} else if index := slices.IndexFunc(record.Effects, func(candidate *agentv1.Effect) bool { return candidate.NativeOperationId == effect.NativeOperationId }); index >= 0 {
@@ -161,7 +168,7 @@ func (e *Executor) inspectBarrier(ctx context.Context, task job) {
 		effects[effectKey{current.CommandId, current.ResourceId, current.NativeOperationId}] = current
 	}
 	read, cancel := context.WithTimeout(ctx, e.options.InspectionTimeout)
-	inventory, inventoryErr := e.runtime.InspectCluster(read, uuid.MustParse(task.cluster), prior)
+	inventory, inventoryErr := e.runtime.InspectApp(read, uuid.MustParse(task.app), prior)
 	cancel()
 	for _, effect := range inventory.Effects {
 		effects[effectKey{effect.CommandId, effect.ResourceId, effect.NativeOperationId}] = effect
@@ -183,7 +190,7 @@ func (e *Executor) inspectBarrier(ctx context.Context, task job) {
 	})
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.session != task.session || task.session.ctx.Err() != nil || task.session.gates[task.cluster] != task.gate || task.gate.active || e.failure != nil {
+	if e.session != task.session || task.session.ctx.Err() != nil || task.session.gates[task.app] != task.gate || task.gate.active || e.failure != nil {
 		return
 	}
 	if err := e.journal.RecordBarrier(report); err != nil {

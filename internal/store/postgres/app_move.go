@@ -38,24 +38,28 @@ func (s *Store) GetAppMove(ctx context.Context, installation, id uuid.UUID) (App
 
 // recordAppMoveTarget reserves the target as a standby. The writer does not change here.
 func recordAppMoveTarget(ctx context.Context, tx pgx.Tx, claim operation.Claim, request placement.Request, decision placement.Decision, plan *agentv1.ExecutionPlan) error {
-	if len(request.Resources) != 1 || len(decision.Assignments) != 1 || len(plan.Steps) != 4 {
+	if len(request.Resources) != 1 || len(decision.Assignments) != 1 || (len(plan.Steps) != 3 && len(plan.Steps) != 4) {
 		return operation.ErrCommandConflict
 	}
-	if err := operation.ValidatePlan(plan, operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID, DesiredRevision: request.DesiredRevision, Kind: MoveAppAPIOperation}); err != nil {
+	if err := operation.ValidatePlan(plan, operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, AppID: claim.AppID, DesiredRevision: request.DesiredRevision, Kind: MoveAppAPIOperation}); err != nil {
 		return err
 	}
 	var source, target uuid.UUID
 	var epoch uint64
-	var standbys int
+	var standbys, tier int
 	var name string
-	err := tx.QueryRow(ctx, `SELECT m.source_node_id,m.target_node_id,m.writer_epoch,(a.spec->'replication'->>'standbys')::integer,a.name
+	err := tx.QueryRow(ctx, `SELECT m.source_node_id,m.target_node_id,m.writer_epoch,(a.spec->'replication'->>'standbys')::integer,a.name,a.tier
  FROM app_moves m JOIN apps a ON a.installation_id=m.installation_id AND a.id=m.app_id
- WHERE m.operation_id=$1 AND a.desired_revision=$2 AND a.writer_node_id=m.source_node_id AND a.writer_epoch=m.writer_epoch AND a.desired_lifecycle='running'`, claim.OperationID, request.DesiredRevision).Scan(&source, &target, &epoch, &standbys, &name)
+ WHERE m.operation_id=$1 AND a.desired_revision=$2 AND a.writer_node_id=m.source_node_id AND a.writer_epoch=m.writer_epoch AND a.desired_lifecycle='running'`, claim.OperationID, request.DesiredRevision).Scan(&source, &target, &epoch, &standbys, &name, &tier)
 	if err != nil {
 		return admissionError(err)
 	}
 	resource, assigned := request.Resources[0], decision.Assignments[0]
-	stop, final, ensure, start := plan.Steps[0].Command, plan.Steps[1].Command, plan.Steps[2].Command, plan.Steps[3].Command
+	database := tier == 1
+	if (database && len(plan.Steps) != 3) || (!database && len(plan.Steps) != 4) {
+		return operation.ErrCommandConflict
+	}
+	stop, final, ensure, start := plan.Steps[0].Command, plan.Steps[len(plan.Steps)-3].Command, plan.Steps[len(plan.Steps)-2].Command, plan.Steps[len(plan.Steps)-1].Command
 	input := ensure.Input.GetEnsureContainer()
 	if resource.Role != "active" || resource.ID != assigned.ResourceID || assigned.NodeID != target || len(assigned.Ports) != 1 || assigned.Ports[0].Name != "backend" {
 		return operation.ErrCommandConflict
@@ -66,7 +70,7 @@ func recordAppMoveTarget(ctx context.Context, tx pgx.Tx, claim operation.Claim, 
 	if ensure.Input.ResourceId != resource.ID.String() || ensure.Epoch.NodeId != target.String() || start.Epoch.NodeId != target.String() || start.Input.ResourceId != resource.ID.String() || start.Input.GetStartContainer() == nil {
 		return operation.ErrCommandConflict
 	}
-	if stop.Input.GetStopContainer() == nil || stop.Epoch.NodeId != source.String() || final.Input.GetFinalAppSnapshot().GetWriterEpoch() != epoch || final.Input.GetFinalAppSnapshot().GetTargetNodeId() != target.String() {
+	if !database && (stop.Input.GetStopContainer() == nil || stop.Epoch.NodeId != source.String() || final.Input.GetFinalAppSnapshot().GetWriterEpoch() != epoch || final.Input.GetFinalAppSnapshot().GetTargetNodeId() != target.String()) {
 		return operation.ErrCommandConflict
 	}
 	for i := 1; i < len(plan.Steps); i++ {
@@ -75,21 +79,39 @@ func recordAppMoveTarget(ctx context.Context, tx pgx.Tx, claim operation.Claim, 
 		}
 	}
 	var valid bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND node_id=$3 AND id=$4 AND desired AND role='active')`, claim.InstallationID, claim.ClusterID, source, stop.Input.ResourceId).Scan(&valid); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND node_id=$3 AND id=$4 AND desired AND role='active')`, claim.InstallationID, claim.AppID, source, stop.Input.ResourceId).Scan(&valid); err != nil {
 		return admissionError(err)
 	}
 	if !valid {
 		return operation.ErrCommandConflict
 	}
+	if database {
+		command := stop.Input.GetSwitchDatabase()
+		if command == nil || command.WriterEpoch != epoch || command.TargetNodeId != target.String() || stop.Epoch.NodeId != source.String() {
+			return operation.ErrCommandConflict
+		}
+		var port uint32
+		if err := tx.QueryRow(ctx, `SELECT host_port FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND node_id=$3 AND id=$4 AND desired AND role='standby'`, claim.InstallationID, claim.AppID, target, resource.ID).Scan(&port); err != nil {
+			return admissionError(err)
+		}
+		if port != command.TargetPort || port != input.Ports[0].HostPort {
+			return operation.ErrCommandConflict
+		}
+		_, err := tx.Exec(ctx, `UPDATE app_moves SET target_copy_id=$2 WHERE operation_id=$1`, claim.OperationID, resource.ID)
+		if err != nil {
+			return admissionError(err)
+		}
+		return nil
+	}
 	// Make room before activating a new or retired target. Keep retired data for deletion.
 	if _, err := tx.Exec(ctx, `UPDATE app_copies SET desired=false,updated_at=clock_timestamp() WHERE id IN
- (SELECT id FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND desired AND role='standby' AND node_id<>$3 ORDER BY copy_index DESC OFFSET $4)`, claim.InstallationID, claim.ClusterID, target, standbys-1); err != nil {
+ (SELECT id FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND desired AND role='standby' AND node_id<>$3 ORDER BY copy_index DESC OFFSET $4)`, claim.InstallationID, claim.AppID, target, standbys-1); err != nil {
 		return admissionError(err)
 	}
 	tag, err := tx.Exec(ctx, `INSERT INTO app_copies(id,installation_id,app_id,node_id,copy_index,host_port,desired_revision,role,observed_state,created_at,updated_at)
  VALUES($1,$2,$3,$4,$5,$6,$7,'standby','pending',clock_timestamp(),clock_timestamp())
  ON CONFLICT(id) DO UPDATE SET desired=true,desired_revision=EXCLUDED.desired_revision,updated_at=clock_timestamp()
- WHERE app_copies.installation_id=EXCLUDED.installation_id AND app_copies.app_id=EXCLUDED.app_id AND app_copies.node_id=EXCLUDED.node_id AND app_copies.copy_index=EXCLUDED.copy_index AND app_copies.host_port=EXCLUDED.host_port AND app_copies.role='standby'`, resource.ID, claim.InstallationID, claim.ClusterID, target, input.Generic.CopyIndex, input.Ports[0].HostPort, request.DesiredRevision)
+ WHERE app_copies.installation_id=EXCLUDED.installation_id AND app_copies.app_id=EXCLUDED.app_id AND app_copies.node_id=EXCLUDED.node_id AND app_copies.copy_index=EXCLUDED.copy_index AND app_copies.host_port=EXCLUDED.host_port AND app_copies.role='standby'`, resource.ID, claim.InstallationID, claim.AppID, target, input.Generic.CopyIndex, input.Ports[0].HostPort, request.DesiredRevision)
 	if err != nil {
 		return admissionError(err)
 	}
@@ -113,7 +135,7 @@ func (s *Store) PrepareAppMoveStep(ctx context.Context, claim operation.Claim, s
 	var writer uuid.UUID
 	var epoch uint64
 	var revision int64
-	if err := tx.QueryRow(ctx, `SELECT writer_node_id,writer_epoch,desired_revision FROM apps WHERE installation_id=$1 AND id=$2 FOR UPDATE`, claim.InstallationID, claim.ClusterID).Scan(&writer, &epoch, &revision); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT writer_node_id,writer_epoch,desired_revision FROM apps WHERE installation_id=$1 AND id=$2 FOR UPDATE`, claim.InstallationID, claim.AppID).Scan(&writer, &epoch, &revision); err != nil {
 		return false, admissionError(err)
 	}
 	_, status, encoded, err := lockClaim(ctx, tx, claim)
@@ -124,7 +146,13 @@ func (s *Store) PrepareAppMoveStep(ctx context.Context, claim operation.Claim, s
 		return false, operation.ErrStaleOwner
 	}
 	var plan agentv1.ExecutionPlan
-	if proto.Unmarshal(encoded, &plan) != nil || len(plan.Steps) != 4 {
+	if proto.Unmarshal(encoded, &plan) != nil {
+		return false, operation.ErrCommandConflict
+	}
+	if len(plan.Steps) == 3 && plan.Steps[0].Command.Input.GetSwitchDatabase() != nil {
+		return s.prepareDatabaseMoveStep(ctx, tx, claim, stepID, writer, epoch, revision, &plan)
+	}
+	if len(plan.Steps) != 4 {
 		return false, operation.ErrCommandConflict
 	}
 	var move AppMove
@@ -152,7 +180,7 @@ func (s *Store) PrepareAppMoveStep(ctx context.Context, claim operation.Claim, s
 		return false, admissionError(err)
 	}
 	if index == 2 {
-		op := operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID}
+		op := operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, AppID: claim.AppID}
 		if err := checkPlanCompletions(ctx, tx, op, &agentv1.ExecutionPlan{Steps: plan.Steps[:2]}); err != nil {
 			return false, err
 		}
@@ -175,7 +203,7 @@ func (s *Store) PrepareAppMoveStep(ctx context.Context, claim operation.Claim, s
  WHERE r.installation_id=$1 AND r.app_id=$2 AND r.node_id=$3 AND r.writer_epoch=$4 AND r.role='standby' AND r.failure_code='' AND r.sequence>0 AND r.completed_at IS NOT NULL
  AND r.session_id=p.session_id AND r.observed_at>clock_timestamp()-interval '20 seconds'
  AND p.last_seen_at>clock_timestamp()-interval '20 seconds' AND NOT p.recovery_required AND n.revoked_at IS NULL
- AND t.acknowledged_at IS NOT NULL AND t.failure_code=''`, claim.InstallationID, claim.ClusterID, move.TargetNodeID, epoch).Scan(&sequence, &tableBytes)
+ AND t.acknowledged_at IS NOT NULL AND t.failure_code=''`, claim.InstallationID, claim.AppID, move.TargetNodeID, epoch).Scan(&sequence, &tableBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -187,7 +215,7 @@ func (s *Store) PrepareAppMoveStep(ctx context.Context, claim operation.Claim, s
 		return false, operation.ErrCommandConflict
 	}
 	if !slices.ContainsFunc(table.Apps, func(a *agentv1.AppReplication) bool {
-		return a.AppId == claim.ClusterID.String() && a.Epoch == epoch && a.Role == replication.RoleStandby
+		return a.AppId == claim.AppID.String() && a.Epoch == epoch && a.Role == replication.RoleStandby
 	}) {
 		return false, nil
 	}
@@ -212,16 +240,16 @@ func (s *Store) PrepareAppMoveStep(ctx context.Context, claim operation.Claim, s
 		return false, nil
 	}
 	// Release source compute only after the stopped writer and final copy are proved.
-	if err := releaseAppCompute(ctx, tx, claim.InstallationID, claim.ClusterID, move.SourceNodeID); err != nil {
+	if err := releaseAppCompute(ctx, tx, claim.InstallationID, claim.AppID, move.SourceNodeID); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app_copies SET role='standby',health='unknown',observed_at=NULL,observed_session_id=NULL WHERE installation_id=$1 AND app_id=$2 AND desired AND role='active'`, claim.InstallationID, claim.ClusterID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE app_copies SET role='standby',health='unknown',observed_at=NULL,observed_session_id=NULL WHERE installation_id=$1 AND app_id=$2 AND desired AND role='active'`, claim.InstallationID, claim.AppID); err != nil {
 		return false, admissionError(err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE app_copies SET role='active',health='unknown',observed_at=NULL,observed_session_id=NULL WHERE id=$1 AND desired`, targetCopy); err != nil {
 		return false, admissionError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE apps SET writer_node_id=$3,writer_epoch=writer_epoch+1,writer_last_grant_at=NULL,updated_at=clock_timestamp() WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.ClusterID, move.TargetNodeID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE apps SET writer_node_id=$3,writer_epoch=writer_epoch+1,writer_last_grant_at=NULL,updated_at=clock_timestamp() WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.AppID, move.TargetNodeID); err != nil {
 		return false, admissionError(err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE app_moves SET promoted_at=clock_timestamp() WHERE operation_id=$1`, claim.OperationID); err != nil {
@@ -235,7 +263,7 @@ func (s *Store) PrepareAppMoveStep(ctx context.Context, claim operation.Claim, s
 
 // releaseAppCompute retains disk and port ownership until app deletion.
 func releaseAppCompute(ctx context.Context, tx pgx.Tx, installation, id, node uuid.UUID) error {
-	rows, err := tx.Query(ctx, `SELECT allocation_bytes FROM resource_allocations WHERE installation_id=$1 AND cluster_id=$2 AND node_id=$3 AND released_at IS NULL AND resource_id IN(SELECT id FROM app_copies WHERE installation_id=$1 AND app_id=$2)`, installation, id, node)
+	rows, err := tx.Query(ctx, `SELECT allocation_bytes FROM resource_allocations WHERE installation_id=$1 AND app_id=$2 AND node_id=$3 AND released_at IS NULL AND resource_id IN(SELECT id FROM app_copies WHERE installation_id=$1 AND app_id=$2)`, installation, id, node)
 	if err != nil {
 		return admissionError(err)
 	}

@@ -16,10 +16,10 @@ func TestStorageLostCompletesJournalAndReleasesMutationSlot(t *testing.T) {
 		t.Run(map[bool]string{false: "execution refusal", true: "recovered refusal"}[recovering], func(t *testing.T) {
 			e := guard(t, pool(t, 8000000), 0)
 			identity := e.journal.Identity()
-			epoch := &agentv1.Epoch{InstallationId: identity.InstallationID, NodeId: identity.NodeID, RecoveryGeneration: identity.RecoveryGeneration, ClusterId: uuid.NewString(), ExecutionEpoch: 1}
+			epoch := &agentv1.Epoch{InstallationId: identity.InstallationID, NodeId: identity.NodeID, RecoveryGeneration: identity.RecoveryGeneration, AppId: uuid.NewString(), ExecutionEpoch: 1}
 			ctx, _ := localSession(t, e)
 			activateLocal(t, e, ctx, epoch)
-			command := volumeCommand(t, epoch)
+			command := ensureCommand(t, epoch)
 			command.Input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}
 			hash, err := operation.CommandHash(command)
 			if err != nil {
@@ -53,7 +53,7 @@ func TestStorageLostCompletesJournalAndReleasesMutationSlot(t *testing.T) {
 			if e.failure != nil {
 				t.Fatal(e.failure)
 			}
-			next := volumeCommand(t, epoch)
+			next := ensureCommand(t, epoch)
 			if _, err := e.journal.Admit(next); err != nil {
 				t.Fatalf("known storage loss retained admission slot: %v", err)
 			}

@@ -3,7 +3,9 @@ package enrollment
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -337,8 +339,8 @@ func (s *State) validateCertificate(response *Response) error {
 	if err := ca.CheckSignatureFrom(ca); err != nil {
 		return fmt.Errorf("%w: the delivered CA is not self-signed: %w", ErrCertificate, err)
 	}
-	if _, ok := ca.PublicKey.(ed25519.PublicKey); !ok {
-		return fmt.Errorf("%w: the delivered CA carries a %T public key and an Ed25519 key is required", ErrCertificate, ca.PublicKey)
+	if public, ok := ca.PublicKey.(*ecdsa.PublicKey); !ok || public.Curve != elliptic.P256() {
+		return fmt.Errorf("%w: the delivered CA carries a %T public key and an ECDSA P-256 key is required", ErrCertificate, ca.PublicKey)
 	}
 	expectedCA := "spiffe://" + s.state.Identity.InstallationID.String() + ".synod/ca"
 	if len(ca.URIs) != 1 || ca.URIs[0].String() != expectedCA {

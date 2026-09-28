@@ -90,7 +90,7 @@ func (s *Store) RecordAgentAdmission(ctx context.Context, installationID, nodeID
 	if epoch.InstallationId != installationID.String() || epoch.NodeId != nodeID.String() || epoch.ExecutionEpoch < 1 {
 		return operation.ErrStaleOwner
 	}
-	for _, id := range []string{ack.CommandId, ack.DeliveryAttemptId, epoch.ClusterId, epoch.RecoveryGeneration} {
+	for _, id := range []string{ack.CommandId, ack.DeliveryAttemptId, epoch.AppId, epoch.RecoveryGeneration} {
 		parsed, err := uuid.Parse(id)
 		if err != nil || parsed == uuid.Nil || parsed.String() != id {
 			return &AdmissionError{Code: InvalidRequest}
@@ -135,7 +135,7 @@ func (s *Store) RecordAgentAdmission(ctx context.Context, installationID, nodeID
 	}
 	var commandBytes []byte
 	if err := tx.QueryRow(ctx, `SELECT command_bytes FROM command_dispatches WHERE command_id=$1
- AND execution_epoch=$2 AND recovery_generation=$3 AND installation_id=$4 AND node_id=$5 AND cluster_id=$6`, ack.CommandId, epoch.ExecutionEpoch, epoch.RecoveryGeneration, installationID, nodeID, epoch.ClusterId).Scan(&commandBytes); err != nil {
+ AND execution_epoch=$2 AND recovery_generation=$3 AND installation_id=$4 AND node_id=$5 AND app_id=$6`, ack.CommandId, epoch.ExecutionEpoch, epoch.RecoveryGeneration, installationID, nodeID, epoch.AppId).Scan(&commandBytes); err != nil {
 		return admissionError(err)
 	}
 	var command agentv1.Command
@@ -180,7 +180,7 @@ func (s *Store) RecordSessionBarrier(ctx context.Context, claim operation.Claim,
 		return &AdmissionError{Code: InvalidRequest}
 	}
 	epoch := report.Epoch
-	if epoch.InstallationId != claim.InstallationID.String() || epoch.ClusterId != claim.ClusterID.String() || epoch.RecoveryGeneration != claim.RecoveryGeneration.String() || epoch.ExecutionEpoch != claim.ExecutionEpoch {
+	if epoch.InstallationId != claim.InstallationID.String() || epoch.AppId != claim.AppID.String() || epoch.RecoveryGeneration != claim.RecoveryGeneration.String() || epoch.ExecutionEpoch != claim.ExecutionEpoch {
 		return operation.ErrStaleOwner
 	}
 	nodeID, err := uuid.Parse(epoch.NodeId)
@@ -347,7 +347,7 @@ func (s *Store) RecordStepCompletion(ctx context.Context, claim operation.Claim,
 	}
 	step := plan.Steps[index]
 	command := step.Command
-	if receiptEpoch.InstallationId != claim.InstallationID.String() || receiptEpoch.ClusterId != claim.ClusterID.String() || receiptEpoch.NodeId != command.Epoch.NodeId || receiptEpoch.ExecutionEpoch < 1 {
+	if receiptEpoch.InstallationId != claim.InstallationID.String() || receiptEpoch.AppId != claim.AppID.String() || receiptEpoch.NodeId != command.Epoch.NodeId || receiptEpoch.ExecutionEpoch < 1 {
 		return operation.ErrCommandConflict
 	}
 	generation, err := uuid.Parse(receiptEpoch.RecoveryGeneration)

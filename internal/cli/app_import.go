@@ -52,6 +52,7 @@ func newAppCommand(a *app) *cobra.Command {
 		},
 	}
 	flags := command.Flags()
+	flags.BoolVar(&options.Worker, "worker", false, "Run a tier 3 worker without published ports or ingress")
 	flags.StringVarP(&filename, "file", "f", "docker-compose.yml", "Compose file")
 	flags.StringVar(&options.Name, "name", "", "App name (default: service name)")
 	flags.IntVar(&tier, "tier", 3, "Workload tier: 2 (one active copy with replicated data) or 3 (parallel copies)")

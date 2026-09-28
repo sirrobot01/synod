@@ -7,9 +7,6 @@
 export type ScreenName =
   | "fleet"
   | "nodes"
-  | "databases"
-  | "cluster"
-  | "topology"
   | "backups"
   | "operations"
   | "operation"
@@ -25,16 +22,11 @@ export interface Route {
 /** match reads one path into a screen and its resource. It never reads the network. */
 export function match(pathname: string): Route {
   const parts = pathname.split("/").filter((part) => part.length > 0).map(decodeURIComponent);
-  const [first, second, third] = parts;
+  const [first, second] = parts;
   if (first === undefined) return { screen: "fleet", id: "" };
   switch (first) {
     case "nodes":
       return { screen: "nodes", id: second ?? "" };
-    case "databases":
-      if (second === undefined) return { screen: "databases", id: "" };
-      // A cluster carries one sub-screen, so the topology keeps the cluster in its path.
-      if (third === "topology") return { screen: "topology", id: second };
-      return { screen: "cluster", id: second };
     case "backups":
       return { screen: "backups", id: second ?? "" };
     case "operations":
@@ -55,12 +47,6 @@ export function path(screen: ScreenName, id = ""): string {
       return "/";
     case "nodes":
       return id === "" ? "/nodes" : `/nodes/${encoded}`;
-    case "databases":
-      return "/databases";
-    case "cluster":
-      return `/databases/${encoded}`;
-    case "topology":
-      return `/databases/${encoded}/topology`;
     case "backups":
       return "/backups";
     case "operations":

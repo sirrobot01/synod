@@ -96,7 +96,7 @@ export interface MockDecision {
   detail: string;
   action: string;
   /** The screen to open, so a decision leads somewhere. */
-  go: { screen: "operation" | "nodes" | "settings" | "cluster"; id: string };
+  go: { screen: "operation" | "nodes" | "settings"; id: string };
 }
 
 /** Ordered by what is unrecoverable if ignored, not by severity colour. */

@@ -226,7 +226,7 @@ tasks:
     summary: |
       A changed migration fails the checksum check on an existing database.
       AGENTS.md requires a dropped development database, never a repair migration.
-      This command destroys every local cluster record.
+      This command destroys every local metadata record.
     deps: [dev:up]
     cmds:
       # --force ends a running controller's connections. Without it the drop fails

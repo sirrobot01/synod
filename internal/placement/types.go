@@ -179,7 +179,7 @@ type Group struct {
 type Request struct {
 	Version         int        `json:"version"`
 	InstallationID  uuid.UUID  `json:"installation_id"`
-	ClusterID       uuid.UUID  `json:"cluster_id"`
+	AppID           uuid.UUID  `json:"app_id"`
 	OperationID     uuid.UUID  `json:"operation_id"`
 	DesiredRevision int64      `json:"desired_revision"`
 	Profile         string     `json:"profile"`
@@ -193,7 +193,7 @@ type Allocation struct {
 	ID                 uuid.UUID         `json:"id"`
 	InstallationID     uuid.UUID         `json:"installation_id"`
 	NodeID             uuid.UUID         `json:"node_id"`
-	ClusterID          uuid.UUID         `json:"cluster_id"`
+	AppID              uuid.UUID         `json:"app_id"`
 	ResourceID         uuid.UUID         `json:"resource_id"`
 	CreatedByOperation uuid.UUID         `json:"created_by_operation"`
 	CreatedRevision    int64             `json:"created_revision"`

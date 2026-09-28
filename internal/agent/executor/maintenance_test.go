@@ -18,7 +18,7 @@ func TestRepeatedNativeCommandsAndScheduledCompaction(t *testing.T) {
 	activateLocal(t, f.e, ctx, f.epoch)
 	var first *agentv1.Command
 	for i := range 40 {
-		command := volumeCommand(t, f.epoch)
+		command := ensureCommand(t, f.epoch)
 		if i == 0 {
 			first = command
 		}
@@ -26,7 +26,7 @@ func TestRepeatedNativeCommandsAndScheduledCompaction(t *testing.T) {
 		if err != nil || ack.GetAdmissionAck().State != "queued" {
 			t.Fatalf("command %d: %v %v", i, ack, err)
 		}
-		f.e.execute(t.Context(), job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]})
+		f.e.execute(t.Context(), job{app: f.epoch.AppId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.AppId]})
 		record, err := f.e.journal.Get(command.CommandId)
 		if err != nil || record.State != journal.Terminal || record.Result.State != "succeeded" {
 			t.Fatalf("command %d: %v %v", i, record, err)

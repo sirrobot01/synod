@@ -50,7 +50,7 @@ func (e *Executor) writerAssignment(appID string) (*agentv1.AppReplication, erro
 
 // prepareWriter refuses empty data after the first writer epoch.
 func (e *Executor) prepareWriter(ctx context.Context, command *agentv1.Command, mounts []*agentv1.Mount) error {
-	assignment, err := e.writerAssignment(command.Epoch.ClusterId)
+	assignment, err := e.writerAssignment(command.Epoch.AppId)
 	if err != nil {
 		return err
 	}
@@ -173,6 +173,9 @@ func writeWriterFile(root *os.Root, name, value string) error {
 }
 
 func (e *Executor) executeWriter(ctx context.Context, command *agentv1.Command, secrets runtime.Secrets) (runtime.Result, error) {
+	if command.Input.GetSwitchDatabase() != nil {
+		return e.switchDatabase(ctx, command)
+	}
 	if command.Input.GetFinalAppSnapshot() != nil {
 		return e.finalAppSnapshot(ctx, command)
 	}
@@ -201,6 +204,11 @@ func (e *Executor) executeWriter(ctx context.Context, command *agentv1.Command, 
 			}
 		}
 	}
+	if slices.ContainsFunc(mounts, func(m *agentv1.Mount) bool { return m.Type == "engine" }) && command.Input.GetEnsureContainer() != nil {
+		if err := e.prepareEngine(command.Epoch.AppId, mounts); err != nil {
+			return runtime.Result{}, err
+		}
+	}
 	if !slices.ContainsFunc(mounts, func(m *agentv1.Mount) bool { return m.Type == "replicated" }) {
 		return e.runtime.Execute(ctx, command, secrets)
 	}
@@ -210,7 +218,7 @@ func (e *Executor) executeWriter(ctx context.Context, command *agentv1.Command, 
 			return runtime.Result{}, err
 		}
 		for _, app := range apps {
-			if app.AppID == command.Epoch.ClusterId && app.Running {
+			if app.AppID == command.Epoch.AppId && app.Running {
 				if app.ResourceID != command.Input.ResourceId {
 					return runtime.Result{}, runtime.ErrBusy
 				}
@@ -227,10 +235,10 @@ func (e *Executor) executeWriter(ctx context.Context, command *agentv1.Command, 
 		return runtime.Result{}, err
 	}
 	result, err := e.runtime.Execute(ctx, command, secrets)
-	if _, leaseErr := e.writerAssignment(command.Epoch.ClusterId); leaseErr != nil {
+	if _, leaseErr := e.writerAssignment(command.Epoch.AppId); leaseErr != nil {
 		if native, ok := e.runtime.(writerRuntime); ok {
 			stop, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.options.InspectionTimeout)
-			fenceErr := native.FenceApp(stop, runtime.AppContainer{AppID: command.Epoch.ClusterId, ResourceID: command.Input.ResourceId})
+			fenceErr := native.FenceApp(stop, runtime.AppContainer{AppID: command.Epoch.AppId, ResourceID: command.Input.ResourceId})
 			cancel()
 			return result, errors.Join(err, leaseErr, fenceErr)
 		}

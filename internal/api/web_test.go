@@ -44,7 +44,7 @@ func TestApplicationIsServedFromTheSameOrigin(t *testing.T) {
 		t.Fatalf("a document was served as %q", got)
 	}
 	// A browser route that the server does not know still loads the application.
-	if rec := call(t, server, "GET", "/clusters/pg-core", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), "Synod") {
+	if rec := call(t, server, "GET", "/apps/photos", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), "Synod") {
 		t.Fatalf("browser route: %d %s", rec.Code, rec.Body)
 	}
 	// A hashed asset is immutable. The index never caches.
@@ -88,7 +88,7 @@ func TestAPIKeepsItsJSONAnswers(t *testing.T) {
 	if got := missing.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
 		t.Fatalf("an API failure was served as %q", got)
 	}
-	wrong := call(t, server, "DELETE", "/v1/clusters", "", withBootstrap)
+	wrong := call(t, server, "DELETE", "/v1/apps", "", withBootstrap)
 	if wrong.Code != 405 || wrong.Header().Get("Allow") == "" {
 		t.Fatalf("method not allowed: %d allow=%q", wrong.Code, wrong.Header().Get("Allow"))
 	}

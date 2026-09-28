@@ -21,9 +21,9 @@ vi.mock("../lib/api", async () => {
   };
 });
 
-function operation(id: string, status: string, kind = "cluster.update", attempts = 1) {
+function operation(id: string, status: string, kind = "app.start", attempts = 1) {
   return {
-    id, cluster_id: "c1", kind, status, plan_version: 2, desired_revision: 3,
+    id, app_id: "c1", kind, status, plan_version: 2, desired_revision: 3,
     attempts, failure_code: null, cancellation_requested_at: null,
     finished_at: status === "succeeded" ? "2026-09-19T13:00:00Z" : null,
     created_at: "2026-09-19T12:00:00Z", updated_at: "2026-09-19T12:30:00Z",
@@ -31,7 +31,7 @@ function operation(id: string, status: string, kind = "cluster.update", attempts
 }
 
 function open(id: string) {
-  return render(Operation, { id, onOpenCluster: () => {} });
+  return render(Operation, { id });
 }
 
 async function settle() {
@@ -46,8 +46,8 @@ beforeEach(() => {
   hold = false;
   // The two answers differ in their fields, so the screen shows which one it drew.
   answers = {
-    op_running: operation("op_running", "running", "cluster.delete", 9),
-    op_done: operation("op_done", "succeeded", "cluster.update", 1),
+    op_running: operation("op_running", "running", "app.delete", 9),
+    op_done: operation("op_done", "succeeded", "app.start", 1),
   };
   vi.useFakeTimers();
 });
@@ -81,7 +81,7 @@ describe("reading an operation", () => {
     const view = open("op_running");
     await settle();
     // The address moves on while the first request is still open.
-    await view.rerender({ id: "op_done", onOpenCluster: () => {} });
+    await view.rerender({ id: "op_done" });
     await settle();
     hold = false;
     // The request for the open address answers first, and the stale one answers
@@ -89,8 +89,8 @@ describe("reading an operation", () => {
     held.reverse().forEach((release) => release());
     await settle();
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("op_done");
-    expect(screen.getByText("cluster.update")).toBeTruthy();
-    expect(screen.queryByText("cluster.delete")).toBe(null);
+    expect(screen.getByText("app.start")).toBeTruthy();
+    expect(screen.queryByText("app.delete")).toBe(null);
   });
 });
 
@@ -98,12 +98,12 @@ describe("a failed operation", () => {
   beforeEach(() => {
     answers = {
       op_failed: {
-        ...operation("op_failed", "failed", "cluster.stop", 3),
+        ...operation("op_failed", "failed", "app.stop", 3),
         failure_code: "dependency_unavailable",
         finished_at: "2026-09-19T13:00:00Z",
       },
-      op_pending: { ...operation("op_pending", "pending", "cluster.create", 0), plan_version: 0 },
-      op_waiting: operation("op_waiting", "waiting", "cluster.upgrade", 1),
+      op_pending: { ...operation("op_pending", "pending", "app.deploy", 0), plan_version: 0 },
+      op_waiting: operation("op_waiting", "waiting", "app.move", 1),
     };
   });
 

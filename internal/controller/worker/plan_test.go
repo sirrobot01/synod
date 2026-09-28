@@ -16,7 +16,7 @@ import (
 const testImageDigest = "postgres@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func testOperation() operation.Operation {
-	return operation.Operation{ID: uuid.New(), InstallationID: uuid.New(), ClusterID: uuid.New(), DesiredRevision: 3, PlanVersion: 1}
+	return operation.Operation{ID: uuid.New(), InstallationID: uuid.New(), AppID: uuid.New(), DesiredRevision: 3, PlanVersion: 1}
 }
 
 // planStep builds one hashed step whose payload matches its postcondition.
@@ -24,47 +24,28 @@ func planStep(t *testing.T, op operation.Operation, nodeID, resourceID string, p
 	t.Helper()
 	input := &agentv1.CommandInput{ResourceId: resourceID, PayloadVersion: operation.PayloadVersion, Timeout: durationpb.New(time.Minute)}
 	switch postcondition {
-	case agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS:
-		input.Payload = &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: resourceID}}
-	case agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS:
-		input.Payload = &agentv1.CommandInput_EnsureNetwork{EnsureNetwork: &agentv1.EnsureNetwork{NetworkId: resourceID}}
-	case agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED:
-		admin, application := uuid.NewString(), uuid.NewString()
-		input.Secrets = []*agentv1.SecretReference{
-			{CredentialId: admin, Version: 1, Purpose: "superuser"},
-			{CredentialId: application, Version: 1, Purpose: "application"},
-		}
+	case agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS:
 		input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
-			ImageDigest: testImageDigest, Engine: "postgres", VolumeId: uuid.NewString(), NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST,
-			Postgres: &agentv1.PostgresContainerConfig{Port: 15432,
-				SuperuserCredentialId: admin, SuperuserCredentialVersion: 1,
-				ApplicationCredentialId: application, ApplicationCredentialVersion: 1},
-			SecretEnv: []*agentv1.SecretEnv{{Name: "POSTGRES_PASSWORD", Purpose: "superuser"}, {Name: "SYNOD_APP_VERIFIER", Purpose: "application"}},
+			ImageDigest: testImageDigest, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE,
+			Generic: &agentv1.GenericContainerConfig{Image: testImageDigest, AppName: "web"},
 		}}
-		if postcondition == agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED {
-			input.Payload = &agentv1.CommandInput_RecoverPostgresSetup{RecoverPostgresSetup: &agentv1.RecoverPostgresSetup{Postgres: input.GetEnsureContainer().Postgres}}
-		}
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING:
 		input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED:
 		input.Payload = &agentv1.CommandInput_StopContainer{StopContainer: &agentv1.StopContainer{GracePeriod: durationpb.New(10 * time.Second)}}
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT:
 		input.Payload = &agentv1.CommandInput_RemoveContainer{RemoveContainer: &agentv1.RemoveContainer{}}
-	case agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED:
-		input.Payload = &agentv1.CommandInput_InspectContainer{InspectContainer: &agentv1.InspectContainer{}}
 	case agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED:
 		input.Payload = &agentv1.CommandInput_FinalAppSnapshot{FinalAppSnapshot: &agentv1.FinalAppSnapshot{WriterEpoch: 1, TargetNodeId: uuid.NewString()}}
+	case agentv1.Postcondition_POSTCONDITION_DATABASE_SWITCHOVER_READY:
+		input.Payload = &agentv1.CommandInput_SwitchDatabase{SwitchDatabase: &agentv1.SwitchDatabase{WriterEpoch: 1, TargetNodeId: uuid.NewString(), TargetHost: "192.0.2.10", TargetPort: 5432}}
 	case agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT:
 		input.Payload = &agentv1.CommandInput_RemoveAppData{RemoveAppData: &agentv1.RemoveAppData{WriterEpoch: 1}}
-	case agentv1.Postcondition_POSTCONDITION_ENGINE_READY:
-		input.Payload = &agentv1.CommandInput_CheckReadiness{CheckReadiness: &agentv1.CheckReadiness{
-			Address: "127.0.0.1", Port: 5432, Database: "app", Role: "synod_admin", Engine: "postgres", PostgresRole: "primary",
-		}}
 	default:
 		t.Fatalf("postcondition %v has no payload", postcondition)
 	}
 	command := &agentv1.Command{
-		Epoch:       &agentv1.Epoch{InstallationId: op.InstallationID.String(), NodeId: nodeID, ClusterId: op.ClusterID.String(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1},
+		Epoch:       &agentv1.Epoch{InstallationId: op.InstallationID.String(), NodeId: nodeID, AppId: op.AppID.String(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1},
 		OperationId: op.ID.String(), StepId: uuid.NewString(), CommandId: uuid.NewString(),
 		DesiredRevision: op.DesiredRevision, PlanVersion: 1, Input: input,
 	}
@@ -82,16 +63,16 @@ func rehash(t *testing.T, command *agentv1.Command) {
 	command.InputHash = hash[:]
 }
 
-// provisionPlan ensures a volume and a network, then creates and starts one container.
+// provisionPlan creates and starts two containers on one node.
 func provisionPlan(t *testing.T, op operation.Operation) *agentv1.ExecutionPlan {
 	t.Helper()
-	node, container := uuid.NewString(), uuid.NewString()
-	volume := planStep(t, op, node, uuid.NewString(), agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS)
-	// An agent runs one command of a cluster at a time, so steps on one node form a chain.
-	network := planStep(t, op, node, uuid.NewString(), agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS, volume.Command.StepId)
-	create := planStep(t, op, node, container, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, volume.Command.StepId, network.Command.StepId)
-	start := planStep(t, op, node, container, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, create.Command.StepId)
-	return &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{volume, network, create, start}}
+	node, first, second := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	// An agent runs one command of an app at a time, so steps on one node form a chain.
+	createFirst := planStep(t, op, node, first, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS)
+	startFirst := planStep(t, op, node, first, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, createFirst.Command.StepId)
+	createSecond := planStep(t, op, node, second, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, startFirst.Command.StepId)
+	startSecond := planStep(t, op, node, second, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, createSecond.Command.StepId)
+	return &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{createFirst, startFirst, createSecond, startSecond}}
 }
 
 func TestValidatePlanAcceptsDeclaredOrder(t *testing.T) {
@@ -124,8 +105,8 @@ func TestValidatePlanRejectsUnsupportedContent(t *testing.T) {
 			p.Steps[1].Command.Epoch.InstallationId = uuid.NewString()
 			rehash(t, p.Steps[1].Command)
 		},
-		"other cluster": func(p *agentv1.ExecutionPlan) {
-			p.Steps[1].Command.Epoch.ClusterId = uuid.NewString()
+		"other app": func(p *agentv1.ExecutionPlan) {
+			p.Steps[1].Command.Epoch.AppId = uuid.NewString()
 			rehash(t, p.Steps[1].Command)
 		},
 		"other operation": func(p *agentv1.ExecutionPlan) {
@@ -176,7 +157,7 @@ func TestValidatePlanBoundsStepCount(t *testing.T) {
 	var steps []*agentv1.PlanStep
 	// Each step has its own node, so no two steps need an order.
 	for range 129 {
-		steps = append(steps, planStep(t, op, uuid.NewString(), uuid.NewString(), agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS))
+		steps = append(steps, planStep(t, op, uuid.NewString(), uuid.NewString(), agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS))
 	}
 	if err := operation.ValidatePlan(&agentv1.ExecutionPlan{Version: 1, Steps: steps[:128]}, op); err != nil {
 		t.Fatal(err)
@@ -201,13 +182,10 @@ func TestCheckResultMatchesPostconditionState(t *testing.T) {
 		postcondition    agentv1.Postcondition
 		proved, unproved string
 	}{
-		{agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS, "present", "absent"},
-		{agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS, "present", ""},
 		{agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, "created", "absent"},
 		{agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING, "running", "exited"},
 		{agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED, "exited", "running"},
 		{agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT, "absent", "exited"},
-		{agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED, "paused", "absent"},
 	} {
 		step := planStep(t, op, node, uuid.NewString(), tt.postcondition)
 		if err := operation.CheckStepResult(step, succeededResult(step, tt.proved)); err != nil {
@@ -244,7 +222,7 @@ func TestCheckResultRejectsWeakEvidence(t *testing.T) {
 		"other input hash":   func(r *agentv1.TerminalResult) { r.InputHash = []byte("another input hash") },
 		"other installation": func(r *agentv1.TerminalResult) { r.Epoch.InstallationId = uuid.NewString() },
 		"other node":         func(r *agentv1.TerminalResult) { r.Epoch.NodeId = uuid.NewString() },
-		"other cluster":      func(r *agentv1.TerminalResult) { r.Epoch.ClusterId = uuid.NewString() },
+		"other app":          func(r *agentv1.TerminalResult) { r.Epoch.AppId = uuid.NewString() },
 		"unfinished state":   func(r *agentv1.TerminalResult) { r.State = "failed" },
 		"failure code":       func(r *agentv1.TerminalResult) { r.FailureCode = "container_start_failed" },
 		"absent effect":      func(r *agentv1.TerminalResult) { r.Effects = []*agentv1.Effect{nil} },
@@ -296,7 +274,7 @@ func completedThrough(plan *agentv1.ExecutionPlan, count int) map[string]bool {
 func TestRecoveryFrontierKeepsLatestObligation(t *testing.T) {
 	op, node, container := testOperation(), uuid.NewString(), uuid.NewString()
 	plan := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{
-		planStep(t, op, node, uuid.NewString(), agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS),
+		planStep(t, op, node, uuid.NewString(), agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS),
 		planStep(t, op, node, container, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS),
 		planStep(t, op, node, container, agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING),
 		planStep(t, op, node, container, agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED),
@@ -334,27 +312,6 @@ func TestRecoveryFrontierRestoresRemovedResource(t *testing.T) {
 	}
 	if got := stepIDs(plan, frontier); len(got) != 1 || got[0] != 2 {
 		t.Fatalf("frontier %v, want the later creation alone", got)
-	}
-}
-
-func TestRecoveryFrontierKeepsInspectionWithoutOwnership(t *testing.T) {
-	op, node, container := testOperation(), uuid.NewString(), uuid.NewString()
-	inspect := planStep(t, op, node, container, agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED)
-	create := planStep(t, op, node, container, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS)
-	plan := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{inspect, create}}
-	frontier, _, err := recoveryFrontier(plan, map[string]bool{inspect.Command.StepId: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := stepIDs(plan, frontier); len(got) != 1 || got[0] != 0 {
-		t.Fatalf("frontier %v, want the inspection alone", got)
-	}
-	frontier, _, err = recoveryFrontier(plan, completedThrough(plan, 2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := stepIDs(plan, frontier); len(got) != 1 || got[0] != 1 {
-		t.Fatalf("frontier %v, want the configuration alone", got)
 	}
 }
 
@@ -407,7 +364,7 @@ func TestValidatePlanAcceptsEveryPostcondition(t *testing.T) {
 	// resource and the removal names the stop.
 	torn := uuid.NewString()
 	var stopStep string
-	for postcondition := agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS; postcondition <= agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED; postcondition++ {
+	for postcondition := agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS; postcondition <= agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT; postcondition++ {
 		switch postcondition {
 		case agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED:
 			step := planStep(t, op, node, torn, postcondition)

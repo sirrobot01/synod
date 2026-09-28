@@ -100,7 +100,7 @@ func prepare(request Request, snapshot Snapshot) (*planner, error) {
 			}
 		}
 		if prior, exists := p.existing[resource.ID]; exists {
-			if prior.Released || prior.ClusterID != request.ClusterID || prior.ID != resource.ReservationID || len(prior.OwnedResourceIDs) != len(resource.OwnedResourceIDs) {
+			if prior.Released || prior.AppID != request.AppID || prior.ID != resource.ReservationID || len(prior.OwnedResourceIDs) != len(resource.OwnedResourceIDs) {
 				return nil, ErrConflict
 			}
 			for _, id := range resource.OwnedResourceIDs {
@@ -141,12 +141,12 @@ func prepare(request Request, snapshot Snapshot) (*planner, error) {
 				continue
 			}
 			prior, exists := p.existing[member]
-			if !exists || prior.Released || prior.ClusterID != request.ClusterID {
+			if !exists || prior.Released || prior.AppID != request.AppID {
 				return nil, ErrInvalid
 			}
 		}
 		for _, prior := range snapshot.Allocations {
-			if prior.Released || prior.ClusterID != request.ClusterID {
+			if prior.Released || prior.AppID != request.AppID {
 				continue
 			}
 			if key, exists := prior.Groups[group.ID]; exists && (key != group.DomainKey || !slices.Contains(group.Members, prior.ResourceID)) {

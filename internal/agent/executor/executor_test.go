@@ -33,7 +33,7 @@ func TestCommandDeliveryRequiresAndEchoesAttempt(t *testing.T) {
 	f := newFixture(t, nil)
 	ctx, _ := localSession(t, f.e)
 	activateLocal(t, f.e, ctx, f.epoch)
-	command := volumeCommand(t, f.epoch)
+	command := ensureCommand(t, f.epoch)
 	for _, id := range []string{"", "invalid", uuid.Nil.String(), strings.ToUpper(uuid.NewString())} {
 		_, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: id, Message: &agentv1.ControllerMessage_Command{Command: command}})
 		if !errors.Is(err, controlstream.ErrMessage) {
@@ -112,7 +112,7 @@ func newFixture(t *testing.T, hook func(*http.Request, http.RoundTripper) (*http
 		}
 		t.Cleanup(func() { mutationAPI.Close() })
 	}
-	r, err := docker.New(mutationAPI, docker.Options{InstallationID: uuid.MustParse(identity.InstallationID), NodeID: uuid.MustParse(identity.NodeID), AllowBridgeFixture: true})
+	r, err := docker.New(mutationAPI, docker.Options{InstallationID: uuid.MustParse(identity.InstallationID), NodeID: uuid.MustParse(identity.NodeID)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func newFixture(t *testing.T, hook func(*http.Request, http.RoundTripper) (*http
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{e: e, api: api, path: path, options: options, epoch: &agentv1.Epoch{InstallationId: identity.InstallationID, NodeId: identity.NodeID, ClusterId: uuid.NewString(), RecoveryGeneration: identity.RecoveryGeneration, ExecutionEpoch: 1}}
+	f := &fixture{e: e, api: api, path: path, options: options, epoch: &agentv1.Epoch{InstallationId: identity.InstallationID, NodeId: identity.NodeID, AppId: uuid.NewString(), RecoveryGeneration: identity.RecoveryGeneration, ExecutionEpoch: 1}}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -175,10 +175,16 @@ func newFixture(t *testing.T, hook func(*http.Request, http.RoundTripper) (*http
 	return f
 }
 
-func volumeCommand(t *testing.T, epoch *agentv1.Epoch) *agentv1.Command {
+// ensureCommand creates one tier 3 container. A create is a native effect that a
+// hook on the Docker API can hold or drop.
+func ensureCommand(t *testing.T, epoch *agentv1.Epoch) *agentv1.Command {
 	t.Helper()
-	id := uuid.NewString()
-	command := &agentv1.Command{Epoch: proto.Clone(epoch).(*agentv1.Epoch), OperationId: uuid.NewString(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1, Input: &agentv1.CommandInput{ResourceId: id, PayloadVersion: 1, Timeout: durationpb.New(10 * time.Second), Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: id}}}}
+	image := "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3"
+	command := &agentv1.Command{Epoch: proto.Clone(epoch).(*agentv1.Epoch), OperationId: uuid.NewString(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1,
+		Input: &agentv1.CommandInput{ResourceId: uuid.NewString(), PayloadVersion: 1, Timeout: durationpb.New(30 * time.Second), Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
+			ImageDigest: image, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
+			Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "executor-app", Mounts: []*agentv1.Mount{{Type: "tmpfs", Target: "/data"}}},
+		}}}}
 	hash, err := operation.CommandHash(command)
 	if err != nil {
 		t.Fatal(err)
@@ -203,7 +209,7 @@ func activateLocal(t *testing.T, e *Executor, ctx context.Context, epoch *agentv
 		t.Fatal(err)
 	}
 	e.mu.Lock()
-	task := job{cluster: epoch.ClusterId, barrier: true, session: e.session, gate: e.session.gates[epoch.ClusterId]}
+	task := job{app: epoch.AppId, barrier: true, session: e.session, gate: e.session.gates[epoch.AppId]}
 	e.mu.Unlock()
 	e.inspectBarrier(t.Context(), task)
 	if _, err := e.Handle(ctx, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_ActivateEpoch{ActivateEpoch: &agentv1.ActivateEpoch{Epoch: epoch}}}); err != nil {
@@ -216,7 +222,7 @@ func TestSessionLossRequiresFreshActivationBeforeStart(t *testing.T) {
 	var command *agentv1.Command
 	var creates atomic.Int32
 	f = newFixture(t, func(request *http.Request, base http.RoundTripper) (*http.Response, error) {
-		if strings.HasSuffix(request.URL.Path, "/volumes/create") {
+		if strings.HasSuffix(request.URL.Path, "/containers/create") {
 			creates.Add(1)
 			record, err := f.e.journal.Get(command.CommandId)
 			if err != nil || record.State != journal.Running {
@@ -227,7 +233,7 @@ func TestSessionLossRequiresFreshActivationBeforeStart(t *testing.T) {
 	})
 	old, cancel := localSession(t, f.e)
 	activateLocal(t, f.e, old, f.epoch)
-	command = volumeCommand(t, f.epoch)
+	command = ensureCommand(t, f.epoch)
 	ack, err := f.e.Handle(old, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
 	if err != nil || ack.GetAdmissionAck().State != "queued" {
 		t.Fatal(ack, err)
@@ -235,18 +241,18 @@ func TestSessionLossRequiresFreshActivationBeforeStart(t *testing.T) {
 	if record, err := f.e.journal.Get(command.CommandId); err != nil || record.State != journal.Queued {
 		t.Fatal("ACK preceded admission", err)
 	}
-	stale := job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]}
+	stale := job{app: f.epoch.AppId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.AppId]}
 	cancel()
 	fresh, _ := localSession(t, f.e)
 	if _, err := f.e.Handle(fresh, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_ActivateEpoch{ActivateEpoch: &agentv1.ActivateEpoch{Epoch: f.epoch}}}); !errors.Is(err, operation.ErrBarrierPending) {
 		t.Fatal("activated persisted authority on new session", err)
 	}
 	f.e.execute(t.Context(), stale)
-	if _, err := f.api.VolumeInspect(t.Context(), "synod-volume-"+command.Input.ResourceId, client.VolumeInspectOptions{}); !errdefs.IsNotFound(err) {
+	if _, err := f.api.ContainerInspect(t.Context(), "synod-instance-"+command.Input.ResourceId, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
 		t.Fatal("stale session started mutation", err)
 	}
 	activateLocal(t, f.e, fresh, f.epoch)
-	current := job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]}
+	current := job{app: f.epoch.AppId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.AppId]}
 	f.e.execute(t.Context(), current)
 	if record, err := f.e.journal.Get(command.CommandId); err != nil || record.State != journal.Terminal || record.Result.State != "succeeded" {
 		t.Fatal("command did not complete", err)
@@ -263,8 +269,8 @@ func TestUnknownNativeReplyRecoversAfterJournalReopen(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		create := strings.HasSuffix(request.URL.Path, "/volumes/create") && response.StatusCode < 300
-		if (create && dropped.CompareAndSwap(false, true)) || (dropped.Load() && request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/volumes/")) {
+		create := strings.HasSuffix(request.URL.Path, "/containers/create") && response.StatusCode < 300
+		if (create && dropped.CompareAndSwap(false, true)) || (dropped.Load() && request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/containers/synod-instance-")) {
 			response.Body.Close()
 			response.Body = io.NopCloser(iotest.ErrReader(io.ErrUnexpectedEOF))
 		}
@@ -272,11 +278,11 @@ func TestUnknownNativeReplyRecoversAfterJournalReopen(t *testing.T) {
 	})
 	ctx, _ := localSession(t, f.e)
 	activateLocal(t, f.e, ctx, f.epoch)
-	command := volumeCommand(t, f.epoch)
+	command := ensureCommand(t, f.epoch)
 	if _, err := f.e.Handle(ctx, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}}); err != nil {
 		t.Fatal(err)
 	}
-	f.e.execute(t.Context(), job{cluster: f.epoch.ClusterId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.ClusterId]})
+	f.e.execute(t.Context(), job{app: f.epoch.AppId, command: command.CommandId, session: f.e.session, gate: f.e.session.gates[f.epoch.AppId]})
 	record, err := f.e.journal.Get(command.CommandId)
 	if err != nil || record.State != journal.Running || len(record.Effects) != 1 || !record.Effects[0].OutcomeUnknown {
 		t.Fatal("uncertainty was not retained", record, err)
@@ -298,7 +304,7 @@ func TestUnknownNativeReplyRecoversAfterJournalReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recovered.execute(t.Context(), job{cluster: f.epoch.ClusterId, command: command.CommandId})
+	recovered.execute(t.Context(), job{app: f.epoch.AppId, command: command.CommandId})
 	terminal, err := reopened.Get(command.CommandId)
 	if err != nil || terminal.State != journal.Terminal || terminal.Result.State != "succeeded" || terminal.Effects[0].NativeOperationId != record.Effects[0].NativeOperationId {
 		t.Fatal("recovery failed", terminal, err)

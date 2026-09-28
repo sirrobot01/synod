@@ -18,9 +18,16 @@ import (
 )
 
 func TestAppPlansCommitCopiesPortsAndCommands(t *testing.T) {
-	for _, mode := range []app.CopiesMode{app.CopiesModeFixed, app.CopiesModeAllCapable} {
-		t.Run(string(mode), func(t *testing.T) {
-			f := newFixture(t, postgresSpec())
+	for _, scenario := range []struct {
+		name   string
+		mode   app.CopiesMode
+		worker bool
+	}{
+		{"fixed", app.CopiesModeFixed, false}, {"all_capable", app.CopiesModeAllCapable, false}, {"worker_fixed", app.CopiesModeFixed, true}, {"worker_all_capable", app.CopiesModeAllCapable, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			mode, worker := scenario.mode, scenario.worker
+			f := newFixture(t)
 			// The database fixture supplies approved amd64 capacity. Add a generic-only arm64 node.
 			arm := uuid.New()
 			if _, err := f.pool.Exec(t.Context(), `INSERT INTO nodes(id,installation_id,public_key_hash,enrolled_at) VALUES($1,$2,$3,clock_timestamp())`, arm, f.claim.InstallationID, make([]byte, 32)); err != nil {
@@ -34,6 +41,10 @@ func TestAppPlansCommitCopiesPortsAndCommands(t *testing.T) {
 			})
 			input := postgres.CreateAppRequest{Identity: postgres.RequestIdentity{InstallationID: f.claim.InstallationID, ActorID: "actor", APIOperation: postgres.CreateAppAPIOperation, IdempotencyKey: uuid.NewString()}, RequestID: "app-request",
 				Spec: app.AppSpec{SchemaVersion: 1, Name: "web", Tier: app.TierParallel, Copies: 3, CopiesMode: mode, Service: app.ServiceSpec{Image: "nginx", Ports: []app.PortSpec{{ContainerPort: 80}}, Command: []string{}, Environment: map[string]string{"MODE": "test"}}, Router: app.RouterSpec{Port: 8080, Protocol: "http"}}}
+			if worker {
+				input.Spec.Router = app.RouterSpec{}
+				input.Spec.Service.Ports = nil
+			}
 			admitted, err := f.store.AdmitApp(t.Context(), input)
 			if err != nil {
 				t.Fatal(err)
@@ -55,7 +66,7 @@ func TestAppPlansCommitCopiesPortsAndCommands(t *testing.T) {
 			if err := f.planner.Plan(t.Context(), claim); err == nil {
 				t.Fatal("unverified image was placed")
 			}
-			pending, err := f.store.GetAppStatus(t.Context(), claim.InstallationID, claim.ClusterID)
+			pending, err := f.store.GetAppStatus(t.Context(), claim.InstallationID, claim.AppID)
 			if err != nil || pending.Status.State != "pending" || pending.Status.FailureCode != string(imageinspect.Unavailable) || len(pending.Status.Copies) != 0 {
 				t.Fatalf("image failure status: %+v %v", pending.Status, err)
 			}
@@ -63,7 +74,7 @@ func TestAppPlansCommitCopiesPortsAndCommands(t *testing.T) {
 			if err := f.planner.Plan(t.Context(), claim); err != nil {
 				t.Fatal(err)
 			}
-			copies, err := f.store.GetAppCopies(t.Context(), claim.InstallationID, claim.ClusterID)
+			copies, err := f.store.GetAppCopies(t.Context(), claim.InstallationID, claim.AppID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,7 +88,7 @@ func TestAppPlansCommitCopiesPortsAndCommands(t *testing.T) {
 			nodes := map[uuid.UUID]bool{}
 			for _, copy := range copies {
 				nodes[copy.NodeID] = true
-				if copy.HostPort == 0 || copy.ObservedState != "pending" {
+				if (copy.HostPort == 0) != worker || copy.ObservedState != "pending" {
 					t.Fatalf("copy %+v", copy)
 				}
 			}
@@ -102,12 +113,16 @@ func TestAppPlansCommitCopiesPortsAndCommands(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(record.Allocations) != want+2 {
+			ingressCount := 2
+			if worker {
+				ingressCount = 0
+			}
+			if len(record.Allocations) != want+ingressCount {
 				t.Fatalf("reservations=%d", len(record.Allocations))
 			}
 			// A new store can replay the installed transaction without fresh probe evidence.
 			restarted := postgres.New(f.pool)
-			replay, err := restarted.InstallPlacementPlan(t.Context(), claim, record.Request, record.Decision, state.Plan, nil)
+			replay, err := restarted.InstallPlacementPlan(t.Context(), claim, record.Request, record.Decision, state.Plan)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -125,6 +140,9 @@ func TestAppPlansCommitCopiesPortsAndCommands(t *testing.T) {
 					t.Fatal(err)
 				}
 				heartbeat := &agentv1.Heartbeat{Sequence: uint64(copy.CopyIndex + 1), ObservedAt: timestamppb.Now(), Observations: []*agentv1.Observation{{ResourceId: copy.ID.String(), Lifecycle: "running", Health: "healthy", ObservedAt: timestamppb.Now(), Ports: []*agentv1.PortBinding{{HostAddress: "0.0.0.0", HostPort: uint32(copy.HostPort), ContainerPort: 80, Transport: "tcp"}}}}}
+				if worker {
+					heartbeat.Observations[0].Ports = nil
+				}
 				if err := f.store.RecordAgentHeartbeat(t.Context(), claim.InstallationID, copy.NodeID, presence.SessionID, heartbeat); err != nil {
 					t.Fatal(err)
 				}
@@ -132,6 +150,33 @@ func TestAppPlansCommitCopiesPortsAndCommands(t *testing.T) {
 			targets, err := f.store.AppRouteTargets(t.Context(), claim.InstallationID)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if worker {
+				for _, allocation := range record.Allocations {
+					if len(allocation.Ports) != 0 {
+						t.Fatal("worker reserved ports")
+					}
+				}
+				for _, target := range targets {
+					if len(target.Table.Routes) != 0 {
+						t.Fatal("worker created routes")
+					}
+				}
+				if _, err := f.pool.Exec(t.Context(), `UPDATE operations SET status='succeeded' WHERE id=$1`, admitted.OperationID); err != nil {
+					t.Fatal(err)
+				}
+				current, err := f.store.GetAppStatus(t.Context(), claim.InstallationID, claim.AppID)
+				if err != nil || current.Status.State != "running" || len(current.Status.Endpoints) != 0 {
+					t.Fatalf("worker status: %+v %v", current.Status, err)
+				}
+				if _, err := f.pool.Exec(t.Context(), `UPDATE agent_presence SET last_seen_at=clock_timestamp()-interval '1 hour' WHERE node_id=$1`, arm); err != nil {
+					t.Fatal(err)
+				}
+				current, err = f.store.GetAppStatus(t.Context(), claim.InstallationID, claim.AppID)
+				if err != nil || current.Status.State == "running" {
+					t.Fatalf("stale worker stayed running: %+v %v", current.Status, err)
+				}
+				return
 			}
 			for node, target := range targets {
 				if len(target.Table.Routes) != 1 || len(target.Table.Routes[0].Backends) != want {
@@ -149,7 +194,7 @@ func TestAppPlansCommitCopiesPortsAndCommands(t *testing.T) {
 				if err := f.store.RecordAppRouteAck(t.Context(), claim.InstallationID, node, uuid.MustParse(table.SessionId), ack); err != nil {
 					t.Fatal(err)
 				}
-				failed, err := f.store.GetAppStatus(t.Context(), claim.InstallationID, claim.ClusterID)
+				failed, err := f.store.GetAppStatus(t.Context(), claim.InstallationID, claim.AppID)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -213,7 +258,7 @@ func TestAppPlansCommitCopiesPortsAndCommands(t *testing.T) {
 				t.Fatal(err)
 			}
 			changed.Steps[0].Command.InputHash = hash[:]
-			if _, err := restarted.InstallPlacementPlan(t.Context(), claim, record.Request, record.Decision, changed, nil); !errors.Is(err, operation.ErrCommandConflict) {
+			if _, err := restarted.InstallPlacementPlan(t.Context(), claim, record.Request, record.Decision, changed); !errors.Is(err, operation.ErrCommandConflict) {
 				t.Fatalf("changed replay: %v", err)
 			}
 		})

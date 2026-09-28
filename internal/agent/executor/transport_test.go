@@ -184,7 +184,7 @@ func TestAuthenticatedLoopCompletesAndAcknowledges(t *testing.T) {
 	f := newFixture(t, nil)
 	controller := startController(t, f, nil)
 	controller.activate(t, f.epoch)
-	command := volumeCommand(t, f.epoch)
+	command := ensureCommand(t, f.epoch)
 	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
 	ack := controller.wait(t, func(message *agentv1.AgentMessage) bool { return message.GetAdmissionAck() != nil })
 	if ack.GetAdmissionAck().State != "queued" {

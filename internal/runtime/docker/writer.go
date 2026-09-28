@@ -48,12 +48,13 @@ func (r *Runtime) AppContainers(ctx context.Context) ([]runtime.AppContainer, er
 		if err := proto.Unmarshal(data, &config); err != nil || config.Generic == nil {
 			return nil, runtime.ErrConfigurationConflict
 		}
-		apps = append(apps, runtime.AppContainer{AppID: identity.ClusterID.String(), ResourceID: identity.ResourceID.String(), PID: c.State.Pid, Running: c.State.Running || c.State.Restarting || c.State.Paused, Mounts: config.Generic.Mounts})
+		apps = append(apps, runtime.AppContainer{AppID: identity.AppID.String(), ResourceID: identity.ResourceID.String(), PID: c.State.Pid, Running: c.State.Running || c.State.Restarting || c.State.Paused, Mounts: config.Generic.Mounts})
 	}
 	return apps, nil
 }
 
 // FenceApp disables restart and kills an owned writer when its lease ends.
+// A writer is a tier 2 app or a tier 1 primary.
 func (r *Runtime) FenceApp(ctx context.Context, app runtime.AppContainer) error {
 	detail, err := r.api.ContainerInspect(ctx, "synod-instance-"+app.ResourceID, client.ContainerInspectOptions{})
 	if errdefs.IsNotFound(err) {
@@ -67,7 +68,7 @@ func (r *Runtime) FenceApp(ctx context.Context, app runtime.AppContainer) error 
 		return runtime.ErrOutcomeUnknown
 	}
 	identity, err := r.inventoryIdentity(c.Config.Labels, "container", strings.TrimPrefix(c.Name, "/"), "synod-instance-")
-	if err != nil || identity.ClusterID.String() != app.AppID || c.Config.Labels["synod.tier"] != "2" {
+	if tier := c.Config.Labels["synod.tier"]; err != nil || identity.AppID.String() != app.AppID || (tier != "1" && tier != "2") {
 		return runtime.ErrOwnershipConflict
 	}
 	if _, err := r.api.ContainerUpdate(ctx, c.ID, client.ContainerUpdateOptions{RestartPolicy: &container.RestartPolicy{Name: container.RestartPolicyDisabled}}); err != nil {

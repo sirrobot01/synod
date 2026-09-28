@@ -27,16 +27,40 @@ func newAppActionCommand(a *app, action string) *cobra.Command {
 	var expected int64
 	var key, to string
 	var wait, yes bool
-	cmd := &cobra.Command{Use: action + " ID", Short: action + " a container app", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		id, err := parseID(args[0], "Use a nonzero app UUID.")
-		if err != nil {
-			return err
+	cmd := &cobra.Command{Use: action + " ID", Short: action + " an app", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		var id uuid.UUID
+		var err error
+		if action == "switchover" {
+			var item containerapp.App
+			if parsed, e := uuid.Parse(args[0]); e == nil && parsed != uuid.Nil {
+				item, err = a.api.GetApp(cmd.Context(), parsed)
+			} else {
+				item, err = a.api.GetAppByName(cmd.Context(), args[0])
+			}
+			if err != nil {
+				return err
+			}
+			if item.Tier != containerapp.TierDatabase {
+				return &client.Error{Code: "invalid_request", Message: "Switchover requires a database app."}
+			}
+			id = item.ID
+			a.result.App = &item
+		} else {
+			id, err = parseID(args[0], "Use a nonzero app UUID.")
+			if err != nil {
+				return err
+			}
 		}
 		if (cmd.Flags().Changed("expected-revision") && expected < 1) || (key != "" && expected < 1) {
 			return &client.Error{Code: "invalid_request", Message: "Use the original positive --expected-revision with a retry key."}
 		}
 		if expected == 0 || (action == "delete" && !yes) {
-			item, err := a.api.GetApp(cmd.Context(), id)
+			item := containerapp.App{}
+			if action == "switchover" {
+				item = *a.result.App
+			} else {
+				item, err = a.api.GetApp(cmd.Context(), id)
+			}
 			if err != nil {
 				return err
 			}
@@ -63,8 +87,14 @@ func newAppActionCommand(a *app, action string) *cobra.Command {
 			}
 		}
 		var result containerapp.Admission
-		if action == "move" {
+		if action == "move" || action == "switchover" {
 			target, parseErr := uuid.Parse(to)
+			if action == "switchover" && parseErr != nil {
+				target, parseErr = a.api.ResolveNodeName(cmd.Context(), to)
+				if parseErr != nil {
+					return parseErr
+				}
+			}
 			if parseErr != nil || target == uuid.Nil {
 				return &client.Error{Code: "invalid_request", Message: "Use a nonzero device UUID with --to."}
 			}
@@ -81,8 +111,13 @@ func newAppActionCommand(a *app, action string) *cobra.Command {
 		}
 		return nil
 	}}
-	if action == "move" {
+	if action == "move" || action == "switchover" {
 		cmd.Flags().StringVar(&to, "to", "", "Target device UUID")
+		if action == "switchover" {
+			cmd.Use = "switchover NAME"
+			cmd.Short = "Move the database primary after catch-up"
+			cmd.Flags().Lookup("to").Usage = "Target device name or UUID"
+		}
 		_ = cmd.MarkFlagRequired("to")
 	}
 	cmd.Flags().Int64Var(&expected, "expected-revision", 0, "Revision to replace (default: read current app)")

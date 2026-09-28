@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/agent/replica"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/runtime"
@@ -30,7 +31,7 @@ func (e *Executor) finalAppSnapshot(ctx context.Context, command *agentv1.Comman
 	}
 	ctx, cancel := context.WithTimeout(ctx, command.Input.Timeout.AsDuration())
 	defer cancel()
-	appID, input := command.Epoch.ClusterId, command.Input.GetFinalAppSnapshot()
+	appID, input := command.Epoch.AppId, command.Input.GetFinalAppSnapshot()
 	unlock, err := e.options.Replication.LockApp(ctx, appID)
 	if err != nil {
 		return runtime.Result{}, err
@@ -146,7 +147,7 @@ func (e *Executor) removeAppData(ctx context.Context, command *agentv1.Command) 
 	if e.options.Replication == nil || !filepath.IsAbs(e.options.AppsDir) {
 		return runtime.Result{}, runtime.ErrUnsupportedConfiguration
 	}
-	appID := command.Epoch.ClusterId
+	appID := command.Epoch.AppId
 	unlock, err := e.options.Replication.LockApp(ctx, appID)
 	if err != nil {
 		return runtime.Result{}, err
@@ -155,16 +156,12 @@ func (e *Executor) removeAppData(ctx context.Context, command *agentv1.Command) 
 	if _, assigned := e.options.Replication.Lookup(appID); assigned {
 		return runtime.Result{}, runtime.ErrBusy
 	}
-	native, ok := e.runtime.(writerRuntime)
-	if !ok {
-		return runtime.Result{}, runtime.ErrUnsupportedConfiguration
-	}
-	containers, err := native.AppContainers(ctx)
+	inspection, err := e.runtime.InspectApp(ctx, uuid.MustParse(appID), nil)
 	if err != nil {
 		return runtime.Result{}, err
 	}
-	for _, container := range containers {
-		if container.AppID == appID {
+	for _, resource := range inspection.Resources {
+		if resource.Kind == "container" {
 			return runtime.Result{}, runtime.ErrBusy
 		}
 	}
@@ -176,7 +173,7 @@ func (e *Executor) removeAppData(ctx context.Context, command *agentv1.Command) 
 		return runtime.Result{}, err
 	}
 	defer root.Close()
-	for _, name := range []string{"epoch", "assigned_epoch"} {
+	for _, name := range []string{"epoch", "assigned_epoch", "database-primary-epoch"} {
 		data, err := root.ReadFile(filepath.Join(appID, name))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -213,19 +210,16 @@ func (e *Executor) recoverAppData(ctx context.Context, command *agentv1.Command)
 	}
 	effect := &agentv1.Effect{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "app-data:" + command.CommandId}
 	if command.Input.GetRemoveAppData() != nil {
-		native, ok := e.runtime.(writerRuntime)
-		if !ok {
-			return runtime.Result{}, runtime.ErrUnsupportedConfiguration
-		}
-		containers, err := native.AppContainers(ctx)
+		inspection, err := e.runtime.InspectApp(ctx, uuid.MustParse(command.Epoch.AppId), nil)
 		if err != nil {
 			return runtime.Result{}, err
 		}
-		for _, container := range containers {
-			if container.AppID == command.Epoch.ClusterId {
+		for _, resource := range inspection.Resources {
+			if resource.Kind == "container" {
 				return runtime.Result{}, runtime.ErrBusy
 			}
 		}
+
 	}
 	root, err := os.OpenRoot(e.options.AppsDir)
 	if err != nil {
@@ -237,12 +231,12 @@ func (e *Executor) recoverAppData(ctx context.Context, command *agentv1.Command)
 	}
 	defer root.Close()
 	if command.Input.GetRemoveAppData() != nil {
-		if _, err := root.Lstat(command.Epoch.ClusterId); !errors.Is(err, os.ErrNotExist) {
+		if _, err := root.Lstat(command.Epoch.AppId); !errors.Is(err, os.ErrNotExist) {
 			return runtime.Result{}, runtime.ErrStorageLost
 		}
 		effect.State = "app_data_absent"
 	} else {
-		data, err := root.ReadFile(filepath.Join(command.Epoch.ClusterId, "final-"+command.CommandId+".json"))
+		data, err := root.ReadFile(filepath.Join(command.Epoch.AppId, "final-"+command.CommandId+".json"))
 		if err != nil {
 			return runtime.Result{}, runtime.ErrStorageLost
 		}

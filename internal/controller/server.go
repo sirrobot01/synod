@@ -22,7 +22,6 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/api"
 	"github.com/sirrobot01/synod/internal/auth"
-	"github.com/sirrobot01/synod/internal/cluster"
 	"github.com/sirrobot01/synod/internal/config"
 	"github.com/sirrobot01/synod/internal/controller/agentstream"
 	"github.com/sirrobot01/synod/internal/controller/capacity"
@@ -170,8 +169,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	if err := store.Migrate(startup); err != nil {
 		return fmt.Errorf("migrate metadata PostgreSQL: %w", err)
 	}
-	// What this installation serves. Each engine advertises its own combinations, so
-	// a version list is no longer enough to say yes to a cluster.
+	// What this installation serves. Tier 1 admission refuses other engine versions.
 	catalog, err := engine.NewCatalog(postgresengine.New(), redisengine.New())
 	if err != nil {
 		return err
@@ -248,19 +246,10 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 			if err != nil {
 				return err
 			}
-			var architectures []string
-			if settings.PlacementArchitecture != "" {
-				architectures = strings.Split(settings.PlacementArchitecture, ",")
-			}
 			planner, err := provision.New(provision.Config{
-				Store: store, Decider: capacityDriver, Catalog: catalog, Keyring: ring,
-				Profile: provision.Profile{
-					Architectures:  architectures,
-					RuntimeVersion: settings.PlacementRuntimeVersion,
-					StorageID:      settings.PlacementStorageID,
-				},
-				Images: pinnedImages,
-				Budget: provisionBudget,
+				Store: store, Decider: capacityDriver, Keyring: ring,
+				DatabaseImages: databaseImages,
+				Budget:         provisionBudget,
 				EndpointPorts: placement.PortRange{
 					First: uint16(settings.EngineEndpointFirstPort),
 					Last:  uint16(settings.EngineEndpointLastPort),
@@ -301,7 +290,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	if agentServer != nil {
 		go func() {
 			defer close(replicationStopped)
-			runAppReplication(runnerCtx, store, agentServer, uuid.MustParse(settings.InstallationID), logger)
+			runAppReplication(runnerCtx, store, agentServer, uuid.MustParse(settings.InstallationID), ring, logger)
 		}()
 	} else {
 		close(replicationStopped)
@@ -340,7 +329,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 				logger.Error("controller runner stopped", "error", err.Error())
 			}
 		}()
-		logger.Info("controller runner electing cluster owners", "installation_id", settings.InstallationID)
+		logger.Info("controller runner electing app owners", "installation_id", settings.InstallationID)
 	} else {
 		close(running)
 	}
@@ -404,21 +393,14 @@ func readStartupFile(path string, maximum int64, private bool) ([]byte, error) {
 	return data, nil
 }
 
-// Pin engine images. Refuse combinations without a digest.
-// The Redis index contains both listed architectures. Runtime qualification is
-// tracked separately in the support matrix.
-var pinnedImages = []provision.Image{
-	{Engine: cluster.PostgreSQL, Version: "17.11", Architecture: "arm64",
-		Digest: "postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0"},
-	{Engine: cluster.PostgreSQL, Version: "17.11", Architecture: "amd64",
-		Digest: "postgres@sha256:f4c66b820c6f974249089d3d16d86a3698eae11e8746eb6644b2271031e91232"},
-	{Engine: cluster.Redis, Version: "8.2.7", Architecture: "arm64",
-		Digest: "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3"},
-	{Engine: cluster.Redis, Version: "8.2.7", Architecture: "amd64",
-		Digest: "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3"},
+// Tier 1 apps use multi-architecture index digests. Each copy pulls the image for its
+// own node's architecture, so a primary and a standby may differ in architecture.
+var databaseImages = []provision.DatabaseImage{
+	{Engine: "postgres", Version: "17.11", Digest: "postgres@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f"},
+	{Engine: "redis", Version: "8.2.7", Digest: "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3"},
 }
 
-// What one instance reserves. The host port it publishes is configuration, because a
+// What one tier 1 copy reserves. The host port it publishes is configuration, because a
 // fleet cannot be described by a constant.
 var provisionBudget = placement.Vector{CPUMillis: 1000, MemoryBytes: 1 << 30, DiskBytes: 8 << 30}
 

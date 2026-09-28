@@ -144,7 +144,7 @@ func TestAppSpecValidationFailures(t *testing.T) {
 			},
 		},
 		{
-			name: "tier 1 rejected in app spec",
+			name: "tier 1 with a service",
 			mutate: func(s *AppSpec) {
 				s.Tier = TierDatabase
 			},
@@ -292,5 +292,116 @@ func TestTier2JSONRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(spec, decoded) {
 		t.Fatalf("round trip changed the spec:\n%+v\n%+v", spec, decoded)
+	}
+}
+
+func validTier1Spec() AppSpec {
+	replication := DefaultDatabaseReplication()
+	return AppSpec{
+		SchemaVersion:    1,
+		Name:             "photos-db",
+		Tier:             TierDatabase,
+		Copies:           1,
+		DevicePreference: DevicePreference{Preferred: []string{"server"}, Allowed: []string{"odin"}},
+		Router:           RouterSpec{Protocol: "tcp", Port: 5432, ReaderPort: 5433},
+		Replication:      &replication,
+		Database:         &DatabaseSpec{Engine: EnginePostgres, Version: "17", Databases: []string{"immich"}},
+	}
+}
+
+func TestTier1Validation(t *testing.T) {
+	for name, mutate := range map[string]func(*AppSpec){
+		"postgres":      func(s *AppSpec) {},
+		"no standby":    func(s *AppSpec) { s.Replication.Standbys = 0 },
+		"no reader":     func(s *AppSpec) { s.Router.ReaderPort = 0 },
+		"redis":         func(s *AppSpec) { s.Database = &DatabaseSpec{Engine: EngineRedis, Version: "8.2"} },
+		"many standbys": func(s *AppSpec) { s.Replication.Standbys = 3 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := validTier1Spec()
+			mutate(&spec)
+			if err := spec.Validate(); err != nil {
+				t.Fatalf("valid tier 1 spec refused: %v", err)
+			}
+		})
+	}
+	for name, mutate := range map[string]func(*AppSpec){
+		"no database":          func(s *AppSpec) { s.Database = nil },
+		"unknown engine":       func(s *AppSpec) { s.Database.Engine = "mysql" },
+		"version text":         func(s *AppSpec) { s.Database.Version = "latest" },
+		"no postgres database": func(s *AppSpec) { s.Database.Databases = nil },
+		"database name":        func(s *AppSpec) { s.Database.Databases = []string{"Photos"} },
+		"repeated database":    func(s *AppSpec) { s.Database.Databases = []string{"a", "a"} },
+		"redis database names": func(s *AppSpec) {
+			s.Database = &DatabaseSpec{Engine: EngineRedis, Version: "8", Databases: []string{"a"}}
+		},
+		"service image":         func(s *AppSpec) { s.Service.Image = "postgres:17" },
+		"service mount":         func(s *AppSpec) { s.Service.Mounts = []MountSpec{{Type: "tmpfs", Target: "/tmp"}} },
+		"two primaries":         func(s *AppSpec) { s.Copies = 2 },
+		"no replication":        func(s *AppSpec) { s.Replication = nil },
+		"four standbys":         func(s *AppSpec) { s.Replication.Standbys = 4 },
+		"snapshot interval":     func(s *AppSpec) { s.Replication.IntervalSeconds = 60 },
+		"failover inside lease": func(s *AppSpec) { s.Replication.FailoverAfterSeconds = 2*LeaseSeconds - 1 },
+		"http route":            func(s *AppSpec) { s.Router.Protocol = "http" },
+		"no writer port":        func(s *AppSpec) { s.Router.Port = 0 },
+		"reader on writer port": func(s *AppSpec) { s.Router.ReaderPort = s.Router.Port },
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := validTier1Spec()
+			mutate(&spec)
+			if err := spec.Validate(); err == nil {
+				t.Fatal("invalid tier 1 spec accepted")
+			}
+		})
+	}
+	for name, mutate := range map[string]func(*AppSpec){
+		"database on tier 3":    func(s *AppSpec) { s.Database = &DatabaseSpec{Engine: EngineRedis, Version: "8"} },
+		"reader port on tier 3": func(s *AppSpec) { s.Router.ReaderPort = 9000 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := validTier3Spec()
+			mutate(&spec)
+			if err := spec.Validate(); err == nil {
+				t.Fatal("tier 1 setting accepted on tier 3")
+			}
+		})
+	}
+}
+
+func TestTier1JSONRoundTrip(t *testing.T) {
+	spec := validTier1Spec()
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded AppSpec
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(spec, decoded) {
+		t.Fatalf("round trip changed the spec: %+v", decoded)
+	}
+}
+
+func TestWorkerSpecHasNoIngress(t *testing.T) {
+	s := validTier3Spec()
+	s.Router = RouterSpec{}
+	s.Service.Ports = nil
+	s.Service.HealthCheck = &HealthCheckSpec{Type: "exec", Command: []string{"true"}}
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*AppSpec){
+		func(s *AppSpec) { s.Router.Protocol = "tcp" },
+		func(s *AppSpec) { s.Router.Port = 8000 },
+		func(s *AppSpec) { s.Service.Ports = []PortSpec{{ContainerPort: 80}} },
+		func(s *AppSpec) { s.Service.HealthCheck = &HealthCheckSpec{Type: "tcp", Port: 80} },
+		func(s *AppSpec) { s.Tier = TierSingleWriter; s.Copies = 1; s.Replication = new(DefaultReplication()) },
+	} {
+		bad := s
+		mutate(&bad)
+		if err := bad.Validate(); err == nil {
+			t.Fatalf("invalid worker accepted: %+v", bad)
+		}
 	}
 }

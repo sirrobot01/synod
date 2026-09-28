@@ -162,7 +162,7 @@ func (f *fixture) stream(t *testing.T, hello *agentv1.Hello) (agentv1.AgentServi
 }
 
 func result(f *fixture) *agentv1.AgentMessage {
-	return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_TerminalResult{TerminalResult: &agentv1.TerminalResult{CommandId: uuid.NewString(), InputHash: make([]byte, 32), Sequence: 1, State: "succeeded", Epoch: &agentv1.Epoch{InstallationId: f.hello.InstallationId, NodeId: f.hello.NodeId, ClusterId: uuid.NewString(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1}}}}
+	return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_TerminalResult{TerminalResult: &agentv1.TerminalResult{CommandId: uuid.NewString(), InputHash: make([]byte, 32), Sequence: 1, State: "succeeded", Epoch: &agentv1.Epoch{InstallationId: f.hello.InstallationId, NodeId: f.hello.NodeId, AppId: uuid.NewString(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1}}}}
 }
 
 func TestDurableAcknowledgementAndReplacement(t *testing.T) {

@@ -162,7 +162,7 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 			return nil, controlstream.ErrMessage
 		}
 		epoch := value.PrepareEpoch.Epoch
-		old := current.gates[epoch.ClusterId]
+		old := current.gates[epoch.AppId]
 		if old != nil && proto.Equal(old.epoch, epoch) && !old.active {
 			return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_BarrierResult{BarrierResult: proto.Clone(old.report).(*agentv1.BarrierResult)}}, nil
 		}
@@ -189,15 +189,15 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 		if err := e.journal.RecordBarrier(report); err != nil {
 			return nil, err
 		}
-		current.gates[epoch.ClusterId] = &epochGate{epoch: proto.Clone(epoch).(*agentv1.Epoch), report: report}
+		current.gates[epoch.AppId] = &epochGate{epoch: proto.Clone(epoch).(*agentv1.Epoch), report: report}
 		return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_BarrierResult{BarrierResult: proto.Clone(report).(*agentv1.BarrierResult)}}, nil
 	case *agentv1.ControllerMessage_ActivateEpoch:
 		if value.ActivateEpoch == nil || value.ActivateEpoch.Epoch == nil {
 			return nil, controlstream.ErrMessage
 		}
 		epoch := value.ActivateEpoch.Epoch
-		gate := current.gates[epoch.ClusterId]
-		if gate == nil || !gate.ready || !proto.Equal(gate.epoch, epoch) || e.active[epoch.ClusterId] {
+		gate := current.gates[epoch.AppId]
+		if gate == nil || !gate.ready || !proto.Equal(gate.epoch, epoch) || e.active[epoch.AppId] {
 			return nil, operation.ErrBarrierPending
 		}
 		if err := e.journal.Activate(epoch, true); err != nil {
@@ -215,7 +215,7 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 			return nil, controlstream.ErrMessage
 		}
 		ack := &agentv1.AdmissionAck{DeliveryAttemptId: message.DeliveryAttemptId, Epoch: proto.Clone(command.Epoch).(*agentv1.Epoch), CommandId: command.CommandId, InputHash: bytes.Clone(command.InputHash), State: "rejected"}
-		gate := current.gates[command.Epoch.ClusterId]
+		gate := current.gates[command.Epoch.AppId]
 		if gate == nil || !gate.active || !proto.Equal(gate.epoch, command.Epoch) {
 			ack.ErrorCode = "stale_owner"
 		} else {
@@ -242,7 +242,7 @@ func (e *Executor) Handle(ctx context.Context, message *agentv1.ControllerMessag
 		if err != nil {
 			return nil, err
 		}
-		gate := current.gates[request.Epoch.ClusterId]
+		gate := current.gates[request.Epoch.AppId]
 		if gate == nil || !proto.Equal(gate.epoch, request.Epoch) || !proto.Equal(record.Epoch, request.Epoch) {
 			return nil, operation.ErrStaleOwner
 		}
@@ -350,13 +350,6 @@ func failureCode(err error) string {
 		return "stale_owner"
 	case errors.Is(err, operation.ErrCommandConflict):
 		return "command_conflict"
-	case errors.Is(err, ErrEngineNotReady):
-		// The reason names the probe that did not pass, and every reason is already
-		// a stable code the receipt column accepts.
-		if unready, ok := errors.AsType[*notReadyError](err); ok {
-			return unready.reason
-		}
-		return notReadyCode
 	case errors.Is(err, ErrSecretUnavailable):
 		return "secret_unavailable"
 	case errors.Is(err, journal.ErrRecoveryRequired):
@@ -381,8 +374,8 @@ func driftItem(item runtime.Drift) *agentv1.DriftItem {
 		Kind: item.Kind, NativeId: item.NativeID, Name: item.Name,
 		State: item.State, Class: string(item.Class), Detail: item.Detail,
 	}
-	if item.ClusterID != uuid.Nil {
-		reported.ClusterId = item.ClusterID.String()
+	if item.AppID != uuid.Nil {
+		reported.AppId = item.AppID.String()
 	}
 	if item.ResourceID != uuid.Nil {
 		reported.ResourceId = item.ResourceID.String()

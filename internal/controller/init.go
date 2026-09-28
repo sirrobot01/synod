@@ -65,15 +65,12 @@ WantedBy=multi-user.target
 
 // InitOptions specifies settings for initializing a Synod controller.
 type InitOptions struct {
-	Address                 string
-	Directory               string
-	DatabaseURL             string
-	InstallationID          string
-	PlacementArchitecture   string
-	PlacementRuntimeVersion string
-	PlacementStorageID      string
-	SystemdDir              string
-	NoContainer             bool
+	Address        string
+	Directory      string
+	DatabaseURL    string
+	InstallationID string
+	SystemdDir     string
+	NoContainer    bool
 }
 
 type materialResult struct {
@@ -86,23 +83,20 @@ type materialResult struct {
 }
 
 type controllerJSON struct {
-	InstallationID          string `json:"installation_id"`
-	Listen                  string `json:"listen"`
-	AgentListen             string `json:"agent_listen"`
-	DatabaseURL             string `json:"database_url"`
-	AdminTokenFile          string `json:"admin_token_file"`
-	TLSCertFile             string `json:"tls_cert_file"`
-	TLSKeyFile              string `json:"tls_key_file"`
-	CACertFile              string `json:"ca_cert_file"`
-	CAKeyFile               string `json:"ca_key_file"`
-	AgentTLSCertFile        string `json:"agent_tls_cert_file"`
-	AgentTLSKeyFile         string `json:"agent_tls_key_file"`
-	AgentCAFile             string `json:"agent_ca_file"`
-	SecretKeyFile           string `json:"secret_key_file"`
-	SecretKeyID             string `json:"secret_key_id"`
-	PlacementArchitecture   string `json:"placement_architecture,omitempty"`
-	PlacementRuntimeVersion string `json:"placement_runtime_version,omitempty"`
-	PlacementStorageID      string `json:"placement_storage_id,omitempty"`
+	InstallationID   string `json:"installation_id"`
+	Listen           string `json:"listen"`
+	AgentListen      string `json:"agent_listen"`
+	DatabaseURL      string `json:"database_url"`
+	AdminTokenFile   string `json:"admin_token_file"`
+	TLSCertFile      string `json:"tls_cert_file"`
+	TLSKeyFile       string `json:"tls_key_file"`
+	CACertFile       string `json:"ca_cert_file"`
+	CAKeyFile        string `json:"ca_key_file"`
+	AgentTLSCertFile string `json:"agent_tls_cert_file"`
+	AgentTLSKeyFile  string `json:"agent_tls_key_file"`
+	AgentCAFile      string `json:"agent_ca_file"`
+	SecretKeyFile    string `json:"secret_key_file"`
+	SecretKeyID      string `json:"secret_key_id"`
 }
 
 func initCommand() *cobra.Command {
@@ -119,9 +113,6 @@ func initCommand() *cobra.Command {
 	command.Flags().StringVar(&options.Directory, "dir", "", "Directory to write the installation material and configuration into (required)")
 	command.Flags().StringVar(&options.DatabaseURL, "database-url", "", "PostgreSQL URL for an existing metadata database")
 	command.Flags().StringVar(&options.InstallationID, "installation-id", "", "Installation UUID; one is generated when absent")
-	command.Flags().StringVar(&options.PlacementArchitecture, "placement-architecture", "", "Node CPU architectures to place onto, in preference order (default: any)")
-	command.Flags().StringVar(&options.PlacementRuntimeVersion, "placement-runtime-version", "", "Container runtime version placement requires (default: any)")
-	command.Flags().StringVar(&options.PlacementStorageID, "placement-storage-id", "", "Storage pool identifier placement requires (default: any)")
 	command.Flags().StringVar(&options.SystemdDir, "systemd-dir", "/etc/systemd/system", "Systemd units directory to install the service into")
 	command.Flags().BoolVar(&options.NoContainer, "no-container", false, "Do not run the metadata PostgreSQL container")
 	return command
@@ -171,23 +162,20 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 	}
 
 	cfg := controllerJSON{
-		InstallationID:          res.id.String(),
-		Listen:                  net.JoinHostPort(address, "8443"),
-		AgentListen:             net.JoinHostPort(address, "8444"),
-		DatabaseURL:             databaseURL,
-		AdminTokenFile:          filepath.Join(absDir, "admin.token"),
-		TLSCertFile:             filepath.Join(absDir, "api.crt"),
-		TLSKeyFile:              filepath.Join(absDir, "api.key"),
-		CACertFile:              filepath.Join(absDir, "ca.crt"),
-		CAKeyFile:               filepath.Join(absDir, "ca.key"),
-		AgentTLSCertFile:        filepath.Join(absDir, "agent-tls.crt"),
-		AgentTLSKeyFile:         filepath.Join(absDir, "agent-tls.key"),
-		AgentCAFile:             filepath.Join(absDir, "ca.crt"),
-		SecretKeyFile:           filepath.Join(absDir, "secret.key"),
-		SecretKeyID:             res.wrappingID.String(),
-		PlacementArchitecture:   options.PlacementArchitecture,
-		PlacementRuntimeVersion: options.PlacementRuntimeVersion,
-		PlacementStorageID:      options.PlacementStorageID,
+		InstallationID:   res.id.String(),
+		Listen:           net.JoinHostPort(address, "8443"),
+		AgentListen:      net.JoinHostPort(address, "8444"),
+		DatabaseURL:      databaseURL,
+		AdminTokenFile:   filepath.Join(absDir, "admin.token"),
+		TLSCertFile:      filepath.Join(absDir, "api.crt"),
+		TLSKeyFile:       filepath.Join(absDir, "api.key"),
+		CACertFile:       filepath.Join(absDir, "ca.crt"),
+		CAKeyFile:        filepath.Join(absDir, "ca.key"),
+		AgentTLSCertFile: filepath.Join(absDir, "agent-tls.crt"),
+		AgentTLSKeyFile:  filepath.Join(absDir, "agent-tls.key"),
+		AgentCAFile:      filepath.Join(absDir, "ca.crt"),
+		SecretKeyFile:    filepath.Join(absDir, "secret.key"),
+		SecretKeyID:      res.wrappingID.String(),
 	}
 
 	encodedConfig, err := json.MarshalIndent(cfg, "", "  ")

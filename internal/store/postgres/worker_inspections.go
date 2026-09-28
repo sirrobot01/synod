@@ -31,7 +31,7 @@ func (s *Store) RecordInspectionRequest(ctx context.Context, claim operation.Cla
 		return &AdmissionError{Code: InvalidRequest}
 	}
 	command := request.Command
-	if command.Epoch.ClusterId != claim.ClusterID.String() || command.Epoch.ExecutionEpoch != claim.ExecutionEpoch || command.Epoch.RecoveryGeneration != claim.RecoveryGeneration.String() {
+	if command.Epoch.AppId != claim.AppID.String() || command.Epoch.ExecutionEpoch != claim.ExecutionEpoch || command.Epoch.RecoveryGeneration != claim.RecoveryGeneration.String() {
 		return operation.ErrStaleOwner
 	}
 	nodeID := uuid.MustParse(command.Epoch.NodeId)
@@ -66,7 +66,7 @@ func (s *Store) RecordInspectionRequest(ctx context.Context, claim operation.Cla
 	}
 	// Only an exact historical dispatch can supply the immutable inspected input.
 	var known bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM command_dispatches WHERE command_id=$1 AND installation_id=$2 AND cluster_id=$3 AND node_id=$4 AND input_hash=$5)`, command.CommandId, claim.InstallationID, claim.ClusterID, nodeID, command.InputHash).Scan(&known); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM command_dispatches WHERE command_id=$1 AND installation_id=$2 AND app_id=$3 AND node_id=$4 AND input_hash=$5)`, command.CommandId, claim.InstallationID, claim.AppID, nodeID, command.InputHash).Scan(&known); err != nil {
 		return admissionError(err)
 	}
 	if !known {
@@ -104,9 +104,9 @@ func (s *Store) RecordAgentInspection(ctx context.Context, installationID, nodeI
 	}
 	defer tx.Rollback(ctx)
 	var claim operation.Claim
-	if err := tx.QueryRow(ctx, `SELECT c.claim_id,c.installation_id,c.cluster_id,c.operation_id,c.recovery_generation,c.owner_id,c.execution_epoch
+	if err := tx.QueryRow(ctx, `SELECT c.claim_id,c.installation_id,c.app_id,c.operation_id,c.recovery_generation,c.owner_id,c.execution_epoch
  FROM command_inspections i JOIN execution_claims c USING(claim_id)
- WHERE i.request_id=$1 AND i.installation_id=$2 AND i.node_id=$3 AND i.session_id=$4`, result.RequestId, installationID, nodeID, sessionID).Scan(&claim.ID, &claim.InstallationID, &claim.ClusterID, &claim.OperationID, &claim.RecoveryGeneration, &claim.OwnerID, &claim.ExecutionEpoch); err != nil {
+ WHERE i.request_id=$1 AND i.installation_id=$2 AND i.node_id=$3 AND i.session_id=$4`, result.RequestId, installationID, nodeID, sessionID).Scan(&claim.ID, &claim.InstallationID, &claim.AppID, &claim.OperationID, &claim.RecoveryGeneration, &claim.OwnerID, &claim.ExecutionEpoch); err != nil {
 		return admissionError(err)
 	}
 	if _, state, _, err := lockClaim(ctx, tx, claim); err != nil {

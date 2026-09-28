@@ -24,7 +24,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store/postgres"
@@ -228,7 +228,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	command := Command()
-	command.SetArgs([]string{"--listen", "127.0.0.1:0", "--database-url", databaseURL.String(), "--installation-id", installation.String(), "--ca-cert-file", caCertPath, "--ca-key-file", caKeyPath, "--agent-listen", "127.0.0.1:0", "--agent-tls-cert-file", agentCertPath, "--agent-tls-key-file", agentKeyPath, "--agent-ca-file", caCertPath, "--admin-token-file", tokenPath, "--tls-cert-file", certPath, "--tls-key-file", keyPath, "--secret-key-file", wrappingKeyPath, "--secret-key-id", wrappingKeyID.String(), "--placement-architecture", "arm64", "--placement-runtime-version", "27.1.1", "--placement-storage-id", "fixture"})
+	command.SetArgs([]string{"--listen", "127.0.0.1:0", "--database-url", databaseURL.String(), "--installation-id", installation.String(), "--ca-cert-file", caCertPath, "--ca-key-file", caKeyPath, "--agent-listen", "127.0.0.1:0", "--agent-tls-cert-file", agentCertPath, "--agent-tls-key-file", agentKeyPath, "--agent-ca-file", caCertPath, "--admin-token-file", tokenPath, "--tls-cert-file", certPath, "--tls-key-file", keyPath, "--secret-key-file", wrappingKeyPath, "--secret-key-id", wrappingKeyID.String()})
 	command.SetErr(log)
 	go func() { done <- command.ExecuteContext(ctx) }()
 	var address, agentAddress string
@@ -263,7 +263,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 			}
 		}
 	}
-	request, err := http.NewRequestWithContext(t.Context(), "POST", "https://"+address+"/v1/clusters", strings.NewReader(`{"schema_version":1,"name":"startup","engine":"redis","redis":{"version":"8.2.7","topology":"standalone","persistence":"aof"}}`))
+	request, err := http.NewRequestWithContext(t.Context(), "POST", "https://"+address+"/v1/apps", strings.NewReader(`{"schema_version":1,"name":"startup","tier":1,"copies":1,"router":{"protocol":"tcp","port":6379},"replication":{"standbys":1,"interval_seconds":0,"failover_after_seconds":90,"failback":"manual","failback_stable_seconds":600},"database":{"engine":"redis","version":"8"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,10 +288,10 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	}
 	defer verification.Close()
 	var count int
-	if err := verification.QueryRow(t.Context(), "SELECT count(*) FROM clusters WHERE name = $1", "startup").Scan(&count); err != nil || count != 1 {
+	if err := verification.QueryRow(t.Context(), "SELECT count(*) FROM apps WHERE name = $1 AND tier = 1", "startup").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("admission missing from isolated database: count=%d error=%v", count, err)
 	}
-	var admission postgres.Admission
+	var admission app.Admission
 	if err := json.Unmarshal(data, &admission); err != nil {
 		t.Fatal(err)
 	}
@@ -302,18 +302,18 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	credentialID := uuid.New()
-	envelope, err := ring.Seal(secret.Binding{InstallationID: installation, OwnerType: "cluster", OwnerID: admission.ClusterID, CredentialID: credentialID, Version: 1}, []byte(password))
+	envelope, err := ring.Seal(secret.Binding{InstallationID: installation, OwnerType: "app", OwnerID: admission.AppID, CredentialID: credentialID, Version: 1}, []byte(password))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := postgres.New(verification).RecordClusterIntent(t.Context(), postgres.ClusterIntent{InstallationID: installation, ClusterID: admission.ClusterID, Credentials: []postgres.Credential{{CredentialID: credentialID, Version: 1, Purpose: postgres.ApplicationCredential, RoleName: "synod_app", Envelope: envelope}}}); err != nil {
+	if err := postgres.New(verification).RecordAppCredentials(t.Context(), installation, admission.AppID, []postgres.Credential{{CredentialID: credentialID, Version: 1, Purpose: postgres.SuperuserCredential, RoleName: "synod_admin", Envelope: envelope}}); err != nil {
 		t.Fatal(err)
 	}
 	// Removing the file proves that requests use the configured keyring, not a reload.
 	if err := os.Remove(wrappingKeyPath); err != nil {
 		t.Fatal(err)
 	}
-	reveal, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://"+address+"/v1/clusters/"+admission.ClusterID.String()+"/credentials/application/reveal", strings.NewReader(`{}`))
+	reveal, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://"+address+"/v1/apps/"+admission.AppID.String()+"/credentials/reveal", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,10 +323,10 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var value cluster.RevealedCredential
+	var value app.Credential
 	decodeErr := json.NewDecoder(revealed.Body).Decode(&value)
 	revealed.Body.Close()
-	if revealed.StatusCode != http.StatusOK || decodeErr != nil || value.Password != password || value.Credential.CredentialID != credentialID || revealed.Header.Get("Cache-Control") != "no-store" {
+	if revealed.StatusCode != http.StatusOK || decodeErr != nil || value.Password != password || value.CredentialID != credentialID || value.Username != "default" || revealed.Header.Get("Cache-Control") != "no-store" {
 		t.Fatalf("startup keyring did not serve audited reveal: status=%d decode=%v", revealed.StatusCode, decodeErr)
 	}
 	// The executable loads the protected CA and serves the complete enrollment path.

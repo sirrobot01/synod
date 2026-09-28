@@ -3,6 +3,8 @@ package docker
 import (
 	"encoding/base64"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,33 +18,33 @@ import (
 
 // A credential reaches the engine's environment and nothing else.
 func TestSecretReachesTheEnvironmentAndNotTheLabel(t *testing.T) {
-	r, api, clusterID := runtimeFixture(t)
-	password := "credential-" + uuid.NewString()
-	volumeID := uuid.NewString()
-	volume := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{
-		ResourceId: volumeID, Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: volumeID}},
-	})
-	if _, err := r.Execute(t.Context(), volume, nil); err != nil {
+	r, api, appID := runtimeFixture(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
+	r.options.AppsDir = root
+	if err := os.MkdirAll(filepath.Join(root, appID.String(), "engine", "data"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	password := "credential-" + uuid.NewString()
 	id := uuid.NewString()
-	command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{
+	command := runtimeCommand(t, r, appID, &agentv1.CommandInput{
 		ResourceId: id,
-		Secrets:    []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "application"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "replication"}},
+		Secrets:    []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "replication"}},
 		Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
-			ImageDigest: redisFixture, Engine: "redis", VolumeId: volumeID,
-			NetworkMode: agentv1.NetworkMode_NETWORK_MODE_HOST, MemoryBytes: 64 << 20, CpuMillis: 250,
-			Redis:     &agentv1.RedisContainerConfig{Port: 6379, Persistence: "none", MaxmemoryBytes: 48 << 20, EvictionPolicy: "noeviction"},
-			SecretEnv: []*agentv1.SecretEnv{{Name: "REDIS_ADMIN_PASSWORD", Purpose: "superuser"}, {Name: "REDIS_APP_PASSWORD", Purpose: "application"}, {Name: "REDIS_REPLICATION_PASSWORD", Purpose: "replication"}},
+			ImageDigest: redisFixture, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
+			SecretEnv: []*agentv1.SecretEnv{{Name: "REDIS_ADMIN_PASSWORD", Purpose: "superuser"}, {Name: "REDIS_REPLICATION_PASSWORD", Purpose: "replication"}},
+			Generic:   &agentv1.GenericContainerConfig{Image: redisFixture, AppName: "cache", Mounts: []*agentv1.Mount{{Type: "engine", Source: "data", Target: "/data"}}},
 		}},
 	})
-	if _, err := r.Execute(t.Context(), command, runtime.Secrets{"superuser": []byte(password), "application": []byte("runtime-test-app"), "replication": []byte("unsafe\nreplication")}); !errors.Is(err, runtime.ErrConfigurationConflict) {
+	if _, err := r.Execute(t.Context(), command, runtime.Secrets{"superuser": []byte(password), "replication": []byte("unsafe\nreplication")}); !errors.Is(err, runtime.ErrConfigurationConflict) {
 		t.Fatal("invalid replication material was not refused")
 	}
 	if _, err := api.ContainerInspect(t.Context(), "synod-instance-"+id, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
 		t.Fatal("invalid replication material reached container creation")
 	}
-	if _, err := r.Execute(t.Context(), command, runtime.Secrets{"superuser": []byte(password), "application": []byte("runtime-test-app"), "replication": []byte("runtime-test-repl")}); err != nil {
+	if _, err := r.Execute(t.Context(), command, runtime.Secrets{"superuser": []byte(password), "replication": []byte("runtime-test-repl")}); err != nil {
 		t.Fatal(err)
 	}
 	found, err := api.ContainerInspect(t.Context(), "synod-instance-"+id, client.ContainerInspectOptions{})
@@ -167,8 +169,8 @@ func containsEnv(environment []string, want string) bool {
 	return false
 }
 
-func TestRedisReplicationSecretRejectsControlBytes(t *testing.T) {
-	p := &agentv1.EnsureContainer{Redis: &agentv1.RedisContainerConfig{}, SecretEnv: []*agentv1.SecretEnv{{Name: "REDIS_REPLICATION_PASSWORD", Purpose: "replication"}}}
+func TestSecretRejectsControlBytes(t *testing.T) {
+	p := &agentv1.EnsureContainer{SecretEnv: []*agentv1.SecretEnv{{Name: "REDIS_REPLICATION_PASSWORD", Purpose: "replication"}}}
 	for _, value := range []byte{0, '\t', '\n', '\r', 0x1f, 0x7f} {
 		material := []byte{'a', value, 'b'}
 		if _, err := secretEnvironment(nil, p, runtime.Secrets{"replication": material}); !errors.Is(err, runtime.ErrConfigurationConflict) {
@@ -177,6 +179,6 @@ func TestRedisReplicationSecretRejectsControlBytes(t *testing.T) {
 	}
 	password := `space " quote \ slash $ dollar # hash`
 	if _, err := secretEnvironment(nil, p, runtime.Secrets{"replication": []byte(password)}); err != nil {
-		t.Fatal("printable replication secret rejected")
+		t.Fatal("printable secret rejected")
 	}
 }

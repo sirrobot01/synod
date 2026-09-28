@@ -42,9 +42,9 @@ func (r Receiver) recordDrift(ctx context.Context, peer controlstream.Peer, sess
 		// An identity that does not parse is absent, not zero. An object that has
 		// lost its labels has no identity to report, and inventing one would be
 		// worse than saying so.
-		if clusterID, err := uuid.Parse(item.ClusterId); err == nil && item.ClusterId != "" {
-			found.ClusterID = clusterID
-		} else if item.ClusterId != "" {
+		if appID, err := uuid.Parse(item.AppId); err == nil && item.AppId != "" {
+			found.AppID = appID
+		} else if item.AppId != "" {
 			return ErrUnsupportedMessage
 		}
 		if resourceID, err := uuid.Parse(item.ResourceId); err == nil && item.ResourceId != "" {

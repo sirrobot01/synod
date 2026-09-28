@@ -21,27 +21,27 @@ func (j *Journal) CloseAdmission(epoch *agentv1.Epoch) error {
 	if err := j.checkTarget(epoch); err != nil {
 		return err
 	}
-	cluster, exists := j.state.Clusters[epoch.ClusterId]
-	if !exists || !proto.Equal(cluster.Prepared, epoch) {
+	app, exists := j.state.Apps[epoch.AppId]
+	if !exists || !proto.Equal(app.Prepared, epoch) {
 		return operation.ErrStaleOwner
 	}
-	if !cluster.Active {
+	if !app.Active {
 		return nil
 	}
-	cluster.Active, cluster.Reconciled = false, false
-	if len(cluster.Barrier) != 0 {
+	app.Active, app.Reconciled = false, false
+	if len(app.Barrier) != 0 {
 		var report agentv1.BarrierResult
-		if err := proto.Unmarshal(cluster.Barrier, &report); err != nil {
-			return fmt.Errorf("decode the saved barrier of cluster %s: %w: %w", epoch.ClusterId, ErrRecoveryRequired, err)
+		if err := proto.Unmarshal(app.Barrier, &report); err != nil {
+			return fmt.Errorf("decode the saved barrier of app %s: %w: %w", epoch.AppId, ErrRecoveryRequired, err)
 		}
 		report.AdmissionsClosed, report.Drained = true, false
 		encoded, err := proto.Marshal(&report)
 		if err != nil {
 			return err
 		}
-		cluster.Barrier = encoded
+		app.Barrier = encoded
 	}
-	return j.persist(nil, map[string]clusterState{epoch.ClusterId: cluster})
+	return j.persist(nil, map[string]appState{epoch.AppId: app})
 }
 
 // RecoveryRecords includes acknowledged results with current unresolved effects.

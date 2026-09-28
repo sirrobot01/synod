@@ -21,7 +21,7 @@ func checkEpoch(epoch *agentv1.Epoch, installationID, nodeID string) error {
 	if epoch == nil || epoch.InstallationId != installationID || epoch.NodeId != nodeID || epoch.ExecutionEpoch < 1 {
 		return ErrMessage
 	}
-	for _, id := range []string{epoch.ClusterId, epoch.RecoveryGeneration} {
+	for _, id := range []string{epoch.AppId, epoch.RecoveryGeneration} {
 		value, err := uuid.Parse(id)
 		if err != nil {
 			return fmt.Errorf("parse %q in the epoch: %w: %w", id, ErrMessage, err)
@@ -81,8 +81,15 @@ func CheckAgentMessage(message *agentv1.AgentMessage, installationID, nodeID str
 			if replica == nil || replica.LastPauseNanos > replica.MaxPauseNanos || replica.MaxPauseNanos > uint64(1<<63-1) || replica.SkippedSnapshots > uint64(1<<63-1) || !canonicalID(replica.AppId) || (replica.Role != replication.RoleActive && replica.Role != replication.RoleStandby) {
 				return ErrMessage
 			}
+			if replica.DatabaseHoldId != "" && (!canonicalID(replica.DatabaseHoldId) || replica.Role != replication.RoleStandby || replica.State == "") {
+				return ErrMessage
+			}
 			switch replica.FailureCode {
 			case "", replication.FailureEpochMismatch, replication.FailureStale, replication.FailureCorrupt, replication.FailureApply, replication.FailurePush, replication.FailureFreeze, replication.FailureSnapshot:
+			case "copying", "disconnected", "drifted", "failed", "writer_lease_expired", "primary_setup_failed", "fence_failed":
+				if replica.State == "" {
+					return ErrMessage
+				}
 			default:
 				return ErrMessage
 			}
@@ -94,7 +101,7 @@ func CheckAgentMessage(message *agentv1.AgentMessage, installationID, nodeID str
 		}
 		return nil
 	case *agentv1.AgentMessage_CapacityReport:
-		// Capacity belongs to a node, not a cluster, so this carries no epoch and
+		// Capacity belongs to a node, not a app, so this carries no epoch and
 		// binds the probe challenge instead.
 		return CheckCapacityReport(value.CapacityReport)
 	case *agentv1.AgentMessage_BarrierResult:
@@ -274,6 +281,9 @@ func checkInspectionEffects(effects []*agentv1.Effect, commandID, resourceID str
 			return ErrMessage
 		}
 		if receipt := effect.AppSnapshot; receipt != nil && (receipt.WriterEpoch == 0 || receipt.WriterEpoch > math.MaxInt64 || receipt.Sequence == 0 || receipt.Sequence > math.MaxInt64 || !identifier(receipt.TargetNodeId) || len(receipt.ManifestHash) != 32) {
+			return ErrMessage
+		}
+		if receipt := effect.DatabaseSwitchover; receipt != nil && (receipt.WriterEpoch == 0 || receipt.WriterEpoch > math.MaxInt64 || !identifier(receipt.TargetNodeId) || len(receipt.PositionHash) != 32) {
 			return ErrMessage
 		}
 		id, err := uuid.Parse(effect.ResourceId)

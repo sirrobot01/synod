@@ -23,7 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirrobot01/synod/internal/agent/replication"
-	"github.com/sirrobot01/synod/internal/cluster"
+	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/controller/worker"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/coordinator"
@@ -277,12 +277,9 @@ func answer(message *agentv1.ControllerMessage) []*agentv1.AgentMessage {
 		return nil
 	}
 	ack := &agentv1.AdmissionAck{DeliveryAttemptId: message.DeliveryAttemptId, Epoch: command.Epoch, CommandId: command.CommandId, State: "queued", InputHash: command.InputHash}
-	state := "present"
-	switch command.Input.Payload.(type) {
-	case *agentv1.CommandInput_StartContainer:
+	state := "created"
+	if command.Input.GetStartContainer() != nil {
 		state = "running"
-	case *agentv1.CommandInput_CheckReadiness:
-		state = "ready"
 	}
 	receipt := &agentv1.TerminalResult{
 		Epoch: command.Epoch, CommandId: command.CommandId, InputHash: command.InputHash, Sequence: 1, State: "succeeded",
@@ -294,13 +291,13 @@ func answer(message *agentv1.ControllerMessage) []*agentv1.AgentMessage {
 	}
 }
 
-// admit creates one cluster, which writes the outbox row that the runner scans.
-func (i *installation) admit(t *testing.T, name string) postgres.Admission {
+// admit creates one tier 3 app, which writes the outbox row that the runner scans.
+func (i *installation) admit(t *testing.T, name string) app.Admission {
 	t.Helper()
-	admission, err := i.store.CreateCluster(t.Context(), postgres.CreateClusterRequest{
-		Identity:  postgres.RequestIdentity{InstallationID: i.id, ActorID: "actor-1", APIOperation: postgres.CreateClusterAPIOperation, IdempotencyKey: uuid.NewString()},
+	admission, err := i.store.AdmitApp(t.Context(), postgres.CreateAppRequest{
+		Identity:  postgres.RequestIdentity{InstallationID: i.id, ActorID: "actor-1", APIOperation: postgres.CreateAppAPIOperation, IdempotencyKey: uuid.NewString()},
 		RequestID: "request-1",
-		Spec:      cluster.CreateSpec{SchemaVersion: 1, Name: name, Engine: cluster.PostgreSQL, PostgreSQL: &cluster.PostgreSQLSpec{Version: "17.11", Topology: "standalone"}},
+		Spec:      app.AppSpec{SchemaVersion: 1, Name: name, Tier: app.TierParallel, Copies: 1, Service: app.ServiceSpec{Image: "nginx", Ports: []app.PortSpec{{ContainerPort: 80}}}, Router: app.RouterSpec{Protocol: "tcp", Port: 8080}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -308,9 +305,9 @@ func (i *installation) admit(t *testing.T, name string) postgres.Admission {
 	return admission
 }
 
-// install reserves one instance and supplies a volume, start, and readiness plan.
+// install reserves one copy and supplies an ensure and start plan.
 // The runner must take over the expired installer claim before it can dispatch.
-func (i *installation) install(t *testing.T, admission postgres.Admission) *agentv1.ExecutionPlan {
+func (i *installation) install(t *testing.T, admission app.Admission) *agentv1.ExecutionPlan {
 	t.Helper()
 	generation, err := i.store.RecoveryGeneration(t.Context(), i.id)
 	if err != nil {
@@ -329,32 +326,25 @@ func (i *installation) install(t *testing.T, admission postgres.Admission) *agen
 	if err != nil {
 		t.Fatal(err)
 	}
-	resource, instance := uuid.New(), uuid.New()
+	instance := uuid.New()
 	port := uint16(15432 + i.count(t, `SELECT count(*) FROM allocation_ports WHERE node_id=$1`, i.node))
-	command := &agentv1.Command{
-		Epoch:       &agentv1.Epoch{InstallationId: i.id.String(), NodeId: i.node.String(), ClusterId: claim.ClusterID.String(), RecoveryGeneration: generation.String(), ExecutionEpoch: claim.ExecutionEpoch},
+	image := "nginx@sha256:" + strings.Repeat("a", 64)
+	ensure := &agentv1.Command{
+		Epoch:       &agentv1.Epoch{InstallationId: i.id.String(), NodeId: i.node.String(), AppId: claim.AppID.String(), RecoveryGeneration: generation.String(), ExecutionEpoch: claim.ExecutionEpoch},
 		OperationId: admission.OperationID.String(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1,
-		Input: &agentv1.CommandInput{ResourceId: resource.String(), PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: resource.String()}}},
+		Input: &agentv1.CommandInput{ResourceId: instance.String(), PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
+			ImageDigest: image, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
+			Ports:   []*agentv1.PortBinding{{ContainerPort: 80, HostPort: uint32(port), HostAddress: "0.0.0.0", Transport: "tcp"}},
+			Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "web"},
+		}}},
 	}
-	hash, err := operation.CommandHash(command)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command.InputHash = hash[:]
-	plan := &agentv1.ExecutionPlan{Version: 1, Steps: []*agentv1.PlanStep{{
-		Command: command, MaxAttempts: 3, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION,
-		Postcondition: agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS,
-	}}}
-	start := proto.Clone(command).(*agentv1.Command)
+	start := proto.Clone(ensure).(*agentv1.Command)
 	start.StepId, start.CommandId = uuid.NewString(), uuid.NewString()
-	start.Input.ResourceId = instance.String()
 	start.Input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}
-	ready := proto.Clone(start).(*agentv1.Command)
-	ready.StepId, ready.CommandId = uuid.NewString(), uuid.NewString()
-	ready.Input.Payload = &agentv1.CommandInput_CheckReadiness{CheckReadiness: &agentv1.CheckReadiness{Address: "127.0.0.1", Port: uint32(port), Engine: "postgres", PostgresRole: "primary", Database: "app", Role: "synod_admin"}}
+	plan := &agentv1.ExecutionPlan{Version: 1}
 	for _, step := range []*agentv1.PlanStep{
-		{Command: start, DependsOn: []string{command.StepId}, MaxAttempts: 3, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING},
-		{Command: ready, DependsOn: []string{start.StepId}, MaxAttempts: 3, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_ENGINE_READY},
+		{Command: ensure, MaxAttempts: 3, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS},
+		{Command: start, DependsOn: []string{ensure.StepId}, MaxAttempts: 3, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING},
 	} {
 		hash, err := operation.CommandHash(step.Command)
 		if err != nil {
@@ -364,9 +354,9 @@ func (i *installation) install(t *testing.T, admission postgres.Admission) *agen
 		plan.Steps = append(plan.Steps, step)
 	}
 	allocation := placement.Allocation{
-		ID: uuid.New(), InstallationID: i.id, NodeID: i.node, ClusterID: claim.ClusterID,
+		ID: uuid.New(), InstallationID: i.id, NodeID: i.node, AppID: claim.AppID,
 		ResourceID: instance, CreatedByOperation: admission.OperationID, CreatedRevision: 1,
-		OwnedResourceIDs: []uuid.UUID{instance, resource},
+		OwnedResourceIDs: []uuid.UUID{instance},
 		Budget:           placement.Vector{CPUMillis: 250, MemoryBytes: 64 << 20, DiskBytes: 1 << 30},
 		Ports:            []placement.Port{{Address: "0.0.0.0", Transport: "tcp", Number: port}},
 	}
@@ -374,18 +364,19 @@ func (i *installation) install(t *testing.T, admission postgres.Admission) *agen
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := i.pool.Exec(t.Context(), `INSERT INTO resource_allocations(id,installation_id,node_id,cluster_id,resource_id,created_operation_id,created_revision,allocation_bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, allocation.ID, i.id, i.node, claim.ClusterID, instance, admission.OperationID, allocation.CreatedRevision, allocationBytes); err != nil {
+	if _, err := i.pool.Exec(t.Context(), `INSERT INTO resource_allocations(id,installation_id,node_id,app_id,resource_id,created_operation_id,created_revision,allocation_bytes) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, allocation.ID, i.id, i.node, claim.AppID, instance, admission.OperationID, allocation.CreatedRevision, allocationBytes); err != nil {
 		t.Fatal(err)
 	}
-	for _, owned := range allocation.OwnedResourceIDs {
-		if _, err := i.pool.Exec(t.Context(), `INSERT INTO allocation_resources(installation_id,cluster_id,node_id,allocation_id,resource_id) VALUES($1,$2,$3,$4,$5)`, i.id, claim.ClusterID, i.node, allocation.ID, owned); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := i.pool.Exec(t.Context(), `INSERT INTO allocation_ports(installation_id,cluster_id,node_id,allocation_id,address,transport,port,name) VALUES($1,$2,$3,$4,$5,$6,$7,'')`, i.id, claim.ClusterID, i.node, allocation.ID, allocation.Ports[0].Address, allocation.Ports[0].Transport, port); err != nil {
+	if _, err := i.pool.Exec(t.Context(), `INSERT INTO allocation_resources(installation_id,app_id,node_id,allocation_id,resource_id) VALUES($1,$2,$3,$4,$5)`, i.id, claim.AppID, i.node, allocation.ID, instance); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := i.pool.Exec(t.Context(), `INSERT INTO operation_allocation_bindings(installation_id,cluster_id,operation_id,allocation_id) VALUES($1,$2,$3,$4)`, i.id, claim.ClusterID, admission.OperationID, allocation.ID); err != nil {
+	if _, err := i.pool.Exec(t.Context(), `INSERT INTO allocation_ports(installation_id,app_id,node_id,allocation_id,address,transport,port,name) VALUES($1,$2,$3,$4,$5,$6,$7,'')`, i.id, claim.AppID, i.node, allocation.ID, allocation.Ports[0].Address, allocation.Ports[0].Transport, port); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := i.pool.Exec(t.Context(), `INSERT INTO operation_allocation_bindings(installation_id,app_id,operation_id,allocation_id) VALUES($1,$2,$3,$4)`, i.id, claim.AppID, admission.OperationID, allocation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := i.pool.Exec(t.Context(), `INSERT INTO app_copies(id,installation_id,app_id,node_id,copy_index,host_port,observed_state,created_at,updated_at) VALUES($1,$2,$3,$4,0,$5,'pending',clock_timestamp(),clock_timestamp())`, instance, i.id, claim.AppID, i.node, port); err != nil {
 		t.Fatal(err)
 	}
 	if err := i.store.InstallPlan(t.Context(), claim, plan); err != nil {
@@ -454,10 +445,10 @@ func TestRunnerDrivesAnAdmittedOperation(t *testing.T) {
 	if inst.count(t, `SELECT count(*) FROM execution_claims WHERE operation_id=$1 AND owner_id='controller/1'`, admission.OperationID) != 1 {
 		t.Fatal("the runner did not claim the operation")
 	}
-	if inst.count(t, `SELECT count(*) FROM clusters WHERE id=$1 AND observed_revision=1 AND observed_lifecycle='running'`, admission.ClusterID) != 1 {
-		t.Fatal("success did not commit the proved cluster lifecycle")
+	if inst.count(t, `SELECT count(*) FROM apps WHERE id=$1 AND observed_revision=1 AND observed_lifecycle='running'`, admission.AppID) != 1 {
+		t.Fatal("success did not commit the proved app lifecycle")
 	}
-	if inst.count(t, `SELECT count(*) FROM resource_allocations WHERE cluster_id=$1 AND released_at IS NULL`, admission.ClusterID) != 1 {
+	if inst.count(t, `SELECT count(*) FROM resource_allocations WHERE app_id=$1 AND released_at IS NULL`, admission.AppID) != 1 {
 		t.Fatal("create success released the live reservation")
 	}
 	cancel()
@@ -469,7 +460,7 @@ func TestRunnerDrivesAnAdmittedOperation(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the runner did not stop")
 	}
-	// Every worker released its cluster before the runner returned.
+	// Every worker released its app before the runner returned.
 	inst.runner.mu.Lock()
 	remaining := len(inst.runner.workers)
 	inst.runner.mu.Unlock()
@@ -478,8 +469,8 @@ func TestRunnerDrivesAnAdmittedOperation(t *testing.T) {
 	}
 }
 
-// Every scan sees the same undelivered outbox row, so one cluster must keep one worker.
-func TestRunnerRunsOneWorkerForOneCluster(t *testing.T) {
+// Every scan sees the same undelivered outbox row, so one app must keep one worker.
+func TestRunnerRunsOneWorkerForOneApp(t *testing.T) {
 	inst := newInstallation(t)
 	inst.connect(t, drainOnly)
 	admission := inst.admit(t, "db")
@@ -493,7 +484,7 @@ func TestRunnerRunsOneWorkerForOneCluster(t *testing.T) {
 	// The worker waits for a receipt that never arrives, across several scans.
 	time.Sleep(3 * inst.runner.config.ScanInterval)
 	if running := len(inst.runner.slots); running != 1 {
-		t.Fatalf("running workers=%d, want one for the cluster", running)
+		t.Fatalf("running workers=%d, want one for the app", running)
 	}
 	if total := inst.count(t, `SELECT count(*) FROM execution_claims WHERE operation_id=$1 AND owner_id='controller/1'`, admission.OperationID); total != 1 {
 		t.Fatalf("runner claims=%d, want one", total)
@@ -547,8 +538,8 @@ func TestRunnerStopsTheWorkerWhenRenewalFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan error, 1)
 	go func() { stopped <- inst.runner.Run(ctx) }()
-	inst.waitFor(t, func() bool { return inst.worker(admission.ClusterID) != nil }, "the runner did not start a worker")
-	first := inst.worker(admission.ClusterID)
+	inst.waitFor(t, func() bool { return inst.worker(admission.AppID) != nil }, "the runner did not start a worker")
+	first := inst.worker(admission.AppID)
 	epoch := inst.epoch(t, admission.OperationID)
 
 	// Expire the claim behind the owner. RenewClaim never revives an expired claim.
@@ -559,10 +550,10 @@ func TestRunnerStopsTheWorkerWhenRenewalFails(t *testing.T) {
 	// The slot count is not the thing to watch. This runner rescans every second
 	// and an expired claim is takeable, so it reclaims the operation and fills the
 	// slot again; the count is zero only between the unwind and the next scan.
-	// The worker for the cluster being replaced is durable: it only changes after
+	// The worker for the app being replaced is durable: it only changes after
 	// the first one was stopped and a new claim was taken.
 	inst.waitFor(t, func() bool {
-		found := inst.worker(admission.ClusterID)
+		found := inst.worker(admission.AppID)
 		return found != nil && found != first
 	}, "a worker outlived its claim")
 
@@ -574,11 +565,11 @@ func TestRunnerStopsTheWorkerWhenRenewalFails(t *testing.T) {
 	<-stopped
 }
 
-// worker reads the worker the runner currently holds for one cluster.
-func (i *installation) worker(clusterID uuid.UUID) *worker.Worker {
+// worker reads the worker the runner currently holds for one app.
+func (i *installation) worker(appID uuid.UUID) *worker.Worker {
 	i.runner.mu.Lock()
 	defer i.runner.mu.Unlock()
-	return i.runner.workers[clusterID]
+	return i.runner.workers[appID]
 }
 
 // epoch reads the durable execution epoch of one operation.
@@ -777,7 +768,7 @@ func TestRunnerSkipsAnOperationWithoutAPlan(t *testing.T) {
 func TestRunnerDropsEvidenceWithNoOwner(t *testing.T) {
 	inst := newInstallation(t)
 	peer := controlstream.Peer{InstallationID: inst.id, NodeID: inst.node, SessionID: uuid.NewString()}
-	epoch := &agentv1.Epoch{InstallationId: inst.id.String(), NodeId: inst.node.String(), ClusterId: uuid.NewString(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1}
+	epoch := &agentv1.Epoch{InstallationId: inst.id.String(), NodeId: inst.node.String(), AppId: uuid.NewString(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1}
 	for name, message := range map[string]*agentv1.AgentMessage{
 		"barrier":   {Message: &agentv1.AgentMessage_BarrierResult{BarrierResult: &agentv1.BarrierResult{Epoch: epoch, AdmissionsClosed: true, Drained: true}}},
 		"admission": {Message: &agentv1.AgentMessage_AdmissionAck{AdmissionAck: &agentv1.AdmissionAck{Epoch: epoch, CommandId: uuid.NewString(), State: "queued", InputHash: make([]byte, 32)}}},
@@ -790,16 +781,16 @@ func TestRunnerDropsEvidenceWithNoOwner(t *testing.T) {
 	if inst.count(t, `SELECT count(*) FROM command_admissions`) != 0 {
 		t.Fatal("evidence with no owner reached the store")
 	}
-	// A reserved cluster has no worker yet and must not receive evidence either.
-	clusterID := uuid.MustParse(epoch.ClusterId)
-	if !inst.runner.reserve(clusterID) {
-		t.Fatal("the cluster was already reserved")
+	// A reserved app has no worker yet and must not receive evidence either.
+	appID := uuid.MustParse(epoch.AppId)
+	if !inst.runner.reserve(appID) {
+		t.Fatal("the app was already reserved")
 	}
 	barrier := &agentv1.AgentMessage{Message: &agentv1.AgentMessage_BarrierResult{BarrierResult: &agentv1.BarrierResult{Epoch: epoch, AdmissionsClosed: true, Drained: true}}}
 	if err := inst.runner.Handle(t.Context(), peer, barrier); err != nil {
-		t.Fatalf("a reserved cluster closed the agent stream: %v", err)
+		t.Fatalf("a reserved app closed the agent stream: %v", err)
 	}
-	inst.runner.release(clusterID)
+	inst.runner.release(appID)
 }
 
 // A receipt outlives its worker. The receiver keeps it durable with no claim context.
@@ -817,14 +808,14 @@ func TestRunnerCommitsALateReceipt(t *testing.T) {
 	}, "the runner did not finish the operation")
 	cancel()
 	<-stopped
-	// No worker owns the cluster now. The same receipt must still commit.
+	// No worker owns the app now. The same receipt must still commit.
 	peer := controlstream.Peer{InstallationID: inst.id, NodeID: inst.node, SessionID: uuid.NewString()}
 	epoch := proto.Clone(command.Epoch).(*agentv1.Epoch)
 	epoch.ExecutionEpoch = 2
 	epoch.RecoveryGeneration = mustGeneration(t, inst)
 	receipt := &agentv1.TerminalResult{
 		Epoch: epoch, CommandId: command.CommandId, InputHash: command.InputHash, Sequence: 1, State: "succeeded",
-		Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-command:" + command.CommandId, State: "present"}},
+		Effects: []*agentv1.Effect{{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "docker-command:" + command.CommandId, State: "created"}},
 	}
 	message := &agentv1.AgentMessage{Message: &agentv1.AgentMessage_TerminalResult{TerminalResult: receipt}}
 	if err := inst.runner.Handle(t.Context(), peer, message); err != nil {

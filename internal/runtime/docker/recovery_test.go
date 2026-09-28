@@ -48,14 +48,15 @@ func runtimeJournal(t *testing.T, command *agentv1.Command) (*journal.Journal, j
 }
 
 func TestRecoveryResolvesRetainedNativeExec(t *testing.T) {
-	r, api, clusterID := runtimeFixture(t)
-	ensure := createFixtureContainer(t, r, clusterID, agentv1.NetworkMode_NETWORK_MODE_BRIDGE)
+	r, api, appID := runtimeFixture(t)
+	ensure := createFixtureContainer(t, r, appID)
 	resourceID := ensure.Input.ResourceId
-	start := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: resourceID, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{AllowInitialization: true}}})
+	start := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: resourceID, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}})
 	if _, err := r.Execute(t.Context(), start, nil); err != nil {
 		t.Fatal(err)
 	}
-	command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: resourceID, Payload: &agentv1.CommandInput_InspectContainer{InspectContainer: &agentv1.InspectContainer{}}})
+	// A repeated start of a running container observes it without changing it.
+	command := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: resourceID, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}})
 	j, options, path := runtimeJournal(t, command)
 	// This test creates a native task directly. The product adapter has no exec API.
 	native, err := api.ExecCreate(t.Context(), "synod-instance-"+resourceID, client.ExecCreateOptions{Cmd: []string{"sleep", "2"}})

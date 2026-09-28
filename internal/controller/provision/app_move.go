@@ -19,11 +19,11 @@ func (p *Planner) moveApp(ctx context.Context, claim operation.Claim, op operati
 	if err != nil {
 		return err
 	}
-	found, err := p.config.Store.GetApp(ctx, claim.InstallationID, claim.ClusterID)
+	found, err := p.config.Store.GetApp(ctx, claim.InstallationID, claim.AppID)
 	if err != nil {
 		return err
 	}
-	deployment, err := p.config.Store.ReadAppDeployment(ctx, claim.InstallationID, claim.ClusterID)
+	deployment, err := p.config.Store.ReadAppDeployment(ctx, claim.InstallationID, claim.AppID)
 	if err != nil {
 		return err
 	}
@@ -49,7 +49,7 @@ func (p *Planner) moveApp(ctx context.Context, claim operation.Claim, op operati
 	if resolved.LocalOnly || resolved.Service.Image != original.ImageDigest {
 		return fmt.Errorf("move image differs from the deployed digest")
 	}
-	copies, err := p.config.Store.GetAllAppCopies(ctx, claim.InstallationID, claim.ClusterID)
+	copies, err := p.config.Store.GetAllAppCopies(ctx, claim.InstallationID, claim.AppID)
 	if err != nil {
 		return err
 	}
@@ -69,8 +69,25 @@ func (p *Planner) moveApp(ctx context.Context, claim operation.Claim, op operati
 	if source.ID == uuid.Nil {
 		return ErrNoWorkload
 	}
+	if found.Tier == app.TierDatabase && target.ID == uuid.Nil {
+		return ErrNoWorkload
+	}
 	if target.ID == uuid.Nil {
 		target = app.Copy{ID: uuid.New(), NodeID: move.TargetNodeID, CopyIndex: nextIndex}
+	}
+	var secrets []*agentv1.SecretReference
+	if found.Tier == app.TierDatabase {
+		original = nil
+		for _, step := range deployment.Steps {
+			if step.Command.Input.ResourceId == target.ID.String() && step.Command.Epoch.NodeId == target.NodeID.String() && step.Command.Input.GetEnsureContainer() != nil {
+				original = step.Command.Input.GetEnsureContainer()
+				secrets = proto.Clone(step.Command.Input).(*agentv1.CommandInput).Secrets
+				break
+			}
+		}
+		if original == nil {
+			return ErrNoWorkload
+		}
 	}
 	snapshot, err := p.config.Store.ReadPlacementSnapshot(ctx, claim.InstallationID)
 	if err != nil {
@@ -126,7 +143,7 @@ func (p *Planner) moveApp(ctx context.Context, claim operation.Claim, op operati
 	if nodeIndex < 0 || snapshot.Nodes[nodeIndex].Policy == nil || snapshot.Nodes[nodeIndex].Policy.ClientAddress == "" {
 		return placement.ErrUnsatisfied
 	}
-	request := placement.Request{Version: 1, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID, OperationID: claim.OperationID, DesiredRevision: op.DesiredRevision, Profile: "compact", PortRange: p.config.EndpointPorts, Resources: []placement.Resource{resource}}
+	request := placement.Request{Version: 1, InstallationID: claim.InstallationID, AppID: claim.AppID, OperationID: claim.OperationID, DesiredRevision: op.DesiredRevision, Profile: "compact", PortRange: p.config.EndpointPorts, Resources: []placement.Resource{resource}}
 	decision, _, err := p.config.Decider.Decide(ctx, request)
 	if err != nil {
 		return err
@@ -135,15 +152,21 @@ func (p *Planner) moveApp(ctx context.Context, claim operation.Claim, op operati
 	container := proto.Clone(original).(*agentv1.EnsureContainer)
 	container.Generic.CopyIndex = uint32(target.CopyIndex)
 	container.Ports = []*agentv1.PortBinding{{ContainerPort: original.Ports[0].ContainerPort, HostPort: uint32(assigned.Ports[0].Number), HostAddress: assigned.Ports[0].Address, Transport: assigned.Ports[0].Transport}}
-	steps, err := p.stopSteps(claim, op, []member{{NodeID: source.NodeID, ResourceID: source.ID, Port: source.HostPort}})
+	var steps []*agentv1.PlanStep
+	var final *agentv1.PlanStep
+	if found.Tier == app.TierDatabase {
+		final, err = p.step(claim, epochFor(claim, source.NodeID), op.DesiredRevision, &agentv1.CommandInput{ResourceId: source.ID.String(), Payload: &agentv1.CommandInput_SwitchDatabase{SwitchDatabase: &agentv1.SwitchDatabase{WriterEpoch: move.WriterEpoch, TargetNodeId: target.NodeID.String(), TargetHost: snapshot.Nodes[nodeIndex].Policy.ClientAddress, TargetPort: uint32(target.HostPort)}}}, agentv1.Postcondition_POSTCONDITION_DATABASE_SWITCHOVER_READY, nil, beforeExecution)
+	} else {
+		steps, err = p.stopSteps(claim, op, []member{{NodeID: source.NodeID, ResourceID: source.ID}})
+		if err != nil {
+			return err
+		}
+		final, err = p.step(claim, epochFor(claim, source.NodeID), op.DesiredRevision, &agentv1.CommandInput{ResourceId: source.ID.String(), Payload: &agentv1.CommandInput_FinalAppSnapshot{FinalAppSnapshot: &agentv1.FinalAppSnapshot{WriterEpoch: move.WriterEpoch, TargetNodeId: target.NodeID.String()}}}, agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED, []string{steps[0].Command.StepId}, beforeExecution)
+	}
 	if err != nil {
 		return err
 	}
-	final, err := p.step(claim, epochFor(claim, source.NodeID), op.DesiredRevision, &agentv1.CommandInput{ResourceId: source.ID.String(), Payload: &agentv1.CommandInput_FinalAppSnapshot{FinalAppSnapshot: &agentv1.FinalAppSnapshot{WriterEpoch: move.WriterEpoch, TargetNodeId: target.NodeID.String()}}}, agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED, []string{steps[0].Command.StepId}, beforeExecution)
-	if err != nil {
-		return err
-	}
-	ensure, err := p.step(claim, epochFor(claim, target.NodeID), op.DesiredRevision, &agentv1.CommandInput{ResourceId: target.ID.String(), Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: container}}, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, []string{final.Command.StepId}, beforeExecution)
+	ensure, err := p.step(claim, epochFor(claim, target.NodeID), op.DesiredRevision, &agentv1.CommandInput{ResourceId: target.ID.String(), Secrets: secrets, Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: container}}, agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, []string{final.Command.StepId}, beforeExecution)
 	if err != nil {
 		return err
 	}
@@ -152,6 +175,6 @@ func (p *Planner) moveApp(ctx context.Context, claim operation.Claim, op operati
 		return err
 	}
 	steps = append(steps, final, ensure, start)
-	_, err = p.config.Store.InstallPlacementPlan(ctx, claim, request, decision, &agentv1.ExecutionPlan{Version: 1, Steps: steps}, nil)
+	_, err = p.config.Store.InstallPlacementPlan(ctx, claim, request, decision, &agentv1.ExecutionPlan{Version: 1, Steps: steps})
 	return err
 }

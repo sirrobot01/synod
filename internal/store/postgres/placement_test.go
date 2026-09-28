@@ -32,10 +32,10 @@ func readyNode(t *testing.T, s *Store, installation, node, session uuid.UUID) pl
 }
 
 // placementRequest asks for one small PostgreSQL instance that the fixture node can hold.
-func placementRequest(installation, clusterID, operationID uuid.UUID, policy placement.NodePolicy, ports []placement.Port) placement.Request {
+func placementRequest(installation, appID, operationID uuid.UUID, policy placement.NodePolicy, ports []placement.Port) placement.Request {
 	resource := uuid.New()
 	return placement.Request{
-		Version: 1, InstallationID: installation, ClusterID: clusterID, OperationID: operationID,
+		Version: 1, InstallationID: installation, AppID: appID, OperationID: operationID,
 		DesiredRevision: 1, Profile: "compact",
 		Resources: []placement.Resource{{
 			ID: resource, ReservationID: uuid.New(), OwnedResourceIDs: []uuid.UUID{resource},
@@ -167,13 +167,13 @@ func TestPlacementSnapshotReportsAllocations(t *testing.T) {
 	policy := readyNode(t, s, installation, node, session)
 	request := testRequest()
 	request.Identity.InstallationID = installation
-	admission, err := s.CreateCluster(t.Context(), request)
+	admission, err := s.AdmitApp(t.Context(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	clusterID, operationID := admission.ClusterID, admission.OperationID
+	appID, operationID := admission.AppID, admission.OperationID
 	held := placement.Allocation{
-		ID: uuid.New(), InstallationID: installation, NodeID: node, ClusterID: clusterID, ResourceID: uuid.New(),
+		ID: uuid.New(), InstallationID: installation, NodeID: node, AppID: appID, ResourceID: uuid.New(),
 		CreatedByOperation: operationID, CreatedRevision: 1,
 		Budget: placement.Vector{CPUMillis: 7000, MemoryBytes: 1 << 33, DiskBytes: 1 << 39},
 		Ports:  []placement.Port{{Address: "127.0.0.1", Transport: "tcp", Number: 5432}},
@@ -191,11 +191,11 @@ func TestPlacementSnapshotReportsAllocations(t *testing.T) {
 		t.Fatalf("ports %+v", snapshot.Allocations[0].Ports)
 	}
 	// The held budget consumes the node, so a new request cannot fit.
-	if _, err := placement.Plan(placementRequest(installation, clusterID, uuid.New(), policy, nil), snapshot); !errors.Is(err, placement.ErrUnsatisfied) {
+	if _, err := placement.Plan(placementRequest(installation, appID, uuid.New(), policy, nil), snapshot); !errors.Is(err, placement.ErrUnsatisfied) {
 		t.Fatalf("a held allocation did not hold capacity: %v", err)
 	}
 	// Its port is taken as well.
-	if _, err := placement.Plan(placementRequest(installation, clusterID, uuid.New(), policy, held.Ports), snapshot); !errors.Is(err, placement.ErrUnsatisfied) {
+	if _, err := placement.Plan(placementRequest(installation, appID, uuid.New(), policy, held.Ports), snapshot); !errors.Is(err, placement.ErrUnsatisfied) {
 		t.Fatalf("a held port was offered again: %v", err)
 	}
 	// A tombstone holds neither capacity nor a port, so it leaves the planning snapshot.
@@ -210,7 +210,7 @@ func TestPlacementSnapshotReportsAllocations(t *testing.T) {
 	if len(snapshot.Allocations) != 0 {
 		t.Fatalf("a released allocation stayed in the planning snapshot: %+v", snapshot.Allocations)
 	}
-	if _, err := placement.Plan(placementRequest(installation, clusterID, uuid.New(), policy, held.Ports), snapshot); err != nil {
+	if _, err := placement.Plan(placementRequest(installation, appID, uuid.New(), policy, held.Ports), snapshot); err != nil {
 		t.Fatalf("a released allocation still held capacity: %v", err)
 	}
 	// The record itself survives. Release is a tombstone, never a delete.
@@ -242,21 +242,21 @@ func (s *Store) seedAllocation(t *testing.T, allocation placement.Allocation, op
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(t.Context(), `INSERT INTO resource_allocations (id,installation_id,node_id,cluster_id,resource_id,created_operation_id,created_revision,allocation_bytes)
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO resource_allocations (id,installation_id,node_id,app_id,resource_id,created_operation_id,created_revision,allocation_bytes)
  VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		allocation.ID, allocation.InstallationID, allocation.NodeID, allocation.ClusterID, allocation.ResourceID,
+		allocation.ID, allocation.InstallationID, allocation.NodeID, allocation.AppID, allocation.ResourceID,
 		operationID, allocation.CreatedRevision, encoded); err != nil {
 		t.Fatal(err)
 	}
 	for _, resource := range allocation.OwnedResourceIDs {
-		if _, err := s.pool.Exec(t.Context(), `INSERT INTO allocation_resources (installation_id,cluster_id,node_id,allocation_id,resource_id) VALUES ($1,$2,$3,$4,$5)`,
-			allocation.InstallationID, allocation.ClusterID, allocation.NodeID, allocation.ID, resource); err != nil {
+		if _, err := s.pool.Exec(t.Context(), `INSERT INTO allocation_resources (installation_id,app_id,node_id,allocation_id,resource_id) VALUES ($1,$2,$3,$4,$5)`,
+			allocation.InstallationID, allocation.AppID, allocation.NodeID, allocation.ID, resource); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, port := range allocation.Ports {
-		if _, err := s.pool.Exec(t.Context(), `INSERT INTO allocation_ports (installation_id,cluster_id,node_id,allocation_id,address,transport,port,name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-			allocation.InstallationID, allocation.ClusterID, allocation.NodeID, allocation.ID, port.Address, port.Transport, port.Number, port.Name); err != nil {
+		if _, err := s.pool.Exec(t.Context(), `INSERT INTO allocation_ports (installation_id,app_id,node_id,allocation_id,address,transport,port,name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+			allocation.InstallationID, allocation.AppID, allocation.NodeID, allocation.ID, port.Address, port.Transport, port.Number, port.Name); err != nil {
 			t.Fatal(err)
 		}
 	}

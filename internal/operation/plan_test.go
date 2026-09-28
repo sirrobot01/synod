@@ -33,7 +33,7 @@ func TestPlanRemovalRequiresStopOnTheSameNode(t *testing.T) {
 		{Command: stop, MaxAttempts: 1, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_SAFE_STOP, Postcondition: agentv1.Postcondition_POSTCONDITION_CONTAINER_STOPPED},
 		{Command: remove, MaxAttempts: 1, CancellationBoundary: agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION, Postcondition: agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT, DependsOn: []string{stop.StepId}},
 	}}
-	op := Operation{ID: uuid.MustParse(stop.OperationId), InstallationID: uuid.MustParse(stop.Epoch.InstallationId), ClusterID: uuid.MustParse(stop.Epoch.ClusterId), DesiredRevision: stop.DesiredRevision}
+	op := Operation{ID: uuid.MustParse(stop.OperationId), InstallationID: uuid.MustParse(stop.Epoch.InstallationId), AppID: uuid.MustParse(stop.Epoch.AppId), DesiredRevision: stop.DesiredRevision}
 	if err := ValidatePlan(plan, op); err != nil {
 		t.Fatal(err)
 	}
@@ -59,13 +59,13 @@ func TestSharedReceiptChecksRejectMissingPlanInput(t *testing.T) {
 	}
 }
 
-// An agent runs one command of a cluster at a time, so two steps on one node need a
+// An agent runs one command of a app at a time, so two steps on one node need a
 // dependency path. Steps on different nodes do not.
 func TestPlanOrdersStepsOnEachNode(t *testing.T) {
-	op := Operation{ID: uuid.New(), InstallationID: uuid.New(), ClusterID: uuid.New(), DesiredRevision: 1}
+	op := Operation{ID: uuid.New(), InstallationID: uuid.New(), AppID: uuid.New(), DesiredRevision: 1}
 	step := func(node string, after ...string) *agentv1.PlanStep {
 		command := commandFixture()
-		command.Epoch.InstallationId, command.Epoch.ClusterId, command.Epoch.NodeId = op.InstallationID.String(), op.ClusterID.String(), node
+		command.Epoch.InstallationId, command.Epoch.AppId, command.Epoch.NodeId = op.InstallationID.String(), op.AppID.String(), node
 		command.OperationId = op.ID.String()
 		hash, err := CommandHash(command)
 		if err != nil {

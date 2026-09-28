@@ -268,3 +268,29 @@ func TestImportTier2Refusals(t *testing.T) {
 		})
 	}
 }
+
+func TestImportWorker(t *testing.T) {
+	filename := filepath.Join(t.TempDir(), "compose.yml")
+	data := "services:\n  worker:\n    image: redis:8\n    command: [sh, -c, 'sleep 100']\n    healthcheck:\n      test: [CMD, 'true']\n"
+	if err := os.WriteFile(filename, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := Import(t.Context(), filename, Options{Worker: true, Copies: "all_capable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Router != (app.RouterSpec{}) || len(spec.Service.Ports) != 0 || spec.CopiesMode != app.CopiesModeAllCapable || spec.Service.HealthCheck.Type != "exec" {
+		t.Fatalf("worker: %+v", spec)
+	}
+	for _, options := range []Options{{}, {Worker: true, Tier: app.TierSingleWriter}, {Worker: true, Port: 8080}} {
+		if _, err := Import(t.Context(), filename, options); err == nil {
+			t.Fatalf("invalid worker import accepted: %+v", options)
+		}
+	}
+	if err := os.WriteFile(filename, []byte(data+"    ports: ['8080:80']\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Import(t.Context(), filename, Options{Worker: true}); err == nil {
+		t.Fatal("published worker port accepted")
+	}
+}

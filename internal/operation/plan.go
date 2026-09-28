@@ -29,7 +29,7 @@ func ValidatePlan(plan *agentv1.ExecutionPlan, op Operation) error {
 			return ErrUnsupportedPlan
 		}
 		command := step.Command
-		if ValidateCommand(command) != nil || command.Epoch.InstallationId != op.InstallationID.String() || command.Epoch.ClusterId != op.ClusterID.String() || command.OperationId != op.ID.String() || command.DesiredRevision != op.DesiredRevision || command.PlanVersion != plan.Version || commands[command.CommandId] || steps[command.StepId] {
+		if ValidateCommand(command) != nil || command.Epoch.InstallationId != op.InstallationID.String() || command.Epoch.AppId != op.AppID.String() || command.OperationId != op.ID.String() || command.DesiredRevision != op.DesiredRevision || command.PlanVersion != plan.Version || commands[command.CommandId] || steps[command.StepId] {
 			return ErrUnsupportedPlan
 		}
 		// A plan carries credential references and never a credential. The reference
@@ -42,23 +42,20 @@ func ValidatePlan(plan *agentv1.ExecutionPlan, op Operation) error {
 		}
 		var expected agentv1.Postcondition
 		switch command.Input.Payload.(type) {
-		case *agentv1.CommandInput_EnsureVolume:
-			expected = agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS
-		case *agentv1.CommandInput_EnsureNetwork:
-			expected = agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS
 		case *agentv1.CommandInput_EnsureContainer:
 			expected = agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS
-		case *agentv1.CommandInput_RecoverPostgresSetup:
-			expected = agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED
-			if step.CancellationBoundary != agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION {
-				return ErrUnsupportedPlan
-			}
 		case *agentv1.CommandInput_FinalAppSnapshot:
 			expected = agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED
 			stop, ok := stopped[resource{command.Epoch.NodeId, command.Input.ResourceId}]
 			if !ok || !slices.Contains(step.DependsOn, stop) || step.CancellationBoundary != agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION {
 				return ErrUnsupportedPlan
 			}
+		case *agentv1.CommandInput_SwitchDatabase:
+			expected = agentv1.Postcondition_POSTCONDITION_DATABASE_SWITCHOVER_READY
+			if step.CancellationBoundary != agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION {
+				return ErrUnsupportedPlan
+			}
+			stopped[resource{command.Epoch.NodeId, command.Input.ResourceId}] = command.StepId
 		case *agentv1.CommandInput_RemoveAppData:
 			expected = agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT
 			if step.CancellationBoundary != agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION {
@@ -83,15 +80,6 @@ func ValidatePlan(plan *agentv1.ExecutionPlan, op Operation) error {
 			if step.CancellationBoundary != agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION {
 				return ErrUnsupportedPlan
 			}
-		case *agentv1.CommandInput_VerifyContainerAbsent:
-			expected = agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT
-			if step.CancellationBoundary != agentv1.CancellationBoundary_CANCELLATION_BOUNDARY_BEFORE_EXECUTION {
-				return ErrUnsupportedPlan
-			}
-		case *agentv1.CommandInput_InspectContainer:
-			expected = agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED
-		case *agentv1.CommandInput_CheckReadiness:
-			expected = agentv1.Postcondition_POSTCONDITION_ENGINE_READY
 		default:
 			return ErrUnsupportedPlan
 		}
@@ -108,35 +96,6 @@ func ValidatePlan(plan *agentv1.ExecutionPlan, op Operation) error {
 	if err := serialOnEachNode(plan); err != nil {
 		return err
 	}
-	if op.Kind == "cluster.recover_setup" {
-		if len(plan.Steps) != 4 {
-			return ErrUnsupportedPlan
-		}
-		recover := plan.Steps[0].Command.Input.GetRecoverPostgresSetup()
-		stop := plan.Steps[1].Command.Input.GetStopContainer()
-		start := plan.Steps[2].Command.Input.GetStartContainer()
-		ready := plan.Steps[3].Command.Input.GetCheckReadiness()
-		if recover == nil || stop == nil || start == nil || start.AllowInitialization || ready == nil || ready.Engine != "postgres" || ready.PostgresRole != "primary" || ready.Database != "app" || ready.Role != "synod_app" || ready.Port != recover.Postgres.Port || ready.RedisReplication != nil {
-			return ErrUnsupportedPlan
-		}
-		first := plan.Steps[0].Command
-		for index, step := range plan.Steps {
-			if step.Command.Epoch.NodeId != first.Epoch.NodeId || step.Command.Input.ResourceId != first.Input.ResourceId {
-				return ErrUnsupportedPlan
-			}
-			if index == 0 {
-				if len(step.DependsOn) != 0 {
-					return ErrUnsupportedPlan
-				}
-			} else if !slices.Equal(step.DependsOn, []string{plan.Steps[index-1].Command.StepId}) {
-				return ErrUnsupportedPlan
-			}
-		}
-		references := plan.Steps[3].Command.Input.Secrets
-		if len(references) != 1 || references[0].Purpose != "application" || references[0].CredentialId != recover.Postgres.ApplicationCredentialId || references[0].Version != recover.Postgres.ApplicationCredentialVersion {
-			return ErrUnsupportedPlan
-		}
-	}
 	return nil
 }
 
@@ -146,7 +105,7 @@ func CheckStepResult(step *agentv1.PlanStep, result *agentv1.TerminalResult) err
 		return ErrPostconditionUnproved
 	}
 	command := step.Command
-	if result == nil || result.Epoch == nil || result.CommandId != command.CommandId || !bytes.Equal(result.InputHash, command.InputHash) || result.Epoch.InstallationId != command.Epoch.InstallationId || result.Epoch.NodeId != command.Epoch.NodeId || result.Epoch.ClusterId != command.Epoch.ClusterId || result.State != "succeeded" || result.FailureCode != "" {
+	if result == nil || result.Epoch == nil || result.CommandId != command.CommandId || !bytes.Equal(result.InputHash, command.InputHash) || result.Epoch.InstallationId != command.Epoch.InstallationId || result.Epoch.NodeId != command.Epoch.NodeId || result.Epoch.AppId != command.Epoch.AppId || result.State != "succeeded" || result.FailureCode != "" {
 		return ErrPostconditionUnproved
 	}
 	return CheckStepEffects(step, result.Effects)
@@ -167,7 +126,8 @@ func CheckStepEffects(step *agentv1.PlanStep, effects []*agentv1.Effect) error {
 		// container action, so it names itself differently. Both are one effect
 		// answering for one command.
 		if effect.NativeOperationId == "docker-command:"+command.CommandId ||
-			effect.NativeOperationId == "readiness:"+command.CommandId || effect.NativeOperationId == "app-data:"+command.CommandId {
+			effect.NativeOperationId == "readiness:"+command.CommandId || effect.NativeOperationId == "app-data:"+command.CommandId ||
+			effect.NativeOperationId == "database-switch:"+command.CommandId {
 			if observed != nil {
 				return ErrPostconditionUnproved
 			}
@@ -179,9 +139,7 @@ func CheckStepEffects(step *agentv1.PlanStep, effects []*agentv1.Effect) error {
 	}
 	matched := false
 	switch step.Postcondition {
-	case agentv1.Postcondition_POSTCONDITION_VOLUME_EXISTS, agentv1.Postcondition_POSTCONDITION_NETWORK_EXISTS:
-		matched = observed.State == "present"
-	case agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS, agentv1.Postcondition_POSTCONDITION_CONTAINER_INSPECTED:
+	case agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS:
 		matched = slices.Contains([]string{"created", "restarting", "running", "removing", "paused", "exited", "dead"}, observed.State)
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING:
 		matched = observed.State == "running"
@@ -190,15 +148,14 @@ func CheckStepEffects(step *agentv1.PlanStep, effects []*agentv1.Effect) error {
 		matched = slices.Contains([]string{"created", "exited", "dead", "absent"}, observed.State)
 	case agentv1.Postcondition_POSTCONDITION_CONTAINER_ABSENT:
 		matched = observed.State == "absent"
-	case agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED:
-		matched = observed.State == "setup_recovered"
 	case agentv1.Postcondition_POSTCONDITION_APP_SNAPSHOT_TRANSFERRED:
 		input, receipt := command.Input.GetFinalAppSnapshot(), observed.AppSnapshot
 		matched = observed.State == "snapshot_transferred" && input != nil && receipt != nil && receipt.WriterEpoch == input.WriterEpoch && receipt.TargetNodeId == input.TargetNodeId && receipt.Sequence > 0 && receipt.Sequence <= math.MaxInt64 && observed.NativeOperationId == "app-data:"+command.CommandId && len(receipt.ManifestHash) == sha256.Size
+	case agentv1.Postcondition_POSTCONDITION_DATABASE_SWITCHOVER_READY:
+		input, receipt := command.Input.GetSwitchDatabase(), observed.DatabaseSwitchover
+		matched = observed.State == "database_switchover_ready" && input != nil && receipt != nil && receipt.WriterEpoch == input.WriterEpoch && receipt.TargetNodeId == input.TargetNodeId && len(receipt.PositionHash) == sha256.Size && observed.NativeOperationId == "database-switch:"+command.CommandId
 	case agentv1.Postcondition_POSTCONDITION_APP_DATA_ABSENT:
 		matched = observed.State == "app_data_absent" && observed.NativeOperationId == "app-data:"+command.CommandId && command.Input.GetRemoveAppData() != nil
-	case agentv1.Postcondition_POSTCONDITION_ENGINE_READY:
-		matched = observed.State == "ready"
 	}
 	if !matched {
 		return ErrPostconditionUnproved
@@ -206,7 +163,7 @@ func CheckStepEffects(step *agentv1.PlanStep, effects []*agentv1.Effect) error {
 	return nil
 }
 
-// knownPurpose reports a SQL credential purpose accepted by existing plans.
+// knownPurpose reports a credential purpose accepted by existing plans.
 func knownPurpose(purpose string) bool {
 	switch purpose {
 	case "superuser", "application", "replication":
@@ -216,7 +173,7 @@ func knownPurpose(purpose string) bool {
 }
 
 // serialOnEachNode requires a dependency path between every two steps on one node. An agent admits
-// one queued or running command of a cluster at a time and refuses another as agent_busy, and each
+// one queued or running command of an app at a time and refuses another as agent_busy, and each
 // refusal spends a delivery attempt. Two steps on one node that could be ready together would race.
 // Dependencies always name earlier steps, so ancestors are complete when a step is reached.
 func serialOnEachNode(plan *agentv1.ExecutionPlan) error {

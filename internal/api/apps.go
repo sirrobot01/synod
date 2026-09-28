@@ -21,6 +21,10 @@ func (s *Server) createApp(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeJSON(w, r, &spec) {
 		return
 	}
+	if spec.Tier == app.TierDatabase && spec.Database != nil && (s.catalog == nil || !s.catalog.Serves(spec.Database.Engine, spec.Database.Version)) {
+		s.writeError(w, r, http.StatusUnprocessableEntity, "unsupported_spec", "This server does not serve the requested database engine and version.", uuid.Nil)
+		return
+	}
 	result, err := s.store.AdmitApp(r.Context(), postgres.CreateAppRequest{
 		Identity:  postgres.RequestIdentity{InstallationID: s.installationID, ActorID: identity.actorID, APIOperation: postgres.CreateAppAPIOperation, IdempotencyKey: keys[0]},
 		RequestID: identity.requestID, Spec: spec,

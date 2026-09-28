@@ -115,7 +115,7 @@ func New(config Config) (*Worker, error) {
 	if claim.ID == uuid.Nil || claim.ExecutionEpoch < 1 || claim.RecoveryGeneration == uuid.Nil || claim.OwnerID == "" {
 		return nil, errors.New("worker requires a complete claim")
 	}
-	if op.ID != claim.OperationID || op.InstallationID != claim.InstallationID || op.ClusterID != claim.ClusterID {
+	if op.ID != claim.OperationID || op.InstallationID != claim.InstallationID || op.AppID != claim.AppID {
 		return nil, errors.New("the claim and the operation name different work")
 	}
 	if config.EvidenceWait == 0 {
@@ -502,7 +502,7 @@ func (w *Worker) recordCancellation(peer controlstream.Peer, result *agentv1.Can
 	if result == nil || result.Epoch == nil || result.CommandId == "" {
 		return ErrUnboundEvidence
 	}
-	if result.Epoch.NodeId != peer.NodeID.String() || result.Epoch.ClusterId != w.config.Claim.ClusterID.String() {
+	if result.Epoch.NodeId != peer.NodeID.String() || result.Epoch.AppId != w.config.Claim.AppID.String() {
 		return ErrUnboundEvidence
 	}
 	if result.State != "cancelled" && result.State != "not_cancellable" {
@@ -657,8 +657,18 @@ func (w *Worker) dispatch(ctx context.Context, state postgres.ExecutionState, co
 		if err != nil {
 			return pass, err
 		}
-		if step.Command.Input.GetRemoveAppData() != nil {
-			ready, err := w.config.Store.AppDataRemovalReady(ctx, w.config.Claim.InstallationID, w.config.Claim.ClusterID, nodeID)
+		if step.Command.Input.GetRemoveAppData() != nil && w.config.Operation.Kind != "app.rejoin" {
+			ready, err := w.config.Store.AppDataRemovalReady(ctx, w.config.Claim.InstallationID, w.config.Claim.AppID, nodeID)
+			if err != nil {
+				return pass, err
+			}
+			if !ready {
+				pass.retryAt = earlier(pass.retryAt, time.Now().Add(w.config.RetryDelay))
+				continue
+			}
+		}
+		if w.config.Operation.Kind == "app.rejoin" {
+			ready, err := w.config.Store.PrepareDatabaseRejoinStep(ctx, w.config.Claim, uuid.MustParse(step.Command.StepId))
 			if err != nil {
 				return pass, err
 			}
@@ -689,12 +699,21 @@ func (w *Worker) dispatch(ctx context.Context, state postgres.ExecutionState, co
 		command.Epoch.ExecutionEpoch = w.config.Claim.ExecutionEpoch
 		command.Epoch.RecoveryGeneration = w.config.Claim.RecoveryGeneration.String()
 		if strings.HasPrefix(w.config.Operation.Kind, "app.") && (command.Input.GetEnsureContainer() != nil || command.Input.GetStartContainer() != nil) {
-			writer, err := w.config.Store.GetAppWriter(ctx, w.config.Claim.InstallationID, w.config.Claim.ClusterID)
+			writer, err := w.config.Store.GetAppWriter(ctx, w.config.Claim.InstallationID, w.config.Claim.AppID)
 			if err != nil {
 				return pass, err
 			}
-			if writer.Epoch > 0 {
-				grant, err := w.config.Store.PrepareAppWriterLease(ctx, w.config.Claim.InstallationID, w.config.Claim.ClusterID, nodeID, sessionID, writer.Epoch, true)
+			if writer.Epoch > 0 && writer.NodeID != nodeID {
+				ready, err := w.config.Store.DatabaseStandbyReady(ctx, w.config.Claim.InstallationID, w.config.Claim.AppID, nodeID, sessionID, uuid.MustParse(command.Input.ResourceId), writer.Epoch, command.DesiredRevision)
+				if err != nil {
+					return pass, err
+				}
+				if !ready {
+					pass.retryAt = earlier(pass.retryAt, time.Now().Add(w.config.RetryDelay))
+					continue
+				}
+			} else if writer.Epoch > 0 {
+				grant, err := w.config.Store.PrepareAppWriterLease(ctx, w.config.Claim.InstallationID, w.config.Claim.AppID, nodeID, sessionID, writer.Epoch, true)
 				if err != nil {
 					return pass, err
 				}
@@ -813,7 +832,7 @@ func (w *Worker) session(ctx context.Context, nodeID uuid.UUID) (controlstream.P
 func (w *Worker) epoch(nodeID uuid.UUID) *agentv1.Epoch {
 	claim := w.config.Claim
 	return &agentv1.Epoch{
-		InstallationId: claim.InstallationID.String(), NodeId: nodeID.String(), ClusterId: claim.ClusterID.String(),
+		InstallationId: claim.InstallationID.String(), NodeId: nodeID.String(), AppId: claim.AppID.String(),
 		RecoveryGeneration: claim.RecoveryGeneration.String(), ExecutionEpoch: claim.ExecutionEpoch,
 	}
 }

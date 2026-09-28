@@ -11,7 +11,7 @@ import (
 )
 
 func TestControllerConfigurationPrecedence(t *testing.T) {
-	for _, name := range []string{"SYNOD_ETCD_ENDPOINTS", "SYNOD_ETCD_PREFIX", "SYNOD_CONFIG", "SYNOD_INSTALLATION_ID", "SYNOD_LISTEN", "SYNOD_DATABASE_URL", "SYNOD_ADMIN_TOKEN_FILE", "SYNOD_ACTOR_ID", "SYNOD_TLS_CERT_FILE", "SYNOD_TLS_KEY_FILE", "SYNOD_LOG_LEVEL", "SYNOD_CA_CERT_FILE", "SYNOD_CA_KEY_FILE", "SYNOD_AGENT_LISTEN", "SYNOD_AGENT_TLS_CERT_FILE", "SYNOD_AGENT_TLS_KEY_FILE", "SYNOD_AGENT_CA_FILE", "SYNOD_PLACEMENT_ARCHITECTURE", "SYNOD_PLACEMENT_RUNTIME_VERSION", "SYNOD_PLACEMENT_STORAGE_ID", "SYNOD_ENGINE_ENDPOINT_FIRST_PORT", "SYNOD_ENGINE_ENDPOINT_LAST_PORT"} {
+	for _, name := range []string{"SYNOD_ETCD_ENDPOINTS", "SYNOD_ETCD_PREFIX", "SYNOD_CONFIG", "SYNOD_INSTALLATION_ID", "SYNOD_LISTEN", "SYNOD_DATABASE_URL", "SYNOD_ADMIN_TOKEN_FILE", "SYNOD_ACTOR_ID", "SYNOD_TLS_CERT_FILE", "SYNOD_TLS_KEY_FILE", "SYNOD_LOG_LEVEL", "SYNOD_CA_CERT_FILE", "SYNOD_CA_KEY_FILE", "SYNOD_AGENT_LISTEN", "SYNOD_AGENT_TLS_CERT_FILE", "SYNOD_AGENT_TLS_KEY_FILE", "SYNOD_AGENT_CA_FILE", "SYNOD_ENGINE_ENDPOINT_FIRST_PORT", "SYNOD_ENGINE_ENDPOINT_LAST_PORT"} {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -52,7 +52,7 @@ func TestControllerConfigurationPrecedence(t *testing.T) {
 }
 
 func TestControllerRejectsInvalidInput(t *testing.T) {
-	for _, name := range []string{"SYNOD_ETCD_ENDPOINTS", "SYNOD_ETCD_PREFIX", "SYNOD_ETCD_CA_FILE", "SYNOD_ETCD_TLS_CERT_FILE", "SYNOD_ETCD_TLS_KEY_FILE", "SYNOD_ETCD_USERNAME", "SYNOD_ETCD_PASSWORD_FILE", "SYNOD_ETCD_ALLOW_PLAINTEXT", "SYNOD_CONFIG", "SYNOD_INSTALLATION_ID", "SYNOD_LISTEN", "SYNOD_DATABASE_URL", "SYNOD_ADMIN_TOKEN_FILE", "SYNOD_ACTOR_ID", "SYNOD_TLS_CERT_FILE", "SYNOD_TLS_KEY_FILE", "SYNOD_LOG_LEVEL", "SYNOD_CA_CERT_FILE", "SYNOD_CA_KEY_FILE", "SYNOD_AGENT_LISTEN", "SYNOD_AGENT_TLS_CERT_FILE", "SYNOD_AGENT_TLS_KEY_FILE", "SYNOD_AGENT_CA_FILE", "SYNOD_PLACEMENT_ARCHITECTURE", "SYNOD_PLACEMENT_RUNTIME_VERSION", "SYNOD_PLACEMENT_STORAGE_ID", "SYNOD_ENGINE_ENDPOINT_FIRST_PORT", "SYNOD_ENGINE_ENDPOINT_LAST_PORT"} {
+	for _, name := range []string{"SYNOD_ETCD_ENDPOINTS", "SYNOD_ETCD_PREFIX", "SYNOD_ETCD_CA_FILE", "SYNOD_ETCD_TLS_CERT_FILE", "SYNOD_ETCD_TLS_KEY_FILE", "SYNOD_ETCD_USERNAME", "SYNOD_ETCD_PASSWORD_FILE", "SYNOD_ETCD_ALLOW_PLAINTEXT", "SYNOD_CONFIG", "SYNOD_INSTALLATION_ID", "SYNOD_LISTEN", "SYNOD_DATABASE_URL", "SYNOD_ADMIN_TOKEN_FILE", "SYNOD_ACTOR_ID", "SYNOD_TLS_CERT_FILE", "SYNOD_TLS_KEY_FILE", "SYNOD_LOG_LEVEL", "SYNOD_CA_CERT_FILE", "SYNOD_CA_KEY_FILE", "SYNOD_AGENT_LISTEN", "SYNOD_AGENT_TLS_CERT_FILE", "SYNOD_AGENT_TLS_KEY_FILE", "SYNOD_AGENT_CA_FILE", "SYNOD_ENGINE_ENDPOINT_FIRST_PORT", "SYNOD_ENGINE_ENDPOINT_LAST_PORT"} {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -85,11 +85,6 @@ func TestControllerRejectsInvalidInput(t *testing.T) {
 		{name: "missing CA key", args: []string{"--ca-cert-file", "cert"}, want: "supplied together"},
 		{name: "missing CA certificate", args: []string{"--ca-key-file", "key"}, want: "supplied together"},
 		{name: "missing TLS key", args: []string{"--tls-key-file", ""}, want: "tls_key_file"},
-		{name: "unknown architecture", args: []string{"--secret-key-file", "key", "--secret-key-id", "70c778bc-353c-4159-844b-882a493a1814", "--placement-architecture", "sparc"}, want: "placement_architecture"},
-		{name: "repeated architecture", args: []string{"--secret-key-file", "key", "--secret-key-id", "70c778bc-353c-4159-844b-882a493a1814", "--placement-architecture", "amd64,amd64"}, want: "placement_architecture"},
-		{name: "empty architecture", args: []string{"--secret-key-file", "key", "--secret-key-id", "70c778bc-353c-4159-844b-882a493a1814", "--placement-architecture", "amd64,"}, want: "placement_architecture"},
-		{name: "spaced architectures", args: []string{"--secret-key-file", "key", "--secret-key-id", "70c778bc-353c-4159-844b-882a493a1814", "--placement-architecture", "amd64, arm64"}, want: "placement_architecture"},
-		{name: "three architectures", args: []string{"--secret-key-file", "key", "--secret-key-id", "70c778bc-353c-4159-844b-882a493a1814", "--placement-architecture", "amd64,arm64,amd64"}, want: "placement_architecture"},
 		{name: "endpoint port out of range", args: []string{"--engine-endpoint-last-port", "70000"}, want: "engine_endpoint_first_port"},
 		{name: "endpoint range inverted", args: []string{"--engine-endpoint-first-port", "6000", "--engine-endpoint-last-port", "5000"}, want: "engine_endpoint_first_port"},
 		{name: "endpoint port not a number", args: []string{"--engine-endpoint-first-port", "postgres"}, want: "invalid"},

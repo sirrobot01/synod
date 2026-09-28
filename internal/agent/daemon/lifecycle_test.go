@@ -218,8 +218,8 @@ func TestExecutableLifecycleWithDocker(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { api.Close() })
-	clusterID, volumeID, containerID := uuid.NewString(), uuid.NewString(), uuid.NewString()
-	labels := map[string]string{"io.synod.installation": config.InstallationID, "io.synod.node": config.NodeID, "io.synod.cluster": clusterID, "io.synod.resource": volumeID, "io.synod.kind": "volume", "io.synod.fixture": "task-048"}
+	appID, volumeID, containerID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	labels := map[string]string{"io.synod.installation": config.InstallationID, "io.synod.node": config.NodeID, "io.synod.app": appID, "io.synod.resource": volumeID, "io.synod.kind": "volume", "io.synod.fixture": "task-048"}
 	volumeName := "synod-volume-" + volumeID
 	if _, err := api.VolumeCreate(ctx, client.VolumeCreateOptions{Name: volumeName, Labels: labels}); err != nil {
 		t.Fatal(err)
@@ -299,15 +299,8 @@ func TestExecutableLifecycleWithDocker(t *testing.T) {
 	if err := held.Close(); err != nil {
 		t.Fatal(err)
 	}
-	managedVolumeID := uuid.NewString()
-	managedVolume := "synod-volume-" + managedVolumeID
-	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), 15*time.Second)
-		defer stop()
-		if _, err := api.VolumeRemove(cleanup, managedVolume, client.VolumeRemoveOptions{}); err != nil && !errdefs.IsNotFound(err) {
-			t.Error(err)
-		}
-	})
+	// A stop of an absent container is a definite native result that leaves nothing behind.
+	absentID := uuid.NewString()
 	for cycle := range 2 {
 		command := exec.CommandContext(ctx, binary, append([]string{"agent"}, runArgs...)...)
 		var out, diagnostics bytes.Buffer
@@ -357,7 +350,7 @@ func TestExecutableLifecycleWithDocker(t *testing.T) {
 			if !ok {
 				t.Fatal("no current session")
 			}
-			epoch := &agentv1.Epoch{InstallationId: config.InstallationID, NodeId: config.NodeID, ClusterId: uuid.NewString(), RecoveryGeneration: config.RecoveryGeneration, ExecutionEpoch: 1}
+			epoch := &agentv1.Epoch{InstallationId: config.InstallationID, NodeId: config.NodeID, AppId: uuid.NewString(), RecoveryGeneration: config.RecoveryGeneration, ExecutionEpoch: 1}
 			if err := server.Send(assigned.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_PrepareEpoch{PrepareEpoch: &agentv1.PrepareEpoch{Epoch: epoch}}}); err != nil {
 				t.Fatal(err)
 			}
@@ -373,7 +366,7 @@ func TestExecutableLifecycleWithDocker(t *testing.T) {
 			if err := server.Send(assigned.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_ActivateEpoch{ActivateEpoch: &agentv1.ActivateEpoch{Epoch: epoch}}}); err != nil {
 				t.Fatal(err)
 			}
-			work := &agentv1.Command{Epoch: epoch, OperationId: uuid.NewString(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1, Input: &agentv1.CommandInput{PayloadVersion: 1, ResourceId: managedVolumeID, Timeout: durationpb.New(5 * time.Second), Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: managedVolumeID}}}}
+			work := &agentv1.Command{Epoch: epoch, OperationId: uuid.NewString(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1, Input: &agentv1.CommandInput{PayloadVersion: 1, ResourceId: absentID, Timeout: durationpb.New(5 * time.Second), Payload: &agentv1.CommandInput_StopContainer{StopContainer: &agentv1.StopContainer{GracePeriod: durationpb.New(time.Second)}}}}
 			hash, err := operation.CommandHash(work)
 			if err != nil {
 				t.Fatal(err)
@@ -392,15 +385,11 @@ func TestExecutableLifecycleWithDocker(t *testing.T) {
 			}
 			select {
 			case result := <-results:
-				if result.CommandId != work.CommandId || result.State != "succeeded" {
+				if result.CommandId != work.CommandId || result.State != "succeeded" || len(result.Effects) == 0 || result.Effects[0].State != "absent" {
 					t.Fatal("native command did not succeed")
 				}
 			case <-ctx.Done():
 				t.Fatal("no durable native result")
-			}
-			volume, err := api.VolumeInspect(ctx, managedVolume, client.VolumeInspectOptions{})
-			if err != nil || volume.Volume.Labels["io.synod.node"] != config.NodeID {
-				t.Fatal("executor did not create owned volume")
 			}
 		}
 		signal := os.Signal(syscall.SIGTERM)

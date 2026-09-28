@@ -75,7 +75,7 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 	if command == nil || command.Epoch == nil || command.Input == nil {
 		return [32]byte{}, fmt.Errorf("command envelope is incomplete")
 	}
-	for _, id := range []string{command.Epoch.InstallationId, command.Epoch.NodeId, command.Epoch.ClusterId, command.Epoch.RecoveryGeneration, command.OperationId, command.StepId, command.CommandId, command.Input.ResourceId} {
+	for _, id := range []string{command.Epoch.InstallationId, command.Epoch.NodeId, command.Epoch.AppId, command.Epoch.RecoveryGeneration, command.OperationId, command.StepId, command.CommandId, command.Input.ResourceId} {
 		parsed, err := uuid.Parse(id)
 		if err != nil || parsed == uuid.Nil {
 			return [32]byte{}, fmt.Errorf("command has an invalid identity")
@@ -100,82 +100,18 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 		}
 	}
 	switch payload := command.Input.Payload.(type) {
-	case *agentv1.CommandInput_EnsureVolume:
-		if payload.EnsureVolume == nil || payload.EnsureVolume.VolumeId != command.Input.ResourceId {
-			return [32]byte{}, fmt.Errorf("volume identity must match resource")
-		}
-	case *agentv1.CommandInput_EnsureNetwork:
-		if payload.EnsureNetwork == nil || payload.EnsureNetwork.NetworkId != command.Input.ResourceId {
-			return [32]byte{}, fmt.Errorf("network identity must match resource")
-		}
 	case *agentv1.CommandInput_EnsureContainer:
 		p := payload.EnsureContainer
-		if p != nil && p.Generic != nil {
-			if err := ValidateGenericContainer(p); err != nil {
-				return [32]byte{}, err
-			}
-			if len(command.Input.Secrets) != 0 {
-				return [32]byte{}, fmt.Errorf("generic containers do not support secret references yet")
-			}
-			break
-		}
-		if p == nil || !imageDigestPattern.MatchString(p.ImageDigest) || (p.Engine != "postgres" && p.Engine != "redis") || p.MemoryBytes < 0 || p.CpuMillis < 0 {
-			return [32]byte{}, fmt.Errorf("container input is invalid")
-		}
-		if p.Engine == "redis" && p.Redis == nil {
-			return [32]byte{}, fmt.Errorf("redis container settings are required")
-		}
-		if p.Engine == "postgres" && p.Postgres == nil {
-			return [32]byte{}, fmt.Errorf("postgres container settings are required")
-		}
-		if config := p.Postgres; config != nil {
-			if p.Engine != "postgres" || len(p.PlainEnv) != 0 {
-				return [32]byte{}, fmt.Errorf("postgres container settings are invalid")
-			}
-			if err := validatePostgresConfiguration(config, command.Input.Secrets); err != nil {
-				return [32]byte{}, err
-			}
-			if len(p.SecretEnv) != 2 || !slices.ContainsFunc(p.SecretEnv, func(env *agentv1.SecretEnv) bool {
-				return env != nil && env.Name == "POSTGRES_PASSWORD" && env.Purpose == "superuser"
-			}) || !slices.ContainsFunc(p.SecretEnv, func(env *agentv1.SecretEnv) bool {
-				return env != nil && env.Name == "SYNOD_APP_VERIFIER" && env.Purpose == "application"
-			}) {
-				return [32]byte{}, fmt.Errorf("postgres credential environment is invalid")
-			}
-		}
-		if p.Redis != nil {
-			if err := ValidateRedisContainer(p, command.Input.Secrets); err != nil {
-				return [32]byte{}, err
-			}
-		}
-		volumeID, err := uuid.Parse(p.VolumeId)
-		if err != nil || volumeID == uuid.Nil {
-			return [32]byte{}, fmt.Errorf("container volume reference is invalid")
-		}
-		switch p.NetworkMode {
-		case agentv1.NetworkMode_NETWORK_MODE_HOST:
-			if p.NetworkId != "" || len(p.Ports) != 0 {
-				return [32]byte{}, fmt.Errorf("host networking requires no network ID or published ports")
-			}
-		case agentv1.NetworkMode_NETWORK_MODE_BRIDGE:
-			networkID, err := uuid.Parse(p.NetworkId)
-			if err != nil || networkID == uuid.Nil {
-				return [32]byte{}, fmt.Errorf("bridge network reference is invalid")
-			}
-		default:
-			return [32]byte{}, fmt.Errorf("container network mode is required")
-		}
-		for _, port := range p.Ports {
-			if port == nil || port.HostPort < 1 || port.HostPort > 65535 || port.ContainerPort < 1 || port.ContainerPort > 65535 || (port.Transport != "tcp" && port.Transport != "udp") {
-				return [32]byte{}, fmt.Errorf("container port is invalid")
-			}
-		}
-	case *agentv1.CommandInput_RecoverPostgresSetup:
-		if payload.RecoverPostgresSetup == nil || payload.RecoverPostgresSetup.Postgres == nil {
-			return [32]byte{}, fmt.Errorf("postgres recovery input is absent")
-		}
-		if err := validatePostgresConfiguration(payload.RecoverPostgresSetup.Postgres, command.Input.Secrets); err != nil {
+		if err := ValidateGenericContainer(p); err != nil {
 			return [32]byte{}, err
+		}
+		// A database copy names each credential its secret environment reads, and nothing else.
+		purposes := map[string]bool{}
+		for _, env := range p.SecretEnv {
+			purposes[env.Purpose] = true
+		}
+		if len(command.Input.Secrets) != len(purposes) || slices.ContainsFunc(command.Input.Secrets, func(reference *agentv1.SecretReference) bool { return !purposes[reference.Purpose] }) {
+			return [32]byte{}, fmt.Errorf("generic secret references must match the secret environment")
 		}
 	case *agentv1.CommandInput_FinalAppSnapshot:
 		p := payload.FinalAppSnapshot
@@ -185,6 +121,19 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 		target, err := uuid.Parse(p.TargetNodeId)
 		if err != nil || target == uuid.Nil || target.String() != p.TargetNodeId || p.TargetNodeId == command.Epoch.NodeId {
 			return [32]byte{}, fmt.Errorf("final snapshot target is invalid")
+		}
+	case *agentv1.CommandInput_SwitchDatabase:
+		p := payload.SwitchDatabase
+		if p == nil || p.WriterEpoch == 0 || p.WriterEpoch > math.MaxInt64 || len(command.Input.Secrets) != 0 || command.Input.Timeout.AsDuration() > time.Minute {
+			return [32]byte{}, fmt.Errorf("database switchover input is invalid")
+		}
+		target, err := uuid.Parse(p.TargetNodeId)
+		if err != nil || target == uuid.Nil || target.String() != p.TargetNodeId || p.TargetNodeId == command.Epoch.NodeId {
+			return [32]byte{}, fmt.Errorf("database switchover target is invalid")
+		}
+		host, err := netip.ParseAddr(p.TargetHost)
+		if err != nil || !host.IsGlobalUnicast() || host.IsLoopback() || host.Zone() != "" || host.Unmap().String() != p.TargetHost || p.TargetPort == 0 || p.TargetPort > 65535 {
+			return [32]byte{}, fmt.Errorf("database switchover endpoint is invalid")
 		}
 	case *agentv1.CommandInput_RemoveAppData:
 		if payload.RemoveAppData == nil || payload.RemoveAppData.WriterEpoch == 0 || payload.RemoveAppData.WriterEpoch > math.MaxInt64 || len(command.Input.Secrets) != 0 {
@@ -201,47 +150,6 @@ func CommandHash(command *agentv1.Command) ([32]byte, error) {
 	case *agentv1.CommandInput_RemoveContainer:
 		if payload.RemoveContainer == nil {
 			return [32]byte{}, fmt.Errorf("remove input is absent")
-		}
-	case *agentv1.CommandInput_VerifyContainerAbsent:
-		if payload.VerifyContainerAbsent == nil || len(command.Input.Secrets) != 0 {
-			return [32]byte{}, fmt.Errorf("container absence input is invalid")
-		}
-	case *agentv1.CommandInput_InspectContainer:
-		if payload.InspectContainer == nil {
-			return [32]byte{}, fmt.Errorf("inspect input is absent")
-		}
-	case *agentv1.CommandInput_CheckReadiness:
-		p := payload.CheckReadiness
-		// A loopback address is what this profile publishes. A readiness check that
-		// can be pointed anywhere is a request to connect to anywhere.
-		if p == nil || p.Port == 0 || p.Port > 65535 || p.Database == "" || p.Role == "" ||
-			(p.Engine != "postgres" && p.Engine != "redis") {
-			return [32]byte{}, fmt.Errorf("readiness input is invalid")
-		}
-		if (p.Engine == "postgres" && p.PostgresRole != "primary" && p.PostgresRole != "replica") || (p.Engine != "postgres" && p.PostgresRole != "") {
-			return [32]byte{}, fmt.Errorf("postgres readiness requires its native role only")
-		}
-		address, err := netip.ParseAddr(p.Address)
-		if err != nil || !address.IsLoopback() {
-			return [32]byte{}, fmt.Errorf("readiness address must be loopback")
-		}
-		if replication := p.RedisReplication; replication != nil {
-			if p.Engine != "redis" || p.Database != "0" || p.Role != "synod_admin" ||
-				len(command.Input.Secrets) != 1 || command.Input.Secrets[0].Purpose != "superuser" {
-				return [32]byte{}, fmt.Errorf("redis replication check requires the admin credential")
-			}
-			switch replication.ExpectedRole {
-			case "primary":
-				if replication.Upstream != nil {
-					return [32]byte{}, fmt.Errorf("redis primary check must not name an upstream")
-				}
-			case "replica":
-				if !validRedisUpstream(replication.Upstream) {
-					return [32]byte{}, fmt.Errorf("redis replica check requires a valid upstream")
-				}
-			default:
-				return [32]byte{}, fmt.Errorf("redis replication check requires an expected role")
-			}
 		}
 	default:
 		return [32]byte{}, fmt.Errorf("command payload is unsupported")
@@ -297,7 +205,7 @@ func BarrierDrained(result *agentv1.BarrierResult) error {
 type Claim struct {
 	ID                 uuid.UUID
 	InstallationID     uuid.UUID
-	ClusterID          uuid.UUID
+	AppID              uuid.UUID
 	OperationID        uuid.UUID
 	RecoveryGeneration uuid.UUID
 	OwnerID            string

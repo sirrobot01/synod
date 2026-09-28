@@ -33,7 +33,7 @@ func (s *Store) AppFailoverCandidates(ctx context.Context, installation, id uuid
  AND r.role='standby' AND r.failure_code='' AND r.writer_epoch=a.writer_epoch AND r.sequence>0 AND r.completed_at IS NOT NULL
  AND r.session_id=p.session_id AND r.observed_at>clock_timestamp()-interval '20 seconds'
  AND p.last_seen_at>clock_timestamp()-interval '20 seconds' AND NOT p.recovery_required AND n.revoked_at IS NULL
- ORDER BY r.sequence DESC,c.node_id`, installation, id)
+ ORDER BY r.lag_seconds ASC NULLS LAST,r.sequence DESC,c.node_id`, installation, id)
 	if err != nil {
 		return nil, admissionError(err)
 	}
@@ -90,7 +90,7 @@ func (s *Store) AdmitAppFailover(ctx context.Context, installation, id uuid.UUID
 	var epoch, revision int64
 	var due bool
 	err = tx.QueryRow(ctx, `SELECT writer_epoch,desired_revision,
- tier=2 AND desired_lifecycle='running' AND writer_last_grant_at IS NOT NULL
+ tier IN (1,2) AND desired_lifecycle='running' AND writer_last_grant_at IS NOT NULL
  AND writer_last_grant_at+make_interval(secs=>(spec->'replication'->>'failover_after_seconds')::double precision)<=clock_timestamp()
  FROM apps WHERE installation_id=$1 AND id=$2 FOR UPDATE`, installation, id).Scan(&epoch, &revision, &due)
 	if err != nil {
@@ -129,11 +129,11 @@ func (s *Store) AdmitAppFailover(ctx context.Context, installation, id uuid.UUID
 	if _, err := tx.Exec(ctx, `UPDATE app_copies SET desired_revision=$3,health='unknown',observed_at=NULL,observed_session_id=NULL WHERE installation_id=$1 AND app_id=$2 AND desired`, installation, id, revision+1); err != nil {
 		return uuid.Nil, admissionError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,installation_id,cluster_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at)
+	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,installation_id,app_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at)
  VALUES($1,$2,$3,'controller','app.failover',$4,$5,1,'app.failover',$6,'pending',0,0,0,clock_timestamp(),clock_timestamp())`, pending, installation, id, pending.String(), hash[:], revision+1); err != nil {
 		return uuid.Nil, admissionError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO outbox(event_id,installation_id,cluster_id,operation_id,kind,schema_version,created_at) VALUES($1,$2,$3,$4,'operation.ready',1,clock_timestamp())`, uuid.New(), installation, id, pending); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO outbox(event_id,installation_id,app_id,operation_id,kind,schema_version,created_at) VALUES($1,$2,$3,$4,'operation.ready',1,clock_timestamp())`, uuid.New(), installation, id, pending); err != nil {
 		return uuid.Nil, admissionError(err)
 	}
 	if err := s.commitMetadata(ctx, tx); err != nil {
@@ -147,7 +147,7 @@ func recordAppPromotion(ctx context.Context, tx pgx.Tx, claim operation.Claim, r
 	if (len(request.Resources) < 1 || len(request.Resources) > 2) || len(decision.Assignments) != len(request.Resources) || len(plan.Steps) != 2 {
 		return operation.ErrCommandConflict
 	}
-	if err := operation.ValidatePlan(plan, operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, ClusterID: claim.ClusterID, DesiredRevision: request.DesiredRevision, Kind: "app.failover"}); err != nil {
+	if err := operation.ValidatePlan(plan, operation.Operation{ID: claim.OperationID, InstallationID: claim.InstallationID, AppID: claim.AppID, DesiredRevision: request.DesiredRevision, Kind: "app.failover"}); err != nil {
 		return err
 	}
 	resource := request.Resources[0]
@@ -171,8 +171,9 @@ func recordAppPromotion(ctx context.Context, tx pgx.Tx, claim operation.Claim, r
 	var name string
 	var epoch uint64
 	var due bool
-	if err := tx.QueryRow(ctx, `SELECT name,writer_epoch,writer_last_grant_at IS NOT NULL AND writer_last_grant_at+make_interval(secs=>(spec->'replication'->>'failover_after_seconds')::double precision)<=clock_timestamp() AND desired_lifecycle='running'
- FROM apps WHERE installation_id=$1 AND id=$2 AND desired_revision=$3`, claim.InstallationID, claim.ClusterID, request.DesiredRevision).Scan(&name, &epoch, &due); err != nil {
+	var tier int
+	if err := tx.QueryRow(ctx, `SELECT name,writer_epoch,tier,writer_last_grant_at IS NOT NULL AND writer_last_grant_at+make_interval(secs=>(spec->'replication'->>'failover_after_seconds')::double precision)<=clock_timestamp() AND desired_lifecycle='running'
+ FROM apps WHERE installation_id=$1 AND id=$2 AND desired_revision=$3`, claim.InstallationID, claim.AppID, request.DesiredRevision).Scan(&name, &epoch, &tier, &due); err != nil {
 		return admissionError(err)
 	}
 	if !due || epoch == math.MaxInt64 {
@@ -185,12 +186,13 @@ func recordAppPromotion(ctx context.Context, tx pgx.Tx, claim operation.Claim, r
 	var completed time.Time
 	var copyIndex uint32
 	var hostPort uint16
-	err := tx.QueryRow(ctx, `SELECT r.sequence,r.completed_at,c.copy_index,c.host_port FROM app_replicas r JOIN app_copies c USING(installation_id,app_id,node_id)
+	var lossWindow *float64
+	err := tx.QueryRow(ctx, `SELECT r.sequence,r.completed_at,c.copy_index,c.host_port,r.lag_seconds FROM app_replicas r JOIN app_copies c USING(installation_id,app_id,node_id)
  JOIN agent_presence p USING(installation_id,node_id)
  WHERE c.installation_id=$1 AND c.app_id=$2 AND c.id=$3 AND c.node_id=$4 AND c.desired AND c.role='standby'
  AND r.role='standby' AND r.failure_code='' AND r.writer_epoch=$5 AND r.sequence>0 AND r.session_id=p.session_id
  AND r.observed_at>clock_timestamp()-interval '20 seconds' AND p.last_seen_at>clock_timestamp()-interval '20 seconds' AND NOT p.recovery_required
- FOR SHARE OF r`, claim.InstallationID, claim.ClusterID, resource.ID, a.NodeID, epoch).Scan(&sequence, &completed, &copyIndex, &hostPort)
+ FOR SHARE OF r`, claim.InstallationID, claim.AppID, resource.ID, a.NodeID, epoch).Scan(&sequence, &completed, &copyIndex, &hostPort, &lossWindow)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return operation.ErrCommandConflict
@@ -200,13 +202,18 @@ func recordAppPromotion(ctx context.Context, tx pgx.Tx, claim operation.Claim, r
 	if input.Generic.AppName != name || input.Generic.CopyIndex != copyIndex || binding.HostPort != uint32(hostPort) {
 		return operation.ErrCommandConflict
 	}
-	rows, err := tx.Query(ctx, `SELECT allocation_bytes FROM resource_allocations WHERE installation_id=$1 AND cluster_id=$2 AND released_at IS NULL AND resource_id IN (SELECT id FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND desired AND role='active')`, claim.InstallationID, claim.ClusterID)
+	rows, err := tx.Query(ctx, `SELECT allocation_bytes FROM resource_allocations WHERE installation_id=$1 AND app_id=$2 AND released_at IS NULL AND resource_id IN (SELECT id FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND desired AND role='active')`, claim.InstallationID, claim.AppID)
 	if err != nil {
 		return admissionError(err)
 	}
 	allocations, err := pgx.CollectRows(rows, pgx.RowTo[[]byte])
 	if err != nil {
 		return admissionError(err)
+	}
+	// A tier 2 writer that steps down only holds data. A tier 1 primary rejoins as a
+	// standby that runs its engine, so it keeps its compute reservation.
+	if tier == 1 {
+		allocations = nil
 	}
 	for _, encoded := range allocations {
 		var allocation placement.Allocation
@@ -233,21 +240,26 @@ func recordAppPromotion(ctx context.Context, tx pgx.Tx, claim operation.Claim, r
 			return operation.ErrCommandConflict
 		}
 		// Keep the old allocation until data cleanup. It no longer receives assignments.
-		if _, err := tx.Exec(ctx, `UPDATE app_copies SET desired=false,role='standby',health='unknown',observed_at=NULL,observed_session_id=NULL WHERE installation_id=$1 AND app_id=$2 AND desired AND role='active'`, claim.InstallationID, claim.ClusterID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE app_copies SET desired=false,role='standby',health='unknown',observed_at=NULL,observed_session_id=NULL WHERE installation_id=$1 AND app_id=$2 AND desired AND role='active'`, claim.InstallationID, claim.AppID); err != nil {
 			return admissionError(err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO app_copies(id,installation_id,app_id,node_id,copy_index,host_port,desired_revision,role,observed_state,created_at,updated_at)
- SELECT $1,$2,$3,$4,COALESCE(MAX(copy_index),0)+1,$5,$6,'standby','pending',clock_timestamp(),clock_timestamp() FROM app_copies WHERE installation_id=$2 AND app_id=$3`, standby.ID, claim.InstallationID, claim.ClusterID, assigned.NodeID, assigned.Ports[0].Number, request.DesiredRevision); err != nil {
+ SELECT $1,$2,$3,$4,COALESCE(MAX(copy_index),0)+1,$5,$6,'standby','pending',clock_timestamp(),clock_timestamp() FROM app_copies WHERE installation_id=$2 AND app_id=$3`, standby.ID, claim.InstallationID, claim.AppID, assigned.NodeID, assigned.Ports[0].Number, request.DesiredRevision); err != nil {
 			return admissionError(err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app_copies SET role='standby',health='unknown',observed_at=NULL,observed_session_id=NULL WHERE installation_id=$1 AND app_id=$2 AND desired AND role='active'`, claim.InstallationID, claim.ClusterID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE app_copies SET role='standby',health='unknown',observed_at=NULL,observed_session_id=NULL WHERE installation_id=$1 AND app_id=$2 AND desired AND role='active'`, claim.InstallationID, claim.AppID); err != nil {
 		return admissionError(err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE app_copies SET role='active',observed_state='pending',health='unknown',observed_at=NULL,observed_session_id=NULL WHERE id=$1`, resource.ID); err != nil {
 		return admissionError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE apps SET writer_epoch=writer_epoch+1,writer_node_id=$3,writer_last_grant_at=NULL,updated_at=clock_timestamp() WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.ClusterID, a.NodeID); err != nil {
+	if tier == 1 {
+		if _, err := tx.Exec(ctx, `UPDATE app_copies SET rebuild_required=(id<>$3),rebuild_data_removed=false WHERE installation_id=$1 AND app_id=$2 AND desired`, claim.InstallationID, claim.AppID, resource.ID); err != nil {
+			return admissionError(err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE apps SET writer_epoch=writer_epoch+1,writer_node_id=$3,writer_last_grant_at=NULL,failover_loss_window_seconds=CASE WHEN tier=1 THEN $4::double precision END,updated_at=clock_timestamp() WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.AppID, a.NodeID, lossWindow); err != nil {
 		return admissionError(err)
 	}
 	return nil

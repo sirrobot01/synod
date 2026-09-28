@@ -34,7 +34,7 @@ func TestAdminTokenAuthentication(t *testing.T) {
 		{name: "oversized", headers: []string{"Bearer " + strings.Repeat("s", 257)}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest("GET", "https://synod.example/v1/clusters"+test.query, nil)
+			request := httptest.NewRequest("GET", "https://synod.example/v1/apps"+test.query, nil)
 			for _, header := range test.headers {
 				request.Header.Add("Authorization", header)
 			}

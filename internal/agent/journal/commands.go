@@ -36,11 +36,11 @@ func (j *Journal) Admit(command *agentv1.Command) (Record, error) {
 	if err := j.checkTarget(command.Epoch); err != nil {
 		return Record{}, err
 	}
-	cluster, exists := j.state.Clusters[command.Epoch.ClusterId]
-	if !exists || !cluster.Active {
+	app, exists := j.state.Apps[command.Epoch.AppId]
+	if !exists || !app.Active {
 		return Record{}, operation.ErrStaleOwner
 	}
-	if err := operation.CheckEpoch(command.Epoch, cluster.Prepared); err != nil {
+	if err := operation.CheckEpoch(command.Epoch, app.Prepared); err != nil {
 		return Record{}, err
 	}
 	if previous, exists := j.state.Commands[command.CommandId]; exists {
@@ -85,7 +85,7 @@ func (j *Journal) Admit(command *agentv1.Command) (Record, error) {
 			count++
 
 		}
-		if existing.Epoch.ClusterId == command.Epoch.ClusterId && (existing.State == Queued || existing.State == Running || active) {
+		if existing.Epoch.AppId == command.Epoch.AppId && (existing.State == Queued || existing.State == Running || active) {
 			return Record{}, ErrBusy
 		}
 	}
@@ -125,13 +125,13 @@ func (j *Journal) Start(commandID string) (Record, error) {
 		}
 		return v, ErrAlreadyCompleted
 	}
-	cluster := j.state.Clusters[r.Epoch.ClusterId]
-	if !cluster.Active || operation.CheckEpoch(r.Epoch, cluster.Prepared) != nil {
+	app := j.state.Apps[r.Epoch.AppId]
+	if !app.Active || operation.CheckEpoch(r.Epoch, app.Prepared) != nil {
 		return Record{}, operation.ErrStaleOwner
 	}
 	// A late native observation can invalidate the slot after admission.
 	for other := range maps.Values(j.state.Commands) {
-		if other.ID == r.ID || other.Epoch.ClusterId != r.Epoch.ClusterId {
+		if other.ID == r.ID || other.Epoch.AppId != r.Epoch.AppId {
 			continue
 		}
 		if other.State == Running {
@@ -319,9 +319,9 @@ func (j *Journal) Compact(now time.Time) (int, error) {
 		return 0, err
 	}
 	protected := make(map[string]bool)
-	for cluster := range maps.Values(j.state.Clusters) {
+	for app := range maps.Values(j.state.Apps) {
 		var barrier agentv1.BarrierResult
-		if err := proto.Unmarshal(cluster.Barrier, &barrier); err != nil {
+		if err := proto.Unmarshal(app.Barrier, &barrier); err != nil {
 			return 0, fmt.Errorf("decode the saved barrier: %w: %w", ErrRecoveryRequired, err)
 		}
 		for _, effect := range barrier.Effects {

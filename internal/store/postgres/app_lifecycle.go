@@ -108,8 +108,8 @@ func (s *Store) AdmitAppAction(ctx context.Context, request AppActionRequest) (a
 	var unused, active bool
 	if err := tx.QueryRow(ctx, `SELECT
  NOT EXISTS(SELECT 1 FROM operations WHERE installation_id=$1 AND app_id=$2 AND plan_version>0)
- AND NOT EXISTS(SELECT 1 FROM command_dispatches WHERE installation_id=$1 AND cluster_id=$2)
- AND NOT EXISTS(SELECT 1 FROM resource_allocations WHERE installation_id=$1 AND cluster_id=$2)
+ AND NOT EXISTS(SELECT 1 FROM command_dispatches WHERE installation_id=$1 AND app_id=$2)
+ AND NOT EXISTS(SELECT 1 FROM resource_allocations WHERE installation_id=$1 AND app_id=$2)
  AND NOT EXISTS(SELECT 1 FROM app_copies WHERE installation_id=$1 AND app_id=$2),
  EXISTS(SELECT 1 FROM operations WHERE installation_id=$1 AND app_id=$2 AND status IN ('pending','running','waiting','cancelling'))`, identity.InstallationID, request.AppID).Scan(&unused, &active); err != nil {
 		return app.Admission{}, admissionError(err)
@@ -125,8 +125,14 @@ func (s *Store) AdmitAppAction(ctx context.Context, request AppActionRequest) (a
 	}
 	if identity.APIOperation == MoveAppAPIOperation {
 		var eligible bool
-		if err := tx.QueryRow(ctx, `SELECT tier=2 AND desired_lifecycle='running' AND writer_epoch>0 AND writer_epoch<9223372036854775807 AND writer_node_id<>$3
+		if err := tx.QueryRow(ctx, `SELECT tier IN (1,2) AND desired_lifecycle='running' AND writer_epoch>0 AND writer_epoch<9223372036854775807 AND writer_node_id<>$3
           AND EXISTS(SELECT 1 FROM nodes WHERE installation_id=$1 AND id=$3 AND revoked_at IS NULL)
+          AND (tier=2 OR EXISTS(SELECT 1 FROM app_copies c JOIN app_replicas r USING(installation_id,app_id,node_id)
+            JOIN agent_presence p USING(installation_id,node_id)
+            WHERE c.installation_id=$1 AND c.app_id=$2 AND c.node_id=$3 AND c.desired AND c.role='standby'
+            AND r.writer_epoch=apps.writer_epoch AND r.role='standby' AND r.state='streaming' AND r.failure_code='' AND r.sequence>0
+            AND r.session_id=p.session_id AND r.observed_at>clock_timestamp()-interval '20 seconds' AND r.completed_at>clock_timestamp()-interval '20 seconds'
+            AND p.last_seen_at>clock_timestamp()-interval '20 seconds' AND NOT p.recovery_required))
           FROM apps WHERE installation_id=$1 AND id=$2`, identity.InstallationID, request.AppID, request.TargetNodeID).Scan(&eligible); err != nil {
 			return app.Admission{}, admissionError(err)
 		}
@@ -148,17 +154,20 @@ func (s *Store) AdmitAppAction(ctx context.Context, request AppActionRequest) (a
 	}
 	if request.RollbackMoveID != uuid.Nil {
 		var targetNode uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT m.target_node_id FROM app_moves m JOIN operations o ON o.id=m.operation_id JOIN apps a ON a.installation_id=m.installation_id AND a.id=m.app_id
+		var tier int
+		err := tx.QueryRow(ctx, `SELECT m.target_node_id,a.tier FROM app_moves m JOIN operations o ON o.id=m.operation_id JOIN apps a ON a.installation_id=m.installation_id AND a.id=m.app_id
        WHERE m.operation_id=$1 AND m.installation_id=$2 AND m.app_id=$3 AND m.promoted_at IS NULL AND o.status IN ('failed','cancelled')
-       AND a.writer_node_id=m.source_node_id AND a.writer_epoch=m.writer_epoch AND a.desired_revision=o.desired_revision`, request.RollbackMoveID, identity.InstallationID, request.AppID).Scan(&targetNode)
+       AND a.writer_node_id=m.source_node_id AND a.writer_epoch=m.writer_epoch AND a.desired_revision=o.desired_revision`, request.RollbackMoveID, identity.InstallationID, request.AppID).Scan(&targetNode, &tier)
 		if err != nil {
 			return app.Admission{}, admissionError(err)
 		}
 		if identity.APIOperation != StartAppAPIOperation {
 			return app.Admission{}, &AdmissionError{Code: InvalidRequest}
 		}
-		if err := releaseAppCompute(ctx, tx, identity.InstallationID, request.AppID, targetNode); err != nil {
-			return app.Admission{}, err
+		if tier == 2 {
+			if err := releaseAppCompute(ctx, tx, identity.InstallationID, request.AppID, targetNode); err != nil {
+				return app.Admission{}, err
+			}
 		}
 	}
 	complete := unused && target != "running"
@@ -175,7 +184,7 @@ func (s *Store) AdmitAppAction(ctx context.Context, request AppActionRequest) (a
 		return app.Admission{}, admissionError(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operations
- (id,installation_id,cluster_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at,finished_at)
+ (id,installation_id,app_id,actor_id,api_operation,idempotency_key,request_hash,hash_version,kind,desired_revision,status,plan_version,execution_epoch,attempts,created_at,updated_at,finished_at)
  VALUES ($1,$2,$3,$4,$5,$6,$7,1,$5,$8,CASE WHEN $9 THEN 'succeeded' ELSE 'pending' END,0,0,0,clock_timestamp(),clock_timestamp(),CASE WHEN $9 THEN clock_timestamp() END)`,
 		result.OperationID, identity.InstallationID, request.AppID, identity.ActorID, identity.APIOperation, identity.IdempotencyKey, hash[:], result.DesiredRevision, complete); err != nil {
 		return app.Admission{}, admissionError(err)
@@ -192,7 +201,7 @@ func (s *Store) AdmitAppAction(ctx context.Context, request AppActionRequest) (a
 		}
 	}
 	if !complete {
-		if _, err := tx.Exec(ctx, `INSERT INTO outbox(event_id,installation_id,cluster_id,operation_id,kind,schema_version,created_at) VALUES($1,$2,$3,$4,'operation.ready',1,clock_timestamp())`, uuid.New(), identity.InstallationID, request.AppID, result.OperationID); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO outbox(event_id,installation_id,app_id,operation_id,kind,schema_version,created_at) VALUES($1,$2,$3,$4,'operation.ready',1,clock_timestamp())`, uuid.New(), identity.InstallationID, request.AppID, result.OperationID); err != nil {
 			return app.Admission{}, admissionError(err)
 		}
 	}
@@ -225,7 +234,7 @@ var ErrAppRoutesPending = errors.New("app_routes_pending")
 func appRoutesWithdrawn(ctx context.Context, tx pgx.Tx, installation, id uuid.UUID) error {
 	rows, err := tx.Query(ctx, `SELECT DISTINCT a.node_id FROM resource_allocations a JOIN allocation_ports p
  ON p.installation_id=a.installation_id AND p.allocation_id=a.id
- WHERE a.installation_id=$1 AND a.cluster_id=$2 AND a.released_at IS NULL AND p.name='ingress' ORDER BY a.node_id`, installation, id)
+ WHERE a.installation_id=$1 AND a.app_id=$2 AND a.released_at IS NULL AND p.name='ingress' ORDER BY a.node_id`, installation, id)
 	if err != nil {
 		return admissionError(err)
 	}
@@ -267,6 +276,9 @@ func appRoutesWithdrawn(ctx context.Context, tx pgx.Tx, installation, id uuid.UU
 
 // completeAppLifecycle runs after all command receipts pass validation.
 func completeAppLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim, op operation.Operation, plan *agentv1.ExecutionPlan, target string) error {
+	if op.Kind == "app.rejoin" {
+		return completeDatabaseRejoin(ctx, tx, claim, op, plan, target)
+	}
 	postcondition := agentv1.Postcondition_POSTCONDITION_CONTAINER_RUNNING
 	switch op.Kind {
 	case "app.deploy", "app.start", "app.failover", "app.move":
@@ -286,7 +298,7 @@ func completeAppLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim,
 	default:
 		return operation.ErrCommandConflict
 	}
-	rows, err := tx.Query(ctx, `SELECT id,node_id FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND ($3 OR (desired AND role<>'standby')) ORDER BY id`, claim.InstallationID, claim.ClusterID, target == "deleted")
+	rows, err := tx.Query(ctx, `SELECT id,node_id FROM app_copies WHERE installation_id=$1 AND app_id=$2 AND ($3 OR (desired AND role<>'standby')) ORDER BY id`, claim.InstallationID, claim.AppID, target == "deleted")
 	if err != nil {
 		return admissionError(err)
 	}
@@ -327,7 +339,7 @@ func completeAppLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim,
 	}
 	if target == "deleted" {
 		var tier int
-		if err := tx.QueryRow(ctx, `SELECT tier FROM apps WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.ClusterID).Scan(&tier); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT tier FROM apps WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.AppID).Scan(&tier); err != nil {
 			return admissionError(err)
 		}
 		if tier == 2 {
@@ -345,33 +357,33 @@ func completeAppLifecycle(ctx context.Context, tx pgx.Tx, claim operation.Claim,
 		}
 	}
 	if target != "running" {
-		if err := appRoutesWithdrawn(ctx, tx, claim.InstallationID, claim.ClusterID); err != nil {
+		if err := appRoutesWithdrawn(ctx, tx, claim.InstallationID, claim.AppID); err != nil {
 			return err
 		}
 	}
 	if target == "running" {
 		// An observation from before the start receipt is not current health.
-		if _, err := tx.Exec(ctx, `UPDATE app_copies SET health='unknown',observed_state='pending',observed_at=NULL,observed_session_id=NULL,updated_at=clock_timestamp() WHERE installation_id=$1 AND app_id=$2 AND desired`, claim.InstallationID, claim.ClusterID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE app_copies SET health='unknown',observed_state='pending',observed_at=NULL,observed_session_id=NULL,updated_at=clock_timestamp() WHERE installation_id=$1 AND app_id=$2 AND desired`, claim.InstallationID, claim.AppID); err != nil {
 			return admissionError(err)
 		}
 	}
 	if target == "stopped" {
-		if _, err := tx.Exec(ctx, `UPDATE app_copies SET health='unknown',observed_state='stopped',observed_at=NULL,observed_session_id=NULL,updated_at=clock_timestamp() WHERE installation_id=$1 AND app_id=$2 AND desired`, claim.InstallationID, claim.ClusterID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE app_copies SET health='unknown',observed_state='stopped',observed_at=NULL,observed_session_id=NULL,updated_at=clock_timestamp() WHERE installation_id=$1 AND app_id=$2 AND desired`, claim.InstallationID, claim.AppID); err != nil {
 			return admissionError(err)
 		}
 	}
 	if target == "deleted" {
-		if _, err := tx.Exec(ctx, `UPDATE allocation_ports SET released_at=clock_timestamp() WHERE installation_id=$1 AND cluster_id=$2 AND released_at IS NULL`, claim.InstallationID, claim.ClusterID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE allocation_ports SET released_at=clock_timestamp() WHERE installation_id=$1 AND app_id=$2 AND released_at IS NULL`, claim.InstallationID, claim.AppID); err != nil {
 			return admissionError(err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE resource_allocations SET released_at=clock_timestamp() WHERE installation_id=$1 AND cluster_id=$2 AND released_at IS NULL`, claim.InstallationID, claim.ClusterID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE resource_allocations SET released_at=clock_timestamp() WHERE installation_id=$1 AND app_id=$2 AND released_at IS NULL`, claim.InstallationID, claim.AppID); err != nil {
 			return admissionError(err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE app_copies SET desired=false,health='unknown',updated_at=clock_timestamp() WHERE installation_id=$1 AND app_id=$2`, claim.InstallationID, claim.ClusterID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE app_copies SET desired=false,health='unknown',updated_at=clock_timestamp() WHERE installation_id=$1 AND app_id=$2`, claim.InstallationID, claim.AppID); err != nil {
 			return admissionError(err)
 		}
 	}
-	_, err = tx.Exec(ctx, `UPDATE apps SET observed_revision=$3,observed_lifecycle=$4,updated_at=clock_timestamp(),deleted_at=CASE WHEN $4='deleted' THEN clock_timestamp() ELSE NULL END WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.ClusterID, op.DesiredRevision, target)
+	_, err = tx.Exec(ctx, `UPDATE apps SET observed_revision=$3,observed_lifecycle=$4,updated_at=clock_timestamp(),deleted_at=CASE WHEN $4='deleted' THEN clock_timestamp() ELSE NULL END WHERE installation_id=$1 AND id=$2`, claim.InstallationID, claim.AppID, op.DesiredRevision, target)
 	if err != nil {
 		return admissionError(err)
 	}

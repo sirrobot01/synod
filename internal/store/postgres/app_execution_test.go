@@ -23,7 +23,7 @@ func TestAppPlanRollsBackCopiesAndReservationsTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := placementRequest(h.id, claim.ClusterID, claim.OperationID, h.policy, []placement.Port{{Name: "backend", Address: "0.0.0.0", Number: 23000, Transport: "tcp"}})
+	request := placementRequest(h.id, claim.AppID, claim.OperationID, h.policy, []placement.Port{{Name: "backend", Address: "0.0.0.0", Number: 23000, Transport: "tcp"}})
 	resource := &request.Resources[0]
 	resource.Kind = "service"
 	resource.Role = ""
@@ -39,9 +39,10 @@ func TestAppPlanRollsBackCopiesAndReservationsTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := planFor(t, claim, h.node, resource.ID, 1)
+	plan := h.planFor(t, claim, resource.ID, resource.Ports[0], 1)
+	plan.Steps = plan.Steps[:1]
 	image := "nginx@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	input := &agentv1.EnsureContainer{ImageDigest: image, Engine: "generic", NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "web", CopyIndex: 1}, Ports: []*agentv1.PortBinding{{HostAddress: "0.0.0.0", HostPort: 23000, ContainerPort: 80, Transport: "tcp"}}}
+	input := &agentv1.EnsureContainer{ImageDigest: image, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "web", CopyIndex: 1}, Ports: []*agentv1.PortBinding{{HostAddress: "0.0.0.0", HostPort: 23000, ContainerPort: 80, Transport: "tcp"}}}
 	plan.Steps[0].Command.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: input}
 	plan.Steps[0].Postcondition = agentv1.Postcondition_POSTCONDITION_CONTAINER_EXISTS
 	hash, err := operation.CommandHash(plan.Steps[0].Command)
@@ -49,7 +50,7 @@ func TestAppPlanRollsBackCopiesAndReservationsTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan.Steps[0].Command.InputHash = hash[:]
-	if _, err := h.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); !errors.Is(err, operation.ErrCommandConflict) {
+	if _, err := h.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); !errors.Is(err, operation.ErrCommandConflict) {
 		t.Fatalf("invalid copy index: %v", err)
 	}
 	if h.count(t, `SELECT count(*) FROM resource_allocations`) != 0 || h.count(t, `SELECT count(*) FROM app_copies`) != 0 || h.count(t, `SELECT count(*) FROM operations WHERE plan_version<>0`) != 0 {
@@ -61,7 +62,7 @@ func TestAppPlanRollsBackCopiesAndReservationsTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan.Steps[0].Command.InputHash = hash[:]
-	if _, err := h.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan, nil); err != nil {
+	if _, err := h.store.InstallPlacementPlan(t.Context(), claim, request, decision, plan); err != nil {
 		t.Fatal(err)
 	}
 	_, err = h.store.AdmitAppAction(t.Context(), AppActionRequest{Identity: RequestIdentity{InstallationID: h.id, ActorID: "operator", APIOperation: DeleteAppAPIOperation, IdempotencyKey: "delete"}, RequestID: "delete", AppID: admitted.AppID, ExpectedRevision: 1})

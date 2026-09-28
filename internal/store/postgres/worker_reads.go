@@ -76,8 +76,8 @@ func (s *Store) LoadDispatch(ctx context.Context, claim operation.Claim, cursor 
 	err = tx.QueryRow(ctx, `SELECT d.command_bytes,a.accepted_bytes,r.result_bytes FROM command_dispatches d
  LEFT JOIN command_admissions a USING (command_id,execution_epoch,recovery_generation)
  LEFT JOIN command_results r USING (command_id,execution_epoch,recovery_generation)
- WHERE d.command_id=$1 AND d.execution_epoch=$2 AND d.recovery_generation=$3 AND d.installation_id=$4 AND d.cluster_id=$5 AND d.operation_id=$6`,
-		cursor.CommandID, cursor.ExecutionEpoch, cursor.RecoveryGeneration, claim.InstallationID, claim.ClusterID, claim.OperationID).Scan(&commandBytes, &acceptedBytes, &resultBytes)
+ WHERE d.command_id=$1 AND d.execution_epoch=$2 AND d.recovery_generation=$3 AND d.installation_id=$4 AND d.app_id=$5 AND d.operation_id=$6`,
+		cursor.CommandID, cursor.ExecutionEpoch, cursor.RecoveryGeneration, claim.InstallationID, claim.AppID, claim.OperationID).Scan(&commandBytes, &acceptedBytes, &resultBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DispatchEvidence{}, operation.ErrCommandConflict
 	}
@@ -216,7 +216,7 @@ func loadCompletions(ctx context.Context, tx pgx.Tx, claim operation.Claim, plan
 		}
 		copy(completion.ReceiptHash[:], hash)
 		completion.ReceiptEpoch = &agentv1.Epoch{
-			InstallationId: claim.InstallationID.String(), NodeId: plan.Steps[i].Command.Epoch.NodeId, ClusterId: claim.ClusterID.String(),
+			InstallationId: claim.InstallationID.String(), NodeId: plan.Steps[i].Command.Epoch.NodeId, AppId: claim.AppID.String(),
 			RecoveryGeneration: cursor.RecoveryGeneration.String(), ExecutionEpoch: cursor.ExecutionEpoch,
 		}
 		steps[i].Completion = &completion

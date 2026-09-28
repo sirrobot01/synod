@@ -134,11 +134,7 @@
         {#each fleet as cluster (cluster.id)}
           {@const state = pair(cluster)}
           <div class="cell stack">
-            <a
-              class="mono name"
-              href={path("cluster", cluster.id)}
-              onclick={(event) => follow(event, () => go("cluster", cluster.id))}>{cluster.name}</a
-            >
+            <span class="mono name">{cluster.name}</span>
             <span class="mono engine">{cluster.engine}</span>
           </div>
           <!-- Desired above, observed below. Never collapsed into one badge. -->

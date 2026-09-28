@@ -58,6 +58,11 @@ message ReplicaStatus {
   uint64 last_pause_nanos = 7;
   uint64 max_pause_nanos = 8;
   uint64 skipped_snapshots = 9;
+  // Tier 1 only: copying, streaming, disconnected, drifted, or failed, and the age of the last applied change.
+  string state = 10;
+  double lag_seconds = 11;
+  // The standby supervisor has stopped mutations for this switchover operation.
+  string database_hold_id = 12;
 }
 message Observation {
   string resource_id = 1;
@@ -71,7 +76,7 @@ message Observation {
 message Epoch {
   string installation_id = 1;
   string node_id = 2;
-  string cluster_id = 3;
+  string app_id = 3;
   string recovery_generation = 4;
   int64 execution_epoch = 5;
 }
@@ -85,12 +90,18 @@ message Effect {
   bool outcome_unknown = 5;
   string state = 6;
   AppSnapshotReceipt app_snapshot = 7;
+  DatabaseSwitchoverReceipt database_switchover = 8;
 }
 message AppSnapshotReceipt {
   uint64 writer_epoch = 1;
   uint64 sequence = 2;
   string target_node_id = 3;
   bytes manifest_hash = 4;
+}
+message DatabaseSwitchoverReceipt {
+  uint64 writer_epoch = 1;
+  string target_node_id = 2;
+  bytes position_hash = 3;
 }
 message BarrierResult {
   Epoch epoch = 1;
@@ -131,8 +142,6 @@ message PlainEnv {
   string value = 2;
 }
 message PortBinding { string host_address = 1; uint32 host_port = 2; uint32 container_port = 3; string transport = 4; }
-message EnsureVolume { string volume_id = 1; }
-message EnsureNetwork { string network_id = 1; }
 enum NetworkMode {
   NETWORK_MODE_UNSPECIFIED = 0;
   NETWORK_MODE_HOST = 1;
@@ -140,9 +149,6 @@ enum NetworkMode {
 }
 message EnsureContainer {
   string image_digest = 1;
-  string engine = 2;
-  string volume_id = 3;
-  string network_id = 4;
   repeated PortBinding ports = 5;
   int64 memory_bytes = 6;
   int64 cpu_millis = 7;
@@ -153,8 +159,6 @@ message EnsureContainer {
   // Non-secret environment an engine image reads at first start, such as the initial
   // superuser and database names.
   repeated PlainEnv plain_env = 10;
-  RedisContainerConfig redis = 11;
-  PostgresContainerConfig postgres = 12;
   GenericContainerConfig generic = 13;
 }
 message GenericContainerConfig {
@@ -184,66 +188,9 @@ message HealthCheckConfig {
   uint32 timeout_seconds = 6;
   uint32 unhealthy_threshold = 7;
 }
-// Fixed PostgreSQL application setup. Credential identities remain in the
-// container configuration so restart inspection never needs secret material.
-message PostgresContainerConfig {
-  uint32 port = 1;
-  string application_credential_id = 2;
-  int64 application_credential_version = 3;
-  string superuser_credential_id = 4;
-  int64 superuser_credential_version = 5;
-}
-message RedisContainerConfig {
-  uint32 port = 1;
-  string persistence = 2;
-  int64 maxmemory_bytes = 3;
-  string eviction_policy = 4;
-  // An absent upstream selects a primary. Replicas use the dedicated credential.
-  RedisUpstream upstream = 5;
-  // Persist identities for restart validation without loading secret material.
-  repeated SecretReference credentials = 6;
-}
-message RedisUpstream {
-  // A canonical IP literal. DNS lookup must not change the declared peer.
-  string address = 1;
-  uint32 port = 2;
-}
-message RedisReplicationCheck {
-  // primary or replica. A replica must name its expected upstream.
-  string expected_role = 1;
-  RedisUpstream upstream = 2;
-}
-message StartContainer {
-  // Only a container that has never started may initialize an empty volume.
-  bool allow_initialization = 1;
-}
-message RecoverPostgresSetup { PostgresContainerConfig postgres = 1; }
+message StartContainer {}
 message StopContainer { google.protobuf.Duration grace_period = 1; }
 message RemoveContainer {}
-message InspectContainer {}
-// Read native absence without stopping or removing a container.
-message VerifyContainerAbsent {}
-
-
-// Check that the engine answers through the endpoint it publishes.
-//
-// Specification 07 requires this before a provisioning operation reports success. A
-// container that is running is not a database that is ready, and an operator told a
-// cluster is up and then unable to connect has been told something untrue.
-message CheckReadiness {
-  string address = 1;
-  uint32 port = 2;
-  string database = 3;
-  string role = 4;
-  // Which engine's prober answers. The plan knows it; the agent must not have to
-  // infer it from another field.
-  string engine = 5;
-  // This admin check proves native role and replication state. It does not mutate.
-  RedisReplicationCheck redis_replication = 6;
-  // Required primary or replica for PostgreSQL. Separate from the SQL login role.
-  string postgres_role = 7;
-}
-
 // This input is immutable. It has no controller epoch or plaintext secret.
 message CommandInput {
   string resource_id = 1;
@@ -251,23 +198,24 @@ message CommandInput {
   google.protobuf.Duration timeout = 3;
   repeated SecretReference secrets = 4;
   oneof payload {
-    EnsureVolume ensure_volume = 10;
-    EnsureNetwork ensure_network = 11;
     EnsureContainer ensure_container = 12;
     StartContainer start_container = 13;
     StopContainer stop_container = 14;
     RemoveContainer remove_container = 15;
-    InspectContainer inspect_container = 16;
-    CheckReadiness check_readiness = 17;
-    RecoverPostgresSetup recover_postgres_setup = 18;
-    VerifyContainerAbsent verify_container_absent = 23;
     FinalAppSnapshot final_app_snapshot = 24;
     RemoveAppData remove_app_data = 25;
+    SwitchDatabase switch_database = 26;
   }
 }
 message FinalAppSnapshot {
   uint64 writer_epoch = 1;
   string target_node_id = 2;
+}
+message SwitchDatabase {
+  uint64 writer_epoch = 1;
+  string target_node_id = 2;
+  string target_host = 3;
+  uint32 target_port = 4;
 }
 message RemoveAppData { uint64 writer_epoch = 1; }
 message Command {
@@ -324,7 +272,7 @@ message CancelCommand { string command_id = 1; Epoch epoch = 2; }
 message CancellationResult { string command_id = 1; string state = 2; repeated Effect effects = 3; Epoch epoch = 4; }
 message InventoryRequest { string cursor = 1; uint32 page_size = 2; }
 
-// Capacity is a property of a node, not of a cluster, so these carry no Epoch.
+// Capacity is a property of a node, not of a app, so these carry no Epoch.
 // The controller issues the challenge and the agent answers it. Presence and
 // Hello capabilities can never substitute for a measured report.
 message CapacityRequest {
@@ -399,7 +347,7 @@ message DriftItem {
   // because only the controller knows what it has a record of.
   string class = 5;
   // Set only when the object carries a readable Synod identity.
-  string cluster_id = 6;
+  string app_id = 6;
   string resource_id = 7;
   // What disagrees, for a mislabelled object. It is a stable code, not prose.
   string detail = 8;
@@ -438,6 +386,19 @@ message AppReplication {
   string role = 3;
   repeated ReplicaPeer peers = 4;
   uint32 interval_seconds = 5;
+  // Set for a tier 1 database. Its engine replicates, so peers and the interval stay empty.
+  DatabaseAssignment database = 6;
+}
+// A tier 1 copy's engine role. A standby follows the primary at primary_host:primary_port.
+// Credentials arrive as session secrets with purposes "db:<app_id>:admin",
+// "db:<app_id>:replication", and "db:<app_id>:app".
+message DatabaseAssignment {
+  string engine = 1;
+  repeated string databases = 2;
+  string primary_host = 3;
+  uint32 primary_port = 4;
+  // A standby observes replication without rebuilding during this operation.
+  string switchover_operation_id = 5;
 }
 // A lease is valid only for this session and the assigned active epoch.
 message WriterLease {
@@ -545,15 +506,11 @@ enum CancellationBoundary {
 }
 enum Postcondition {
   POSTCONDITION_UNSPECIFIED = 0;
-  POSTCONDITION_VOLUME_EXISTS = 1;
-  POSTCONDITION_NETWORK_EXISTS = 2;
   POSTCONDITION_CONTAINER_EXISTS = 3;
   POSTCONDITION_CONTAINER_RUNNING = 4;
   POSTCONDITION_CONTAINER_STOPPED = 5;
   POSTCONDITION_CONTAINER_ABSENT = 6;
-  POSTCONDITION_CONTAINER_INSPECTED = 7;
-  POSTCONDITION_ENGINE_READY = 8;
-  POSTCONDITION_POSTGRES_SETUP_RECOVERED = 9;
   POSTCONDITION_APP_SNAPSHOT_TRANSFERRED = 10;
   POSTCONDITION_APP_DATA_ABSENT = 11;
+  POSTCONDITION_DATABASE_SWITCHOVER_READY = 12;
 }

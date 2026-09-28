@@ -111,14 +111,44 @@ func (s *Store) PrepareAppWriterLease(ctx context.Context, installation, id, nod
 
 // AppWriter is the durable writer identity. Epoch zero means placement is pending.
 type AppWriter struct {
-	NodeID      uuid.UUID
-	Epoch       uint64
-	LastGrantAt *time.Time
+	NodeID            uuid.UUID
+	Epoch             uint64
+	LastGrantAt       *time.Time
+	LossWindowSeconds *float64
+}
+
+// DatabaseStandbyReady requires this copy's current acknowledged engine assignment.
+// A standby runs without a writer lease. It cannot use this check to start a primary.
+func (s *Store) DatabaseStandbyReady(ctx context.Context, installation, id, node, session, copyID uuid.UUID, epoch uint64, revision int64) (bool, error) {
+	var encoded []byte
+	err := s.pool.QueryRow(ctx, `SELECT t.table_bytes FROM apps a
+ JOIN app_copies c ON c.installation_id=a.installation_id AND c.app_id=a.id
+ JOIN agent_presence p ON p.installation_id=c.installation_id AND p.node_id=c.node_id
+ JOIN nodes n ON n.installation_id=p.installation_id AND n.id=p.node_id
+ JOIN agent_replication t ON t.installation_id=p.installation_id AND t.node_id=p.node_id AND t.session_id=p.session_id
+ WHERE a.installation_id=$1 AND a.id=$2 AND a.tier=1 AND a.desired_lifecycle='running'
+ AND a.writer_epoch=$6 AND a.writer_node_id<>$3 AND a.desired_revision=$7
+ AND c.node_id=$3 AND c.id=$5 AND c.desired AND c.role='standby' AND NOT (c.rebuild_required AND NOT c.rebuild_data_removed) AND c.desired_revision=$7
+ AND p.session_id=$4 AND p.last_seen_at>clock_timestamp()-interval '20 seconds' AND NOT p.recovery_required AND n.revoked_at IS NULL
+ AND t.acknowledged_at IS NOT NULL AND t.failure_code=''`, installation, id, node, session, copyID, epoch, revision).Scan(&encoded)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, admissionError(err)
+	}
+	var table agentv1.ReplicationTable
+	if proto.Unmarshal(encoded, &table) != nil {
+		return false, operation.ErrCommandConflict
+	}
+	return slices.ContainsFunc(table.Apps, func(a *agentv1.AppReplication) bool {
+		return a.AppId == id.String() && a.Role == replication.RoleStandby && a.Epoch == epoch && a.Database != nil
+	}), nil
 }
 
 func (s *Store) GetAppWriter(ctx context.Context, installation, id uuid.UUID) (AppWriter, error) {
 	var writer AppWriter
-	err := s.pool.QueryRow(ctx, `SELECT COALESCE(writer_node_id,'00000000-0000-0000-0000-000000000000'::uuid),writer_epoch,writer_last_grant_at FROM apps WHERE installation_id=$1 AND id=$2`, installation, id).Scan(&writer.NodeID, &writer.Epoch, &writer.LastGrantAt)
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(writer_node_id,'00000000-0000-0000-0000-000000000000'::uuid),writer_epoch,writer_last_grant_at,failover_loss_window_seconds FROM apps WHERE installation_id=$1 AND id=$2`, installation, id).Scan(&writer.NodeID, &writer.Epoch, &writer.LastGrantAt, &writer.LossWindowSeconds)
 	if err != nil {
 		return AppWriter{}, admissionError(err)
 	}

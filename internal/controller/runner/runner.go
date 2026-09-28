@@ -37,7 +37,7 @@ type Config struct {
 	MaxWorkers int
 	// ScanInterval bounds how long the runner waits before it rescans without a notification.
 	ScanInterval time.Duration
-	// CampaignTimeout bounds one wait for elected ownership of a cluster.
+	// CampaignTimeout bounds one wait for elected ownership of a app.
 	CampaignTimeout time.Duration
 	// IdleBackoff is the pause before a worker retries while it holds its claim.
 	IdleBackoff time.Duration
@@ -54,7 +54,7 @@ type Config struct {
 	EvidenceWait time.Duration
 }
 
-// Runner keeps at most one worker for each cluster in this process.
+// Runner keeps at most one worker for each app in this process.
 type Runner struct {
 	config   Config
 	receiver agentstream.Receiver
@@ -105,7 +105,7 @@ func New(config Config) (*Runner, error) {
 	}, nil
 }
 
-// Handle routes claim-bound evidence to the worker that owns its cluster.
+// Handle routes claim-bound evidence to the worker that owns its app.
 // Every other message reaches the receiver, which commits it without claim context.
 func (r *Runner) Handle(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
 	if message == nil {
@@ -137,7 +137,7 @@ func (r *Runner) Handle(ctx context.Context, peer controlstream.Peer, message *a
 func (r *Runner) deliver(ctx context.Context, epoch *agentv1.Epoch, peer controlstream.Peer, message *agentv1.AgentMessage) error {
 	found, ok := r.worker(epoch)
 	if !ok {
-		r.config.Logger.Warn("dropped claim evidence with no owner", "cluster_id", epoch.GetClusterId(), "node_id", peer.NodeID)
+		r.config.Logger.Warn("dropped claim evidence with no owner", "app_id", epoch.GetAppId(), "node_id", peer.NodeID)
 		return nil
 	}
 	return found.Handle(ctx, peer, message)
@@ -147,14 +147,14 @@ func (r *Runner) worker(epoch *agentv1.Epoch) (*worker.Worker, bool) {
 	if epoch == nil {
 		return nil, false
 	}
-	clusterID, err := uuid.Parse(epoch.ClusterId)
-	if err != nil || clusterID == uuid.Nil {
+	appID, err := uuid.Parse(epoch.AppId)
+	if err != nil || appID == uuid.Nil {
 		return nil, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// A reserved cluster holds a nil entry until its claim and worker exist.
-	found, ok := r.workers[clusterID]
+	// A reserved app holds a nil entry until its claim and worker exist.
+	found, ok := r.workers[appID]
 	return found, ok && found != nil
 }
 
@@ -267,63 +267,63 @@ func (r *Runner) consider(ctx context.Context, operationID uuid.UUID) {
 	case op.PlanVersion == 0 && r.config.Planner == nil:
 		// Admission leaves an operation pending until a plan exists, and this
 		// controller cannot produce one.
-		r.config.Logger.Debug("operation has no executable plan", "operation_id", op.ID, "cluster_id", op.ClusterID)
+		r.config.Logger.Debug("operation has no executable plan", "operation_id", op.ID, "app_id", op.AppID)
 		return
 	}
 	r.start(ctx, op)
 }
 
-// start reserves a slot and a cluster, then drives the operation in its own goroutine.
+// start reserves a slot and a app, then drives the operation in its own goroutine.
 func (r *Runner) start(ctx context.Context, op operation.Operation) {
-	if !r.reserve(op.ClusterID) {
+	if !r.reserve(op.AppID) {
 		return
 	}
 	select {
 	case r.slots <- struct{}{}:
 	default:
-		r.release(op.ClusterID)
+		r.release(op.AppID)
 		return
 	}
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		defer func() { <-r.slots }()
-		defer r.release(op.ClusterID)
+		defer r.release(op.AppID)
 		if err := r.drive(ctx, op); err != nil && ctx.Err() == nil {
-			r.config.Logger.Info("operation run stopped", "operation_id", op.ID, "cluster_id", op.ClusterID, "reason", err.Error())
+			r.config.Logger.Info("operation run stopped", "operation_id", op.ID, "app_id", op.AppID, "reason", err.Error())
 		}
 	}()
 }
 
-// reserve claims the cluster slot before any campaign so one process runs one worker.
-func (r *Runner) reserve(clusterID uuid.UUID) bool {
+// reserve claims the app slot before any campaign so one process runs one worker.
+func (r *Runner) reserve(appID uuid.UUID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, running := r.workers[clusterID]; running {
+	if _, running := r.workers[appID]; running {
 		return false
 	}
-	// A nil entry holds the cluster while the campaign and the claim complete.
-	r.workers[clusterID] = nil
+	// A nil entry holds the app while the campaign and the claim complete.
+	r.workers[appID] = nil
 	return true
 }
 
-func (r *Runner) publish(clusterID uuid.UUID, owner *worker.Worker) {
+func (r *Runner) publish(appID uuid.UUID, owner *worker.Worker) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.workers[clusterID] = owner
+	r.workers[appID] = owner
 }
 
-func (r *Runner) release(clusterID uuid.UUID) {
+func (r *Runner) release(appID uuid.UUID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.workers, clusterID)
+	delete(r.workers, appID)
 }
 
-// drive campaigns for the cluster, claims the operation, and runs one worker.
+// drive campaigns for the app, claims the operation, and runs one worker.
 func (r *Runner) drive(ctx context.Context, op operation.Operation) error {
 	run, stop := context.WithCancel(ctx)
 	defer stop()
-	leader, err := r.elect(run, stop, op.ClusterID)
+	leader, err := r.elect(run, stop, op.AppID)
 	if err != nil {
 		return err
 	}
@@ -331,7 +331,7 @@ func (r *Runner) drive(ctx context.Context, op operation.Operation) error {
 		closing, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if err := leader.Close(closing); err != nil {
-			r.config.Logger.Warn("release elected ownership failed", "cluster_id", op.ClusterID, "error", err.Error())
+			r.config.Logger.Warn("release elected ownership failed", "app_id", op.AppID, "error", err.Error())
 		}
 	}()
 	generation, err := r.config.Store.RecoveryGeneration(run, r.config.InstallationID)
@@ -370,8 +370,8 @@ func (r *Runner) drive(ctx context.Context, op operation.Operation) error {
 	if err != nil {
 		return err
 	}
-	r.publish(op.ClusterID, owner)
-	r.config.Logger.Info("operation claimed", "operation_id", op.ID, "cluster_id", op.ClusterID, "execution_epoch", claim.ExecutionEpoch)
+	r.publish(op.AppID, owner)
+	r.config.Logger.Info("operation claimed", "operation_id", op.ID, "app_id", op.AppID, "execution_epoch", claim.ExecutionEpoch)
 	var renewal sync.WaitGroup
 	renewal.Add(1)
 	go func() {
@@ -396,16 +396,16 @@ func (r *Runner) drive(ctx context.Context, op operation.Operation) error {
 	return err
 }
 
-// elect bounds the wait for cluster ownership so a wedged etcd cannot hold a worker slot.
+// elect bounds the wait for app ownership so a wedged etcd cannot hold a worker slot.
 // The election session lives on the run context, so a timeout must end that context.
-func (r *Runner) elect(run context.Context, stop context.CancelFunc, clusterID uuid.UUID) (*coordinator.Leadership, error) {
+func (r *Runner) elect(run context.Context, stop context.CancelFunc, appID uuid.UUID) (*coordinator.Leadership, error) {
 	type outcome struct {
 		leader *coordinator.Leadership
 		err    error
 	}
 	elected := make(chan outcome, 1)
 	go func() {
-		leader, err := r.config.Coordinator.Campaign(run, r.config.InstallationID, clusterID, r.config.OwnerID, r.config.LeaseSeconds)
+		leader, err := r.config.Coordinator.Campaign(run, r.config.InstallationID, appID, r.config.OwnerID, r.config.LeaseSeconds)
 		elected <- outcome{leader, err}
 	}()
 	timer := time.NewTimer(r.config.CampaignTimeout)
@@ -413,7 +413,7 @@ func (r *Runner) elect(run context.Context, stop context.CancelFunc, clusterID u
 	select {
 	case result := <-elected:
 		if result.err != nil {
-			return nil, fmt.Errorf("campaign for cluster %s: %w", clusterID, result.err)
+			return nil, fmt.Errorf("campaign for app %s: %w", appID, result.err)
 		}
 		return result.leader, nil
 	case <-timer.C:
@@ -424,10 +424,10 @@ func (r *Runner) elect(run context.Context, stop context.CancelFunc, clusterID u
 		closing, cancel := context.WithTimeout(context.WithoutCancel(run), 5*time.Second)
 		defer cancel()
 		if err := result.leader.Close(closing); err != nil {
-			r.config.Logger.Warn("release late elected ownership failed", "cluster_id", clusterID, "error", err.Error())
+			r.config.Logger.Warn("release late elected ownership failed", "app_id", appID, "error", err.Error())
 		}
 	}
-	return nil, fmt.Errorf("campaign for cluster %s did not elect an owner in %s", clusterID, r.config.CampaignTimeout)
+	return nil, fmt.Errorf("campaign for app %s did not elect an owner in %s", appID, r.config.CampaignTimeout)
 }
 
 // renew holds durable ownership while a worker runs.
@@ -440,7 +440,7 @@ func (r *Runner) renew(ctx context.Context, stop context.CancelFunc, claim opera
 		case <-ctx.Done():
 			return
 		case <-leader.Done:
-			r.config.Logger.Warn("elected ownership ended", "operation_id", claim.OperationID, "cluster_id", claim.ClusterID)
+			r.config.Logger.Warn("elected ownership ended", "operation_id", claim.OperationID, "app_id", claim.AppID)
 			stop()
 			return
 		case <-ticker.C:

@@ -1,8 +1,6 @@
 package docker
 
 import (
-	"archive/tar"
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -15,7 +13,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/operation"
@@ -39,7 +36,7 @@ func runtimeFixture(t *testing.T) (*Runtime, *client.Client, uuid.UUID) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := New(api, Options{InstallationID: uuid.New(), NodeID: uuid.New(), AllowBridgeFixture: true})
+	runtime, err := New(api, Options{InstallationID: uuid.New(), NodeID: uuid.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,14 +88,11 @@ func runtimeFixture(t *testing.T) (*Runtime, *client.Client, uuid.UUID) {
 	return runtime, api, uuid.New()
 }
 
-func runtimeCommand(t *testing.T, r *Runtime, clusterID uuid.UUID, input *agentv1.CommandInput) *agentv1.Command {
+func runtimeCommand(t *testing.T, r *Runtime, appID uuid.UUID, input *agentv1.CommandInput) *agentv1.Command {
 	t.Helper()
 	input.PayloadVersion = 1
 	input.Timeout = durationpb.New(30 * time.Second)
-	if configuration := input.GetEnsureContainer(); configuration != nil && configuration.Redis != nil && configuration.Redis.Credentials == nil {
-		configuration.Redis.Credentials = input.Secrets
-	}
-	command := &agentv1.Command{Epoch: &agentv1.Epoch{InstallationId: r.options.InstallationID.String(), NodeId: r.options.NodeID.String(), ClusterId: clusterID.String(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1}, OperationId: uuid.NewString(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1, Input: input}
+	command := &agentv1.Command{Epoch: &agentv1.Epoch{InstallationId: r.options.InstallationID.String(), NodeId: r.options.NodeID.String(), AppId: appID.String(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1}, OperationId: uuid.NewString(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1, Input: input}
 	hash, err := operation.CommandHash(command)
 	if err != nil {
 		t.Fatal(err)
@@ -107,150 +101,27 @@ func runtimeCommand(t *testing.T, r *Runtime, clusterID uuid.UUID, input *agentv
 	return command
 }
 
-func createFixtureContainer(t *testing.T, r *Runtime, clusterID uuid.UUID, mode agentv1.NetworkMode) *agentv1.Command {
+// fixtureContainer is one tier 3 container with a scratch data mount.
+func fixtureContainer() *agentv1.EnsureContainer {
+	return &agentv1.EnsureContainer{
+		ImageDigest: redisFixture, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
+		Generic: &agentv1.GenericContainerConfig{Image: redisFixture, AppName: "fixture", Mounts: []*agentv1.Mount{{Type: "tmpfs", Target: "/data"}}},
+	}
+}
+
+// createFixtureContainer creates one tier 3 container.
+func createFixtureContainer(t *testing.T, r *Runtime, appID uuid.UUID) *agentv1.Command {
 	t.Helper()
-	volumeID := uuid.NewString()
-	networkID := ""
-	volume := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: volumeID, Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: volumeID}}})
-	if _, err := r.Execute(t.Context(), volume, nil); err != nil {
-		t.Fatalf("volume: %v / %v", err, errors.Unwrap(err))
-	}
-	if mode == agentv1.NetworkMode_NETWORK_MODE_BRIDGE {
-		networkID = uuid.NewString()
-		network := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: networkID, Payload: &agentv1.CommandInput_EnsureNetwork{EnsureNetwork: &agentv1.EnsureNetwork{NetworkId: networkID}}})
-		if _, err := r.Execute(t.Context(), network, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{
-		ResourceId: uuid.NewString(),
-		Secrets:    []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "application"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "replication"}},
-		Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
-			ImageDigest: redisFixture, Engine: "redis", VolumeId: volumeID, NetworkId: networkID, NetworkMode: mode, MemoryBytes: 64 << 20, CpuMillis: 250,
-			Redis:     &agentv1.RedisContainerConfig{Port: 6379, Persistence: "none", MaxmemoryBytes: 48 << 20, EvictionPolicy: "noeviction"},
-			SecretEnv: []*agentv1.SecretEnv{{Name: "REDIS_ADMIN_PASSWORD", Purpose: "superuser"}, {Name: "REDIS_APP_PASSWORD", Purpose: "application"}, {Name: "REDIS_REPLICATION_PASSWORD", Purpose: "replication"}},
-		}},
-	})
-	if _, err := r.Execute(t.Context(), command, redisFixtureSecrets); err != nil {
+	command := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: uuid.NewString(), Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: fixtureContainer()}})
+	if _, err := r.Execute(t.Context(), command, nil); err != nil {
 		t.Fatalf("container: %v / %v", err, errors.Unwrap(err))
 	}
 	return command
 }
 
-func TestOwnedContainerLifecycleAndRetainedData(t *testing.T) {
-	r, api, clusterID := runtimeFixture(t)
-	ensure := createFixtureContainer(t, r, clusterID, agentv1.NetworkMode_NETWORK_MODE_BRIDGE)
-	id := ensure.Input.ResourceId
-	name := "synod-instance-" + id
-	first, err := api.ContainerInspect(t.Context(), name, client.ContainerInspectOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Execute(t.Context(), ensure, redisFixtureSecrets); err != nil {
-		t.Fatal(err)
-	}
-	inventory, err := r.Inventory(t.Context())
-	if err != nil || len(inventory) != 3 {
-		t.Fatalf("inventory %+v: %v", inventory, err)
-	}
-	var content bytes.Buffer
-	archive := tar.NewWriter(&content)
-	data := []byte("retained-task-038-data")
-	if err := archive.WriteHeader(&tar.Header{Name: "marker", Mode: 0600, Size: int64(len(data))}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := archive.Write(data); err != nil {
-		t.Fatal(err)
-	}
-	if err := archive.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := api.CopyToContainer(t.Context(), first.Container.ID, client.CopyToContainerOptions{DestinationPath: "/data", Content: &content}); err != nil {
-		t.Fatal(err)
-	}
-	// A first start initializes, as the provisioning plan does. Storage loss on a later
-	// start is TestRedisLostStorageRefusesStart.
-	start := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{AllowInitialization: true}}})
-	if _, err := r.Execute(t.Context(), start, nil); err != nil {
-		t.Fatalf("start: %v / %v", err, errors.Unwrap(err))
-	}
-	// Running is visible before the first-start program finishes its storage marker.
-	if got := storageExec(t, api, name, "sh", "-c", "until [ -s /data/.synod-redis-volume ]; do sleep 0.1; done; cat /data/.synod-redis-volume"); got != "synod" {
-		t.Fatalf("marker contents %q", got)
-	}
-	if _, err := r.Execute(t.Context(), start, nil); err != nil {
-		t.Fatal(err)
-	}
-	logs, err := r.Logs(t.Context(), start, 128)
-	if err != nil || len(logs) > 128 {
-		t.Fatalf("logs length %d: %v", len(logs), err)
-	}
-	remove := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_RemoveContainer{RemoveContainer: &agentv1.RemoveContainer{}}})
-	if _, err := r.Execute(t.Context(), remove, nil); !errors.Is(err, runtime.ErrBusy) {
-		t.Fatalf("removed running container: %v", err)
-	}
-	stop := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_StopContainer{StopContainer: &agentv1.StopContainer{GracePeriod: durationpb.New(5 * time.Second)}}})
-	if _, err := r.Execute(t.Context(), stop, nil); err != nil {
-		t.Fatal(err)
-	}
-	stopped, err := api.ContainerInspect(t.Context(), name, client.ContainerInspectOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stopped.Container.State.Running || stopped.Container.HostConfig.RestartPolicy.Name != container.RestartPolicyDisabled {
-		t.Fatal("stopped intent was not preserved")
-	}
-	if _, err := r.Execute(t.Context(), remove, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Execute(t.Context(), remove, nil); err != nil {
-		t.Fatal(err)
-	}
-	volumeName := "synod-volume-" + ensure.Input.GetEnsureContainer().VolumeId
-	if _, err := api.VolumeInspect(t.Context(), volumeName, client.VolumeInspectOptions{}); err != nil {
-		t.Fatal("removed retained volume", err)
-	}
-	if _, err := r.Execute(t.Context(), ensure, redisFixtureSecrets); err != nil {
-		t.Fatal(err)
-	}
-	replacement, err := api.ContainerInspect(t.Context(), name, client.ContainerInspectOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if replacement.Container.ID == first.Container.ID {
-		t.Fatal("container was not replaced")
-	}
-	copied, err := api.CopyFromContainer(t.Context(), replacement.Container.ID, client.CopyFromContainerOptions{SourcePath: "/data/marker"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer copied.Content.Close()
-	reader := tar.NewReader(copied.Content)
-	if _, err := reader.Next(); err != nil {
-		t.Fatal(err)
-	}
-	got, err := io.ReadAll(reader)
-	if err != nil || !bytes.Equal(got, data) {
-		t.Fatalf("retained data %q: %v", got, err)
-	}
-}
-
 func TestRuntimeOwnershipAndConfigurationConflicts(t *testing.T) {
-	r, api, clusterID := runtimeFixture(t)
-	id := uuid.NewString()
-	command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: id}}})
-	labels := r.labels(command, "volume", id)
-	labels[labelNode] = uuid.NewString()
-	if _, err := api.VolumeCreate(t.Context(), client.VolumeCreateOptions{Name: "synod-volume-" + id, Driver: "local", Labels: labels}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Execute(t.Context(), command, nil); !errors.Is(err, runtime.ErrOwnershipConflict) {
-		t.Fatalf("accepted wrong node volume: %v", err)
-	}
-	if _, err := api.VolumeInspect(t.Context(), "synod-volume-"+id, client.VolumeInspectOptions{}); err != nil {
-		t.Fatal("deleted conflicting volume", err)
-	}
-	ensure := createFixtureContainer(t, r, clusterID, agentv1.NetworkMode_NETWORK_MODE_BRIDGE)
+	r, api, appID := runtimeFixture(t)
+	ensure := createFixtureContainer(t, r, appID)
 	changed := proto.Clone(ensure).(*agentv1.Command)
 	changed.Input.GetEnsureContainer().MemoryBytes = 128 << 20
 	hash, err := operation.CommandHash(changed)
@@ -270,36 +141,15 @@ func TestRuntimeOwnershipAndConfigurationConflicts(t *testing.T) {
 	}
 }
 
-func TestExplicitHostNetworkAndBridgeGate(t *testing.T) {
-	r, api, clusterID := runtimeFixture(t)
-	r.options.AllowBridgeFixture = false
-	ensure := createFixtureContainer(t, r, clusterID, agentv1.NetworkMode_NETWORK_MODE_HOST)
-	item, err := api.ContainerInspect(t.Context(), "synod-instance-"+ensure.Input.ResourceId, client.ContainerInspectOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if item.Container.HostConfig.NetworkMode != "host" || len(item.Container.HostConfig.PortBindings) != 0 {
-		t.Fatal("host networking used published ports")
-	}
-	if item.Container.State.Running {
-		t.Fatal("host test unexpectedly started a listener")
-	}
-	id := uuid.NewString()
-	network := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_EnsureNetwork{EnsureNetwork: &agentv1.EnsureNetwork{NetworkId: id}}})
-	if _, err := r.Execute(t.Context(), network, nil); !errors.Is(err, runtime.ErrUnsupportedConfiguration) {
-		t.Fatalf("bridge fixture not gated: %v", err)
-	}
-}
-
 func TestRealDockerLostCreateReplyAndRecovery(t *testing.T) {
 	for _, failedRecovery := range []bool{false, true} {
 		t.Run(map[bool]string{false: "inspect-success", true: "inspect-unavailable"}[failedRecovery], func(t *testing.T) {
-			r, _, clusterID := runtimeFixture(t)
+			r, _, appID := runtimeFixture(t)
 			host := os.Getenv("SYNOD_TEST_DOCKER_HOST")
 			var dropped atomic.Bool
 			faulty, err := client.New(client.WithHost(host), client.WithResponseHook(func(response *http.Response) {
-				isCreate := strings.HasSuffix(response.Request.URL.Path, "/volumes/create") && response.StatusCode < 300
-				if (isCreate && dropped.CompareAndSwap(false, true)) || (failedRecovery && dropped.Load() && response.Request.Method == http.MethodGet && strings.Contains(response.Request.URL.Path, "/volumes/")) {
+				isCreate := strings.HasSuffix(response.Request.URL.Path, "/containers/create") && response.StatusCode < 300
+				if (isCreate && dropped.CompareAndSwap(false, true)) || (failedRecovery && dropped.Load() && response.Request.Method == http.MethodGet && strings.Contains(response.Request.URL.Path, "/containers/synod-instance-")) {
 					response.Body.Close()
 					response.Body = io.NopCloser(iotest.ErrReader(io.ErrUnexpectedEOF))
 				}
@@ -312,8 +162,7 @@ func TestRealDockerLostCreateReplyAndRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			id := uuid.NewString()
-			command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: id}}})
+			command := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: uuid.NewString(), Payload: &agentv1.CommandInput_EnsureContainer{EnsureContainer: fixtureContainer()}})
 			j, options, path := runtimeJournal(t, command)
 			result, err := injected.Execute(t.Context(), command, nil)
 			if failedRecovery {
@@ -363,23 +212,23 @@ func TestRealDockerLostCreateReplyAndRecovery(t *testing.T) {
 	}
 }
 
-// Usage must measure a volume this node actually owns, on a real daemon.
+// Usage must measure a container this node actually owns, on a real daemon.
 func TestUsageMeasuresOwnedResources(t *testing.T) {
-	r, _, clusterID := runtimeFixture(t)
-	id := uuid.NewString()
-	command := runtimeCommand(t, r, clusterID, &agentv1.CommandInput{ResourceId: id, Payload: &agentv1.CommandInput_EnsureVolume{EnsureVolume: &agentv1.EnsureVolume{VolumeId: id}}})
-	if _, err := r.Execute(t.Context(), command, nil); err != nil {
+	r, _, appID := runtimeFixture(t)
+	ensure := createFixtureContainer(t, r, appID)
+	start := runtimeCommand(t, r, appID, &agentv1.CommandInput{ResourceId: ensure.Input.ResourceId, Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}})
+	if _, err := r.Execute(t.Context(), start, nil); err != nil {
 		t.Fatal(err)
 	}
-	resource := uuid.MustParse(id)
+	resource := uuid.MustParse(ensure.Input.ResourceId)
 	usage, err := r.Usage(t.Context(), []uuid.UUID{resource})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(usage) != 1 || usage[0].ResourceID != resource {
-		t.Fatalf("usage=%+v, want the volume this node owns", usage)
+		t.Fatalf("usage=%+v, want the container this node owns", usage)
 	}
-	// A fresh volume can measure zero bytes, but never a negative amount.
+	// A fresh container can measure zero bytes, but never a negative amount.
 	if usage[0].Used.DiskBytes < 0 || usage[0].Used.MemoryBytes < 0 || usage[0].Used.CPUMillis < 0 {
 		t.Fatalf("used=%+v", usage[0].Used)
 	}

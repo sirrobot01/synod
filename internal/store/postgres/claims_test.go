@@ -23,7 +23,7 @@ func claimFixture(t *testing.T) (*Store, ClaimRequest, operation.Claim) {
 	t.Helper()
 	s := testStore(t)
 	request := testRequest()
-	admission, err := s.CreateCluster(t.Context(), request)
+	admission, err := s.AdmitApp(t.Context(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func claimFixture(t *testing.T) (*Store, ClaimRequest, operation.Claim) {
 
 func claimPlan(t *testing.T, claim operation.Claim) *agentv1.ExecutionPlan {
 	t.Helper()
-	command := &agentv1.Command{Epoch: &agentv1.Epoch{InstallationId: claim.InstallationID.String(), NodeId: uuid.NewString(), ClusterId: claim.ClusterID.String(), RecoveryGeneration: claim.RecoveryGeneration.String(), ExecutionEpoch: claim.ExecutionEpoch}, OperationId: claim.OperationID.String(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1,
+	command := &agentv1.Command{Epoch: &agentv1.Epoch{InstallationId: claim.InstallationID.String(), NodeId: uuid.NewString(), AppId: claim.AppID.String(), RecoveryGeneration: claim.RecoveryGeneration.String(), ExecutionEpoch: claim.ExecutionEpoch}, OperationId: claim.OperationID.String(), StepId: uuid.NewString(), CommandId: uuid.NewString(), DesiredRevision: 1, PlanVersion: 1,
 		Input: &agentv1.CommandInput{ResourceId: uuid.NewString(), PayloadVersion: 1, Timeout: durationpb.New(time.Minute), Payload: &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}}}
 	hash, err := operation.CommandHash(command)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestConcurrentClaims(t *testing.T) {
 		t.Fatalf("claim winners: %d", successes)
 	}
 	var epoch int64
-	if err := s.pool.QueryRow(t.Context(), `SELECT execution_epoch FROM clusters`).Scan(&epoch); err != nil || epoch != 2 {
+	if err := s.pool.QueryRow(t.Context(), `SELECT execution_epoch FROM apps`).Scan(&epoch); err != nil || epoch != 2 {
 		t.Fatalf("epoch %d: %v", epoch, err)
 	}
 }
@@ -353,7 +353,7 @@ func TestCoordinatorAndPostgresAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leader, err := coord.Campaign(t.Context(), r.InstallationID, old.ClusterID, "real-leader", 3)
+	leader, err := coord.Campaign(t.Context(), r.InstallationID, old.AppID, "real-leader", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestHistoricalClaimIDCannotBeReused(t *testing.T) {
 		t.Fatalf("reused historical claim ID: %v", err)
 	}
 	var epoch int64
-	if err := s.pool.QueryRow(t.Context(), `SELECT execution_epoch FROM clusters`).Scan(&epoch); err != nil || epoch != 2 {
+	if err := s.pool.QueryRow(t.Context(), `SELECT execution_epoch FROM apps`).Scan(&epoch); err != nil || epoch != 2 {
 		t.Fatalf("rejected claim changed epoch %d: %v", epoch, err)
 	}
 }
@@ -419,36 +419,5 @@ func TestChangedRecoveryGenerationInvalidatesClaim(t *testing.T) {
 	request.RecoveryGeneration = generation
 	if _, err := s.AcquireClaim(t.Context(), request); !errors.Is(err, operation.ErrStaleOwner) {
 		t.Fatalf("claim replay adopted a changed generation: %v", err)
-	}
-}
-
-func TestInstallPostgresRecoveryPlan(t *testing.T) {
-	s, _, claim := claimFixture(t)
-	plan := claimPlan(t, claim)
-	command := plan.Steps[0].Command
-	admin, application := uuid.NewString(), uuid.NewString()
-	command.Input.Secrets = []*agentv1.SecretReference{{CredentialId: admin, Version: 1, Purpose: "superuser"}, {CredentialId: application, Version: 1, Purpose: "application"}}
-	command.Input.Payload = &agentv1.CommandInput_RecoverPostgresSetup{RecoverPostgresSetup: &agentv1.RecoverPostgresSetup{Postgres: &agentv1.PostgresContainerConfig{Port: 5432, SuperuserCredentialId: admin, SuperuserCredentialVersion: 1, ApplicationCredentialId: application, ApplicationCredentialVersion: 1}}}
-	plan.Steps[0].Postcondition = agentv1.Postcondition_POSTCONDITION_POSTGRES_SETUP_RECOVERED
-	hash, err := operation.CommandHash(command)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command.InputHash = hash[:]
-	if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.InstallPlan(t.Context(), claim, plan); err != nil {
-		t.Fatal(err)
-	}
-	changed := proto.Clone(plan).(*agentv1.ExecutionPlan)
-	changed.Steps[0].Command.Input.GetRecoverPostgresSetup().Postgres.Port++
-	hash, err = operation.CommandHash(changed.Steps[0].Command)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changed.Steps[0].Command.InputHash = hash[:]
-	if err := s.InstallPlan(t.Context(), claim, changed); !errors.Is(err, operation.ErrCommandConflict) {
-		t.Fatalf("recovery plan identity changed: %v", err)
 	}
 }

@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -35,21 +34,14 @@ type Controller struct {
 	PublicOrigin     string `json:"public_origin"`
 	LogLevel         string `json:"log_level"`
 	// SecretKeyFile holds the base64 of one 32-byte wrapping key, and SecretKeyID
-	// names it. A controller without both seals nothing, so it admits clusters and
+	// names it. A controller without both seals nothing, so it admits apps and
 	// cannot provision them: a credential this installation cannot name later is
 	// worse than a provision that did not start.
 	SecretKeyFile string `json:"secret_key_file"`
 	SecretKeyID   string `json:"secret_key_id"`
-	// The node shape this installation places onto. A cluster spec names none of it
-	// and placement matches a node's operator-declared policy exactly, so it is
-	// configuration: a controller on one architecture routinely manages nodes on
-	// another, and a compile-time default cannot describe a real fleet.
-	PlacementArchitecture   string `json:"placement_architecture"`
-	PlacementRuntimeVersion string `json:"placement_runtime_version"`
-	PlacementStorageID      string `json:"placement_storage_id"`
-	// The host ports an engine may publish on. This profile uses host networking, so
+	// The host ports a tier 1 copy may publish on. Copies use host networking, so
 	// a port is a host resource the plan reserves, and placement chooses one from this
-	// span. A node carries as many clusters as the span has free ports.
+	// span. A node carries as many copies as the span has free ports.
 	EngineEndpointFirstPort int `json:"engine_endpoint_first_port"`
 	EngineEndpointLastPort  int `json:"engine_endpoint_last_port"`
 }
@@ -76,9 +68,6 @@ func BindController(flags *pflag.FlagSet) func() (Controller, error) {
 	flags.StringVar(&override.CAKeyFile, "ca-key-file", "", "protected enrollment CA private key file")
 	flags.StringVar(&override.SecretKeyFile, "secret-key-file", "", "protected file holding the base64 of one 32-byte credential wrapping key")
 	flags.StringVar(&override.SecretKeyID, "secret-key-id", "", "UUID naming the active credential wrapping key")
-	flags.StringVar(&override.PlacementArchitecture, "placement-architecture", "", "node CPU architectures to place onto in preference order, amd64, arm64, or both separated by a comma")
-	flags.StringVar(&override.PlacementRuntimeVersion, "placement-runtime-version", "", "container runtime version the nodes report")
-	flags.StringVar(&override.PlacementStorageID, "placement-storage-id", "", "storage pool identifier the nodes declare")
 	flags.IntVar(&override.EngineEndpointFirstPort, "engine-endpoint-first-port", 0, "lowest host port an engine may publish on (default 5432)")
 	flags.IntVar(&override.EngineEndpointLastPort, "engine-endpoint-last-port", 0, "highest host port an engine may publish on (default 5531)")
 	flags.StringVar(&override.PublicOrigin, "public-origin", "", "browser origin of this API, such as https://synod.example.com")
@@ -140,9 +129,6 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 		{"SYNOD_LOG_LEVEL", &config.LogLevel},
 		{"SYNOD_SECRET_KEY_FILE", &config.SecretKeyFile},
 		{"SYNOD_SECRET_KEY_ID", &config.SecretKeyID},
-		{"SYNOD_PLACEMENT_ARCHITECTURE", &config.PlacementArchitecture},
-		{"SYNOD_PLACEMENT_RUNTIME_VERSION", &config.PlacementRuntimeVersion},
-		{"SYNOD_PLACEMENT_STORAGE_ID", &config.PlacementStorageID},
 	} {
 		if value, present := os.LookupEnv(field.name); present {
 			*field.value = value
@@ -189,12 +175,6 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 			config.TLSKeyFile = override.TLSKeyFile
 		case "ca-cert-file":
 			config.CACertFile = override.CACertFile
-		case "placement-architecture":
-			config.PlacementArchitecture = override.PlacementArchitecture
-		case "placement-runtime-version":
-			config.PlacementRuntimeVersion = override.PlacementRuntimeVersion
-		case "placement-storage-id":
-			config.PlacementStorageID = override.PlacementStorageID
 		case "engine-endpoint-first-port":
 			config.EngineEndpointFirstPort = override.EngineEndpointFirstPort
 		case "engine-endpoint-last-port":
@@ -243,20 +223,11 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 			return Controller{}, errors.New("secret_key_id must be a nonzero UUID")
 		}
 	}
-	// Placement shape is read from node records. An operator may declare
-	// placement_architecture to constrain or order architecture preference.
-	if config.PlacementArchitecture != "" {
-		architectures := strings.Split(config.PlacementArchitecture, ",")
-		if len(architectures) > 2 || slices.ContainsFunc(architectures, func(value string) bool { return value != "amd64" && value != "arm64" }) ||
-			(len(architectures) == 2 && architectures[0] == architectures[1]) {
-			return Controller{}, errors.New("placement_architecture must be amd64, arm64, or both separated by a comma")
-		}
-	}
 	if config.EngineEndpointFirstPort == 0 {
 		config.EngineEndpointFirstPort = 5432
 	}
 	if config.EngineEndpointLastPort == 0 {
-		// A hundred ports is a hundred clusters on one node, which is past what any
+		// A hundred ports is a hundred apps on one node, which is past what any
 		// other limit here allows. An operator narrows it when the host is shared.
 		config.EngineEndpointLastPort = config.EngineEndpointFirstPort + 99
 	}

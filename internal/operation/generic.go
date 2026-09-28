@@ -4,18 +4,31 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/netip"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/sirrobot01/synod/internal/app"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
+var engineSourcePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
 // ValidateGenericContainer also checks stored Docker configuration during recovery.
+// A container with an engine mount is a tier 1 database copy. Only it may take secret
+// environment values, which carry its credentials.
 func ValidateGenericContainer(p *agentv1.EnsureContainer) error {
-	if p == nil || p.Generic == nil || p.Engine != "generic" || p.Postgres != nil || p.Redis != nil || p.VolumeId != "" || p.NetworkId != "" || p.NetworkMode != agentv1.NetworkMode_NETWORK_MODE_BRIDGE || len(p.SecretEnv) != 0 {
-		return fmt.Errorf("generic containers require bridge networking without engine state")
+	if p == nil || p.Generic == nil || p.NetworkMode != agentv1.NetworkMode_NETWORK_MODE_BRIDGE {
+		return fmt.Errorf("containers require generic settings and bridge networking")
 	}
 	g := p.Generic
+	database := slices.ContainsFunc(g.Mounts, func(m *agentv1.Mount) bool { return m != nil && m.Type == "engine" })
+	if len(p.SecretEnv) > 0 && !database {
+		return fmt.Errorf("only a database copy takes secret environment values")
+	}
+	if len(p.SecretEnv) > 8 {
+		return fmt.Errorf("a database copy takes at most 8 secret environment values")
+	}
 	if g.Image != p.ImageDigest {
 		return fmt.Errorf("generic image must match its pinned reference")
 	}
@@ -58,24 +71,39 @@ func ValidateGenericContainer(p *agentv1.EnsureContainer) error {
 			return fmt.Errorf("generic host address must be a unicast or wildcard IP")
 		}
 		ports[port.ContainerPort] = true
+		spec.Service.Ports = append(spec.Service.Ports, app.PortSpec{ContainerPort: uint16(port.ContainerPort), Protocol: port.Transport})
 	}
-	targets := map[string]bool{}
+	targets, engines := map[string]bool{}, map[string]bool{}
 	for _, m := range g.Mounts {
 		if m == nil || targets[m.Target] || (m.Type == "tmpfs" && m.Source != "") {
 			return fmt.Errorf("generic mount is invalid or repeated")
 		}
 		targets[m.Target] = true
+		// Engine data lives in Synod-owned directories. It never passes through the app mount rules.
+		if m.Type == "engine" {
+			if !engineSourcePattern.MatchString(m.Source) || engines[m.Source] || !strings.HasPrefix(m.Target, "/") {
+				return fmt.Errorf("engine mount is invalid or repeated")
+			}
+			engines[m.Source] = true
+			continue
+		}
 		if m.Type == "replicated" {
 			spec.Tier = app.TierSingleWriter
 			spec.Replication = new(app.DefaultReplication())
 		}
 		spec.Service.Mounts = append(spec.Service.Mounts, app.MountSpec{Type: m.Type, Source: m.Source, Target: m.Target, ReadOnly: m.ReadOnly})
 	}
+	if database && spec.Tier == app.TierSingleWriter {
+		return fmt.Errorf("a container cannot hold both engine and replicated mounts")
+	}
 	if h := g.HealthCheck; h != nil {
 		if h.Port > 65535 || (h.Type != "exec" && !ports[h.Port]) {
 			return fmt.Errorf("health probe needs a published backend port")
 		}
 		spec.Service.HealthCheck = &app.HealthCheckSpec{Type: h.Type, Path: h.Path, Port: uint16(h.Port), Command: h.Command}
+	}
+	if spec.Tier == app.TierParallel && len(p.Ports) == 0 {
+		spec.Router = app.RouterSpec{}
 	}
 	return spec.Validate()
 }

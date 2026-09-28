@@ -2,7 +2,7 @@
 // one engine's shape onto another.
 //
 // Specification 06 states that a single engine-wide boolean is not sufficient: what a
-// cluster can do comes from its engine, version, topology, and persistence together,
+// database can do comes from its engine, version, topology, and persistence together,
 // and that combination is what carries a qualification status.
 package engine
 
@@ -11,16 +11,15 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-
-	"github.com/sirrobot01/synod/internal/cluster"
 )
 
-var (
-	// ErrUnknownEngine reports a spec for an engine this installation does not serve.
-	ErrUnknownEngine = errors.New("unknown_engine")
-	// ErrUnsupportedCombination is refused at validation, never at execution, so an
-	// operator finds out before a host is touched.
-	ErrUnsupportedCombination = errors.New("unsupported_combination")
+// ErrUnknownEngine reports an engine this installation does not serve.
+var ErrUnknownEngine = errors.New("unknown_engine")
+
+// Engine names served by the catalog.
+const (
+	PostgreSQL = "postgres"
+	Redis      = "redis"
 )
 
 // Status is how far one advertised combination has been proved. Specification 36
@@ -37,10 +36,10 @@ const (
 // Persistence is part of the key because it changes what the combination can do: an
 // unpersisted engine has no backup to take and nothing to restore.
 type Combination struct {
-	Engine      cluster.Engine `json:"engine"`
-	Version     string         `json:"version"`
-	Topology    string         `json:"topology"`
-	Persistence string         `json:"persistence,omitempty"`
+	Engine      string `json:"engine"`
+	Version     string `json:"version"`
+	Topology    string `json:"topology"`
+	Persistence string `json:"persistence,omitempty"`
 }
 
 // Replicas is the replica count a combination accepts.
@@ -72,30 +71,27 @@ type Capabilities struct {
 	TLS          bool     `json:"tls"`
 }
 
-// Engine answers what a spec is and what it can do. Planning and side-effect
+// Engine answers what one database engine can do. Planning and side-effect
 // execution stay out: something else decides what to run.
 type Engine interface {
-	Identity() cluster.Engine
-	// Validate checks engine rules a stored spec cannot express.
-	Validate(spec cluster.CreateSpec) error
-	Resolve(spec cluster.CreateSpec) (Capabilities, error)
+	Identity() string
 	// Advertised lists every known combination in a stable order.
 	Advertised() []Capabilities
 }
 
 // Catalog is the set of engines one installation serves.
-type Catalog struct{ engines map[cluster.Engine]Engine }
+type Catalog struct{ engines map[string]Engine }
 
 // NewCatalog binds the engines an installation serves. Two claiming one identity is a
 // wiring mistake, not a precedence question.
 func NewCatalog(engines ...Engine) (*Catalog, error) {
-	catalog := &Catalog{engines: make(map[cluster.Engine]Engine, len(engines))}
+	catalog := &Catalog{engines: make(map[string]Engine, len(engines))}
 	for _, found := range engines {
 		if found == nil {
 			return nil, errors.New("engine catalog requires non-nil engines")
 		}
 		identity := found.Identity()
-		if identity != cluster.PostgreSQL && identity != cluster.Redis {
+		if identity != PostgreSQL && identity != Redis {
 			return nil, fmt.Errorf("%w: %s", ErrUnknownEngine, identity)
 		}
 		if _, exists := catalog.engines[identity]; exists {
@@ -109,28 +105,16 @@ func NewCatalog(engines ...Engine) (*Catalog, error) {
 	return catalog, nil
 }
 
-// Resolve validates a spec and answers what it can do. A malformed spec is refused
-// before any capability is read, so it never reaches a lookup that could answer for a
-// different combination than the one asked about.
-func (c *Catalog) Resolve(spec cluster.CreateSpec) (Capabilities, error) {
-	if err := spec.Validate(); err != nil {
-		return Capabilities{}, err
-	}
-	found, ok := c.engines[spec.Engine]
+// Serves reports whether the catalog serves a supported release of an engine version.
+// A major version such as "17" matches any advertised release in it, such as "17.11".
+func (c *Catalog) Serves(name, version string) bool {
+	found, ok := c.engines[name]
 	if !ok {
-		return Capabilities{}, fmt.Errorf("%w: %s", ErrUnknownEngine, spec.Engine)
+		return false
 	}
-	if err := found.Validate(spec); err != nil {
-		return Capabilities{}, err
-	}
-	resolved, err := found.Resolve(spec)
-	if err != nil {
-		return Capabilities{}, err
-	}
-	if resolved.Status == Unsupported {
-		return Capabilities{}, fmt.Errorf("%w: %s", ErrUnsupportedCombination, resolved.Combination)
-	}
-	return resolved, nil
+	return slices.ContainsFunc(found.Advertised(), func(item Capabilities) bool {
+		return item.Status != Unsupported && (item.Combination.Version == version || strings.HasPrefix(item.Combination.Version, version+"."))
+	})
 }
 
 // Advertised lists every combination this installation serves, in a stable order.

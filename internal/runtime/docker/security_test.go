@@ -13,8 +13,8 @@ import (
 )
 
 func TestRejectUnsupportedContainerSecurity(t *testing.T) {
-	r, api, clusterID := runtimeFixture(t)
-	ensure := createFixtureContainer(t, r, clusterID, agentv1.NetworkMode_NETWORK_MODE_BRIDGE)
+	r, api, appID := runtimeFixture(t)
+	ensure := createFixtureContainer(t, r, appID)
 	item, err := api.ContainerInspect(t.Context(), "synod-instance-"+ensure.Input.ResourceId, client.ContainerInspectOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestRejectUnsupportedContainerSecurity(t *testing.T) {
 		{ResourceId: ensure.Input.ResourceId, Payload: &agentv1.CommandInput_StopContainer{StopContainer: &agentv1.StopContainer{GracePeriod: durationpb.New(time.Second)}}},
 		{ResourceId: ensure.Input.ResourceId, Payload: &agentv1.CommandInput_RemoveContainer{RemoveContainer: &agentv1.RemoveContainer{}}},
 	} {
-		command := runtimeCommand(t, r, clusterID, input)
+		command := runtimeCommand(t, r, appID, input)
 		if _, err := r.Execute(t.Context(), command, nil); !errors.Is(err, runtime.ErrConfigurationConflict) {
 			t.Fatalf("mutated unauthorized container: %v", err)
 		}

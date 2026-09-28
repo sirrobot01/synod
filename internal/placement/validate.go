@@ -147,7 +147,7 @@ func PortsConflict(a, b Port) bool {
 
 // Validate checks the request version, identity, profile, resources, and groups.
 func (r Request) Validate() error {
-	if r.Version != 1 || r.InstallationID == uuid.Nil || r.ClusterID == uuid.Nil || r.OperationID == uuid.Nil || r.DesiredRevision < 1 || (r.Profile != "compact" && r.Profile != "ha") || len(r.Resources) == 0 || len(r.Resources) > MaxResources || len(r.Groups) > 64 || (r.Profile == "ha" && len(r.Groups) == 0) {
+	if r.Version != 1 || r.InstallationID == uuid.Nil || r.AppID == uuid.Nil || r.OperationID == uuid.Nil || r.DesiredRevision < 1 || (r.Profile != "compact" && r.Profile != "ha") || len(r.Resources) == 0 || len(r.Resources) > MaxResources || len(r.Groups) > 64 || (r.Profile == "ha" && len(r.Groups) == 0) {
 		return ErrInvalid
 	}
 	if r.PortRange != (PortRange{}) && (r.PortRange.First == 0 || r.PortRange.First > r.PortRange.Last) {
@@ -184,7 +184,8 @@ func (r Request) Validate() error {
 				seen[id] = true
 			}
 		}
-		if resource.Role == "standby" && (resource.Budgets.Workload == nil || resource.Budgets.Workload.CPUMillis != 0 || resource.Budgets.Workload.MemoryBytes != 0 || resource.Budgets.Workload.DiskBytes == 0) {
+		// A standby holds data, so it reserves disk. A tier 1 standby also runs its engine.
+		if resource.Role == "standby" && (resource.Budgets.Workload == nil || resource.Budgets.Workload.DiskBytes == 0) {
 			return ErrInvalid
 		}
 		if len(resource.RequiredPaths) > 128 {
@@ -200,7 +201,7 @@ func (r Request) Validate() error {
 		if err != nil || total == (Vector{}) {
 			return ErrInvalid
 		}
-		// An instance is a member of the cluster, so it names which member it is.
+		// An instance is a member of the app, so it names which member it is.
 		// A generic service can be an active writer or a standby.
 		if (resource.Kind == "instance") != (resource.Role == "primary" || resource.Role == "replica") || (resource.Kind != "instance" && resource.Role != "" && !(resource.Engine == "generic" && (resource.Role == "active" || resource.Role == "standby"))) {
 			return ErrInvalid

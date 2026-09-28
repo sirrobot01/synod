@@ -10,51 +10,31 @@ import (
 	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/operation"
-	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
 )
 
-func runningWorkload(t *testing.T, f *fixture) (*agentv1.Command, *agentv1.Command) {
+// runningWorkload creates and starts one tier 3 container.
+func runningWorkload(t *testing.T, f *fixture) *agentv1.Command {
 	t.Helper()
-	volume := volumeCommand(t, f.epoch)
-	if _, err := f.e.runtime.Execute(t.Context(), volume, nil); err != nil {
-		t.Fatal(err)
-	}
-	networkID := uuid.NewString()
-	network := volumeCommand(t, f.epoch)
-	network.Input.ResourceId = networkID
-	network.Input.Payload = &agentv1.CommandInput_EnsureNetwork{EnsureNetwork: &agentv1.EnsureNetwork{NetworkId: networkID}}
-	hash, err := operation.CommandHash(network)
-	if err != nil {
-		t.Fatal(err)
-	}
-	network.InputHash = hash[:]
-	if _, err := f.e.runtime.Execute(t.Context(), network, nil); err != nil {
-		t.Fatal(err)
-	}
-	ensure := volumeCommand(t, f.epoch)
-	ensure.Input.Secrets = []*agentv1.SecretReference{{CredentialId: uuid.NewString(), Version: 1, Purpose: "superuser"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "application"}, {CredentialId: uuid.NewString(), Version: 1, Purpose: "replication"}}
+	image := "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3"
+	ensure := ensureCommand(t, f.epoch)
 	ensure.Input.Payload = &agentv1.CommandInput_EnsureContainer{EnsureContainer: &agentv1.EnsureContainer{
-		ImageDigest: "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3", Engine: "redis", VolumeId: volume.Input.ResourceId, NetworkId: networkID, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
-		Redis:     &agentv1.RedisContainerConfig{Port: 6379, Persistence: "none", MaxmemoryBytes: 48 << 20, EvictionPolicy: "noeviction"},
-		SecretEnv: []*agentv1.SecretEnv{{Name: "REDIS_ADMIN_PASSWORD", Purpose: "superuser"}, {Name: "REDIS_APP_PASSWORD", Purpose: "application"}, {Name: "REDIS_REPLICATION_PASSWORD", Purpose: "replication"}},
+		ImageDigest: image, NetworkMode: agentv1.NetworkMode_NETWORK_MODE_BRIDGE, MemoryBytes: 64 << 20, CpuMillis: 250,
+		Generic: &agentv1.GenericContainerConfig{Image: image, AppName: "drain-app", Mounts: []*agentv1.Mount{{Type: "tmpfs", Target: "/data"}}},
 	}}
-	ensure.Input.GetEnsureContainer().Redis.Credentials = ensure.Input.Secrets
-	hash, err = operation.CommandHash(ensure)
+	hash, err := operation.CommandHash(ensure)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ensure.InputHash = hash[:]
-	if _, err := f.e.runtime.Execute(t.Context(), ensure, runtime.Secrets{"superuser": []byte("executor-test-admin"), "application": []byte("executor-test-app"), "replication": []byte("executor-test-repl")}); err != nil {
+	if _, err := f.e.runtime.Execute(t.Context(), ensure, nil); err != nil {
 		t.Fatal(err)
 	}
 	start := proto.Clone(ensure).(*agentv1.Command)
 	start.CommandId = uuid.NewString()
 	start.StepId = uuid.NewString()
-	start.Input.Secrets = nil
-	// This is the workload's first start, so it initializes, as the plan does.
-	start.Input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{AllowInitialization: true}}
+	start.Input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}
 	hash, err = operation.CommandHash(start)
 	if err != nil {
 		t.Fatal(err)
@@ -63,12 +43,12 @@ func runningWorkload(t *testing.T, f *fixture) (*agentv1.Command, *agentv1.Comma
 	if _, err := f.e.runtime.Execute(t.Context(), start, nil); err != nil {
 		t.Fatal(err)
 	}
-	return ensure, volume
+	return ensure
 }
 
 func TestBarrierDrainsUnjournaledExecAndShutdownPreservesWorkload(t *testing.T) {
 	f := newFixture(t, nil)
-	ensure, volume := runningWorkload(t, f)
+	ensure := runningWorkload(t, f)
 	controller := startController(t, f, nil)
 	native, err := f.api.ExecCreate(t.Context(), "synod-instance-"+ensure.Input.ResourceId, client.ExecCreateOptions{Cmd: []string{"sleep", "2"}})
 	if err != nil {
@@ -119,19 +99,16 @@ func TestBarrierDrainsUnjournaledExecAndShutdownPreservesWorkload(t *testing.T) 
 	if err != nil || !container.Container.State.Running {
 		t.Fatal("shutdown stopped workload", err)
 	}
-	if _, err := f.api.VolumeInspect(t.Context(), "synod-volume-"+volume.Input.ResourceId, client.VolumeInspectOptions{}); err != nil {
-		t.Fatal("shutdown removed data volume", err)
-	}
 }
 
 func TestStartupRecoversAcknowledgedResidualEffects(t *testing.T) {
 	f := newFixture(t, nil)
-	ensure, _ := runningWorkload(t, f)
+	ensure := runningWorkload(t, f)
 	ctx, _ := localSession(t, f.e)
 	activateLocal(t, f.e, ctx, f.epoch)
 	command := proto.Clone(ensure).(*agentv1.Command)
 	command.CommandId, command.StepId = uuid.NewString(), uuid.NewString()
-	command.Input.Payload = &agentv1.CommandInput_InspectContainer{InspectContainer: &agentv1.InspectContainer{}}
+	command.Input.Payload = &agentv1.CommandInput_StartContainer{StartContainer: &agentv1.StartContainer{}}
 	hash, err := operation.CommandHash(command)
 	if err != nil {
 		t.Fatal(err)

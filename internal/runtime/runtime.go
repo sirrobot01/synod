@@ -46,7 +46,7 @@ type Secrets map[string][]byte
 
 // Resource is one owned native object and its observed state.
 type Resource struct {
-	ClusterID  uuid.UUID
+	AppID      uuid.UUID
 	ResourceID uuid.UUID
 	Kind       string
 	Name       string
@@ -85,17 +85,17 @@ type Drift struct {
 	Name     string
 	State    string
 	Class    DriftClass
-	// ClusterID and ResourceID are set only when the object still carries a
+	// AppID and ResourceID are set only when the object still carries a
 	// readable Synod identity.
-	ClusterID  uuid.UUID
+	AppID      uuid.UUID
 	ResourceID uuid.UUID
 	// Detail is a stable code naming what disagrees. It is never prose, and it
 	// never carries a host path or a label value.
 	Detail string
 }
 
-// ClusterInspection is the owned inventory and effects of one cluster on a node.
-type ClusterInspection struct {
+// AppInspection is the owned inventory and effects of one app on a node.
+type AppInspection struct {
 	Resources []Resource
 	Effects   []*agentv1.Effect
 }
@@ -123,7 +123,7 @@ type Runtime interface {
 	Execute(ctx context.Context, command *agentv1.Command, secrets Secrets) (Result, error)
 	Recover(ctx context.Context, command *agentv1.Command, prior []*agentv1.Effect) (Result, error)
 	Inventory(ctx context.Context) ([]Resource, error)
-	InspectCluster(ctx context.Context, clusterID uuid.UUID, prior []*agentv1.Effect) (ClusterInspection, error)
+	InspectApp(ctx context.Context, appID uuid.UUID, prior []*agentv1.Effect) (AppInspection, error)
 	// Usage measures what the named owned resources consume. A resource the
 	// driver does not own is absent from the answer rather than reported as
 	// zero, because zero is a measurement and absence is not.

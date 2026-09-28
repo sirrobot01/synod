@@ -25,7 +25,7 @@ func TestInspectionRequiresNegotiationAndDrainedAuthority(t *testing.T) {
 		calls.Add(1)
 		return base.RoundTrip(request)
 	})
-	request := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CommandInspection{CommandInspection: &agentv1.CommandInspectionRequest{RequestId: uuid.NewString(), Command: volumeCommand(t, f.epoch)}}}
+	request := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CommandInspection{CommandInspection: &agentv1.CommandInspectionRequest{RequestId: uuid.NewString(), Command: ensureCommand(t, f.epoch)}}}
 	old, _ := localSession(t, f.e)
 	if _, err := f.e.Handle(old, request); !errors.Is(err, operation.ErrIncompatibleProtocol) {
 		t.Fatal("inspection was not negotiated", err)
@@ -48,14 +48,14 @@ func TestInspectionRequiresNegotiationAndDrainedAuthority(t *testing.T) {
 func TestInspectionReadsFreshStateWithoutAdmission(t *testing.T) {
 	var creates atomic.Int32
 	f := newFixture(t, func(request *http.Request, base http.RoundTripper) (*http.Response, error) {
-		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/volumes/create") {
+		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/containers/create") {
 			creates.Add(1)
 		}
 		return base.RoundTrip(request)
 	})
 	controller := startController(t, f, nil)
 	controller.activate(t, f.epoch)
-	command := volumeCommand(t, f.epoch)
+	command := ensureCommand(t, f.epoch)
 	controller.send(t, &agentv1.ControllerMessage{DeliveryAttemptId: uuid.NewString(), Message: &agentv1.ControllerMessage_Command{Command: command}})
 	terminal := controller.wait(t, func(message *agentv1.AgentMessage) bool { return message.GetTerminalResult() != nil }).GetTerminalResult()
 	if terminal.State != "succeeded" {
@@ -77,32 +77,33 @@ func TestInspectionReadsFreshStateWithoutAdmission(t *testing.T) {
 	request := &agentv1.CommandInspectionRequest{RequestId: uuid.NewString(), Command: inspectCommand, PriorEffects: terminal.Effects}
 	controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CommandInspection{CommandInspection: request}})
 	present := controller.wait(t, func(message *agentv1.AgentMessage) bool { return message.GetCommandInspection() != nil }).GetCommandInspection()
-	if present.RequestId != request.RequestId || !proto.Equal(present.Epoch, next) || present.FailureCode != "" || len(present.Effects) != 1 || present.Effects[0].State != "present" || present.Effects[0].Active || present.Effects[0].OutcomeUnknown {
-		t.Fatal("inspection did not prove current volume", present)
+	if present.RequestId != request.RequestId || !proto.Equal(present.Epoch, next) || present.FailureCode != "" || len(present.Effects) != 1 || present.Effects[0].State != "created" || present.Effects[0].Active || present.Effects[0].OutcomeUnknown {
+		t.Fatal("inspection did not prove the current container", present)
 	}
-	if _, err := f.api.VolumeRemove(t.Context(), "synod-volume-"+command.Input.ResourceId, client.VolumeRemoveOptions{}); err != nil {
+	if _, err := f.api.ContainerRemove(t.Context(), "synod-instance-"+command.Input.ResourceId, client.ContainerRemoveOptions{Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	request.RequestId = uuid.NewString()
 	controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CommandInspection{CommandInspection: request}})
 	missing := controller.wait(t, func(message *agentv1.AgentMessage) bool { return message.GetCommandInspection() != nil }).GetCommandInspection()
-	if missing.RequestId != request.RequestId || missing.FailureCode == "" || len(missing.Effects) != 1 || !missing.Effects[0].OutcomeUnknown {
+	// A missing container proves that the ensure is no longer in effect.
+	if missing.RequestId != request.RequestId || missing.FailureCode == "" || len(missing.Effects) != 1 || missing.Effects[0].State != "absent" {
 		t.Fatal("old success replaced fresh missing state", missing)
 	}
 	after, err := f.e.journal.Get(command.CommandId)
 	if err != nil || after.State != journal.Terminal || !proto.Equal(before.Result, after.Result) || !proto.Equal(after.Epoch, command.Epoch) {
 		t.Fatal("inspection changed historical execution", err)
 	}
-	request = &agentv1.CommandInspectionRequest{RequestId: uuid.NewString(), Command: volumeCommand(t, next)}
+	request = &agentv1.CommandInspectionRequest{RequestId: uuid.NewString(), Command: ensureCommand(t, next)}
 	controller.send(t, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CommandInspection{CommandInspection: request}})
 	controller.wait(t, func(message *agentv1.AgentMessage) bool { return message.GetCommandInspection() != nil })
 	if _, err := f.e.journal.Get(request.Command.CommandId); !errors.Is(err, journal.ErrNotFound) {
 		t.Fatal("inspection admitted a command", err)
 	}
 	if creates.Load() != 1 {
-		t.Fatal("inspection repeated volume creation", creates.Load())
+		t.Fatal("inspection repeated container creation", creates.Load())
 	}
-	if _, err := f.api.VolumeInspect(t.Context(), "synod-volume-"+request.Command.Input.ResourceId, client.VolumeInspectOptions{}); !errdefs.IsNotFound(err) {
+	if _, err := f.api.ContainerInspect(t.Context(), "synod-instance-"+request.Command.Input.ResourceId, client.ContainerInspectOptions{}); !errdefs.IsNotFound(err) {
 		t.Fatal("inspection created missing resource", err)
 	}
 }
@@ -114,7 +115,7 @@ func TestInspectionBoundsAndRejectsLateAuthority(t *testing.T) {
 			var once atomic.Bool
 			f := newFixture(t, func(request *http.Request, base http.RoundTripper) (*http.Response, error) {
 				response, err := base.RoundTrip(request)
-				if request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/volumes/synod-volume-") && once.CompareAndSwap(false, true) {
+				if request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/containers/synod-instance-") && once.CompareAndSwap(false, true) {
 					close(entered)
 					<-release
 				}
@@ -122,7 +123,7 @@ func TestInspectionBoundsAndRejectsLateAuthority(t *testing.T) {
 			})
 			ctx, _ := localSession(t, f.e, controlstream.CommandInspectionCapability)
 			activateLocal(t, f.e, ctx, f.epoch)
-			request := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CommandInspection{CommandInspection: &agentv1.CommandInspectionRequest{RequestId: uuid.NewString(), Command: volumeCommand(t, f.epoch)}}}
+			request := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CommandInspection{CommandInspection: &agentv1.CommandInspectionRequest{RequestId: uuid.NewString(), Command: ensureCommand(t, f.epoch)}}}
 			done := make(chan error, 1)
 			go func() {
 				response, err := f.e.Handle(ctx, request)
@@ -156,7 +157,7 @@ func TestInspectionRetainsUnknownPriorIdentity(t *testing.T) {
 	f := newFixture(t, nil)
 	ctx, _ := localSession(t, f.e, controlstream.CommandInspectionCapability)
 	activateLocal(t, f.e, ctx, f.epoch)
-	command := volumeCommand(t, f.epoch)
+	command := ensureCommand(t, f.epoch)
 	prior := &agentv1.Effect{CommandId: command.CommandId, ResourceId: command.Input.ResourceId, NativeOperationId: "unknown-native-task", Active: true, OutcomeUnknown: true, State: "unknown"}
 	request := &agentv1.CommandInspectionRequest{RequestId: uuid.NewString(), Command: command, PriorEffects: []*agentv1.Effect{prior}}
 	response, err := f.e.Handle(ctx, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CommandInspection{CommandInspection: request}})

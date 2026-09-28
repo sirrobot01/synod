@@ -18,7 +18,7 @@ import (
 const (
 	metadataKey                = "synod/agent/journal/v2/meta"
 	commandPrefix              = "synod/agent/journal/v2/command/"
-	clusterPrefix              = "synod/agent/journal/v2/cluster/"
+	appPrefix                  = "synod/agent/journal/v2/app/"
 	metadataReservation  int64 = 4096
 	maxFormatRecordBytes       = 64 << 20
 )
@@ -27,7 +27,7 @@ const (
 // LastWriteBytes includes the Pebble batch encoding, before WAL framing.
 type Usage struct {
 	Records            int
-	Clusters           int
+	Apps               int
 	LogicalStoredBytes int64
 	ReservedBytes      int64
 	PhysicalDiskBytes  uint64
@@ -76,7 +76,7 @@ func decodeRecord(data []byte, target any) error {
 }
 
 func (j *Journal) load() error {
-	j.state = diskState{Clusters: make(map[string]clusterState), Commands: make(map[string]commandRecord)}
+	j.state = diskState{Apps: make(map[string]appState), Commands: make(map[string]commandRecord)}
 	iter, err := j.db.NewIter(nil)
 	if err != nil {
 		return err
@@ -130,15 +130,15 @@ func (j *Journal) load() error {
 			}
 			stored.Record.Effects = effects.Effects
 			j.state.Commands[strings.TrimPrefix(key, commandPrefix)] = stored.Record
-		case strings.HasPrefix(key, clusterPrefix):
-			if len(j.state.Clusters) >= j.options.MaxClusters {
+		case strings.HasPrefix(key, appPrefix):
+			if len(j.state.Apps) >= j.options.MaxApps {
 				return ErrBusy
 			}
-			var cluster clusterState
-			if err := decodeRecord(value, &cluster); err != nil {
+			var app appState
+			if err := decodeRecord(value, &app); err != nil {
 				return err
 			}
-			j.state.Clusters[strings.TrimPrefix(key, clusterPrefix)] = cluster
+			j.state.Apps[strings.TrimPrefix(key, appPrefix)] = app
 		default:
 			return ErrRecoveryRequired
 		}
@@ -175,7 +175,7 @@ func (j *Journal) load() error {
 	if err := j.validate(); err != nil {
 		return err
 	}
-	j.usage.Records, j.usage.Clusters = len(j.state.Commands), len(j.state.Clusters)
+	j.usage.Records, j.usage.Apps = len(j.state.Commands), len(j.state.Apps)
 	j.usage.ReservedBytes = metadataReservation
 	for id, record := range j.state.Commands {
 		size := j.sizes[commandPrefix+id]
@@ -188,11 +188,11 @@ func (j *Journal) load() error {
 			j.usage.ReservedBytes += record.ReservedBytes
 		}
 	}
-	for id, cluster := range j.state.Clusters {
-		if err := checkClusterStorage(cluster, j.sizes[clusterPrefix+id]); err != nil {
+	for id, app := range j.state.Apps {
+		if err := checkAppStorage(app, j.sizes[appPrefix+id]); err != nil {
 			return err
 		}
-		j.usage.ReservedBytes += cluster.ReservedBytes
+		j.usage.ReservedBytes += app.ReservedBytes
 	}
 	if j.usage.ReservedBytes > j.options.MaxStoredBytes || retainedBytes(j.state.Commands) > j.options.MaxRetainedBytes {
 		return ErrBusy
@@ -201,7 +201,7 @@ func (j *Journal) load() error {
 }
 
 func (j *Journal) prepareMigration() error {
-	if len(j.state.Commands) > j.options.MaxRecords || len(j.state.Clusters) > j.options.MaxClusters {
+	if len(j.state.Commands) > j.options.MaxRecords || len(j.state.Apps) > j.options.MaxApps {
 		return ErrBusy
 	}
 	for id, record := range j.state.Commands {
@@ -209,10 +209,10 @@ func (j *Journal) prepareMigration() error {
 		record.ReservedBytes = commandReservation(record.CommandLimit, record.ResultLimit)
 		j.state.Commands[id] = record
 	}
-	for id, cluster := range j.state.Clusters {
-		cluster.InventoryLimit = j.options.MaxInventoryBytes
-		cluster.ReservedBytes = inventoryReservation(cluster.InventoryLimit)
-		j.state.Clusters[id] = cluster
+	for id, app := range j.state.Apps {
+		app.InventoryLimit = j.options.MaxInventoryBytes
+		app.ReservedBytes = inventoryReservation(app.InventoryLimit)
+		j.state.Apps[id] = app
 	}
 	j.state.Version = 2
 	return nil
@@ -225,7 +225,7 @@ func checkCommandStorage(r commandRecord, size int64) error {
 	return nil
 }
 
-func checkClusterStorage(c clusterState, size int64) error {
+func checkAppStorage(c appState, size int64) error {
 	if c.InventoryLimit < 1 || c.InventoryLimit > maxFormatRecordBytes || c.ReservedBytes != inventoryReservation(c.InventoryLimit) || c.ReservedBytes > maxFormatRecordBytes || size > c.ReservedBytes || len(c.Barrier) > c.InventoryLimit {
 		return errors.Join(ErrRecoveryRequired, ErrBusy)
 	}
@@ -243,7 +243,7 @@ func checkClusterStorage(c clusterState, size int64) error {
 }
 
 // makeBatch encodes only supplied records. The live maps change after Commit.
-func (j *Journal) makeBatch(commands map[string]commandRecord, clusters map[string]clusterState, includeMetadata bool) (*transition, error) {
+func (j *Journal) makeBatch(commands map[string]commandRecord, apps map[string]appState, includeMetadata bool) (*transition, error) {
 	t := &transition{batch: j.db.NewBatch(), usage: j.usage, sizes: make(map[string]int64)}
 	ok := false
 	defer func() {
@@ -307,14 +307,14 @@ func (j *Journal) makeBatch(commands map[string]commandRecord, clusters map[stri
 			t.usage.ReservedBytes += record.ReservedBytes
 		}
 	}
-	for id, cluster := range clusters {
-		key := clusterPrefix + id
-		data, err := json.Marshal(cluster)
+	for id, app := range apps {
+		key := appPrefix + id
+		data, err := json.Marshal(app)
 		if err != nil {
 			return nil, err
 		}
 		size := int64(len(key) + len(data))
-		if err := checkClusterStorage(cluster, size); err != nil {
+		if err := checkAppStorage(app, size); err != nil {
 			return nil, err
 		}
 		if err := t.batch.Set([]byte(key), data, nil); err != nil {
@@ -323,13 +323,13 @@ func (j *Journal) makeBatch(commands map[string]commandRecord, clusters map[stri
 		t.sizes[key] = size
 		t.usage.LogicalStoredBytes += size - j.sizes[key]
 		if j.sizes[key] != 0 {
-			t.usage.ReservedBytes -= j.state.Clusters[id].ReservedBytes
+			t.usage.ReservedBytes -= j.state.Apps[id].ReservedBytes
 		} else {
-			t.usage.Clusters++
+			t.usage.Apps++
 		}
-		t.usage.ReservedBytes += cluster.ReservedBytes
+		t.usage.ReservedBytes += app.ReservedBytes
 	}
-	if t.usage.ReservedBytes > j.options.MaxStoredBytes || t.usage.Records > j.options.MaxRecords || t.usage.Clusters > j.options.MaxClusters {
+	if t.usage.ReservedBytes > j.options.MaxStoredBytes || t.usage.Records > j.options.MaxRecords || t.usage.Apps > j.options.MaxApps {
 		return nil, ErrBusy
 	}
 	t.usage.LastWriteBytes, t.usage.LastWriteRecords = t.batch.Len(), len(t.sizes)
@@ -337,32 +337,32 @@ func (j *Journal) makeBatch(commands map[string]commandRecord, clusters map[stri
 	return t, nil
 }
 
-func (j *Journal) apply(t *transition, commands map[string]commandRecord, clusters map[string]clusterState) error {
+func (j *Journal) apply(t *transition, commands map[string]commandRecord, apps map[string]appState) error {
 	defer t.batch.Close()
 	if err := t.batch.Commit(pebble.Sync); err != nil {
 		j.failed = true
 		return fmt.Errorf("persist journal transition: %w", errors.Join(ErrRecoveryRequired, err))
 	}
 	maps.Copy(j.state.Commands, commands)
-	maps.Copy(j.state.Clusters, clusters)
+	maps.Copy(j.state.Apps, apps)
 	maps.Copy(j.sizes, t.sizes)
 	j.usage = t.usage
 	return nil
 }
 
-func (j *Journal) persist(commands map[string]commandRecord, clusters map[string]clusterState) error {
-	t, err := j.makeBatch(commands, clusters, false)
+func (j *Journal) persist(commands map[string]commandRecord, apps map[string]appState) error {
+	t, err := j.makeBatch(commands, apps, false)
 	if err != nil {
 		return err
 	}
-	return j.apply(t, commands, clusters)
+	return j.apply(t, commands, apps)
 }
 
 func (j *Journal) initialize(migrate bool) error {
 	if retainedBytes(j.state.Commands) > j.options.MaxRetainedBytes {
 		return ErrBusy
 	}
-	t, err := j.makeBatch(j.state.Commands, j.state.Clusters, true)
+	t, err := j.makeBatch(j.state.Commands, j.state.Apps, true)
 	if err != nil {
 		return err
 	}

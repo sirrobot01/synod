@@ -32,7 +32,7 @@ func TestOutboxListenerWakesOnCommitAndSurvivesTimeout(t *testing.T) {
 	if waitFor(t, listener, 300*time.Millisecond) {
 		t.Fatal("notified before any event committed")
 	}
-	admitted, err := s.CreateCluster(t.Context(), request)
+	admitted, err := s.AdmitApp(t.Context(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,13 +55,13 @@ func TestOutboxListenerIgnoresOtherInstallations(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	if _, err := s.CreateCluster(t.Context(), other); err != nil {
+	if _, err := s.AdmitApp(t.Context(), other); err != nil {
 		t.Fatal(err)
 	}
 	if waitFor(t, listener, time.Second) {
 		t.Fatal("woke for another installation")
 	}
-	if _, err := s.CreateCluster(t.Context(), mine); err != nil {
+	if _, err := s.AdmitApp(t.Context(), mine); err != nil {
 		t.Fatal(err)
 	}
 	if !waitFor(t, listener, 10*time.Second) {
@@ -81,7 +81,7 @@ func TestOutboxNotifyWaitsForCommit(t *testing.T) {
 	owner := New(s.pool)
 	owner.commitTx = func(ctx context.Context, tx pgx.Tx) error { close(ready); <-release; return tx.Commit(ctx) }
 	result := make(chan error, 1)
-	go func() { _, err := owner.CreateCluster(t.Context(), request); result <- err }()
+	go func() { _, err := owner.AdmitApp(t.Context(), request); result <- err }()
 	<-ready
 	// The row exists in an open transaction. NOTIFY must not reach the listener yet.
 	if waitFor(t, listener, time.Second) {

@@ -3,6 +3,7 @@ package executor
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"maps"
 	"slices"
@@ -15,7 +16,6 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/controlstream"
-	"github.com/sirrobot01/synod/internal/engine"
 	"github.com/sirrobot01/synod/internal/router"
 	"github.com/sirrobot01/synod/internal/runtime"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -42,11 +42,7 @@ type Options struct {
 	// floor, so the pool is only refused when it has no free space at all:
 	// inventing a headroom figure here would reject work nobody asked to reject.
 	MinFreeBytes int64
-	// Probers check a live engine through the endpoint it publishes, by engine name.
-	// An engine with no prober cannot be told about, which is an unavailable probe
-	// rather than a failure.
-	Probers map[string]engine.Prober
-	Router  *router.Manager
+	Router       *router.Manager
 	// Replication receives the tier 2 assignment. It outlives a session, so a
 	// standby keeps its assignment while the controller is away.
 	Replication   *replication.Table
@@ -55,6 +51,10 @@ type Options struct {
 	PushSnapshot  func(context.Context, *agentv1.ReplicaPeer, string, *replica.Manifest, string) (*agentv1.PushResult, error)
 	// BootTime must count time spent suspended. Tests can supply a controlled clock.
 	BootTime func() (time.Duration, error)
+	// EngineTLS is the node certificate that tier 1 database copies serve, and EngineCA
+	// is the installation CA in PEM. Standbys and clients verify copies against it.
+	EngineTLS *tls.Certificate
+	EngineCA  []byte
 }
 
 type epochGate struct {
@@ -92,7 +92,7 @@ type session struct {
 }
 
 type job struct {
-	cluster string
+	app     string
 	command string
 	session *session
 	gate    *epochGate
@@ -167,6 +167,8 @@ func (e *Executor) Run(ctx context.Context, stream *transport.Client) error {
 	defer cancel()
 	var workers sync.WaitGroup
 	workers.Go(func() { e.watchWriters(ctx) })
+	workers.Go(func() { e.watchDatabaseWriters(ctx) })
+	workers.Go(func() { e.superviseDatabases(ctx) })
 	for range e.options.Workers {
 		workers.Go(func() {
 			for {
@@ -180,7 +182,7 @@ func (e *Executor) Run(ctx context.Context, stream *transport.Client) error {
 						e.execute(ctx, task)
 					}
 					e.mu.Lock()
-					delete(e.active, task.cluster)
+					delete(e.active, task.app)
 					e.mu.Unlock()
 				}
 			}
@@ -260,8 +262,8 @@ func (e *Executor) schedule(ctx context.Context, stream *transport.Client) error
 			}
 			current.sent[result.CommandId] = true
 		}
-		for _, cluster := range slices.Sorted(maps.Keys(current.gates)) {
-			gate := current.gates[cluster]
+		for _, app := range slices.Sorted(maps.Keys(current.gates)) {
+			gate := current.gates[app]
 			if gate.unsent {
 				if err := stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_BarrierResult{BarrierResult: gate.report}}); err == nil {
 					gate.unsent = false
@@ -269,10 +271,10 @@ func (e *Executor) schedule(ctx context.Context, stream *transport.Client) error
 					return err
 				}
 			}
-			if !gate.active && !gate.ready && !e.active[cluster] {
+			if !gate.active && !gate.ready && !e.active[app] {
 				select {
-				case e.jobs <- job{cluster: cluster, barrier: true, session: current, gate: gate}:
-					e.active[cluster] = true
+				case e.jobs <- job{app: app, barrier: true, session: current, gate: gate}:
+					e.active[app] = true
 				default:
 				}
 			}
@@ -287,8 +289,8 @@ func (e *Executor) schedule(ctx context.Context, stream *transport.Client) error
 		return err
 	}
 	for _, record := range append(recoverable, pending...) {
-		cluster := record.Epoch.ClusterId
-		if e.active[cluster] {
+		app := record.Epoch.AppId
+		if e.active[app] {
 			continue
 		}
 		var gate *epochGate
@@ -296,14 +298,14 @@ func (e *Executor) schedule(ctx context.Context, stream *transport.Client) error
 			if current == nil || current.ctx.Err() != nil {
 				continue
 			}
-			gate = current.gates[cluster]
+			gate = current.gates[app]
 			if gate == nil || !gate.active || !proto.Equal(gate.epoch, record.Epoch) {
 				continue
 			}
 		}
 		select {
-		case e.jobs <- job{cluster: cluster, command: record.CommandID, session: current, gate: gate}:
-			e.active[cluster] = true
+		case e.jobs <- job{app: app, command: record.CommandID, session: current, gate: gate}:
+			e.active[app] = true
 		default:
 			return nil
 		}
