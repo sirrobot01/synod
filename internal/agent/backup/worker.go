@@ -57,6 +57,10 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if request.Validate() != nil || request.NodeID != w.NodeID || request.InstallationID != w.InstallationID {
 		return backup.Result{}, backup.ErrInvalid
 	}
+	method := request.Method
+	if method == backup.Auto {
+		method = backup.Stop
+	}
 	input, _ := json.Marshal(request)
 	record, err := w.Journal.Admit(ctx, request.ID, input)
 	if err != nil {
@@ -142,7 +146,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			return w.finish(ctx, request, &state, r)
 		}
 		c := response.Container
-		if c.State.Restarting || c.State.Dead || c.State.Status == "removing" || (request.Method == backup.Stop && (c.HostConfig.AutoRemove || (c.Config.StopTimeout != nil && (*c.Config.StopTimeout < 0 || *c.Config.StopTimeout > 600)))) {
+		if c.State.Restarting || c.State.Dead || c.State.Status == "removing" || (method == backup.Stop && (c.HostConfig.AutoRemove || (c.Config.StopTimeout != nil && (*c.Config.StopTimeout < 0 || *c.Config.StopTimeout > 600)))) {
 			state.FailureCode = "app_state_unsafe"
 			return w.finish(ctx, request, &state, r)
 		}
@@ -191,13 +195,13 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			Present:    true,
 			Definition: app,
 		},
-		Method:       request.Method,
+		Method:       method,
 		Architecture: w.Architecture,
 		StartedAt:    state.StartedAt,
 		Paths:        tree.Paths,
 	}
 	source := snapshot.SourceInfo{Host: w.NodeID.String(), UserName: "synod", Path: request.AppID.String()}
-	if request.Method == backup.Stop {
+	if method == backup.Stop {
 		root, err := tree.Root(ctx, definitions)
 		if err == nil {
 			_, err = r.UploadFiles(ctx, root, source, true)
@@ -236,7 +240,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			}
 		}
 	}
-	if request.Method == backup.Stop {
+	if method == backup.Stop {
 		if err := w.checkStopped(ctx, inspected); err != nil {
 			state.FailureCode = "app_changed_during_backup"
 			return w.finish(ctx, request, &state, r)
@@ -248,7 +252,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if err == nil {
 		state.Prepared, err = r.UploadFiles(final, root, source, false)
 	}
-	if err == nil && request.Method == backup.Stop {
+	if err == nil && method == backup.Stop {
 		err = w.checkStopped(final, inspected)
 	}
 	if err != nil {

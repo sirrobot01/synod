@@ -102,13 +102,13 @@ func (r *Repository) PublishSnapshot(ctx context.Context, prepared *snapshot.Man
 	}
 	err = repo.WriteSession(ctx, r.repo, repo.WriteSessionOptions{Purpose: "publish app snapshot"}, func(ctx context.Context, w repo.RepositoryWriter) error {
 		prepared = prepared.Clone()
-		prepared.Tags = map[string]string{"synod.snapshot": metadata.ID.String(), "synod.installation": metadata.InstallationID.String(), "synod.app": metadata.App.ID.String()}
+		prepared.Tags = map[string]string{"synod.snapshot": metadata.ID.String(), "synod.installation": metadata.InstallationID.String(), "synod.app": metadata.App.ID.String(), "synod.destination": metadata.DestinationID.String()}
 		id, err := snapshot.SaveSnapshot(ctx, w, prepared)
 		if err != nil {
 			return err
 		}
 		metadata.FilesID = string(id)
-		_, err = w.PutManifest(ctx, map[string]string{"type": "synod.backup", "snapshot": metadata.ID.String(), "installation": metadata.InstallationID.String(), "app": metadata.App.ID.String()}, metadata)
+		_, err = w.PutManifest(ctx, map[string]string{"type": "synod.backup", "snapshot": metadata.ID.String(), "installation": metadata.InstallationID.String(), "app": metadata.App.ID.String(), "destination": metadata.DestinationID.String()}, metadata)
 		return err
 	})
 	if fatal := r.fatal.Load(); fatal != nil {

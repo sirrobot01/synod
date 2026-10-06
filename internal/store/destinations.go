@@ -126,6 +126,12 @@ func (s *Store) RemoveDestination(ctx context.Context, id uuid.UUID, actorID, re
 	if busy {
 		return &Error{Code: OperationConflict}
 	}
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM app_protection p JOIN json_each(CAST(p.settings AS TEXT),'$.destinations') d WHERE p.enabled=1 AND d.value=?) OR EXISTS(SELECT 1 FROM protection_defaults p JOIN json_each(CAST(p.settings AS TEXT),'$.destinations') d WHERE p.auto_protect=1 AND d.value=?)`, id, id).Scan(&busy); err != nil {
+		return storeError(err)
+	}
+	if busy {
+		return &Error{Code: OperationConflict}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE destinations SET credentials=NULL,removed_at=? WHERE id=?`, s.now().UnixMilli(), id); err != nil {
 		return storeError(err)
 	}

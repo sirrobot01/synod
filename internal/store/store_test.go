@@ -45,7 +45,7 @@ func TestOpenAppliesMigrationsOnce(t *testing.T) {
 		if err := s.db.QueryRowContext(t.Context(), `SELECT count(*) FROM schema_migrations`).Scan(&applied); err != nil {
 			t.Fatal(err)
 		}
-		if applied != 5 {
+		if applied != 6 {
 			t.Fatalf("applied %d migrations", applied)
 		}
 		s.Close()

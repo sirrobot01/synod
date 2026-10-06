@@ -1,11 +1,14 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/inventory"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
@@ -23,7 +26,8 @@ func (s *Store) RecordInventory(ctx context.Context, nodeID, sessionID uuid.UUID
 	}
 	defer tx.Rollback()
 	var current string
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce(session_id,'') FROM nodes WHERE id=? AND revoked_at IS NULL`, nodeID).Scan(&current); err != nil {
+	var approved bool
+	if err := tx.QueryRowContext(ctx, `SELECT coalesce(session_id,''),approved_at IS NOT NULL FROM nodes WHERE id=? AND revoked_at IS NULL`, nodeID).Scan(&current, &approved); err != nil {
 		return storeError(err)
 	}
 	if current != sessionID.String() {
@@ -43,6 +47,42 @@ ON CONFLICT(node_id) DO UPDATE SET session_id=excluded.session_id,observed_at=ex
 		return storeError(err)
 	}
 	if report.FailureCode == "" {
+		type savedApp struct {
+			present    bool
+			definition []byte
+		}
+		prior := make(map[uuid.UUID]savedApp)
+		rows, err := tx.QueryContext(ctx, `SELECT id,present,definition FROM apps WHERE node_id=?`, nodeID)
+		if err != nil {
+			return storeError(err)
+		}
+		for rows.Next() {
+			var id uuid.UUID
+			var saved savedApp
+			if err := rows.Scan(&id, &saved.present, &saved.definition); err != nil {
+				rows.Close()
+				return storeError(err)
+			}
+			prior[id] = saved
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return storeError(err)
+		}
+		if err := rows.Close(); err != nil {
+			return storeError(err)
+		}
+		var auto bool
+		var installation sql.Null[uuid.UUID]
+		var raw []byte
+		var defaults backup.Settings
+		if err := tx.QueryRowContext(ctx, `SELECT auto_protect,settings,installation_id FROM protection_defaults`).Scan(&auto, &raw, &installation); err != nil {
+			return storeError(err)
+		}
+		if json.Unmarshal(raw, &defaults) != nil {
+			return &Error{Code: Unavailable}
+		}
+		changed := false
 		if _, err := tx.ExecContext(ctx, `UPDATE apps SET present=0 WHERE node_id=?`, nodeID); err != nil {
 			return storeError(err)
 		}
@@ -52,8 +92,32 @@ ON CONFLICT(node_id) DO UPDATE SET session_id=excluded.session_id,observed_at=ex
 				return &Error{Code: InvalidRequest, Cause: err}
 			}
 			id := uuid.NewSHA1(nodeID, []byte(app.Key))
+			if saved, ok := prior[id]; !ok || !saved.present || !bytes.Equal(saved.definition, definition) {
+				changed = true
+			}
+			delete(prior, id)
 			if _, err := tx.ExecContext(ctx, `INSERT INTO apps (id,node_id,source_key,observed_at,present,definition) VALUES (?,?,?,?,1,?)
 ON CONFLICT(node_id,source_key) DO UPDATE SET observed_at=excluded.observed_at,present=1,definition=excluded.definition`, id, nodeID, app.Key, observed, definition); err != nil {
+				return storeError(err)
+			}
+			if auto && approved {
+				var selected bool
+				if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM app_protection WHERE app_id=?)`, id).Scan(&selected); err != nil {
+					return storeError(err)
+				}
+				if !selected {
+					if err := setAppProtection(ctx, tx, installation.V, id, nodeID, app.Key, true, defaults, s.now()); err != nil {
+						return err
+					}
+					changed = true
+				}
+			}
+		}
+		for _, saved := range prior {
+			changed = changed || saved.present
+		}
+		if changed {
+			if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
 				return storeError(err)
 			}
 		}

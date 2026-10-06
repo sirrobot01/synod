@@ -95,7 +95,7 @@ func newWorkerFixture(t *testing.T, method backup.Method, stopAction string) *wo
 }
 
 func TestWorkerCopiesAndRestoresRealDockerApp(t *testing.T) {
-	for _, method := range []backup.Method{backup.Stop, backup.Live} {
+	for _, method := range []backup.Method{backup.Auto, backup.Stop, backup.Live} {
 		t.Run(string(method), func(t *testing.T) {
 			fixture := newWorkerFixture(t, method, ":")
 			before, err := fixture.worker.Docker.ContainerInspect(t.Context(), fixture.id, client.ContainerInspectOptions{})
@@ -110,7 +110,7 @@ func TestWorkerCopiesAndRestoresRealDockerApp(t *testing.T) {
 			if err != nil || !after.Container.State.Running {
 				t.Fatalf("app was not resumed: %v", err)
 			}
-			if method == backup.Stop && (result.DowntimeMillis <= 0 || after.Container.State.StartedAt == before.Container.State.StartedAt) {
+			if method != backup.Live && (result.DowntimeMillis <= 0 || after.Container.State.StartedAt == before.Container.State.StartedAt) {
 				t.Fatal("Stop method did not stop and resume the app")
 			}
 			if method == backup.Live && (result.DowntimeMillis != 0 || after.Container.State.StartedAt != before.Container.State.StartedAt) {
@@ -129,12 +129,15 @@ func TestWorkerCopiesAndRestoresRealDockerApp(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if saved.Method == backup.Auto || (method == backup.Live && saved.Method != backup.Live) {
+				t.Fatal("snapshot did not record the resolved copy method")
+			}
 			target := filepath.Join(t.TempDir(), "restored")
 			if err := r.RestoreFiles(t.Context(), result.SnapshotID, target); err != nil {
 				t.Fatal(err)
 			}
 			expected := "before-stop"
-			if method == backup.Stop {
+			if method != backup.Live {
 				expected = "after-stop"
 			}
 			found := false

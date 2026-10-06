@@ -2,6 +2,8 @@
 package backup
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -14,6 +16,7 @@ import (
 type Method string
 
 const (
+	Auto Method = "auto"
 	Stop Method = "stop"
 	Live Method = "live"
 )
@@ -22,19 +25,25 @@ var ErrInvalid = errors.New("invalid backup request or snapshot")
 
 // Request contains no credentials or file contents. The agent resolves its saved destination.
 type Request struct {
-	ID             uuid.UUID `json:"id"`
-	InstallationID uuid.UUID `json:"installation_id"`
-	AppID          uuid.UUID `json:"app_id"`
-	NodeID         uuid.UUID `json:"node_id"`
-	SourceKey      string    `json:"source_key"`
-	DestinationID  uuid.UUID `json:"destination_id"`
-	Method         Method    `json:"method"`
-	Initialize     bool      `json:"initialize,omitzero"`
-	RequestedAt    time.Time `json:"requested_at"`
+	ID             uuid.UUID  `json:"id"`
+	InstallationID uuid.UUID  `json:"installation_id"`
+	AppID          uuid.UUID  `json:"app_id"`
+	NodeID         uuid.UUID  `json:"node_id"`
+	SourceKey      string     `json:"source_key"`
+	DestinationID  uuid.UUID  `json:"destination_id"`
+	Method         Method     `json:"method"`
+	Initialize     bool       `json:"initialize,omitzero"`
+	RequestedAt    time.Time  `json:"requested_at"`
+	ScheduleID     uuid.UUID  `json:"schedule_id,omitzero"`
+	ScheduledAt    time.Time  `json:"scheduled_at,omitzero"`
+	Retention      *Retention `json:"retention,omitzero"`
 }
 
 func (r Request) Validate() error {
-	if r.ID == uuid.Nil || r.InstallationID == uuid.Nil || r.AppID == uuid.Nil || r.NodeID == uuid.Nil || r.DestinationID == uuid.Nil || r.RequestedAt.IsZero() || (r.Method != Stop && r.Method != Live) || len(r.SourceKey) > 512 || !(strings.HasPrefix(r.SourceKey, "compose:") || strings.HasPrefix(r.SourceKey, "container:")) || uuid.NewSHA1(r.NodeID, []byte(r.SourceKey)) != r.AppID {
+	if r.ID == uuid.Nil || r.InstallationID == uuid.Nil || r.AppID == uuid.Nil || r.NodeID == uuid.Nil || r.DestinationID == uuid.Nil || r.RequestedAt.IsZero() || (r.Method != Auto && r.Method != Stop && r.Method != Live) || len(r.SourceKey) > 512 || !(strings.HasPrefix(r.SourceKey, "compose:") || strings.HasPrefix(r.SourceKey, "container:")) || uuid.NewSHA1(r.NodeID, []byte(r.SourceKey)) != r.AppID {
+		return ErrInvalid
+	}
+	if (r.ScheduleID == uuid.Nil) != r.ScheduledAt.IsZero() || (r.ScheduleID != uuid.Nil && (r.Initialize || !r.RequestedAt.Equal(r.ScheduledAt) || r.Retention == nil)) || (r.Retention != nil && r.Retention.Validate() != nil) {
 		return ErrInvalid
 	}
 	return nil
@@ -93,12 +102,23 @@ type Submission struct {
 
 // Event is resent until a terminal result is durably acknowledged.
 type Event struct {
-	ID     uuid.UUID `json:"id"`
-	Status string    `json:"status"`
-	Result Result    `json:"result"`
+	ID      uuid.UUID `json:"id"`
+	Status  string    `json:"status"`
+	Result  Result    `json:"result"`
+	Request *Request  `json:"request,omitzero"`
 }
 
 func (e Event) Validate(request Request) error {
+	if e.Request != nil {
+		expected, _ := json.Marshal(request)
+		provided, _ := json.Marshal(e.Request)
+		if !bytes.Equal(expected, provided) {
+			return ErrInvalid
+		}
+	}
+	if request.ScheduleID != uuid.Nil && e.Request == nil {
+		return ErrInvalid
+	}
 	result := e.Result
 	if e.ID != request.ID || result.DestinationID != request.DestinationID || result.DowntimeMillis < 0 || result.FileBytes < 0 || len(result.RestartPending) > 256 {
 		return ErrInvalid
