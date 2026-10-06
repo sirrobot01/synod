@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
 	"github.com/sirrobot01/synod/internal/pki"
+	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store"
 	"golang.org/x/time/rate"
 )
@@ -38,10 +39,12 @@ type identityKey struct{}
 type Server struct {
 	// EnrollmentAuthority must be configured before serving requests. Nil disables new issuance.
 	EnrollmentAuthority *pki.CA
-	requestLimit        *rate.Limiter
-	enrollmentLimit     *rate.Limiter
-	signInLimit         *rate.Limiter
-	signInAttempts      *attemptLimiter
+	// CredentialKeyring wraps destination secrets. Set it before serving requests.
+	CredentialKeyring *secret.Keyring
+	requestLimit      *rate.Limiter
+	enrollmentLimit   *rate.Limiter
+	signInLimit       *rate.Limiter
+	signInAttempts    *attemptLimiter
 	// assets is the built browser application. A nil value serves the API alone.
 	assets fs.FS
 	// PublicOrigin is the browser origin of this API. Set it before serving requests.
@@ -108,6 +111,9 @@ func NewServer(metadata *store.Store, admin *auth.AdminToken, installationID uui
 			signed.Group(func(admin chi.Router) {
 				admin.Use(server.requireAdmin)
 				admin.Get("/apps", server.listApps)
+				admin.Post("/destinations", server.addDestination)
+				admin.Get("/destinations", server.listDestinations)
+				admin.Delete("/destinations/{id}", server.removeDestination)
 				admin.Get("/operations", server.listOperations)
 				admin.Get("/operations/{id}", server.getOperation)
 				admin.Get("/nodes", server.listNodes)

@@ -50,40 +50,61 @@ func (Credentials) GoString() string { return "[repository credentials]" }
 var ErrLocation = errors.New("invalid repository location")
 var ErrCredentials = errors.New("repository credentials are missing")
 
-func storage(ctx context.Context, location Location, credentials Credentials, create bool) (blob.Storage, error) {
+// Validate checks settings without contacting the destination.
+func Validate(location Location, credentials Credentials) error {
 	if credentials.Password == "" {
-		return nil, ErrCredentials
+		return ErrCredentials
 	}
 	switch location.Kind {
 	case "local":
-		if !filepath.IsAbs(location.Path) || location.SFTP != nil || location.S3 != nil {
-			return nil, ErrLocation
+		if !filepath.IsAbs(location.Path) || filepath.Clean(location.Path) != location.Path || location.SFTP != nil || location.S3 != nil {
+			return ErrLocation
 		}
-		return filesystem.New(ctx, &filesystem.Options{Path: filepath.Clean(location.Path), FileMode: 0600, DirectoryMode: 0700}, create)
+		if credentials.SSHKey != "" || credentials.AccessKeyID != "" || credentials.SecretAccessKey != "" || credentials.SessionToken != "" {
+			return ErrCredentials
+		}
 	case "sftp":
 		if location.SFTP == nil || location.S3 != nil || !strings.HasPrefix(location.Path, "/") {
-			return nil, ErrLocation
+			return ErrLocation
 		}
 		remote := location.SFTP
-		if remote.Host == "" || strings.ContainsAny(remote.Host, "/@ \t\n") || remote.User == "" || remote.Port < 1 || remote.Port > 65535 || remote.KnownHosts == "" {
-			return nil, ErrLocation
+		if remote.Host == "" || strings.ContainsAny(remote.Host, "/@ \t\r\n") || remote.User == "" || remote.Port < 1 || remote.Port > 65535 || remote.KnownHosts == "" {
+			return ErrLocation
 		}
-		if credentials.SSHKey == "" {
-			return nil, ErrCredentials
+		if credentials.SSHKey == "" || credentials.AccessKeyID != "" || credentials.SecretAccessKey != "" || credentials.SessionToken != "" {
+			return ErrCredentials
 		}
-		return newSFTP(ctx, &sftpOptions{Path: location.Path, Host: remote.Host, Port: remote.Port, User: remote.User, KnownHosts: remote.KnownHosts, Key: credentials.SSHKey}, create)
 	case "s3":
 		if location.S3 == nil || location.SFTP != nil || location.Path != "" {
-			return nil, ErrLocation
+			return ErrLocation
 		}
 		remote := location.S3
 		endpoint, err := url.Parse(remote.Endpoint)
 		if err != nil || (endpoint.Scheme != "https" && endpoint.Scheme != "http") || endpoint.Host == "" || endpoint.User != nil || endpoint.Path != "" || endpoint.RawQuery != "" || endpoint.Fragment != "" || remote.Bucket == "" {
-			return nil, ErrLocation
+			return ErrLocation
 		}
-		if credentials.AccessKeyID == "" || credentials.SecretAccessKey == "" {
-			return nil, ErrCredentials
+		if credentials.AccessKeyID == "" || credentials.SecretAccessKey == "" || credentials.SSHKey != "" {
+			return ErrCredentials
 		}
+	default:
+		return ErrLocation
+	}
+	return nil
+}
+
+func storage(ctx context.Context, location Location, credentials Credentials, create bool) (blob.Storage, error) {
+	if err := Validate(location, credentials); err != nil {
+		return nil, err
+	}
+	switch location.Kind {
+	case "local":
+		return filesystem.New(ctx, &filesystem.Options{Path: location.Path, FileMode: 0600, DirectoryMode: 0700}, create)
+	case "sftp":
+		remote := location.SFTP
+		return newSFTP(ctx, &sftpOptions{Path: location.Path, Host: remote.Host, Port: remote.Port, User: remote.User, KnownHosts: remote.KnownHosts, Key: credentials.SSHKey}, create)
+	case "s3":
+		remote := location.S3
+		endpoint, _ := url.Parse(remote.Endpoint)
 		return s3.New(ctx, &s3.Options{Endpoint: endpoint.Host, DoNotUseTLS: endpoint.Scheme == "http", BucketName: remote.Bucket, Prefix: remote.Prefix, Region: remote.Region, AccessKeyID: credentials.AccessKeyID, SecretAccessKey: credentials.SecretAccessKey, SessionToken: credentials.SessionToken}, create)
 	default:
 		return nil, ErrLocation

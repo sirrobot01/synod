@@ -40,7 +40,10 @@ type Record struct {
 }
 
 // Journal keeps at most 64 undelivered records. Each input and result is at most 1 MiB.
-type Journal struct{ db *sql.DB }
+type Journal struct {
+	db                     *sql.DB
+	installationID, nodeID uuid.UUID
+}
 
 // Open binds a journal file to one installation and device.
 func Open(ctx context.Context, path string, installationID, nodeID uuid.UUID) (*Journal, error) {
@@ -82,6 +85,8 @@ func Open(ctx context.Context, path string, installationID, nodeID uuid.UUID) (*
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS identity (
  singleton INTEGER PRIMARY KEY CHECK (singleton=1), installation_id TEXT NOT NULL, node_id TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS destination_plan (
+ singleton INTEGER PRIMARY KEY CHECK (singleton=1), revision INTEGER NOT NULL CHECK (revision>0), envelope BLOB NOT NULL);
  CREATE TABLE IF NOT EXISTS records (
  id TEXT PRIMARY KEY, input_hash BLOB NOT NULL CHECK (length(input_hash)=32),
  state TEXT NOT NULL CHECK (state IN ('queued','running','terminal')),
@@ -102,7 +107,7 @@ func Open(ctx context.Context, path string, installationID, nodeID uuid.UUID) (*
 		return nil, fmt.Errorf("commit journal initialization: %w", err)
 	}
 	ready = true
-	return &Journal{db: db}, nil
+	return &Journal{db: db, installationID: installationID, nodeID: nodeID}, nil
 }
 
 func (j *Journal) Close() error { return j.db.Close() }

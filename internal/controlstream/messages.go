@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/inventory"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
@@ -61,6 +62,11 @@ func NegotiateHello(hello *agentv1.Hello, supported []string) ([]string, error) 
 // CheckAgentMessage validates the wire shape of one agent message after Hello.
 func CheckAgentMessage(message *agentv1.AgentMessage) error {
 	switch value := message.GetMessage().(type) {
+	case *agentv1.AgentMessage_DestinationAck:
+		if value.DestinationAck == nil || value.DestinationAck.Revision < 1 {
+			return ErrMessage
+		}
+		return nil
 	case *agentv1.AgentMessage_Inventory:
 		if inventory.Validate(value.Inventory) != nil {
 			return ErrMessage
@@ -79,6 +85,11 @@ func CheckAgentMessage(message *agentv1.AgentMessage) error {
 // CheckControllerMessage validates the wire shape of one controller message.
 func CheckControllerMessage(message *agentv1.ControllerMessage) error {
 	switch value := message.GetMessage().(type) {
+	case *agentv1.ControllerMessage_DestinationPlan:
+		if value.DestinationPlan == nil || len(value.DestinationPlan.SettingsJson) == 0 || len(value.DestinationPlan.SettingsJson) > destination.MaxPlanBytes {
+			return ErrMessage
+		}
+		return nil
 	case *agentv1.ControllerMessage_Session:
 		if value.Session == nil || !canonicalID(value.Session.SessionId) {
 			return ErrMessage

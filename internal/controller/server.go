@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -126,8 +127,10 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 			return err
 		}
 	}
+	var keyring *secret.Keyring
 	if settings.SecretKeyFile != "" {
-		if _, err := loadKeyring(settings.SecretKeyFile, settings.SecretKeyID); err != nil {
+		keyring, err = loadKeyring(settings.SecretKeyFile, settings.SecretKeyID)
+		if err != nil {
 			return err
 		}
 	}
@@ -142,6 +145,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	if err != nil {
 		return err
 	}
+	handler.CredentialKeyring = keyring
 	handler.EnrollmentAuthority = authority
 	handler.PublicOrigin = settings.PublicOrigin
 	handler.AgentListen = settings.AgentListen
@@ -176,13 +180,19 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 			Authorize: func(ctx context.Context, _, nodeID uuid.UUID, certificate *x509.Certificate) error {
 				return metadata.CheckAgentCertificate(ctx, nodeID, certificate)
 			},
-			Capabilities: []string{"runtime.docker", "apps.discovery"},
+			Capabilities: []string{"runtime.docker", "apps.discovery", "destinations"},
 			Handle:       (agentstream.Receiver{Store: metadata}).Handle,
 		})
 		if err != nil {
 			return err
 		}
 		defer agentServer.Stop()
+		deliveryCtx, stopDelivery := context.WithCancel(ctx)
+		var delivery sync.WaitGroup
+		delivery.Go(func() {
+			deliverDestinations(deliveryCtx, uuid.MustParse(settings.InstallationID), metadata, keyring, agentServer, logger)
+		})
+		defer func() { stopDelivery(); delivery.Wait() }()
 		agentListener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", settings.AgentListen)
 		if err != nil {
 			return fmt.Errorf("listen for agent transport on %s: %w", settings.AgentListen, err)

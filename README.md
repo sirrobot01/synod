@@ -226,11 +226,74 @@ SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock go test -race -p 1 -count=1 .
 The test creates private containers and a volume.
 It removes them after the test.
 
+## Destinations
+
+Put the repository password in a private JSON file.
+Set its mode to `0600`.
+Keep a separate copy of the password for recovery.
+The CLI does not print saved credentials.
+
+```json
+{"password":"use-a-long-random-repository-password"}
+```
+
+Add a local directory on an approved device:
+
+```sh
+synod destination add home --device server --path /srv/backups/synod --credentials-file ./repository.json
+synod destination list
+synod destination remove home
+```
+
+The local path belongs to the selected device.
+A copy on that device does not protect its own apps from device loss.
+Add a destination on another device for that protection.
+A local destination is sent only to its owner.
+SFTP and S3 settings are sent to all approved agents.
+Pending devices receive no destination credentials.
+
+For SFTP, add `ssh_key` to the credentials JSON.
+Use the full private key text as a JSON string.
+Use a separate known-hosts file to verify the server key.
+
+```sh
+synod destination add remote --type sftp --host backup.example --port 22 --user synod --path /srv/synod --known-hosts-file ./known_hosts --credentials-file ./sftp.json
+```
+
+For S3, add `access_key_id` and `secret_access_key` to the credentials JSON.
+Add `session_token` only when the provider requires it.
+
+```sh
+synod destination add cloud --type s3 --endpoint https://s3.example --bucket backups --prefix synod/ --credentials-file ./s3.json
+```
+
+A successful add saves settings only.
+It does not check the connection or show backup success.
+`destination list` shows when each approved agent has saved the current settings.
+A reconnect requires a new acknowledgement.
+There is a limit of 64 destinations and 384 KiB of total input.
+Each destination accepts at most 32 KiB of input.
+
+The controller wraps credentials with its installation key.
+The agent wraps its local copy with a key derived from its enrolled private key.
+The agent journal is the enrollment directory path with `.db` appended.
+Keep that private key with the journal.
+The agent saves a plan before it acknowledges delivery.
+It can read saved settings while the controller is down.
+A key replacement must rewrap the journal cache.
+
+Removing a destination keeps all repository data.
+It removes the saved credentials from the active controller record.
+An offline agent removes its copy when it receives the next plan.
+Removal does not revoke credentials at the storage provider.
+Backups, app destination selection, and schedules are later tasks.
+
 ## Repository library
 
 The repository library uses Kopia v0.23.1.
 It creates and opens encrypted repositories on a local path, SFTP, or S3.
-Destination commands are not available yet.
+Destination commands save the connection settings.
+They do not create a repository or start a backup.
 
 The recovery catalog is stored inside the encrypted repository.
 It holds the installation ID, devices, and discovered apps.

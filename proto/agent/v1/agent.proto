@@ -47,6 +47,7 @@ message AgentMessage {
     Hello hello = 1;
     Heartbeat heartbeat = 2;
     AppInventory inventory = 3;
+    DestinationAck destination_ack = 4;
   }
 }
 
@@ -54,6 +55,7 @@ message ControllerMessage {
   oneof message {
     Session session = 1;
     ProtocolError error = 2;
+    DestinationPlan destination_plan = 3;
   }
 }
 
@@ -99,3 +101,8 @@ message DiscoveredPath {
   bool size_known = 9;
   bool read_only = 10;
 }
+
+// The private JSON payload holds destination.Plan. Never log this message.
+message DestinationPlan { bytes settings_json = 1; }
+// The agent sends this only after its encrypted local transaction commits.
+message DestinationAck { int64 revision = 1; }

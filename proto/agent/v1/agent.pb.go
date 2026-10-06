@@ -379,6 +379,7 @@ type AgentMessage struct {
 	//	*AgentMessage_Hello
 	//	*AgentMessage_Heartbeat
 	//	*AgentMessage_Inventory
+	//	*AgentMessage_DestinationAck
 	Message       isAgentMessage_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -448,6 +449,15 @@ func (x *AgentMessage) GetInventory() *AppInventory {
 	return nil
 }
 
+func (x *AgentMessage) GetDestinationAck() *DestinationAck {
+	if x != nil {
+		if x, ok := x.Message.(*AgentMessage_DestinationAck); ok {
+			return x.DestinationAck
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Message interface {
 	isAgentMessage_Message()
 }
@@ -464,11 +474,17 @@ type AgentMessage_Inventory struct {
 	Inventory *AppInventory `protobuf:"bytes,3,opt,name=inventory,proto3,oneof"`
 }
 
+type AgentMessage_DestinationAck struct {
+	DestinationAck *DestinationAck `protobuf:"bytes,4,opt,name=destination_ack,json=destinationAck,proto3,oneof"`
+}
+
 func (*AgentMessage_Hello) isAgentMessage_Message() {}
 
 func (*AgentMessage_Heartbeat) isAgentMessage_Message() {}
 
 func (*AgentMessage_Inventory) isAgentMessage_Message() {}
+
+func (*AgentMessage_DestinationAck) isAgentMessage_Message() {}
 
 type ControllerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -476,6 +492,7 @@ type ControllerMessage struct {
 	//
 	//	*ControllerMessage_Session
 	//	*ControllerMessage_Error
+	//	*ControllerMessage_DestinationPlan
 	Message       isControllerMessage_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -536,6 +553,15 @@ func (x *ControllerMessage) GetError() *ProtocolError {
 	return nil
 }
 
+func (x *ControllerMessage) GetDestinationPlan() *DestinationPlan {
+	if x != nil {
+		if x, ok := x.Message.(*ControllerMessage_DestinationPlan); ok {
+			return x.DestinationPlan
+		}
+	}
+	return nil
+}
+
 type isControllerMessage_Message interface {
 	isControllerMessage_Message()
 }
@@ -548,9 +574,15 @@ type ControllerMessage_Error struct {
 	Error *ProtocolError `protobuf:"bytes,2,opt,name=error,proto3,oneof"`
 }
 
+type ControllerMessage_DestinationPlan struct {
+	DestinationPlan *DestinationPlan `protobuf:"bytes,3,opt,name=destination_plan,json=destinationPlan,proto3,oneof"`
+}
+
 func (*ControllerMessage_Session) isControllerMessage_Message() {}
 
 func (*ControllerMessage_Error) isControllerMessage_Message() {}
+
+func (*ControllerMessage_DestinationPlan) isControllerMessage_Message() {}
 
 // An inventory is complete. A failed scan has a failure code and no apps.
 type AppInventory struct {
@@ -930,6 +962,96 @@ func (x *DiscoveredPath) GetReadOnly() bool {
 	return false
 }
 
+// The private JSON payload holds destination.Plan. Never log this message.
+type DestinationPlan struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SettingsJson  []byte                 `protobuf:"bytes,1,opt,name=settings_json,json=settingsJson,proto3" json:"settings_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DestinationPlan) Reset() {
+	*x = DestinationPlan{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DestinationPlan) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DestinationPlan) ProtoMessage() {}
+
+func (x *DestinationPlan) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DestinationPlan.ProtoReflect.Descriptor instead.
+func (*DestinationPlan) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *DestinationPlan) GetSettingsJson() []byte {
+	if x != nil {
+		return x.SettingsJson
+	}
+	return nil
+}
+
+// The agent sends this only after its encrypted local transaction commits.
+type DestinationAck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Revision      int64                  `protobuf:"varint,1,opt,name=revision,proto3" json:"revision,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DestinationAck) Reset() {
+	*x = DestinationAck{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DestinationAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DestinationAck) ProtoMessage() {}
+
+func (x *DestinationAck) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DestinationAck.ProtoReflect.Descriptor instead.
+func (*DestinationAck) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *DestinationAck) GetRevision() int64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
 var File_proto_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_agent_proto_rawDesc = "" +
@@ -963,15 +1085,17 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"observedAt\"=\n" +
 	"\rProtocolError\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\xc1\x01\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\x8c\x02\n" +
 	"\fAgentMessage\x12-\n" +
 	"\x05hello\x18\x01 \x01(\v2\x15.synod.agent.v1.HelloH\x00R\x05hello\x129\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x19.synod.agent.v1.HeartbeatH\x00R\theartbeat\x12<\n" +
-	"\tinventory\x18\x03 \x01(\v2\x1c.synod.agent.v1.AppInventoryH\x00R\tinventoryB\t\n" +
-	"\amessage\"\x8a\x01\n" +
+	"\tinventory\x18\x03 \x01(\v2\x1c.synod.agent.v1.AppInventoryH\x00R\tinventory\x12I\n" +
+	"\x0fdestination_ack\x18\x04 \x01(\v2\x1e.synod.agent.v1.DestinationAckH\x00R\x0edestinationAckB\t\n" +
+	"\amessage\"\xd8\x01\n" +
 	"\x11ControllerMessage\x123\n" +
 	"\asession\x18\x01 \x01(\v2\x17.synod.agent.v1.SessionH\x00R\asession\x125\n" +
-	"\x05error\x18\x02 \x01(\v2\x1d.synod.agent.v1.ProtocolErrorH\x00R\x05errorB\t\n" +
+	"\x05error\x18\x02 \x01(\v2\x1d.synod.agent.v1.ProtocolErrorH\x00R\x05error\x12L\n" +
+	"\x10destination_plan\x18\x03 \x01(\v2\x1f.synod.agent.v1.DestinationPlanH\x00R\x0fdestinationPlanB\t\n" +
 	"\amessage\"\xa1\x01\n" +
 	"\fAppInventory\x12;\n" +
 	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
@@ -1011,7 +1135,11 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"size_known\x18\t \x01(\bR\tsizeKnown\x12\x1b\n" +
 	"\tread_only\x18\n" +
-	" \x01(\bR\breadOnly2^\n" +
+	" \x01(\bR\breadOnly\"6\n" +
+	"\x0fDestinationPlan\x12#\n" +
+	"\rsettings_json\x18\x01 \x01(\fR\fsettingsJson\",\n" +
+	"\x0eDestinationAck\x12\x1a\n" +
+	"\brevision\x18\x01 \x01(\x03R\brevision2^\n" +
 	"\fAgentService\x12N\n" +
 	"\aConnect\x12\x1c.synod.agent.v1.AgentMessage\x1a!.synod.agent.v1.ControllerMessage(\x010\x01B4Z2github.com/sirrobot01/synod/proto/agent/v1;agentv1b\x06proto3"
 
@@ -1027,7 +1155,7 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_proto_agent_v1_agent_proto_rawDescData
 }
 
-var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*VersionRange)(nil),          // 0: synod.agent.v1.VersionRange
 	(*Hello)(nil),                 // 1: synod.agent.v1.Hello
@@ -1040,30 +1168,34 @@ var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*DiscoveredApp)(nil),         // 8: synod.agent.v1.DiscoveredApp
 	(*DiscoveredContainer)(nil),   // 9: synod.agent.v1.DiscoveredContainer
 	(*DiscoveredPath)(nil),        // 10: synod.agent.v1.DiscoveredPath
-	(*durationpb.Duration)(nil),   // 11: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
+	(*DestinationPlan)(nil),       // 11: synod.agent.v1.DestinationPlan
+	(*DestinationAck)(nil),        // 12: synod.agent.v1.DestinationAck
+	(*durationpb.Duration)(nil),   // 13: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 14: google.protobuf.Timestamp
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
 	0,  // 0: synod.agent.v1.Hello.protocol:type_name -> synod.agent.v1.VersionRange
-	11, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
-	11, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
-	12, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	13, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
+	13, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
+	14, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
 	1,  // 4: synod.agent.v1.AgentMessage.hello:type_name -> synod.agent.v1.Hello
 	3,  // 5: synod.agent.v1.AgentMessage.heartbeat:type_name -> synod.agent.v1.Heartbeat
 	7,  // 6: synod.agent.v1.AgentMessage.inventory:type_name -> synod.agent.v1.AppInventory
-	2,  // 7: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
-	4,  // 8: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
-	12, // 9: synod.agent.v1.AppInventory.observed_at:type_name -> google.protobuf.Timestamp
-	8,  // 10: synod.agent.v1.AppInventory.apps:type_name -> synod.agent.v1.DiscoveredApp
-	9,  // 11: synod.agent.v1.DiscoveredApp.containers:type_name -> synod.agent.v1.DiscoveredContainer
-	10, // 12: synod.agent.v1.DiscoveredApp.paths:type_name -> synod.agent.v1.DiscoveredPath
-	5,  // 13: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
-	6,  // 14: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
-	14, // [14:15] is the sub-list for method output_type
-	13, // [13:14] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	12, // 7: synod.agent.v1.AgentMessage.destination_ack:type_name -> synod.agent.v1.DestinationAck
+	2,  // 8: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
+	4,  // 9: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
+	11, // 10: synod.agent.v1.ControllerMessage.destination_plan:type_name -> synod.agent.v1.DestinationPlan
+	14, // 11: synod.agent.v1.AppInventory.observed_at:type_name -> google.protobuf.Timestamp
+	8,  // 12: synod.agent.v1.AppInventory.apps:type_name -> synod.agent.v1.DiscoveredApp
+	9,  // 13: synod.agent.v1.DiscoveredApp.containers:type_name -> synod.agent.v1.DiscoveredContainer
+	10, // 14: synod.agent.v1.DiscoveredApp.paths:type_name -> synod.agent.v1.DiscoveredPath
+	5,  // 15: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
+	6,  // 16: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
+	16, // [16:17] is the sub-list for method output_type
+	15, // [15:16] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -1075,10 +1207,12 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*AgentMessage_Hello)(nil),
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_Inventory)(nil),
+		(*AgentMessage_DestinationAck)(nil),
 	}
 	file_proto_agent_v1_agent_proto_msgTypes[6].OneofWrappers = []any{
 		(*ControllerMessage_Session)(nil),
 		(*ControllerMessage_Error)(nil),
+		(*ControllerMessage_DestinationPlan)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1086,7 +1220,7 @@ func file_proto_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_agent_proto_rawDesc), len(file_proto_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

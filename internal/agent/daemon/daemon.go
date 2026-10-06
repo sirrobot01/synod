@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,8 +15,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/agent/enrollment"
+	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/controlstream"
+	"github.com/sirrobot01/synod/internal/destination"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
@@ -40,6 +43,15 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("%w: read enrollment credentials: %w", ErrEnrollment, err)
 	}
+	cache, err := journal.Open(ctx, config.EnrollmentDir+".db", identity.Identity.InstallationID, identity.Identity.NodeID)
+	if err != nil {
+		return fmt.Errorf("%w: open agent journal: %w", ErrConfiguration, err)
+	}
+	defer cache.Close()
+	ring, err := journal.DestinationKeyring(identity.Identity.InstallationID, identity.Identity.NodeID, identity.Certificate.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("%w: build destination cache key: %w", ErrConfiguration, err)
+	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM([]byte(identity.CACertificatePEM)) {
 		return fmt.Errorf("%w: the enrolled CA bundle contains no usable certificate", ErrEnrollment)
@@ -55,13 +67,21 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	hello := &agentv1.Hello{
 		InstallationId: config.InstallationID, NodeId: config.NodeID,
 		Protocol:     &agentv1.VersionRange{Minimum: controlstream.ProtocolVersion, Maximum: controlstream.ProtocolVersion},
-		Capabilities: []string{"runtime.docker", "apps.discovery"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
+		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
 		Hostname: hostname, AgentVersion: Version,
 	}
 	stream, err := transport.New(transport.Config{
 		Endpoints: config.ControllerEndpoints, Logger: logger, Hello: hello,
 		TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{identity.Certificate}},
-		Handle: func(_ context.Context, message *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
+		Handle: func(ctx context.Context, message *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
+			if update := message.GetDestinationPlan(); update != nil {
+				var plan destination.Plan
+				if json.Unmarshal(update.SettingsJson, &plan) != nil || cache.SaveDestinationPlan(ctx, ring, plan) != nil {
+					logger.Warn("destination_plan_failed", "code", "destination_cache_failed")
+					return nil, destination.ErrInvalid
+				}
+				return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_DestinationAck{DestinationAck: &agentv1.DestinationAck{Revision: plan.Revision}}}, nil
+			}
 			if failure := message.GetError(); failure != nil {
 				logger.Warn("controller_error", "code", failure.Code, "message", failure.Message)
 			}

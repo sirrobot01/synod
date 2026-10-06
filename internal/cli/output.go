@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sirrobot01/synod/internal/client"
+	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/spf13/cobra"
@@ -17,18 +18,22 @@ import (
 
 // Result is the single JSON document that the CLI writes to stdout.
 type Result struct {
-	Apps            []inventory.App         `json:"apps,omitempty"`
-	Discovery       []inventory.Device      `json:"discovery,omitempty"`
-	Operation       *operation.Operation    `json:"operation,omitzero"`
-	Operations      []operation.Operation   `json:"operations,omitempty"`
-	EnrollmentToken *client.EnrollmentToken `json:"enrollment_token,omitzero"`
-	User            *client.User            `json:"user,omitzero"`
-	Token           *client.APIToken        `json:"token,omitzero"`
-	Tokens          []client.APIToken       `json:"tokens,omitempty"`
-	Node            *client.Node            `json:"node,omitzero"`
-	Nodes           []client.Node           `json:"nodes,omitempty"`
-	Error           *client.Error           `json:"error,omitzero"`
-	Installation    *client.Installation    `json:"installation,omitzero"`
+	Destination     *destination.Destination `json:"destination,omitzero"`
+	Destinations    *destination.Listing     `json:"destinations,omitzero"`
+	Message         string                   `json:"message,omitempty"`
+	Warnings        []string                 `json:"warnings,omitempty"`
+	Apps            []inventory.App          `json:"apps,omitempty"`
+	Discovery       []inventory.Device       `json:"discovery,omitempty"`
+	Operation       *operation.Operation     `json:"operation,omitzero"`
+	Operations      []operation.Operation    `json:"operations,omitempty"`
+	EnrollmentToken *client.EnrollmentToken  `json:"enrollment_token,omitzero"`
+	User            *client.User             `json:"user,omitzero"`
+	Token           *client.APIToken         `json:"token,omitzero"`
+	Tokens          []client.APIToken        `json:"tokens,omitempty"`
+	Node            *client.Node             `json:"node,omitzero"`
+	Nodes           []client.Node            `json:"nodes,omitempty"`
+	Error           *client.Error            `json:"error,omitzero"`
+	Installation    *client.Installation     `json:"installation,omitzero"`
 	// JoinToken is the one secret an operator copies to the joining node.
 	JoinToken string `json:"join_token,omitempty"`
 }
@@ -68,6 +73,30 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 		return code
 	}
 	var output strings.Builder
+	if a.result.Message != "" {
+		fmt.Fprintln(&output, a.result.Message)
+	}
+	for _, warning := range a.result.Warnings {
+		fmt.Fprintln(&output, "Warning: "+warning)
+	}
+	if d := a.result.Destination; d != nil {
+		fmt.Fprintf(&output, "Destination: %s  %s  %s\n", d.ID, d.Name, d.Location.Kind)
+	}
+	if listing := a.result.Destinations; listing != nil {
+		for _, d := range listing.Destinations {
+			fmt.Fprintf(&output, "%s  %s  %s\n", d.ID, d.Name, d.Location.Kind)
+			if d.Location.Kind == "local" {
+				fmt.Fprintf(&output, "  Device: %s  Path: %s\n  Warning: Copies on this device do not protect its apps from device loss.\n", d.NodeID, d.Location.Path)
+			}
+		}
+		for _, d := range listing.Delivery {
+			state := "pending"
+			if d.Current {
+				state = "saved by agent"
+			}
+			fmt.Fprintf(&output, "Device %s: settings %s (revision %d of %d).\n", d.NodeName, state, d.Revision, listing.Revision)
+		}
+	}
 	for _, device := range a.result.Discovery {
 		if device.ReceivedAt == nil {
 			fmt.Fprintf(&output, "Device %s: no app scan received.\n", device.NodeName)

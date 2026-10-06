@@ -42,7 +42,7 @@ CREATE TABLE audit_events (
     id TEXT PRIMARY KEY,
     actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 256),
     request_id TEXT NOT NULL CHECK (length(request_id) BETWEEN 1 AND 128),
-    action TEXT NOT NULL CHECK (action IN ('enrollment.token.registered', 'node.enrolled', 'node.approved', 'node.certificate.revoked')),
+    action TEXT NOT NULL CHECK (action IN ('enrollment.token.registered', 'node.enrolled', 'node.approved', 'node.certificate.revoked', 'destination.added', 'destination.removed')),
     subject_id TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );

@@ -3,7 +3,7 @@
   "info": {
     "title": "Synod development API",
     "version": "0.1.0-dev",
-    "description": "Development API for device enrollment, app discovery, approval, and operation inspection. Account and session endpoints are not described here yet."
+    "description": "Development API for device enrollment, app discovery, destinations, approval, and operation inspection. Account and session endpoints are not described here yet."
   },
   "servers": [
     {
@@ -991,6 +991,231 @@
           }
         }
       }
+    },
+    "/v1/destinations": {
+      "get": {
+        "operationId": "listDestinations",
+        "responses": {
+          "200": {
+            "description": "Public settings and durable delivery status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationListing"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting destination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata or wrapping key unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "addDestination",
+        "description": "Save settings and queue delivery. This does not check storage or start a backup. Reuse the destination ID and exact input for a retry. A removed ID cannot be reused. Input is limited to 32 KiB.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DestinationInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved public settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Destination"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting destination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata or wrapping key unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/destinations/{id}": {
+      "delete": {
+        "operationId": "removeDestination",
+        "description": "Remove settings. Keep repository data. Offline agents remove cached credentials after reconnect. Repeated removal has no effect.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Settings removed"
+          },
+          "404": {
+            "description": "Destination not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting destination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata or wrapping key unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1482,6 +1707,194 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/DiscoveryState"
+            }
+          }
+        }
+      },
+      "RepositoryLocation": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "local",
+              "sftp",
+              "s3"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "sftp": {
+            "type": "object",
+            "required": [
+              "host",
+              "port",
+              "user",
+              "known_hosts"
+            ],
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "user": {
+                "type": "string"
+              },
+              "known_hosts": {
+                "type": "string"
+              }
+            }
+          },
+          "s3": {
+            "type": "object",
+            "required": [
+              "endpoint",
+              "bucket"
+            ],
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "bucket": {
+                "type": "string"
+              },
+              "prefix": {
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Destination": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "location"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "node_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Required for a local path. The device must be approved."
+          },
+          "location": {
+            "$ref": "#/components/schemas/RepositoryLocation"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          }
+        }
+      },
+      "DestinationCredentials": {
+        "type": "object",
+        "writeOnly": true,
+        "required": [
+          "password"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "ssh_key": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "access_key_id": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "secret_access_key": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "session_token": {
+            "type": "string",
+            "writeOnly": true
+          }
+        }
+      },
+      "DestinationInput": {
+        "type": "object",
+        "required": [
+          "destination",
+          "credentials"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "destination": {
+            "$ref": "#/components/schemas/Destination"
+          },
+          "credentials": {
+            "$ref": "#/components/schemas/DestinationCredentials"
+          }
+        }
+      },
+      "DestinationListing": {
+        "type": "object",
+        "required": [
+          "revision",
+          "destinations",
+          "delivery"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Destination"
+            }
+          },
+          "delivery": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "node_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "node_name": {
+                  "type": "string"
+                },
+                "revision": {
+                  "type": "integer"
+                },
+                "current": {
+                  "type": "boolean",
+                  "description": "The current agent session saved this revision."
+                },
+                "acknowledged_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
             }
           }
         }
