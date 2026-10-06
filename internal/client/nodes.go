@@ -11,15 +11,16 @@ import (
 
 // Node is one enrolled device and its last known presence.
 type Node struct {
-	ID             uuid.UUID  `json:"id"`
-	Name           string     `json:"name"`
-	Architecture   string     `json:"architecture"`
-	RuntimeVersion string     `json:"runtime_version"`
-	AgentVersion   string     `json:"agent_version"`
-	EnrolledAt     time.Time  `json:"enrolled_at"`
-	ApprovedAt     *time.Time `json:"approved_at"`
-	ConnectedAt    *time.Time `json:"connected_at"`
-	LastSeenAt     *time.Time `json:"last_seen_at"`
+	ID                 uuid.UUID  `json:"id"`
+	Name               string     `json:"name"`
+	Architecture       string     `json:"architecture"`
+	RuntimeVersion     string     `json:"runtime_version"`
+	AgentVersion       string     `json:"agent_version"`
+	DestinationAddress string     `json:"destination_address,omitempty"`
+	EnrolledAt         time.Time  `json:"enrolled_at"`
+	ApprovedAt         *time.Time `json:"approved_at"`
+	ConnectedAt        *time.Time `json:"connected_at"`
+	LastSeenAt         *time.Time `json:"last_seen_at"`
 }
 
 // ListNodes reads every enrolled node.

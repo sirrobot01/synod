@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 
@@ -67,7 +68,7 @@ func (s *Store) AddDestination(ctx context.Context, installationID uuid.UUID, ri
 	}
 	if d.NodeID != uuid.Nil {
 		var allowed bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND approved_at IS NOT NULL AND revoked_at IS NULL)`, d.NodeID).Scan(&allowed); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND approved_at IS NOT NULL AND revoked_at IS NULL AND (?!='device' OR destination_address!=''))`, d.NodeID, d.Location.Kind).Scan(&allowed); err != nil {
 			return destination.Destination{}, storeError(err)
 		}
 		if !allowed {
@@ -86,7 +87,7 @@ func (s *Store) AddDestination(ctx context.Context, installationID uuid.UUID, ri
 	if err != nil {
 		return destination.Destination{}, storeError(err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO destinations (id,name,node_id,definition,credentials,input_bytes) VALUES (?,?,?,?,?,?)`, d.ID, d.Name, sql.Null[uuid.UUID]{V: d.NodeID, Valid: d.NodeID != uuid.Nil}, definition, sealed, len(input)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO destinations (id,name,node_id,kind,definition,credentials,input_bytes) VALUES (?,?,?,?,?,?,?)`, d.ID, d.Name, sql.Null[uuid.UUID]{V: d.NodeID, Valid: d.NodeID != uuid.Nil}, d.Location.Kind, definition, sealed, len(input)); err != nil {
 		if isUnique(err) {
 			return destination.Destination{}, &Error{Code: IdempotencyConflict}
 		}
@@ -196,7 +197,7 @@ func (s *Store) DestinationPlan(ctx context.Context, installationID, nodeID, ses
 	if err := tx.QueryRowContext(ctx, `SELECT revision FROM destination_revision`).Scan(&result.Revision); err != nil {
 		return result, storeError(err)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id,definition,credentials FROM destinations WHERE removed_at IS NULL AND (node_id IS NULL OR node_id=?) ORDER BY id`, nodeID)
+	rows, err := tx.QueryContext(ctx, `SELECT id,definition,credentials FROM destinations WHERE removed_at IS NULL AND (kind!='local' OR node_id=?) ORDER BY id`, nodeID)
 	if err != nil {
 		return result, storeError(err)
 	}
@@ -230,7 +231,29 @@ func (s *Store) DestinationPlan(ctx context.Context, installationID, nodeID, ses
 		if !bytes.Equal(definition, expected) {
 			return result, &Error{Code: Unavailable}
 		}
-		result.Destinations = append(result.Destinations, entry)
+		if entry.Destination.Location.Kind != "local" || entry.Destination.NodeID == nodeID {
+			result.Destinations = append(result.Destinations, entry)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return result, storeError(err)
+	}
+	if err := rows.Close(); err != nil {
+		return result, storeError(err)
+	}
+	rows, err = tx.QueryContext(ctx, `SELECT n.id,n.destination_address,c.der_hash FROM nodes n JOIN node_certificates c ON c.node_id=n.id WHERE n.approved_at IS NOT NULL AND n.revoked_at IS NULL AND c.revoked_at IS NULL ORDER BY n.id,c.id`)
+	if err != nil {
+		return result, storeError(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var peer destination.Peer
+		var hash []byte
+		if err := rows.Scan(&peer.NodeID, &peer.Address, &hash); err != nil {
+			return result, storeError(err)
+		}
+		peer.CertificateSHA256 = hex.EncodeToString(hash)
+		result.Peers = append(result.Peers, peer)
 	}
 	if err := rows.Err(); err != nil {
 		return result, storeError(err)

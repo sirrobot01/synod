@@ -78,7 +78,7 @@ func TestDestinationPersistenceAndAuthorizedDelivery(t *testing.T) {
 		if node == owner {
 			want = 2
 		}
-		if err != nil || len(plan.Destinations) != want || plan.Revision != 3 {
+		if err != nil || len(plan.Destinations) != want || plan.Revision != 5 {
 			t.Fatalf("plan for %s: %v", node, err)
 		}
 		for _, d := range plan.Destinations {
@@ -109,7 +109,7 @@ func TestDestinationPersistenceAndAuthorizedDelivery(t *testing.T) {
 	if err := s.RecordAgentSession(t.Context(), owner, sessions[owner], &agentv1.Hello{NodeId: owner.String(), Architecture: "amd64"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcknowledgeDestinations(t.Context(), owner, old, 3); !errors.Is(err, ErrStaleSession) {
+	if err := s.AcknowledgeDestinations(t.Context(), owner, old, 5); !errors.Is(err, ErrStaleSession) {
 		t.Fatalf("stale ack: %v", err)
 	}
 	listing, err = s.ListDestinations(t.Context())
@@ -153,10 +153,10 @@ func TestDestinationPersistenceAndAuthorizedDelivery(t *testing.T) {
 		t.Fatalf("deleted request recreated destination: %v", err)
 	}
 	plan, err := s.DestinationPlan(t.Context(), installation, owner, sessions[owner], ring)
-	if err != nil || len(plan.Destinations) != 1 || plan.Revision != 4 {
+	if err != nil || len(plan.Destinations) != 1 || plan.Revision != 6 {
 		t.Fatalf("remove plan: %v", err)
 	}
-	if err := s.AcknowledgeDestinations(t.Context(), owner, sessions[owner], 3); err != nil {
+	if err := s.AcknowledgeDestinations(t.Context(), owner, sessions[owner], 5); err != nil {
 		t.Fatal(err)
 	}
 	listing, err = s.ListDestinations(t.Context())
@@ -171,5 +171,75 @@ func TestDestinationPersistenceAndAuthorizedDelivery(t *testing.T) {
 	var sealed []byte
 	if err := s.db.QueryRowContext(t.Context(), `SELECT credentials FROM destinations WHERE id=?`, entry.Destination.ID).Scan(&sealed); err != nil || sealed != nil {
 		t.Fatal("removed credential remains in active metadata")
+	}
+}
+
+func TestDevicePlansRefreshAddressesAndCertificateAccess(t *testing.T) {
+	s, ca := open(t), authority(t)
+	owner, _ := join(t, s, ca)
+	source, _ := join(t, s, ca)
+	pending, _ := join(t, s, ca)
+	keyID := uuid.New()
+	ring, err := secret.NewKeyring(keyID, map[uuid.UUID][]byte{keyID: bytes.Repeat([]byte{23}, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := map[uuid.UUID]uuid.UUID{owner: uuid.New(), source: uuid.New(), pending: uuid.New()}
+	for node, session := range sessions {
+		hello := &agentv1.Hello{NodeId: node.String(), Architecture: "arm64"}
+		if node == owner {
+			hello.DestinationAddress = "192.0.2.10:8445"
+		}
+		if err := s.RecordAgentSession(t.Context(), node, session, hello); err != nil {
+			t.Fatal(err)
+		}
+		if node != pending {
+			if _, err := s.ApproveNode(t.Context(), node, "test", "approve"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	id := uuid.New()
+	entry := destination.Entry{Destination: destination.Destination{ID: id, NodeID: owner, Name: "Device", Location: repository.Location{Kind: "device", Path: "/srv/backup", Device: &repository.DeviceLocation{NodeID: owner, DestinationID: id}}}, Credentials: repository.Credentials{Password: "repository-password"}}
+	if _, err := s.AddDestination(t.Context(), ca.InstallationID(), ring, entry, "test", "add"); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := s.DestinationPlan(t.Context(), ca.InstallationID(), source, sessions[source], ring)
+	if err != nil || len(plan.Destinations) != 1 || len(plan.Peers) != 2 {
+		t.Fatalf("device plan: %v", err)
+	}
+	for _, peer := range plan.Peers {
+		if peer.NodeID == pending {
+			t.Fatal("pending peer received access")
+		}
+	}
+	location, _, err := plan.Connection(id, &repository.DeviceIdentity{InstallationID: ca.InstallationID()})
+	if err != nil || location.Device.Endpoint != "https://192.0.2.10:8445" || len(location.Device.CertificateSHA256) != 1 {
+		t.Fatalf("device address: %v", err)
+	}
+	if err := s.AcknowledgeDestinations(t.Context(), source, sessions[source], plan.Revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordAgentSession(t.Context(), owner, uuid.New(), &agentv1.Hello{NodeId: owner.String(), Architecture: "arm64", DestinationAddress: "192.0.2.11:8445"}); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := s.DestinationPlan(t.Context(), ca.InstallationID(), source, sessions[source], ring)
+	if err != nil || moved.Revision != plan.Revision+1 {
+		t.Fatalf("address revision: %v", err)
+	}
+	location, _, err = moved.Connection(id, &repository.DeviceIdentity{InstallationID: ca.InstallationID()})
+	if err != nil || location.Device.Endpoint != "https://192.0.2.11:8445" {
+		t.Fatalf("new address: %v", err)
+	}
+	var certificateID uuid.UUID
+	if err := s.db.QueryRowContext(t.Context(), `SELECT id FROM node_certificates WHERE node_id=?`, source).Scan(&certificateID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeAgentCertificate(t.Context(), source, certificateID, "test", "revoke"); err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := s.DestinationPlan(t.Context(), ca.InstallationID(), source, sessions[source], ring)
+	if err != nil || revoked.Revision != moved.Revision+1 || len(revoked.Peers) != 1 || revoked.Peers[0].NodeID != owner {
+		t.Fatalf("certificate revocation did not change plan: %v", err)
 	}
 }

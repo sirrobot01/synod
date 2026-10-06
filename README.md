@@ -249,8 +249,39 @@ The local path belongs to the selected device.
 A copy on that device does not protect its own apps from device loss.
 Add a destination on another device for that protection.
 A local destination is sent only to its owner.
-SFTP and S3 settings are sent to all approved agents.
+Synod-device, SFTP, and S3 settings are sent to all approved agents.
 Pending devices receive no destination credentials.
+
+To use a directory on another Synod device, select type `device`:
+
+```sh
+synod destination add peer --type device --device odin --path /srv/synod-backups --credentials-file ./repository.json
+```
+
+The destination agent serves that directory over mutual TLS.
+The directory must be empty or hold a Kopia filesystem repository.
+The service creates the directory when a repository client first connects.
+It adds a small `.synod-repository` marker.
+It does not expose other directories.
+The stored repository also opens through the local provider with its password.
+
+Each agent listens on port 8445 by default.
+The controller uses the address from the agent connection.
+For another route, set `--destination-address HOST:PORT` during `agent join`.
+Use `--destination-listen HOST:PORT` to change the listener.
+Existing agents use `destination_address` and `destination_listen` in `agent.json`.
+An address change is sent to peers after the agent reconnects.
+Peers use the stored address during a controller outage.
+
+Each request checks the cached list of approved certificate fingerprints.
+The client checks the destination certificate and its exact device identity.
+Access changes take effect when an agent receives the new plan.
+Expired certificates are always refused.
+The service accepts at most eight requests at once.
+Each blob is limited to 64 MiB.
+Each directory listing is limited to 20,000 entries.
+Kopia divides its repository into directories.
+An interrupted upload cannot replace a complete object.
 
 For SFTP, add `ssh_key` to the credentials JSON.
 Use the full private key text as a JSON string.
@@ -291,7 +322,7 @@ Backups, app destination selection, and schedules are later tasks.
 ## Repository library
 
 The repository library uses Kopia v0.23.1.
-It creates and opens encrypted repositories on a local path, SFTP, or S3.
+It creates and opens encrypted repositories on a local path, a Synod device, SFTP, or S3.
 Destination commands save the connection settings.
 They do not create a repository or start a backup.
 

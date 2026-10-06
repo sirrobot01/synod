@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/destination"
 )
 
 var ErrConfiguration = errors.New("invalid protected agent configuration")
@@ -29,6 +30,8 @@ type Config struct {
 	EnrollmentDir       string   `json:"enrollment_dir"`
 	ControllerEndpoints []string `json:"controller_endpoints"`
 	DockerSocket        string   `json:"docker_socket"`
+	DestinationListen   string   `json:"destination_listen,omitempty"`
+	DestinationAddress  string   `json:"destination_address,omitempty"`
 }
 
 // Load accepts one bounded, private JSON file. It does not create local state.
@@ -68,6 +71,12 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) validate() error {
+	if c.DestinationListen != "" && !destination.ValidAddress(c.DestinationListen, true) {
+		return fmt.Errorf("%w: destination_listen requires a host and port", ErrConfiguration)
+	}
+	if c.DestinationAddress != "" && !destination.ValidAddress(c.DestinationAddress, false) {
+		return fmt.Errorf("%w: destination_address requires a reachable host and port", ErrConfiguration)
+	}
 	for _, field := range []struct{ name, value string }{{"installation_id", c.InstallationID}, {"node_id", c.NodeID}} {
 		parsed, err := uuid.Parse(field.value)
 		if err != nil {

@@ -23,6 +23,7 @@ message Hello {
   string architecture = 6;
   string hostname = 7;
   string agent_version = 8;
+  string destination_address = 9;
 }
 
 message Session {

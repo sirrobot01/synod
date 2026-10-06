@@ -77,17 +77,18 @@ func (x *VersionRange) GetMaximum() uint32 {
 
 // Hello opens a session. The facts in it are what the agent measured on its host.
 type Hello struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	InstallationId string                 `protobuf:"bytes,1,opt,name=installation_id,json=installationId,proto3" json:"installation_id,omitempty"`
-	NodeId         string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	Protocol       *VersionRange          `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"`
-	Capabilities   []string               `protobuf:"bytes,4,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
-	RuntimeVersion string                 `protobuf:"bytes,5,opt,name=runtime_version,json=runtimeVersion,proto3" json:"runtime_version,omitempty"`
-	Architecture   string                 `protobuf:"bytes,6,opt,name=architecture,proto3" json:"architecture,omitempty"`
-	Hostname       string                 `protobuf:"bytes,7,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	AgentVersion   string                 `protobuf:"bytes,8,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	InstallationId     string                 `protobuf:"bytes,1,opt,name=installation_id,json=installationId,proto3" json:"installation_id,omitempty"`
+	NodeId             string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Protocol           *VersionRange          `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	Capabilities       []string               `protobuf:"bytes,4,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
+	RuntimeVersion     string                 `protobuf:"bytes,5,opt,name=runtime_version,json=runtimeVersion,proto3" json:"runtime_version,omitempty"`
+	Architecture       string                 `protobuf:"bytes,6,opt,name=architecture,proto3" json:"architecture,omitempty"`
+	Hostname           string                 `protobuf:"bytes,7,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	AgentVersion       string                 `protobuf:"bytes,8,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	DestinationAddress string                 `protobuf:"bytes,9,opt,name=destination_address,json=destinationAddress,proto3" json:"destination_address,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *Hello) Reset() {
@@ -172,6 +173,13 @@ func (x *Hello) GetHostname() string {
 func (x *Hello) GetAgentVersion() string {
 	if x != nil {
 		return x.AgentVersion
+	}
+	return ""
+}
+
+func (x *Hello) GetDestinationAddress() string {
+	if x != nil {
+		return x.DestinationAddress
 	}
 	return ""
 }
@@ -1059,7 +1067,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x1aproto/agent/v1/agent.proto\x12\x0esynod.agent.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"B\n" +
 	"\fVersionRange\x12\x18\n" +
 	"\aminimum\x18\x01 \x01(\rR\aminimum\x12\x18\n" +
-	"\amaximum\x18\x02 \x01(\rR\amaximum\"\xb5\x02\n" +
+	"\amaximum\x18\x02 \x01(\rR\amaximum\"\xe6\x02\n" +
 	"\x05Hello\x12'\n" +
 	"\x0finstallation_id\x18\x01 \x01(\tR\x0einstallationId\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x128\n" +
@@ -1068,7 +1076,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\x0fruntime_version\x18\x05 \x01(\tR\x0eruntimeVersion\x12\"\n" +
 	"\farchitecture\x18\x06 \x01(\tR\farchitecture\x12\x1a\n" +
 	"\bhostname\x18\a \x01(\tR\bhostname\x12#\n" +
-	"\ragent_version\x18\b \x01(\tR\fagentVersion\"\xd9\x02\n" +
+	"\ragent_version\x18\b \x01(\tR\fagentVersion\x12/\n" +
+	"\x13destination_address\x18\t \x01(\tR\x12destinationAddress\"\xd9\x02\n" +
 	"\aSession\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +

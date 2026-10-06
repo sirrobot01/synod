@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/store"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // ErrUnsupportedMessage reports an agent message that this receiver cannot record.
@@ -29,7 +31,22 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 	}
 	switch value := message.Message.(type) {
 	case *agentv1.AgentMessage_Hello:
-		return r.Store.RecordAgentSession(ctx, peer.NodeID, sessionID, value.Hello)
+		hello := value.Hello
+		if hello != nil && hello.DestinationAddress != "" {
+			hello = proto.Clone(hello).(*agentv1.Hello)
+			host, port, err := net.SplitHostPort(hello.DestinationAddress)
+			if err != nil {
+				return ErrUnsupportedMessage
+			}
+			if host == "" || (net.ParseIP(host) != nil && net.ParseIP(host).IsUnspecified()) {
+				host, _, err = net.SplitHostPort(peer.RemoteAddress)
+				if err != nil {
+					return ErrUnsupportedMessage
+				}
+			}
+			hello.DestinationAddress = net.JoinHostPort(host, port)
+		}
+		return r.Store.RecordAgentSession(ctx, peer.NodeID, sessionID, hello)
 	case *agentv1.AgentMessage_DestinationAck:
 		if value.DestinationAck == nil {
 			return ErrUnsupportedMessage

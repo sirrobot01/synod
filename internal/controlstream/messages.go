@@ -38,6 +38,9 @@ func NegotiateHello(hello *agentv1.Hello, supported []string) ([]string, error) 
 	if hello.Protocol.Minimum > ProtocolVersion || hello.Protocol.Maximum < ProtocolVersion || hello.Protocol.Minimum > hello.Protocol.Maximum {
 		return nil, ErrIncompatibleProtocol
 	}
+	if hello.DestinationAddress != "" && !destination.ValidAddress(hello.DestinationAddress, true) {
+		return nil, ErrIncompatibleProtocol
+	}
 	if len(hello.Capabilities) > 64 || len(hello.RuntimeVersion) > 256 || len(hello.Hostname) > 253 || len(hello.AgentVersion) > 128 {
 		return nil, ErrIncompatibleProtocol
 	}

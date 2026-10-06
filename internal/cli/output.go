@@ -85,7 +85,7 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 	if listing := a.result.Destinations; listing != nil {
 		for _, d := range listing.Destinations {
 			fmt.Fprintf(&output, "%s  %s  %s\n", d.ID, d.Name, d.Location.Kind)
-			if d.Location.Kind == "local" {
+			if d.Location.Kind == "local" || d.Location.Kind == "device" {
 				fmt.Fprintf(&output, "  Device: %s  Path: %s\n  Warning: Copies on this device do not protect its apps from device loss.\n", d.NodeID, d.Location.Path)
 			}
 		}

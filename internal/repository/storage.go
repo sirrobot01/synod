@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/kopia/kopia/repo/blob"
 	"github.com/kopia/kopia/repo/blob/filesystem"
 	"github.com/kopia/kopia/repo/blob/s3"
@@ -15,10 +16,11 @@ import (
 
 // Location contains connection settings. Credentials are supplied separately.
 type Location struct {
-	Kind string        `json:"kind"`
-	Path string        `json:"path,omitempty"`
-	SFTP *SFTPLocation `json:"sftp,omitzero"`
-	S3   *S3Location   `json:"s3,omitzero"`
+	Kind   string          `json:"kind"`
+	Path   string          `json:"path,omitempty"`
+	SFTP   *SFTPLocation   `json:"sftp,omitzero"`
+	S3     *S3Location     `json:"s3,omitzero"`
+	Device *DeviceLocation `json:"device,omitzero"`
 }
 
 type SFTPLocation struct {
@@ -37,11 +39,12 @@ type S3Location struct {
 
 // Credentials must be wrapped before persistent storage outside the repository.
 type Credentials struct {
-	Password        string `json:"password"`
-	SSHKey          string `json:"ssh_key,omitempty"`
-	AccessKeyID     string `json:"access_key_id,omitempty"`
-	SecretAccessKey string `json:"secret_access_key,omitempty"`
-	SessionToken    string `json:"session_token,omitempty"`
+	DeviceIdentity  *DeviceIdentity `json:"-"`
+	Password        string          `json:"password"`
+	SSHKey          string          `json:"ssh_key,omitempty"`
+	AccessKeyID     string          `json:"access_key_id,omitempty"`
+	SecretAccessKey string          `json:"secret_access_key,omitempty"`
+	SessionToken    string          `json:"session_token,omitempty"`
 }
 
 func (Credentials) String() string   { return "[repository credentials]" }
@@ -56,15 +59,22 @@ func Validate(location Location, credentials Credentials) error {
 		return ErrCredentials
 	}
 	switch location.Kind {
+	case "device":
+		if location.Device == nil || location.SFTP != nil || location.S3 != nil || location.Device.NodeID == uuid.Nil || location.Device.DestinationID == uuid.Nil || !filepath.IsAbs(location.Path) || filepath.Clean(location.Path) != location.Path {
+			return ErrLocation
+		}
+		if credentials.SSHKey != "" || credentials.AccessKeyID != "" || credentials.SecretAccessKey != "" || credentials.SessionToken != "" {
+			return ErrCredentials
+		}
 	case "local":
-		if !filepath.IsAbs(location.Path) || filepath.Clean(location.Path) != location.Path || location.SFTP != nil || location.S3 != nil {
+		if !filepath.IsAbs(location.Path) || filepath.Clean(location.Path) != location.Path || location.SFTP != nil || location.S3 != nil || location.Device != nil {
 			return ErrLocation
 		}
 		if credentials.SSHKey != "" || credentials.AccessKeyID != "" || credentials.SecretAccessKey != "" || credentials.SessionToken != "" {
 			return ErrCredentials
 		}
 	case "sftp":
-		if location.SFTP == nil || location.S3 != nil || !strings.HasPrefix(location.Path, "/") {
+		if location.SFTP == nil || location.S3 != nil || location.Device != nil || !strings.HasPrefix(location.Path, "/") {
 			return ErrLocation
 		}
 		remote := location.SFTP
@@ -75,7 +85,7 @@ func Validate(location Location, credentials Credentials) error {
 			return ErrCredentials
 		}
 	case "s3":
-		if location.S3 == nil || location.SFTP != nil || location.Path != "" {
+		if location.S3 == nil || location.SFTP != nil || location.Device != nil || location.Path != "" {
 			return ErrLocation
 		}
 		remote := location.S3
@@ -97,6 +107,11 @@ func storage(ctx context.Context, location Location, credentials Credentials, cr
 		return nil, err
 	}
 	switch location.Kind {
+	case "device":
+		if credentials.DeviceIdentity == nil {
+			return nil, ErrCredentials
+		}
+		return newDevice(ctx, &deviceOptions{NodeID: location.Device.NodeID, DestinationID: location.Device.DestinationID, Endpoint: location.Device.Endpoint, CertificateSHA256: location.Device.CertificateSHA256, Identity: *credentials.DeviceIdentity}, create)
 	case "local":
 		return filesystem.New(ctx, &filesystem.Options{Path: location.Path, FileMode: 0600, DirectoryMode: 0700}, create)
 	case "sftp":

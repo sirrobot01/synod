@@ -36,3 +36,30 @@ func TestAppsFromAuthenticatedAgentToAPI(t *testing.T) {
 		t.Fatalf("app list: %d %s", response.Code, response.Body.String())
 	}
 }
+
+func TestAgentDestinationAddressUsesObservedPeer(t *testing.T) {
+	_, metadata, _ := identityServer(t)
+	node := enrollTestNode(t, metadata)
+	receiver := agentstream.Receiver{Store: metadata}
+	peer := controlstream.Peer{NodeID: node, SessionID: uuid.NewString(), RemoteAddress: "192.0.2.15:54000"}
+	hello := &agentv1.Hello{NodeId: node.String(), Architecture: "arm64", DestinationAddress: "[::]:8445"}
+	if err := receiver.Handle(t.Context(), peer, &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Hello{Hello: hello}}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := metadata.GetNode(t.Context(), node)
+	if err != nil || saved.DestinationAddress != "192.0.2.15:8445" {
+		t.Fatalf("observed destination address: %v", err)
+	}
+	if hello.DestinationAddress != "[::]:8445" {
+		t.Fatal("receiver changed caller's Hello")
+	}
+	hello.DestinationAddress = "backup.example:18445"
+	peer.SessionID = uuid.NewString()
+	if err := receiver.Handle(t.Context(), peer, &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Hello{Hello: hello}}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err = metadata.GetNode(t.Context(), node)
+	if err != nil || saved.DestinationAddress != "backup.example:18445" {
+		t.Fatalf("explicit destination address: %v", err)
+	}
+}

@@ -2,8 +2,11 @@
 package destination
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -40,10 +43,25 @@ func (Entry) GoString() string { return "[private destination settings]" }
 type Plan struct {
 	Revision     int64   `json:"revision"`
 	Destinations []Entry `json:"destinations"`
+	Peers        []Peer  `json:"peers,omitempty"`
 }
 
 func (Plan) String() string   { return "[private destination plan]" }
 func (Plan) GoString() string { return "[private destination plan]" }
+
+// Peer permits a specific enrolled certificate to use device destinations.
+type Peer struct {
+	NodeID            uuid.UUID `json:"node_id"`
+	Address           string    `json:"address,omitempty"`
+	CertificateSHA256 string    `json:"certificate_sha256"`
+}
+
+// ValidAddress accepts a host and port. An empty host is allowed only before advertisement.
+func ValidAddress(address string, allowEmptyHost bool) bool {
+	host, port, err := net.SplitHostPort(address)
+	number, numberErr := strconv.Atoi(port)
+	return len(address) <= 260 && len(host) <= 253 && err == nil && numberErr == nil && number > 0 && number <= 65535 && (host != "" || allowEmptyHost) && !strings.ContainsAny(host, "/\\%?#@ \t\r\n")
+}
 
 type Delivery struct {
 	NodeID         uuid.UUID  `json:"node_id"`
@@ -64,7 +82,10 @@ func (e Entry) Validate() error {
 	if d.ID == uuid.Nil || len(d.Name) == 0 || len(d.Name) > 128 || strings.TrimSpace(d.Name) != d.Name || strings.ContainsFunc(d.Name, unicode.IsControl) {
 		return ErrInvalid
 	}
-	if (d.Location.Kind == "local") != (d.NodeID != uuid.Nil) || repository.Validate(d.Location, e.Credentials) != nil {
+	if (d.Location.Kind == "local" || d.Location.Kind == "device") != (d.NodeID != uuid.Nil) || repository.Validate(d.Location, e.Credentials) != nil {
+		return ErrInvalid
+	}
+	if d.Location.Kind == "device" && (d.Location.Device.NodeID != d.NodeID || d.Location.Device.DestinationID != d.ID) {
 		return ErrInvalid
 	}
 	e.Destination.CreatedAt = time.Time{}
@@ -82,10 +103,21 @@ func (p Plan) Validate(nodeID uuid.UUID) error {
 	}
 	ids := make(map[uuid.UUID]bool)
 	for _, e := range p.Destinations {
-		if e.Validate() != nil || ids[e.Destination.ID] || (e.Destination.NodeID != uuid.Nil && e.Destination.NodeID != nodeID) {
+		if e.Validate() != nil || ids[e.Destination.ID] || (e.Destination.Location.Kind == "local" && e.Destination.NodeID != nodeID) {
 			return ErrInvalid
 		}
 		ids[e.Destination.ID] = true
+	}
+	if len(p.Peers) > 256 {
+		return ErrInvalid
+	}
+	certificates := make(map[string]bool)
+	for _, peer := range p.Peers {
+		hash, err := hex.DecodeString(peer.CertificateSHA256)
+		if peer.NodeID == uuid.Nil || (peer.Address != "" && !ValidAddress(peer.Address, false)) || err != nil || len(hash) != 32 || certificates[peer.CertificateSHA256] {
+			return ErrInvalid
+		}
+		certificates[peer.CertificateSHA256] = true
 	}
 	raw, err := json.Marshal(p)
 	defer clear(raw)
@@ -102,9 +134,40 @@ func OnlyOnSource(nodeID uuid.UUID, selected []Destination) bool {
 		return false
 	}
 	for _, d := range selected {
-		if d.Location.Kind != "local" || d.NodeID != nodeID {
+		if (d.Location.Kind != "local" && d.Location.Kind != "device") || d.NodeID != nodeID {
 			return false
 		}
 	}
 	return true
+}
+
+// Connection resolves a repository from the durable plan and the agent's own identity.
+func (p Plan) Connection(id uuid.UUID, identity *repository.DeviceIdentity) (repository.Location, repository.Credentials, error) {
+	for _, entry := range p.Destinations {
+		if entry.Destination.ID != id {
+			continue
+		}
+		location, credentials := entry.Destination.Location, entry.Credentials
+		if location.Kind != "device" {
+			return location, credentials, nil
+		}
+		if identity == nil || location.Device == nil {
+			return repository.Location{}, repository.Credentials{}, ErrInvalid
+		}
+		target := *location.Device
+		target.CertificateSHA256 = nil
+		for _, peer := range p.Peers {
+			if peer.NodeID == target.NodeID && peer.Address != "" {
+				target.Endpoint = "https://" + peer.Address
+				target.CertificateSHA256 = append(target.CertificateSHA256, peer.CertificateSHA256)
+			}
+		}
+		if target.Endpoint == "" {
+			return repository.Location{}, repository.Credentials{}, ErrInvalid
+		}
+		location.Device = &target
+		credentials.DeviceIdentity = identity
+		return location, credentials, nil
+	}
+	return repository.Location{}, repository.Credentials{}, ErrInvalid
 }

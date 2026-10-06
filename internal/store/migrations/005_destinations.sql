@@ -7,6 +7,7 @@ CREATE TABLE destinations (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL COLLATE NOCASE,
     node_id TEXT REFERENCES nodes (id),
+    kind TEXT NOT NULL,
     definition BLOB NOT NULL,
     credentials BLOB,
     input_bytes INTEGER NOT NULL,

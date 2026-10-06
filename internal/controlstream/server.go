@@ -32,6 +32,7 @@ var ErrMessage = errors.New("invalid transport message")
 
 // Peer is the authenticated identity of one connected agent session.
 type Peer struct {
+	RemoteAddress  string
 	InstallationID uuid.UUID
 	NodeID         uuid.UUID
 	SessionID      string
@@ -207,7 +208,7 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 	leaf := info.State.PeerCertificates[0]
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
-	current := &session{peer: Peer{InstallationID: identity.InstallationID, NodeID: identity.SubjectID, SessionID: uuid.NewString()}, ctx: ctx, cancel: cancel, outgoing: make(chan *agentv1.ControllerMessage, s.config.QueueSize)}
+	current := &session{peer: Peer{RemoteAddress: remote.Addr.String(), InstallationID: identity.InstallationID, NodeID: identity.SubjectID, SessionID: uuid.NewString()}, ctx: ctx, cancel: cancel, outgoing: make(chan *agentv1.ControllerMessage, s.config.QueueSize)}
 	defer func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()

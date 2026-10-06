@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/pki"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
@@ -261,6 +262,9 @@ func (s *Store) RevokeAgentCertificate(ctx context.Context, nodeID, certificateI
 	if _, err := tx.ExecContext(ctx, `UPDATE node_certificates SET revoked_at=? WHERE id=?`, now.UnixMilli(), certificateID); err != nil {
 		return storeError(err)
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
+		return storeError(err)
+	}
 	if err := audit(ctx, tx, actorID, requestID, "node.certificate.revoked", certificateID, now); err != nil {
 		return err
 	}
@@ -270,21 +274,31 @@ func (s *Store) RevokeAgentCertificate(ctx context.Context, nodeID, certificateI
 // RecordAgentSession records a new live session and the facts its Hello reports.
 // The controller transport assigns the session identity, never the agent.
 func (s *Store) RecordAgentSession(ctx context.Context, nodeID, sessionID uuid.UUID, hello *agentv1.Hello) error {
-	if nodeID == uuid.Nil || sessionID == uuid.Nil || hello == nil || hello.NodeId != nodeID.String() {
+	if nodeID == uuid.Nil || sessionID == uuid.Nil || hello == nil || hello.NodeId != nodeID.String() || (hello.DestinationAddress != "" && !destination.ValidAddress(hello.DestinationAddress, false)) {
 		return &Error{Code: InvalidRequest}
 	}
-	now := s.now().UnixMilli()
-	// The first Hello names the node. A later rename by the operator wins over the hostname.
-	result, err := s.db.ExecContext(ctx, `UPDATE nodes SET session_id=?,connected_at=?,last_seen_at=?,heartbeat_sequence=0,
- architecture=?,runtime_version=?,agent_version=?,name=CASE WHEN name='' THEN ? ELSE name END
- WHERE id=? AND revoked_at IS NULL`, sessionID, now, now, hello.Architecture, hello.RuntimeVersion, hello.AgentVersion, hello.Hostname, nodeID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return storeError(err)
 	}
-	if changed, err := result.RowsAffected(); err != nil || changed == 0 {
-		return &Error{Code: NotFound, Cause: err}
+	defer tx.Rollback()
+	var previous string
+	var approved bool
+	if err := tx.QueryRowContext(ctx, `SELECT destination_address,approved_at IS NOT NULL FROM nodes WHERE id=? AND revoked_at IS NULL`, nodeID).Scan(&previous, &approved); err != nil {
+		return storeError(err)
 	}
-	return nil
+	now := s.now().UnixMilli()
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET session_id=?,connected_at=?,last_seen_at=?,heartbeat_sequence=0,
+ architecture=?,runtime_version=?,agent_version=?,destination_address=?,name=CASE WHEN name='' THEN ? ELSE name END
+ WHERE id=?`, sessionID, now, now, hello.Architecture, hello.RuntimeVersion, hello.AgentVersion, hello.DestinationAddress, hello.Hostname, nodeID); err != nil {
+		return storeError(err)
+	}
+	if approved && previous != hello.DestinationAddress {
+		if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
+			return storeError(err)
+		}
+	}
+	return storeCommit(tx)
 }
 
 // RecordAgentHeartbeat refreshes presence for the current session only.
@@ -314,21 +328,22 @@ func (s *Store) RecordAgentHeartbeat(ctx context.Context, nodeID, sessionID uuid
 
 // Node is one enrolled device and its last known presence.
 type Node struct {
-	ID             uuid.UUID  `json:"id"`
-	Name           string     `json:"name"`
-	Architecture   string     `json:"architecture"`
-	RuntimeVersion string     `json:"runtime_version"`
-	AgentVersion   string     `json:"agent_version"`
-	EnrolledAt     time.Time  `json:"enrolled_at"`
-	ApprovedAt     *time.Time `json:"approved_at"`
-	ConnectedAt    *time.Time `json:"connected_at"`
-	LastSeenAt     *time.Time `json:"last_seen_at"`
+	ID                 uuid.UUID  `json:"id"`
+	Name               string     `json:"name"`
+	Architecture       string     `json:"architecture"`
+	RuntimeVersion     string     `json:"runtime_version"`
+	AgentVersion       string     `json:"agent_version"`
+	DestinationAddress string     `json:"destination_address,omitempty"`
+	EnrolledAt         time.Time  `json:"enrolled_at"`
+	ApprovedAt         *time.Time `json:"approved_at"`
+	ConnectedAt        *time.Time `json:"connected_at"`
+	LastSeenAt         *time.Time `json:"last_seen_at"`
 }
 
-const nodeColumns = `id,name,architecture,runtime_version,agent_version,enrolled_at,approved_at,connected_at,last_seen_at`
+const nodeColumns = `id,name,architecture,runtime_version,agent_version,destination_address,enrolled_at,approved_at,connected_at,last_seen_at`
 
 func (n *Node) fields() []any {
-	return []any{&n.ID, &n.Name, &n.Architecture, &n.RuntimeVersion, &n.AgentVersion, millis{&n.EnrolledAt}, optionalMillis{&n.ApprovedAt}, optionalMillis{&n.ConnectedAt}, optionalMillis{&n.LastSeenAt}}
+	return []any{&n.ID, &n.Name, &n.Architecture, &n.RuntimeVersion, &n.AgentVersion, &n.DestinationAddress, millis{&n.EnrolledAt}, optionalMillis{&n.ApprovedAt}, optionalMillis{&n.ConnectedAt}, optionalMillis{&n.LastSeenAt}}
 }
 
 // ListNodes reports every enrolled node that is not revoked, oldest first.
@@ -384,6 +399,9 @@ func (s *Store) ApproveNode(ctx context.Context, nodeID uuid.UUID, actorID, requ
 	}
 	now := s.now().Truncate(time.Millisecond).UTC()
 	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET approved_at=?,approved_by=? WHERE id=?`, now.UnixMilli(), actorID, nodeID); err != nil {
+		return Node{}, storeError(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
 		return Node{}, storeError(err)
 	}
 	if err := audit(ctx, tx, actorID, requestID, "node.approved", nodeID, now); err != nil {

@@ -43,13 +43,13 @@ func newDestinationCommand(app *app) *cobra.Command {
 		}
 		entry := destination.Entry{Destination: destination.Destination{ID: uuid.New(), Name: args[0], Location: repository.Location{Kind: kind, Path: path}}, Credentials: credentials}
 		switch kind {
-		case "local":
+		case "local", "device":
 			if device == "" {
-				return &client.Error{Code: "invalid_request", Message: "A local destination needs --device and an absolute --path."}
+				return &client.Error{Code: "invalid_request", Message: "A device directory needs --device and an absolute --path."}
 			}
 		case "sftp":
 			if device != "" {
-				return &client.Error{Code: "invalid_request", Message: "Use --device only for a local destination."}
+				return &client.Error{Code: "invalid_request", Message: "Use --device only for a local or Synod-device destination."}
 			}
 			file, err := os.OpenFile(knownHostsFile, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 			if err != nil {
@@ -67,21 +67,27 @@ func newDestinationCommand(app *app) *cobra.Command {
 			entry.Destination.Location.SFTP = &repository.SFTPLocation{Host: host, Port: port, User: user, KnownHosts: string(hosts)}
 		case "s3":
 			if device != "" {
-				return &client.Error{Code: "invalid_request", Message: "Use --device only for a local destination."}
+				return &client.Error{Code: "invalid_request", Message: "Use --device only for a local or Synod-device destination."}
 			}
 			entry.Destination.Location.S3 = &repository.S3Location{Endpoint: endpoint, Bucket: bucket, Prefix: prefix, Region: region}
 		default:
-			return &client.Error{Code: "invalid_request", Message: "Use destination type local, sftp, or s3."}
+			return &client.Error{Code: "invalid_request", Message: "Use destination type local, device, sftp, or s3."}
 		}
 		if err := app.connect(cmd, nil); err != nil {
 			return err
 		}
-		if kind == "local" {
+		if kind == "local" || kind == "device" {
 			node, err := app.api.ResolveNode(cmd.Context(), device)
 			if err != nil {
 				return err
 			}
 			entry.Destination.NodeID = node.ID
+			if kind == "device" {
+				if node.DestinationAddress == "" {
+					return &client.Error{Code: "invalid_request", Message: "Start the destination agent with its blob listener before adding this destination."}
+				}
+				entry.Destination.Location.Device = &repository.DeviceLocation{NodeID: node.ID, DestinationID: entry.Destination.ID}
+			}
 		}
 		if entry.Validate() != nil {
 			return &client.Error{Code: "invalid_request", Message: "The destination settings are invalid. Check its type, path, connection settings, and credentials."}
@@ -98,9 +104,9 @@ func newDestinationCommand(app *app) *cobra.Command {
 		return nil
 	}}
 	flags := add.Flags()
-	flags.StringVar(&kind, "type", "local", "Repository type: local, sftp, or s3")
+	flags.StringVar(&kind, "type", "local", "Repository type: local, device, sftp, or s3")
 	flags.StringVar(&path, "path", "", "Absolute repository directory on the destination device or SFTP host")
-	flags.StringVar(&device, "device", "", "Device ID or name that owns the local path")
+	flags.StringVar(&device, "device", "", "Device ID or name that owns the local or served path")
 	flags.StringVar(&credentialsFile, "credentials-file", "", "Private JSON file with the repository password and provider credentials")
 	flags.StringVar(&host, "host", "", "SFTP host")
 	flags.IntVar(&port, "port", 22, "SFTP port")

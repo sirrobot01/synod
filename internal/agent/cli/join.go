@@ -45,6 +45,8 @@ type joinOptions struct {
 	systemdDir   string
 	// controllerEndpoint replaces the agent endpoint that enrollment returns.
 	controllerEndpoint string
+	destinationListen  string
+	destinationAddress string
 }
 
 func joinCommand() *cobra.Command {
@@ -60,6 +62,8 @@ Run it again with the same token and directory to resume after a failure.`,
 		},
 	}
 	flags := command.Flags()
+	flags.StringVar(&options.destinationListen, "destination-listen", ":8445", "Agent destination listener")
+	flags.StringVar(&options.destinationAddress, "destination-address", "", "Reachable host:port for other agents (default: controller-observed address)")
 	flags.StringVar(&options.dir, "dir", "/var/lib/synod/agent", "Private directory for the agent state and configuration")
 	flags.StringVar(&options.dockerSocket, "docker-socket", "/var/run/docker.sock", "Docker Engine socket")
 	flags.StringVar(&options.controllerEndpoint, "controller-endpoint", "", "Controller agent transport host:port (default: the address enrollment returns)")
@@ -112,6 +116,8 @@ func join(ctx context.Context, encoded string, options joinOptions, stdout io.Wr
 		EnrollmentDir:       filepath.Join(dir, "enrollment"),
 		ControllerEndpoints: []string{endpoint},
 		DockerSocket:        options.dockerSocket,
+		DestinationListen:   options.destinationListen,
+		DestinationAddress:  options.destinationAddress,
 	}
 
 	executable, err := os.Executable()

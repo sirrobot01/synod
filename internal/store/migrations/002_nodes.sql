@@ -11,6 +11,7 @@ CREATE TABLE nodes (
     architecture TEXT NOT NULL DEFAULT '',
     runtime_version TEXT NOT NULL DEFAULT '',
     agent_version TEXT NOT NULL DEFAULT '',
+    destination_address TEXT NOT NULL DEFAULT '',
     session_id TEXT,
     connected_at INTEGER,
     last_seen_at INTEGER,

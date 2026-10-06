@@ -1497,6 +1497,10 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "destination_address": {
+            "type": "string",
+            "description": "The destination service host and port. Empty before advertisement."
           }
         },
         "required": [
@@ -1720,6 +1724,7 @@
           "kind": {
             "enum": [
               "local",
+              "device",
               "sftp",
               "s3"
             ]
@@ -1772,6 +1777,26 @@
                 "type": "string"
               }
             }
+          },
+          "device": {
+            "type": "object",
+            "required": [
+              "node_id",
+              "destination_id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "node_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Must match the destination owner."
+              },
+              "destination_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Must match the destination ID."
+              }
+            }
           }
         }
       },
@@ -1795,7 +1820,7 @@
           "node_id": {
             "type": "string",
             "format": "uuid",
-            "description": "Required for a local path. The device must be approved."
+            "description": "Required for local and Synod-device paths. The device must be approved. A Synod-device destination needs an advertised listener."
           },
           "location": {
             "$ref": "#/components/schemas/RepositoryLocation"

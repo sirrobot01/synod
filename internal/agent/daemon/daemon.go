@@ -1,19 +1,24 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/moby/moby/client"
+	"github.com/sirrobot01/synod/internal/agent/blobserver"
 	"github.com/sirrobot01/synod/internal/agent/enrollment"
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/agent/transport"
@@ -64,10 +69,20 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("%w: read the hostname: %w", ErrConfiguration, err)
 	}
+	blobHandler, err := blobserver.New(identity.Identity.InstallationID, identity.Identity.NodeID, identity.Certificate.Leaf, func(ctx context.Context) (destination.Plan, error) { return cache.DestinationPlan(ctx, ring) })
+	if err != nil {
+		return fmt.Errorf("%w: build destination service: %w", ErrConfiguration, err)
+	}
+	blobListener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cmp.Or(config.DestinationListen, ":8445"))
+	if err != nil {
+		return fmt.Errorf("%w: listen for destination requests: %w", ErrConfiguration, err)
+	}
+	defer blobListener.Close()
+	destinationAddress := cmp.Or(config.DestinationAddress, blobListener.Addr().String())
 	hello := &agentv1.Hello{
-		InstallationId: config.InstallationID, NodeId: config.NodeID,
+		InstallationId: config.InstallationID, NodeId: config.NodeID, DestinationAddress: destinationAddress,
 		Protocol:     &agentv1.VersionRange{Minimum: controlstream.ProtocolVersion, Maximum: controlstream.ProtocolVersion},
-		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
+		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
 		Hostname: hostname, AgentVersion: Version,
 	}
 	stream, err := transport.New(transport.Config{
@@ -102,7 +117,21 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	worker.Go(func() { discover(workerCtx, api, stream, logger) })
 	defer func() { stopWorker(); worker.Wait() }()
 	logger.Info("agent_started", "node_id", config.NodeID, "architecture", facts.architecture, "runtime_version", facts.version)
-	err = stream.Run(ctx)
+	blobHTTP := &http.Server{Handler: blobHandler, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{identity.Certificate}, ClientCAs: roots, ClientAuth: tls.RequireAndVerifyClientCert}, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn), BaseContext: func(net.Listener) context.Context { return workerCtx }}
+	stopped := make(chan error, 2)
+	worker.Go(func() { stopped <- stream.Run(workerCtx) })
+	worker.Go(func() { stopped <- blobHTTP.ServeTLS(blobListener, "", "") })
+	select {
+	case err = <-stopped:
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	stopWorker()
+	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if stopErr := blobHTTP.Shutdown(shutdown); stopErr != nil {
+		err = errors.Join(err, stopErr, blobHTTP.Close())
+	}
 	if ctx.Err() == nil {
 		return fmt.Errorf("%w: %w", ErrExecution, err)
 	}
