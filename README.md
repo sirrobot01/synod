@@ -226,6 +226,46 @@ SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock go test -race -p 1 -count=1 .
 The test creates private containers and a volume.
 It removes them after the test.
 
+## Repository library
+
+The repository library uses Kopia v0.23.1.
+It creates and opens encrypted repositories on a local path, SFTP, or S3.
+Destination commands are not available yet.
+
+The recovery catalog is stored inside the encrypted repository.
+It holds the installation ID, devices, and discovered apps.
+A new catalog generation keeps the previous generations.
+A repeated write with the same content has no effect.
+A stale generation or a conflicting generation fails.
+A repository cannot silently change to another installation.
+Repository settings and backup schedules will be added in later tasks.
+
+Opening a repository needs its location, access credentials, and repository password.
+It needs no saved controller state.
+A private temporary connection file is removed when the repository opens.
+The library keeps no local repository cache.
+
+SFTP uses a private key and a saved host key.
+It requires the server's atomic POSIX rename extension.
+A cancelled SFTP request closes its connection.
+Open the repository again before another request.
+S3 verifies TLS for an HTTPS endpoint.
+An explicit HTTP endpoint is supported for local test services.
+Provider errors do not print credentials.
+Catalog reads, writes, and connection setup have a 30-second deadline.
+Kopia can take up to one retry sleep to observe cancellation.
+
+Run the repository checks with a temporary MinIO service:
+
+```sh
+SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock ./scripts/test-minio.sh go test -race -p 1 -count=1 -timeout=2m ./internal/repository
+```
+
+The fixture builds MinIO from source revision `9e49d5e7a648`.
+It keeps the local test image for later runs.
+It binds a free port to loopback and removes the container after the command.
+The SFTP test starts its own SSH server on loopback.
+
 ## Operator access
 
 The CLI uses the token file in `SYNOD_ADMIN_TOKEN_FILE`.
