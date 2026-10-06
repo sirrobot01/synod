@@ -12,31 +12,30 @@ Read it from these paths even when you work in a worktree.
 | Path | Purpose |
 | --- | --- |
 | `/Users/mukhtarakere/cools/synod/tmp/docs/00-product-brief.md` | Product direction. It wins over every other document. |
-| `/Users/mukhtarakere/cools/synod/tmp/tasks/HANDOFF.md` | Current state, next tasks, and open decisions. |
-| `/Users/mukhtarakere/cools/synod/tmp/tasks/BOARD.md` | Generated task summary. Run `refresh_board.py` first. |
-| `/Users/mukhtarakere/cools/synod/tmp/tasks/items/TASK-NNN.md` | The source of truth for one task. |
+| `/Users/mukhtarakere/cools/synod/tmp/docs/engineering.md` | Code, test, and completion rules. |
+| `/Users/mukhtarakere/cools/synod/tmp/tasks/TASKS.md` | The one task tracker: board, notes, and done log. |
 | `/Users/mukhtarakere/cools/synod/tmp/tasks/HOSTS.md` | The real Linux hosts for end-to-end proof. |
-| `/Users/mukhtarakere/cools/synod/tmp/docs/README.md` | Index of the older specifications. |
+| `/Users/mukhtarakere/cools/synod/tmp/design/` | The approved web UI design. |
 
 Never create a `tmp/` plan inside a worktree. Never copy the plan into Git.
 If these paths do not exist, stop and ask the user for them.
 
 ## Direction
 
-Synod pools a home-lab user's mixed devices and runs any container on them.
+Synod backs up the Docker apps of a home lab and restores them on any device.
 Devices can be amd64 or arm64, and some are only online part of the time.
-Mixed architectures are mandatory. No default mode may require matching devices.
-Apps run in three tiers: databases (tier 1), single-writer apps such as Sonarr (tier 2), and parallel apps (tier 3).
-Before you deepen engine-specific or database-only code, check that the work serves this direction.
+The repository and its password must be enough to restore everything.
+Restore is the product. A backup that was never restored is only a claim.
+Before you add a feature, check that it serves the brief.
 If a task pulls away from the brief, stop and ask the user.
 Rewriting, re-engineering, and moving code are allowed. Staying on course matters most.
 
 ## Keep going
 
 Do not ask the user what to do next when the plan answers it.
-After you finish a task, take the next one from the handoff or the board and start it.
-Do not ask "Should I start TASK-NNN now?". Start it.
-Ask the user only for a real decision: a product or design choice that the brief and the task file leave open, a conflict with the brief, an action that is destructive or visible outside this machine, or a claim that looks abandoned.
+After you finish a task, take the next one from `TASKS.md` and start it.
+Do not ask "Should I start T05 now?". Start it.
+Ask the user only for a real decision: a product or design choice that the brief leaves open, a conflict with the brief, an action that is destructive or visible outside this machine, or a claim that looks abandoned.
 When you ask, give your recommendation, and continue with other unblocked work while you wait.
 
 ## Parallel work
@@ -44,16 +43,15 @@ When you ask, give your recommendation, and continue with other unblocked work w
 Several agents, on different models, can work at the same time.
 Follow these rules so that no two agents collide.
 
-1. Take one task that is `ready`, or that the user names. Work on one task at a time.
-2. Claim it before you change code. In the task file, set `Status` to `in_progress`, set `Claimed by` to your agent and model name, and set `Worktree` and `Base revision`.
-3. Do not take a task that another agent claims. Ask the user when a claim looks abandoned.
-4. Create your worktree from `main`: `git worktree add /Users/mukhtarakere/cools/synod-worktrees/TASK-NNN -b task/NNN main`.
+1. Take one `todo` task whose needs are done, or the task that the user names. Work on one task at a time.
+2. Claim it in `TASKS.md` before you change code: set `doing` and your agent and model name.
+3. Do not take a task that another agent owns. Ask the user when a claim looks abandoned.
+4. Create your worktree from `main`: `git worktree add /Users/mukhtarakere/cools/synod-worktrees/TNN -b tNN main`.
 5. Change code only in your worktree. Change plan files only at the main checkout paths above.
-6. Change only the paths that your task file lists. Record a scope change in the task file before you make it.
-7. Shared contracts are proto files, migrations, `go.mod`, API shapes, and shared domain types. Before you change one, check the board for another `in_progress` task that changes it. If one exists, stop and ask the user.
-8. Before a merge, rebase on `main` and run the task's checks again in your worktree.
-9. Merge from the main checkout with `git merge --ff-only task/NNN`. Then remove the worktree and the branch.
-10. When you stop, record the completed work and the exact next action in the task file. Clear `Claimed by` if you will not continue.
+6. Shared contracts are proto files, migrations, `go.mod`, API shapes, and shared domain types. Before you change one, check the board for another `doing` task that changes it. If one exists, stop and ask the user.
+7. Before a merge, rebase on `main` and run the task's checks again in your worktree.
+8. Merge from the main checkout with `git merge --ff-only tNN`. Then remove the worktree and the branch.
+9. When you stop, write the exact next action in the task's note. Clear the owner if you will not continue.
 
 ## Code
 
@@ -102,18 +100,17 @@ Use real dependencies for critical transaction and orchestration tests.
   `SYNOD_TEST_DOCKER_HOST=unix://<docker socket> ./scripts/test-etcd.sh ./scripts/test-postgres.sh go test -race -p 1 -count=1 <packages>`.
 - For heavy Docker packages (`internal/runtime/docker`, `internal/engine/postgres`), use `-run` to select the tests you touched.
 - Never change the tree while a `go test` run is in flight. Never use `git stash` to get a baseline. Use a separate worktree at the base revision.
-- A failure that also happens on the base revision is not yours. Record it in the task file and in the handoff.
+- A failure that also happens on the base revision is not yours. Record it in the task note in `TASKS.md`.
 - Known flaky tests: `TestRunnerReleasesASlotWhenNoOwnerIsElected` in `internal/controller/runner`, and the enrollment tests in `internal/api` under heavy load. Run a flaky test again alone before you draw a conclusion.
 - For web changes, run `npx svelte-check`, `npx vitest run`, and `npm run build` in `web/`. The `dist` output is committed.
 - Some behaviour needs real Linux hosts: host networking, `/proc`, and mTLS between machines. Read `HOSTS.md` before you use them.
 
 ## Records
 
-Write the record in the task file before you stop work.
-Record changed behaviour, files, contracts, test commands, results, and remaining limits.
+Keep records short. `TASKS.md` explains the format.
+Record changed behaviour, commands, results, and remaining limits in the done log.
 Do not mark a check passed before it finishes.
 Do not mark a task done before its checks pass on the integrated result.
-If a done task missed a file in its own scope, reopen that task. Do not fix it inside your current task.
 
 ## Commits
 
