@@ -282,9 +282,9 @@ func (s *Store) RecordAgentSession(ctx context.Context, nodeID, sessionID uuid.U
 		return storeError(err)
 	}
 	defer tx.Rollback()
-	var previous string
+	var previous, previousArchitecture, previousName string
 	var approved bool
-	if err := tx.QueryRowContext(ctx, `SELECT destination_address,approved_at IS NOT NULL FROM nodes WHERE id=? AND revoked_at IS NULL`, nodeID).Scan(&previous, &approved); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT destination_address,architecture,name,approved_at IS NOT NULL FROM nodes WHERE id=? AND revoked_at IS NULL`, nodeID).Scan(&previous, &previousArchitecture, &previousName, &approved); err != nil {
 		return storeError(err)
 	}
 	now := s.now().UnixMilli()
@@ -293,7 +293,7 @@ func (s *Store) RecordAgentSession(ctx context.Context, nodeID, sessionID uuid.U
  WHERE id=?`, sessionID, now, now, hello.Architecture, hello.RuntimeVersion, hello.AgentVersion, hello.DestinationAddress, hello.Hostname, nodeID); err != nil {
 		return storeError(err)
 	}
-	if approved && previous != hello.DestinationAddress {
+	if approved && (previous != hello.DestinationAddress || previousArchitecture != hello.Architecture || (previousName == "" && hello.Hostname != "")) {
 		if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
 			return storeError(err)
 		}

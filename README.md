@@ -13,7 +13,7 @@ It provides user accounts, API tokens, operation records, and a web shell.
 The controller stores its metadata in SQLite through `modernc.org/sqlite`.
 It requires no PostgreSQL server or etcd service.
 
-On-demand Stop and Live backups are available for file-based apps.
+On-demand and scheduled Stop and Live backups are available for file-based apps.
 They use encrypted local, Synod-device, SFTP, or S3 repositories.
 Schedules, database dumps, app restore, repository recovery, and the recovery kit are not available yet.
 Synod does not place running apps or provide automatic failover.
@@ -318,8 +318,63 @@ Removing a destination keeps all repository data.
 It removes the saved credentials from the active controller record.
 An offline agent removes its copy when it receives the next plan.
 Removal does not revoke credentials at the storage provider.
-A destination cannot be removed while a backup operation uses it.
-App schedules and saved destination choices are later tasks.
+A destination cannot be removed while a backup operation or an enabled plan uses it.
+
+## Protect apps on a schedule
+
+Review the paths and the proposed settings before confirmation.
+Use a destination on another device to protect against source device loss.
+
+```sh
+synod protect --all --destination peer
+# Repeat the same command with the revision shown in the preview.
+synod protect --all --destination peer --confirm REVISION
+synod app status
+```
+
+Protect all also enables automatic protection for new apps.
+Select one app to change only that app.
+Use `--device` if its name occurs on more than one device.
+An explicit opt-out stays off when Synod discovers the app again.
+
+```sh
+synod protect notes --destination peer --destination cloud --at 03:30 --time-zone Africa/Lagos
+synod protect notes --off
+synod protect --all --off
+```
+
+These commands show a preview.
+Repeat the same command with `--confirm REVISION` to save it.
+A changed plan requires a new review.
+Omitted flags keep saved choices.
+Use `--off` to stop future admissions after settings reach the agent.
+Admitted work still finishes. Existing snapshots remain available.
+
+The defaults are Auto, 03:00 UTC, 7 daily, 4 weekly, and 6 monthly snapshots.
+Auto uses Stop for file apps.
+Database apps show a blocked state until dump support is available.
+Use `--method live` only when the app permits a live copy.
+Use `--keep-daily`, `--keep-weekly`, and `--keep-monthly` to change retention.
+Retention always keeps the newest copy, the copy just made, and Kopia pins.
+It expires older snapshot records after a successful backup.
+Content space reclamation remains a later maintenance task.
+
+A new plan runs at once, then once each day at the saved time.
+A part-time device takes one current backup when it returns.
+It does not replay every missed day.
+A skipped daylight-saving time moves forward by the clock gap.
+A repeated daylight-saving time has one slot.
+The agent saves schedules and destination credentials in its encrypted cache.
+An initialized repository remains usable during a controller outage.
+The agent reports saved results when the controller returns.
+First repository setup requires the controller to assign one owner.
+
+App status shows pending settings, blocked apps, per-destination results, and warnings.
+The data-loss window starts at the last good backup's start time.
+No reported good copy means that the window is unknown.
+`catalog_write_failed` means that the backup did not save current recovery settings.
+`retention_failed` means that the backup did not expire older copies.
+The next backup retries these steps.
 
 ## Back up an app
 
@@ -382,12 +437,15 @@ Destination commands save the connection settings.
 They do not create a repository or start a backup.
 
 The recovery catalog is stored inside the encrypted repository.
-It holds the installation ID, devices, and discovered apps.
+It holds the installation ID, devices, apps, destination credentials, and protection settings.
+Each backup writes its cached catalog after the app resumes.
+Settings changed after that write reach the repository with a later backup.
+An offline agent cannot replace a newer catalog generation.
 A new catalog generation keeps the previous generations.
 A repeated write with the same content has no effect.
 A stale generation or a conflicting generation fails.
 A repository cannot silently change to another installation.
-Repository settings and backup schedules will be added in later tasks.
+Controller recovery from this catalog remains a later task.
 
 Opening a repository needs its location, access credentials, and repository password.
 It needs no saved controller state.

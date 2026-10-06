@@ -9,8 +9,12 @@ import (
 	"errors"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/destination"
+	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/secret"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // AddDestination saves settings once. A retry must have the same ID and input.
@@ -174,14 +178,14 @@ func (s *Store) ListDestinations(ctx context.Context) (destination.Listing, erro
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return result, storeError(err)
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT n.id,n.name,coalesce(d.revision,0),coalesce(d.revision=? AND d.session_id=n.session_id,0),d.acknowledged_at FROM nodes n LEFT JOIN destination_deliveries d ON d.node_id=n.id WHERE n.approved_at IS NOT NULL AND n.revoked_at IS NULL ORDER BY n.name,n.id`, result.Revision)
+	rows, err = tx.QueryContext(ctx, `SELECT n.id,n.name,coalesce(n.session_id,''),coalesce(d.revision,0),coalesce(d.revision=? AND d.session_id=n.session_id,0),d.acknowledged_at FROM nodes n LEFT JOIN destination_deliveries d ON d.node_id=n.id WHERE n.approved_at IS NOT NULL AND n.revoked_at IS NULL ORDER BY n.name,n.id`, result.Revision)
 	if err != nil {
 		return result, storeError(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var d destination.Delivery
-		if err := rows.Scan(&d.NodeID, &d.NodeName, &d.Revision, &d.Current, optionalMillis{&d.AcknowledgedAt}); err != nil {
+		if err := rows.Scan(&d.NodeID, &d.NodeName, &d.SessionID, &d.Revision, &d.Current, optionalMillis{&d.AcknowledgedAt}); err != nil {
 			return result, storeError(err)
 		}
 		result.Delivery = append(result.Delivery, d)
@@ -192,10 +196,10 @@ func (s *Store) ListDestinations(ctx context.Context) (destination.Listing, erro
 	return result, storeCommit(tx)
 }
 
-// DestinationPlan decrypts only settings available to the current approved session.
+// DestinationPlan returns authorized settings and the private recovery catalog.
 func (s *Store) DestinationPlan(ctx context.Context, installationID, nodeID, sessionID uuid.UUID, ring *secret.Keyring) (destination.Plan, error) {
-	result := destination.Plan{Destinations: []destination.Entry{}}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	result := destination.Plan{InstallationID: installationID, Destinations: []destination.Entry{}}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return result, storeError(err)
 	}
@@ -210,51 +214,21 @@ func (s *Store) DestinationPlan(ctx context.Context, installationID, nodeID, ses
 	if err := tx.QueryRowContext(ctx, `SELECT revision FROM destination_revision`).Scan(&result.Revision); err != nil {
 		return result, storeError(err)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id,definition,credentials FROM destinations WHERE removed_at IS NULL AND (kind!='local' OR node_id=?) ORDER BY id`, nodeID)
+	catalog, compressed, err := s.recoveryCatalog(ctx, tx, installationID, result.Revision, ring)
 	if err != nil {
-		return result, storeError(err)
+		return result, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id uuid.UUID
-		var definition, raw []byte
-		if err := rows.Scan(&id, &definition, &raw); err != nil {
-			return result, storeError(err)
+	result.Catalog = compressed
+	for _, target := range catalog.Destinations {
+		if target.Location.Kind == "local" && target.NodeID != nodeID {
+			continue
 		}
-		var envelope secret.Envelope
-		if err := json.Unmarshal(raw, &envelope); err != nil {
-			return result, storeError(err)
-		}
-		plain, err := ring.Open(secret.Binding{InstallationID: installationID, OwnerType: "destination", OwnerID: id, CredentialID: id, Version: 1}, envelope)
-		if err != nil {
-			return result, storeError(err)
-		}
-		var entry destination.Entry
-		err = json.Unmarshal(plain, &entry)
-		clear(plain)
-		if err != nil {
-			return result, storeError(err)
-		}
-		var public destination.Destination
-		if err := json.Unmarshal(definition, &public); err != nil {
-			return result, storeError(err)
-		}
-		entry.Destination.CreatedAt = public.CreatedAt
-		expected, _ := json.Marshal(entry.Destination)
-		if !bytes.Equal(definition, expected) {
-			return result, &Error{Code: Unavailable}
-		}
-		if entry.Destination.Location.Kind != "local" || entry.Destination.NodeID == nodeID {
-			result.Destinations = append(result.Destinations, entry)
+		result.Destinations = append(result.Destinations, destination.Entry{Destination: destination.Destination{ID: target.ID, Name: target.Name, NodeID: target.NodeID, Location: target.Location, CreatedAt: target.CreatedAt}, Credentials: target.Credentials})
+		if target.Initialized {
+			result.Ready = append(result.Ready, target.ID)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return result, storeError(err)
-	}
-	if err := rows.Close(); err != nil {
-		return result, storeError(err)
-	}
-	rows, err = tx.QueryContext(ctx, `SELECT n.id,n.destination_address,c.der_hash FROM nodes n JOIN node_certificates c ON c.node_id=n.id WHERE n.approved_at IS NOT NULL AND n.revoked_at IS NULL AND c.revoked_at IS NULL ORDER BY n.id,c.id`)
+	rows, err := tx.QueryContext(ctx, `SELECT n.id,n.destination_address,c.der_hash FROM nodes n JOIN node_certificates c ON c.node_id=n.id WHERE n.approved_at IS NOT NULL AND n.revoked_at IS NULL AND c.revoked_at IS NULL ORDER BY n.id,c.id`)
 	if err != nil {
 		return result, storeError(err)
 	}
@@ -267,6 +241,31 @@ func (s *Store) DestinationPlan(ctx context.Context, installationID, nodeID, ses
 		}
 		peer.CertificateSHA256 = hex.EncodeToString(hash)
 		result.Peers = append(result.Peers, peer)
+	}
+	if err := rows.Err(); err != nil {
+		return result, storeError(err)
+	}
+	if err := rows.Close(); err != nil {
+		return result, storeError(err)
+	}
+	rows, err = tx.QueryContext(ctx, `SELECT s.definition,a.definition FROM app_protection p JOIN backup_schedules s ON s.id=p.schedule_id JOIN apps a ON a.id=p.app_id WHERE p.enabled=1 AND s.node_id=? AND a.present=1 ORDER BY p.app_id`, nodeID)
+	if err != nil {
+		return result, storeError(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw, definition []byte
+		if err := rows.Scan(&raw, &definition); err != nil {
+			return result, storeError(err)
+		}
+		var schedule backup.Schedule
+		app := inventory.App{Present: true, Definition: new(agentv1.DiscoveredApp)}
+		if json.Unmarshal(raw, &schedule) != nil || schedule.InstallationID != installationID || proto.Unmarshal(definition, app.Definition) != nil {
+			return result, &Error{Code: Unavailable}
+		}
+		if backup.BlockedCode(app) == "" {
+			result.Schedules = append(result.Schedules, schedule)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return result, storeError(err)

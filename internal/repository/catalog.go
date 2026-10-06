@@ -2,16 +2,19 @@ package repository
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/kopia/kopia/repo"
+	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/inventory"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -20,12 +23,77 @@ import (
 // Catalog is the recovery state stored inside the encrypted repository.
 // Increase Generation when the controller changes this state.
 type Catalog struct {
-	Version        int             `json:"version"`
-	InstallationID uuid.UUID       `json:"installation_id"`
-	Generation     uint64          `json:"generation"`
-	WrittenAt      time.Time       `json:"written_at"`
-	Devices        []Device        `json:"devices"`
-	Apps           []inventory.App `json:"apps"`
+	Version        int                  `json:"version"`
+	InstallationID uuid.UUID            `json:"installation_id"`
+	Generation     uint64               `json:"generation"`
+	WrittenAt      time.Time            `json:"written_at"`
+	Devices        []Device             `json:"devices"`
+	Apps           []inventory.App      `json:"apps"`
+	Destinations   []CatalogDestination `json:"destinations,omitempty"`
+	AutoProtect    bool                 `json:"auto_protect"`
+	Defaults       *backup.Settings     `json:"defaults,omitzero"`
+	Protection     []backup.Selection   `json:"protection,omitempty"`
+}
+
+func (Catalog) String() string   { return "[private recovery catalog]" }
+func (Catalog) GoString() string { return "[private recovery catalog]" }
+
+// CatalogDestination keeps the settings needed to reopen other copies after controller loss.
+type CatalogDestination struct {
+	ID          uuid.UUID   `json:"id"`
+	Name        string      `json:"name"`
+	NodeID      uuid.UUID   `json:"node_id,omitzero"`
+	Location    Location    `json:"location"`
+	Credentials Credentials `json:"credentials"`
+	Initialized bool        `json:"initialized"`
+	CreatedAt   time.Time   `json:"created_at"`
+}
+
+func (CatalogDestination) String() string   { return "[private recovery destination]" }
+func (CatalogDestination) GoString() string { return "[private recovery destination]" }
+
+const MaxCatalogBytes = 8 << 20
+const MaxCatalogTransferBytes = 512 << 10
+
+// EncodeCatalog bounds and compresses recovery settings for encrypted agent delivery.
+func EncodeCatalog(catalog Catalog) ([]byte, error) {
+	if validateCatalog(catalog) != nil {
+		return nil, ErrCatalogInvalid
+	}
+	raw, err := json.Marshal(catalog)
+	defer clear(raw)
+	if err != nil || len(raw) > MaxCatalogBytes {
+		return nil, ErrCatalogInvalid
+	}
+	var result bytes.Buffer
+	w := gzip.NewWriter(&result)
+	if _, err := w.Write(raw); err != nil {
+		w.Close()
+		return nil, ErrCatalogInvalid
+	}
+	if err := w.Close(); err != nil || result.Len() > MaxCatalogTransferBytes {
+		return nil, ErrCatalogInvalid
+	}
+	return result.Bytes(), nil
+}
+
+// DecodeCatalog bounds decompression before it reads private recovery settings.
+func DecodeCatalog(data []byte) (Catalog, error) {
+	if len(data) == 0 || len(data) > MaxCatalogTransferBytes {
+		return Catalog{}, ErrCatalogInvalid
+	}
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return Catalog{}, ErrCatalogInvalid
+	}
+	defer r.Close()
+	raw, err := io.ReadAll(io.LimitReader(r, MaxCatalogBytes+1))
+	defer clear(raw)
+	var result Catalog
+	if err != nil || len(raw) > MaxCatalogBytes || json.Unmarshal(raw, &result) != nil || validateCatalog(result) != nil {
+		return Catalog{}, ErrCatalogInvalid
+	}
+	return result, nil
 }
 
 type Device struct {
@@ -47,7 +115,7 @@ func (r *Repository) WriteCatalog(ctx context.Context, catalog Catalog) error {
 		return err
 	}
 	data, err := json.Marshal(catalog)
-	if err != nil || len(data) > 8<<20 {
+	if err != nil || len(data) > MaxCatalogBytes {
 		return ErrCatalogInvalid
 	}
 	r.write.Lock()
@@ -129,7 +197,7 @@ func (r *Repository) ReadCatalog(ctx context.Context) (Catalog, error) {
 			return Catalog{}, ErrCatalogInvalid
 		}
 		data, err := json.Marshal(catalog)
-		if err != nil || len(data) > 8<<20 {
+		if err != nil || len(data) > MaxCatalogBytes {
 			return Catalog{}, ErrCatalogInvalid
 		}
 		if selectedJSON != nil && !bytes.Equal(selectedJSON, data) {
@@ -147,6 +215,9 @@ func (r *Repository) ReadCatalog(ctx context.Context) (Catalog, error) {
 }
 
 func validateCatalog(catalog Catalog) error {
+	if len(catalog.Devices) > 256 || len(catalog.Apps) > 8192 || len(catalog.Destinations) > 64 || len(catalog.Protection) > 8192 {
+		return ErrCatalogInvalid
+	}
 	if catalog.Version != 1 || catalog.InstallationID == uuid.Nil || catalog.Generation == 0 || catalog.WrittenAt.IsZero() {
 		return ErrCatalogInvalid
 	}
@@ -162,7 +233,48 @@ func validateCatalog(catalog Catalog) error {
 		if app.ID == uuid.Nil || apps[app.ID] || !devices[app.NodeID] || app.Definition == nil || inventory.Validate(&agentv1.AppInventory{ObservedAt: timestamppb.New(app.ObservedAt), Apps: []*agentv1.DiscoveredApp{app.Definition}}) != nil {
 			return ErrCatalogInvalid
 		}
+		if app.ID != uuid.NewSHA1(app.NodeID, []byte(app.Definition.Key)) {
+			return ErrCatalogInvalid
+		}
 		apps[app.ID] = true
+	}
+	targets := make(map[uuid.UUID]bool)
+	for _, target := range catalog.Destinations {
+		if target.ID == uuid.Nil || targets[target.ID] || target.Name == "" || len(target.Name) > 128 || Validate(target.Location, target.Credentials) != nil || ((target.Location.Kind == "local" || target.Location.Kind == "device") != (target.NodeID != uuid.Nil)) || (target.NodeID != uuid.Nil && !devices[target.NodeID]) || target.Credentials.DeviceIdentity != nil {
+			return ErrCatalogInvalid
+		}
+		if target.Location.Kind == "device" && (target.Location.Device.NodeID != target.NodeID || target.Location.Device.DestinationID != target.ID) {
+			return ErrCatalogInvalid
+		}
+		targets[target.ID] = true
+	}
+	if catalog.AutoProtect {
+		if catalog.Defaults == nil || catalog.Defaults.Validate() != nil {
+			return ErrCatalogInvalid
+		}
+		for _, id := range catalog.Defaults.Destinations {
+			if !targets[id] {
+				return ErrCatalogInvalid
+			}
+		}
+	}
+	selected := make(map[uuid.UUID]bool)
+	for _, selection := range catalog.Protection {
+		if !apps[selection.AppID] || selected[selection.AppID] {
+			return ErrCatalogInvalid
+		}
+		selected[selection.AppID] = true
+		if !selection.Enabled {
+			continue
+		}
+		if selection.Settings.Validate() != nil {
+			return ErrCatalogInvalid
+		}
+		for _, id := range selection.Settings.Destinations {
+			if !targets[id] {
+				return ErrCatalogInvalid
+			}
+		}
 	}
 	return nil
 }

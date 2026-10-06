@@ -225,7 +225,7 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 	if err := rows.Close(); err != nil {
 		return plan, storeError(err)
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT a.id,a.node_id,n.name,a.observed_at,a.present,a.definition,n.approved_at IS NOT NULL AND n.revoked_at IS NULL,coalesce(p.enabled,0),p.settings,p.schedule_id,p.changed_at FROM apps a JOIN nodes n ON n.id=a.node_id LEFT JOIN app_protection p ON p.app_id=a.id ORDER BY n.name,a.source_key,a.id`)
+	rows, err = tx.QueryContext(ctx, `SELECT a.id,a.node_id,n.name,a.observed_at,a.present,a.definition,n.approved_at IS NOT NULL AND n.revoked_at IS NULL,coalesce(p.enabled,0),p.settings,p.schedule_id,p.changed_at,coalesce(d.revision=? AND d.session_id=n.session_id,0) FROM apps a JOIN nodes n ON n.id=a.node_id LEFT JOIN app_protection p ON p.app_id=a.id LEFT JOIN destination_deliveries d ON d.node_id=n.id ORDER BY n.name,a.source_key,a.id`, plan.Revision)
 	if err != nil {
 		return plan, storeError(err)
 	}
@@ -236,7 +236,7 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 		var approved bool
 		var scheduleID sql.Null[uuid.UUID]
 		var changed sql.NullInt64
-		if err := rows.Scan(&entry.App.ID, &entry.App.NodeID, &entry.App.NodeName, millis{&entry.App.ObservedAt}, &entry.App.Present, &raw, &approved, &entry.Enabled, &settings, &scheduleID, &changed); err != nil {
+		if err := rows.Scan(&entry.App.ID, &entry.App.NodeID, &entry.App.NodeName, millis{&entry.App.ObservedAt}, &entry.App.Present, &raw, &approved, &entry.Enabled, &settings, &scheduleID, &changed, &entry.SettingsCurrent); err != nil {
 			return plan, storeError(err)
 		}
 		entry.App.Definition = new(agentv1.DiscoveredApp)
@@ -314,9 +314,9 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 	now := s.now()
 	for i := range plan.Apps {
 		entry := &plan.Apps[i]
-		entry.State = "unprotected"
+		entry.State = backup.Unprotected
 		if entry.Enabled {
-			entry.State = "protected"
+			entry.State = backup.Protected
 		}
 		targetIDs := slices.Clone(entry.Settings.Destinations)
 		for key := range latest {
@@ -325,9 +325,9 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 			}
 		}
 		slices.SortFunc(targetIDs, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
-		states := make(map[string]bool)
+		states := make(map[backup.ProtectionState]bool)
 		for _, id := range targetIDs {
-			status := backup.TargetStatus{DestinationID: id, State: "pending", Selected: entry.Enabled && slices.Contains(entry.Settings.Destinations, id)}
+			status := backup.TargetStatus{DestinationID: id, State: backup.Pending, Selected: entry.Enabled && slices.Contains(entry.Settings.Destinations, id)}
 			if status.Selected {
 				schedule := backup.Schedule{ID: entry.ScheduleID, InstallationID: installation.V, AppID: entry.App.ID, NodeID: entry.App.NodeID, SourceKey: entry.App.Definition.Key, Settings: entry.Settings, CreatedAt: entry.ChangedAt}
 				status.DueAt = schedule.Due(now)
@@ -336,11 +336,11 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 			if result, ok := good[key]; ok {
 				status.LastGood = &result
 				status.DataLossWindowSeconds = new(max(0, int64(now.Sub(result.StartedAt).Seconds())))
-				status.State = "protected"
+				status.State = backup.Protected
 				if !status.Selected {
-					status.State = "retained"
+					status.State = backup.Retained
 				} else if result.StartedAt.Before(status.DueAt) {
-					status.State = "overdue"
+					status.State = backup.Overdue
 				}
 				if entry.DataLossWindowSeconds == nil || *status.DataLossWindowSeconds < *entry.DataLossWindowSeconds {
 					entry.DataLossWindowSeconds = status.DataLossWindowSeconds
@@ -350,9 +350,11 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 				status.LastOperationID = op.ID
 				status.FailureCode = op.FailureCode
 				if !op.Status.Terminal() {
-					status.State = string(op.Status)
+					status.State = backup.ProtectionState(op.Status)
 				} else if op.Status == operation.Failed {
-					status.State = "failed"
+					status.State = backup.Failed
+				} else if status.State == backup.Protected && status.LastGood != nil && len(status.LastGood.WarningCodes) > 0 {
+					status.State = backup.Warning
 				}
 			}
 			if status.Selected {
@@ -361,14 +363,14 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 			entry.Targets = append(entry.Targets, status)
 		}
 		if len(states) > 1 {
-			entry.State = "partial"
+			entry.State = backup.Partial
 		} else {
 			for state := range states {
 				entry.State = state
 			}
 		}
 		if entry.Enabled && entry.BlockedCode != "" {
-			entry.State = "blocked"
+			entry.State = backup.Blocked
 		}
 	}
 	return plan, storeCommit(tx)

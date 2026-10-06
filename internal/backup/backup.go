@@ -90,6 +90,7 @@ type Result struct {
 	FailureCode      string    `json:"failure_code,omitempty"`
 	RepositoryOpened bool      `json:"repository_opened,omitzero"`
 	RestartPending   []string  `json:"restart_pending,omitempty"`
+	WarningCodes     []string  `json:"warning_codes,omitempty"`
 }
 
 // Submission holds the choices made by an administrator. The controller resolves the device.
@@ -123,6 +124,14 @@ func (e Event) Validate(request Request) error {
 	if e.ID != request.ID || result.DestinationID != request.DestinationID || result.DowntimeMillis < 0 || result.FileBytes < 0 || len(result.RestartPending) > 256 {
 		return ErrInvalid
 	}
+	if len(result.WarningCodes) > 2 || (len(result.WarningCodes) != 0 && !result.RepositoryOpened) {
+		return ErrInvalid
+	}
+	for i, warning := range result.WarningCodes {
+		if !slices.Contains([]string{"catalog_write_failed", "retention_failed"}, warning) || slices.Contains(result.WarningCodes[:i], warning) {
+			return ErrInvalid
+		}
+	}
 	for _, id := range result.RestartPending {
 		if len(id) != 64 || strings.ContainsFunc(id, func(r rune) bool { return !strings.ContainsRune("0123456789abcdef", r) }) {
 			return ErrInvalid
@@ -133,7 +142,7 @@ func (e Event) Validate(request Request) error {
 		if e.Status == "queued" && (result.RepositoryOpened || !result.StartedAt.IsZero() || len(result.RestartPending) > 0) {
 			return ErrInvalid
 		}
-		if result.SnapshotID != uuid.Nil || !result.CompletedAt.IsZero() || result.FailureCode != "" {
+		if result.SnapshotID != uuid.Nil || !result.CompletedAt.IsZero() || result.FailureCode != "" || len(result.WarningCodes) != 0 {
 			return ErrInvalid
 		}
 	case "succeeded", "failed":

@@ -37,7 +37,7 @@ func DestinationKeyring(installationID, nodeID uuid.UUID, privateKey any) (*secr
 
 // SaveDestinationPlan commits an encrypted replacement before the agent acknowledges it.
 func (j *Journal) SaveDestinationPlan(ctx context.Context, ring *secret.Keyring, plan destination.Plan) error {
-	if plan.Validate(j.nodeID) != nil {
+	if plan.InstallationID != j.installationID || plan.Validate(j.nodeID) != nil {
 		return ErrConflict
 	}
 	input, err := json.Marshal(plan)
@@ -110,7 +110,7 @@ func (j *Journal) DestinationPlan(ctx context.Context, ring *secret.Keyring) (de
 	}
 	defer clear(plain)
 	var plan destination.Plan
-	if err := json.Unmarshal(plain, &plan); err != nil || plan.Revision != revision || plan.Validate(j.nodeID) != nil {
+	if err := json.Unmarshal(plain, &plan); err != nil || plan.Revision != revision || plan.InstallationID != j.installationID || plan.Validate(j.nodeID) != nil {
 		return destination.Plan{}, ErrConflict
 	}
 	return plan, nil

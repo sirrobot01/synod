@@ -356,6 +356,41 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 		result.SnapshotID = state.Metadata.ID
 		result.FileBytes = state.Metadata.FileBytes
 	}
+	if r != nil && state.RepositoryOpened {
+		plan, catalogErr := w.Journal.DestinationPlan(cleanup, w.Keyring)
+		var catalog repository.Catalog
+		if catalogErr == nil {
+			catalog, catalogErr = repository.DecodeCatalog(plan.Catalog)
+		}
+		if catalogErr == nil && catalog.InstallationID != w.InstallationID {
+			catalogErr = repository.ErrCatalogConflict
+		}
+		if catalogErr == nil {
+			previous, err := r.ReadCatalog(cleanup)
+			if err != nil && !errors.Is(err, repository.ErrCatalogMissing) {
+				catalogErr = err
+			} else if err == nil && previous.InstallationID != w.InstallationID {
+				catalogErr = repository.ErrCatalogConflict
+			} else if previous.Generation <= catalog.Generation {
+				catalogErr = r.WriteCatalog(cleanup, catalog)
+				// Another agent can commit a newer generation between the read and write.
+				if errors.Is(catalogErr, repository.ErrCatalogConflict) {
+					latest, err := r.ReadCatalog(cleanup)
+					if err == nil && latest.InstallationID == w.InstallationID && latest.Generation > catalog.Generation {
+						catalogErr = nil
+					}
+				}
+			}
+		}
+		if catalogErr != nil {
+			result.WarningCodes = append(result.WarningCodes, "catalog_write_failed")
+		}
+		if result.FailureCode == "" && request.Retention != nil {
+			if _, err := r.ApplyRetention(cleanup, w.InstallationID, request.AppID, request.DestinationID, *request.Retention, result.SnapshotID); err != nil {
+				result.WarningCodes = append(result.WarningCodes, "retention_failed")
+			}
+		}
+	}
 	raw, _ := json.Marshal(result)
 	if err := w.Journal.Complete(cleanup, request.ID, raw); err != nil {
 		return backup.Result{}, err

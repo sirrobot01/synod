@@ -14,9 +14,9 @@ import (
 	"github.com/sirrobot01/synod/internal/backup"
 )
 
-// ApplyRetention expires snapshots for one app and destination. It always keeps the newest copy.
+// ApplyRetention expires snapshots for one app and destination. It keeps the newest and current copies.
 // Kopia pins also keep a snapshot. Content reclamation is a separate maintenance step.
-func (r *Repository) ApplyRetention(ctx context.Context, installationID, appID, destinationID uuid.UUID, retention backup.Retention) ([]uuid.UUID, error) {
+func (r *Repository) ApplyRetention(ctx context.Context, installationID, appID, destinationID uuid.UUID, retention backup.Retention, current uuid.UUID) ([]uuid.UUID, error) {
 	if installationID == uuid.Nil || appID == uuid.Nil || destinationID == uuid.Nil || retention.Validate() != nil {
 		return nil, backup.ErrInvalid
 	}
@@ -57,12 +57,15 @@ func (r *Repository) ApplyRetention(ctx context.Context, installationID, appID, 
 		logical[file.ID] = saved.ID
 		metadata[file.ID] = entry.ID
 	}
+	if current != uuid.Nil && !seen[current] {
+		return nil, backup.ErrInvalid
+	}
 	retentionPolicy := policy.RetentionPolicy{KeepLatest: new(policy.OptionalInt(1)), KeepDaily: new(policy.OptionalInt(retention.Daily)), KeepWeekly: new(policy.OptionalInt(retention.Weekly)), KeepMonthly: new(policy.OptionalInt(retention.Monthly))}
 	retentionPolicy.ComputeRetentionReasons(files)
 	var expired []*snapshot.Manifest
 	var ids []uuid.UUID
 	for _, file := range files {
-		if len(file.RetentionReasons) == 0 && len(file.Pins) == 0 {
+		if len(file.RetentionReasons) == 0 && len(file.Pins) == 0 && logical[file.ID] != current {
 			expired = append(expired, file)
 			ids = append(ids, logical[file.ID])
 		}

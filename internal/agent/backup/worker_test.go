@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -16,9 +17,11 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/client"
+	"github.com/sirrobot01/synod/internal/agent/discovery"
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/destination"
+	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/secret"
 )
@@ -57,7 +60,7 @@ func newWorkerFixture(t *testing.T, method backup.Method, stopAction string) *wo
 	}
 	fixture.worker = &Worker{Docker: api, Journal: cache, Keyring: ring, InstallationID: installation, NodeID: node, NodeName: "fixture", Architecture: "arm64"}
 	t.Cleanup(func() { fixture.worker.Journal.Close() })
-	if err := cache.SaveDestinationPlan(t.Context(), ring, destination.Plan{Revision: 1, Destinations: []destination.Entry{{Destination: destination.Destination{ID: destinationID, Name: "test", NodeID: node, Location: fixture.location, CreatedAt: time.Now().UTC()}, Credentials: fixture.credentials}}}); err != nil {
+	if err := cache.SaveDestinationPlan(t.Context(), ring, destination.Plan{InstallationID: installation, Revision: 1, Destinations: []destination.Entry{{Destination: destination.Destination{ID: destinationID, Name: "test", NodeID: node, Location: fixture.location, CreatedAt: time.Now().UTC()}, Credentials: fixture.credentials}}}); err != nil {
 		t.Fatal(err)
 	}
 	for name, content := range map[string]string{"compose.yaml": "services: {}\n", "state": "before-stop", ".env": "PRIVATE=private-worker-data"} {
@@ -91,6 +94,29 @@ func newWorkerFixture(t *testing.T, method backup.Method, stopAction string) *wo
 	}
 	keyName := "compose:" + project
 	fixture.request = backup.Request{ID: uuid.New(), InstallationID: installation, NodeID: node, AppID: uuid.NewSHA1(node, []byte(keyName)), SourceKey: keyName, DestinationID: destinationID, Method: method, Initialize: true, RequestedAt: time.Now().UTC()}
+	filters := make(client.Filters)
+	filters.Add("label", "com.docker.compose.project="+project)
+	report, err := discovery.Scan(t.Context(), api, filters)
+	if err != nil || len(report.Apps) != 1 {
+		t.Fatalf("catalog fixture scan: %v", err)
+	}
+	plan, err := cache.DestinationPlan(t.Context(), ring)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Revision++
+	settings := backup.DefaultSettings()
+	settings.Destinations = []uuid.UUID{destinationID}
+	settings.Method = method
+	catalog := repository.Catalog{Version: 1, InstallationID: installation, Generation: uint64(plan.Revision), WrittenAt: time.Now().UTC(), Devices: []repository.Device{{ID: node, Name: "fixture", Architecture: "arm64"}}, Apps: []inventory.App{{ID: fixture.request.AppID, NodeID: node, NodeName: "fixture", ObservedAt: report.ObservedAt.AsTime(), Present: true, Definition: report.Apps[0]}}, Defaults: &settings, Protection: []backup.Selection{{AppID: fixture.request.AppID, Enabled: true, Settings: settings}}, Destinations: []repository.CatalogDestination{{ID: destinationID, Name: "test", NodeID: node, Location: fixture.location, Credentials: fixture.credentials}}}
+	plan.Catalog, err = repository.EncodeCatalog(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.SaveDestinationPlan(t.Context(), ring, plan); err != nil {
+		t.Fatal(err)
+	}
+	fixture.request.Retention = new(settings.Retention)
 	return fixture
 }
 
@@ -103,7 +129,7 @@ func TestWorkerCopiesAndRestoresRealDockerApp(t *testing.T) {
 				t.Fatal(err)
 			}
 			result, err := fixture.worker.Execute(t.Context(), fixture.request)
-			if err != nil || result.FailureCode != "" || result.SnapshotID != fixture.request.ID {
+			if err != nil || result.FailureCode != "" || len(result.WarningCodes) != 0 || result.SnapshotID != fixture.request.ID {
 				t.Fatalf("backup: %+v %v", result, err)
 			}
 			after, err := fixture.worker.Docker.ContainerInspect(t.Context(), fixture.id, client.ContainerInspectOptions{})
@@ -125,6 +151,10 @@ func TestWorkerCopiesAndRestoresRealDockerApp(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer r.Close(context.Background())
+			recovered, err := r.ReadCatalog(t.Context())
+			if err != nil || len(recovered.Protection) != 1 || recovered.Protection[0].Settings.Retention.Monthly != 6 || recovered.Destinations[0].Credentials.Password != fixture.credentials.Password {
+				t.Fatalf("backup did not save the recovery settings: %v", err)
+			}
 			saved, err := r.Snapshot(t.Context(), result.SnapshotID)
 			if err != nil {
 				t.Fatal(err)
@@ -182,6 +212,66 @@ func TestWorkerResumesAfterFinalCopyFailure(t *testing.T) {
 	defer r.Close(context.Background())
 	if _, err := r.Snapshot(t.Context(), fixture.request.ID); !errors.Is(err, repository.ErrSnapshotMissing) {
 		t.Fatalf("failed copy published a snapshot: %v", err)
+	}
+}
+
+func TestWorkerKeepsGoodCopyWhenCatalogCannotBeReplaced(t *testing.T) {
+	for _, newer := range []bool{false, true} {
+		t.Run(map[bool]string{false: "conflict", true: "newer"}[newer], func(t *testing.T) {
+			fixture := newWorkerFixture(t, backup.Live, ":")
+			plan, err := fixture.worker.Journal.DestinationPlan(t.Context(), fixture.worker.Keyring)
+			if err != nil {
+				t.Fatal(err)
+			}
+			catalog, err := repository.DecodeCatalog(plan.Catalog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			catalog.WrittenAt = catalog.WrittenAt.Add(time.Second)
+			if newer {
+				catalog.Generation++
+			}
+			r, err := repository.Create(t.Context(), fixture.location, fixture.credentials)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close(context.Background())
+			if err := r.WriteCatalog(t.Context(), catalog); err != nil {
+				t.Fatal(err)
+			}
+			result, err := fixture.worker.Execute(t.Context(), fixture.request)
+			if err != nil || result.FailureCode != "" || result.SnapshotID != fixture.request.ID {
+				t.Fatalf("catalog issue lost a good snapshot: %+v %v", result, err)
+			}
+			if newer && len(result.WarningCodes) != 0 || !newer && !slices.Equal(result.WarningCodes, []string{"catalog_write_failed"}) {
+				t.Fatalf("incorrect catalog warning: %v", result.WarningCodes)
+			}
+			saved, err := r.ReadCatalog(t.Context())
+			if err != nil || saved.Generation != catalog.Generation || !saved.WrittenAt.Equal(catalog.WrittenAt) {
+				t.Fatal("agent replaced an incompatible or newer catalog")
+			}
+			metadata, err := r.Snapshot(t.Context(), result.SnapshotID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(t.TempDir(), "restore")
+			if err := r.RestoreFiles(t.Context(), result.SnapshotID, target); err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, path := range metadata.Paths {
+				if path.Kind == "project" && path.Source == fixture.project {
+					data, err := os.ReadFile(filepath.Join(target, path.Archive, "state"))
+					if err != nil || string(data) != "before-stop" {
+						t.Fatalf("good copy cannot be restored: %v", err)
+					}
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("backup lost the project files")
+			}
+		})
 	}
 }
 

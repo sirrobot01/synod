@@ -39,7 +39,7 @@ func TestRetentionKeepsCalendarHistoryPinsAndOtherApps(t *testing.T) {
 		t.Fatal(err)
 	}
 	kept, expired := make(map[uuid.UUID]bool), make(map[uuid.UUID]bool)
-	var newest uuid.UUID
+	var newest, current uuid.UUID
 	for _, test := range []struct {
 		at        string
 		keep, pin bool
@@ -73,6 +73,9 @@ func TestRetentionKeepsCalendarHistoryPinsAndOtherApps(t *testing.T) {
 		if _, err := r.PublishSnapshot(t.Context(), files, metadata); err != nil {
 			t.Fatal(err)
 		}
+		if test.at == "2026-05-31T03:00:00Z" {
+			current = metadata.ID
+		}
 		if newest == uuid.Nil {
 			newest = metadata.ID
 		}
@@ -95,7 +98,7 @@ func TestRetentionKeepsCalendarHistoryPinsAndOtherApps(t *testing.T) {
 		}
 		unrelated = append(unrelated, metadata.ID)
 	}
-	removed, err := r.ApplyRetention(t.Context(), catalog.InstallationID, app.ID, destination, backup.Retention{Daily: 7, Weekly: 4, Monthly: 6})
+	removed, err := r.ApplyRetention(t.Context(), catalog.InstallationID, app.ID, destination, backup.Retention{Daily: 7, Weekly: 4, Monthly: 6}, uuid.Nil)
 	if err != nil || len(removed) != len(expired) {
 		t.Fatalf("retention removed %d snapshots, want %d: %v", len(removed), len(expired), err)
 	}
@@ -134,16 +137,19 @@ func TestRetentionKeepsCalendarHistoryPinsAndOtherApps(t *testing.T) {
 			t.Fatalf("unrelated snapshot lost: %v", err)
 		}
 	}
-	if ids, err := r.ApplyRetention(t.Context(), catalog.InstallationID, app.ID, destination, backup.Retention{Daily: 7, Weekly: 4, Monthly: 6}); err != nil || len(ids) != 0 {
+	if ids, err := r.ApplyRetention(t.Context(), catalog.InstallationID, app.ID, destination, backup.Retention{Daily: 7, Weekly: 4, Monthly: 6}, uuid.Nil); err != nil || len(ids) != 0 {
 		t.Fatalf("retention retry: %v", err)
 	}
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := r.ApplyRetention(cancelled, catalog.InstallationID, app.ID, destination, backup.Retention{}); err == nil {
+	if _, err := r.ApplyRetention(cancelled, catalog.InstallationID, app.ID, destination, backup.Retention{}, uuid.Nil); err == nil {
 		t.Fatal("cancelled retention succeeded")
 	}
-	if _, err := r.ApplyRetention(t.Context(), catalog.InstallationID, app.ID, destination, backup.Retention{}); err != nil {
+	if _, err := r.ApplyRetention(t.Context(), catalog.InstallationID, app.ID, destination, backup.Retention{}, current); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := r.Snapshot(t.Context(), current); err != nil {
+		t.Fatalf("retention removed the current copy after a clock change: %v", err)
 	}
 	if _, err := r.Snapshot(t.Context(), newest); err != nil {
 		t.Fatalf("zero counts removed newest snapshot: %v", err)

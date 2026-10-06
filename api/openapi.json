@@ -3,7 +3,7 @@
   "info": {
     "title": "Synod development API",
     "version": "0.1.0-dev",
-    "description": "Development API for device enrollment, app discovery, destinations, approval, backups, and operation inspection. Account and session endpoints are not described here yet."
+    "description": "Development API for device enrollment, app discovery, destinations, approval, backups, protection plans, and operation inspection. Account and session endpoints are not described here yet."
   },
   "servers": [
     {
@@ -1314,6 +1314,190 @@
           }
         }
       }
+    },
+    "/v1/protection": {
+      "get": {
+        "operationId": "getProtection",
+        "description": "Read choices, discovered paths, delivery state, and the last reported copies. This does not admit work.",
+        "responses": {
+          "200": {
+            "description": "Current plan and status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtectionPlan"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid selection or settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "An app is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The preview changed or the request ID has different input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable. Retry with the same ID and input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateProtection",
+        "description": "Confirm the reviewed revision and save choices atomically. Offline agents apply changes when settings arrive. Admitted work continues. Snapshots remain after an opt-out.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProtectionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved revision. An exact retry returns its original confirmation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtectionConfirmation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid selection or settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "An app is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The preview changed or the request ID has different input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable. Retry with the same ID and input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2045,6 +2229,7 @@
           "method": {
             "type": "string",
             "enum": [
+              "auto",
               "stop",
               "live"
             ],
@@ -2102,6 +2287,18 @@
               "pattern": "^[0-9a-f]{64}$"
             },
             "description": "Containers that the agent must restart before it can finish."
+          },
+          "warning_codes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "catalog_write_failed",
+                "retention_failed"
+              ]
+            },
+            "maxItems": 2,
+            "uniqueItems": true
           }
         },
         "required": [
@@ -2110,6 +2307,250 @@
           "completed_at",
           "downtime_ms",
           "file_bytes"
+        ]
+      },
+      "Retention": {
+        "type": "object",
+        "properties": {
+          "daily": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 366
+          },
+          "weekly": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 104
+          },
+          "monthly": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 120
+          }
+        },
+        "required": [
+          "daily",
+          "weekly",
+          "monthly"
+        ]
+      },
+      "ProtectionSettings": {
+        "type": "object",
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "minItems": 0,
+            "maxItems": 64,
+            "uniqueItems": true
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "stop",
+              "live"
+            ]
+          },
+          "at": {
+            "type": "string",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+          },
+          "time_zone": {
+            "type": "string",
+            "description": "IANA time zone. Local is not accepted."
+          },
+          "retention": {
+            "$ref": "#/components/schemas/Retention"
+          }
+        },
+        "required": [
+          "destinations",
+          "method",
+          "at",
+          "time_zone",
+          "retention"
+        ]
+      },
+      "ProtectionUpdate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Keep this ID and input for retries."
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "all": {
+            "type": "boolean"
+          },
+          "app_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "uniqueItems": true,
+            "maxItems": 512
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/ProtectionSettings"
+          }
+        },
+        "required": [
+          "id",
+          "expected_revision",
+          "all",
+          "enabled",
+          "settings"
+        ],
+        "description": "Use all or nonempty app_ids. All also sets automatic protection for new apps. Settings are required when enabled. Omitted destination choices are allowed only when protection is off.",
+        "additionalProperties": false
+      },
+      "ProtectionConfirmation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "revision"
+        ]
+      },
+      "ProtectionTarget": {
+        "type": "object",
+        "properties": {
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "selected": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          },
+          "due_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_operation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "failure_code": {
+            "type": "string"
+          },
+          "last_good": {
+            "$ref": "#/components/schemas/BackupResult"
+          },
+          "data_loss_window_seconds": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "destination_id",
+          "selected",
+          "state"
+        ]
+      },
+      "AppProtection": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "$ref": "#/components/schemas/App"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "settings_current": {
+            "type": "boolean",
+            "description": "The current source session saved the current plan revision."
+          },
+          "settings": {
+            "$ref": "#/components/schemas/ProtectionSettings"
+          },
+          "schedule_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "changed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "blocked_code": {
+            "type": "string"
+          },
+          "only_on_source": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          },
+          "data_loss_window_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Seconds since the latest good snapshot started. Absent when no good copy was reported."
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProtectionTarget"
+            }
+          }
+        },
+        "required": [
+          "app",
+          "enabled",
+          "settings_current",
+          "settings",
+          "only_on_source",
+          "state",
+          "targets"
+        ]
+      },
+      "ProtectionPlan": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "auto_protect": {
+            "type": "boolean"
+          },
+          "defaults": {
+            "$ref": "#/components/schemas/ProtectionSettings"
+          },
+          "apps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AppProtection"
+            }
+          }
+        },
+        "required": [
+          "revision",
+          "auto_protect",
+          "defaults",
+          "apps"
         ]
       }
     },

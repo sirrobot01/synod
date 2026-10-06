@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"slices"
 	"sync/atomic"
 	"time"
 
@@ -25,20 +24,14 @@ func executeBackups(ctx context.Context, worker *agentbackup.Worker, waiting *at
 		if ctx.Err() != nil {
 			return
 		}
-		records, err := worker.Journal.Records(ctx)
+		if _, err := worker.Journal.AdmitScheduled(ctx, worker.Keyring, time.Now()); err != nil && !errors.Is(err, journal.ErrNotFound) {
+			logger.Warn("backup_schedule_failed", "code", "schedule_admission_failed")
+		}
+		records, err := worker.Journal.Pending(ctx)
 		if err != nil {
 			logger.Warn("backup_journal_failed", "code", "journal_read_failed")
 		}
-		// Recovery runs before new work. A pending restart prevents another app from stopping.
-		slices.SortStableFunc(records, func(a, b journal.Record) int {
-			if a.State == journal.Running && b.State != journal.Running {
-				return -1
-			}
-			if b.State == journal.Running && a.State != journal.Running {
-				return 1
-			}
-			return 0
-		})
+		// Pending puts recovery first. A pending restart prevents another app from stopping.
 		for _, record := range records {
 			if ctx.Err() != nil {
 				return
@@ -83,6 +76,9 @@ func reportBackups(ctx context.Context, cache *journal.Journal, stream *transpor
 				continue
 			}
 			event := backup.Event{ID: record.ID, Result: backup.Result{DestinationID: request.DestinationID}}
+			if request.ScheduleID != uuid.Nil {
+				event.Request = &request
+			}
 			switch record.State {
 			case journal.Queued:
 				event.Status = "queued"

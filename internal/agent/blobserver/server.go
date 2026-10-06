@@ -67,7 +67,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plan, err := s.Plan(r.Context())
-	if err != nil || plan.Validate(s.NodeID) != nil {
+	if err != nil || plan.InstallationID != s.InstallationID || plan.Validate(s.NodeID) != nil {
 		http.Error(w, "destination settings unavailable", http.StatusServiceUnavailable)
 		return
 	}

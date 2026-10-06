@@ -115,6 +115,8 @@ func NewServer(metadata *store.Store, admin *auth.AdminToken, installationID uui
 				admin.Get("/destinations", server.listDestinations)
 				admin.Delete("/destinations/{id}", server.removeDestination)
 				admin.Post("/backups", server.createBackup)
+				admin.Get("/protection", server.getProtection)
+				admin.Put("/protection", server.updateProtection)
 				admin.Get("/operations", server.listOperations)
 				admin.Get("/operations/{id}", server.getOperation)
 				admin.Get("/nodes", server.listNodes)
@@ -198,6 +200,8 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 			status, message = http.StatusConflict, "More than one resource has this name. Use its ID."
 		case store.BackupInitializing:
 			status, message = http.StatusConflict, "A repository is being initialized. Wait for its agent to confirm the connection, then retry the backup."
+		case store.PlanConflict:
+			status, message = http.StatusConflict, "The protection plan changed. Read the plan and confirm its current revision."
 		case store.OperationConflict:
 			status, message = http.StatusConflict, "The operation state or device approval conflicts with this request. Read the current state."
 		case store.NodeFactsUnavailable:

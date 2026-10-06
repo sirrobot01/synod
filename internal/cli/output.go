@@ -20,22 +20,24 @@ import (
 
 // Result is the single JSON document that the CLI writes to stdout.
 type Result struct {
-	Destination     *destination.Destination `json:"destination,omitzero"`
-	Destinations    *destination.Listing     `json:"destinations,omitzero"`
-	Message         string                   `json:"message,omitempty"`
-	Warnings        []string                 `json:"warnings,omitempty"`
-	Apps            []inventory.App          `json:"apps,omitempty"`
-	Discovery       []inventory.Device       `json:"discovery,omitempty"`
-	Operation       *operation.Operation     `json:"operation,omitzero"`
-	Operations      []operation.Operation    `json:"operations,omitempty"`
-	EnrollmentToken *client.EnrollmentToken  `json:"enrollment_token,omitzero"`
-	User            *client.User             `json:"user,omitzero"`
-	Token           *client.APIToken         `json:"token,omitzero"`
-	Tokens          []client.APIToken        `json:"tokens,omitempty"`
-	Node            *client.Node             `json:"node,omitzero"`
-	Nodes           []client.Node            `json:"nodes,omitempty"`
-	Error           *client.Error            `json:"error,omitzero"`
-	Installation    *client.Installation     `json:"installation,omitzero"`
+	Protection       *backup.ProtectionPlan   `json:"protection,omitzero"`
+	ProtectionUpdate *backup.ProtectionUpdate `json:"protection_update,omitzero"`
+	Destination      *destination.Destination `json:"destination,omitzero"`
+	Destinations     *destination.Listing     `json:"destinations,omitzero"`
+	Message          string                   `json:"message,omitempty"`
+	Warnings         []string                 `json:"warnings,omitempty"`
+	Apps             []inventory.App          `json:"apps,omitempty"`
+	Discovery        []inventory.Device       `json:"discovery,omitempty"`
+	Operation        *operation.Operation     `json:"operation,omitzero"`
+	Operations       []operation.Operation    `json:"operations,omitempty"`
+	EnrollmentToken  *client.EnrollmentToken  `json:"enrollment_token,omitzero"`
+	User             *client.User             `json:"user,omitzero"`
+	Token            *client.APIToken         `json:"token,omitzero"`
+	Tokens           []client.APIToken        `json:"tokens,omitempty"`
+	Node             *client.Node             `json:"node,omitzero"`
+	Nodes            []client.Node            `json:"nodes,omitempty"`
+	Error            *client.Error            `json:"error,omitzero"`
+	Installation     *client.Installation     `json:"installation,omitzero"`
 	// JoinToken is the one secret an operator copies to the joining node.
 	JoinToken string `json:"join_token,omitempty"`
 }
@@ -106,6 +108,51 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			fmt.Fprintf(&output, "Device %s: %s. The last app list is kept.\n", device.NodeName, device.FailureCode)
 		}
 	}
+	if plan := a.result.Protection; plan != nil {
+		fmt.Fprintf(&output, "Protection revision: %d\nAuto-protect new apps: %t\n", plan.Revision, plan.AutoProtect)
+		if update := a.result.ProtectionUpdate; update != nil && update.All {
+			fmt.Fprintf(&output, "Proposed auto-protect: %t\n", update.Enabled)
+		}
+		for _, entry := range plan.Apps {
+			name := entry.App.ID.String()
+			if entry.App.Definition != nil {
+				name = entry.App.Definition.Name
+			}
+			fmt.Fprintf(&output, "%s  %s  %s  Current status: %s\n", entry.App.ID, name, entry.App.NodeName, entry.State)
+			if a.result.ProtectionUpdate != nil {
+				fmt.Fprintf(&output, "  Proposed enabled: %t\n", entry.Enabled)
+			} else {
+				fmt.Fprintf(&output, "  Enabled: %t  Settings saved by agent: %t\n", entry.Enabled, entry.SettingsCurrent)
+			}
+			fmt.Fprintf(&output, "  Method: %s  Daily: %s %s  Keep: %d daily, %d weekly, %d monthly\n", entry.Settings.Method, entry.Settings.At, entry.Settings.TimeZone, entry.Settings.Retention.Daily, entry.Settings.Retention.Weekly, entry.Settings.Retention.Monthly)
+			fmt.Fprintf(&output, "  Destinations: %v\n", entry.Settings.Destinations)
+			if entry.DataLossWindowSeconds == nil {
+				fmt.Fprintln(&output, "  Data-loss window: no good snapshot reported")
+			} else {
+				fmt.Fprintf(&output, "  Data-loss window: %s\n", (time.Duration(*entry.DataLossWindowSeconds) * time.Second).String())
+			}
+			if entry.OnlyOnSource {
+				fmt.Fprintln(&output, "  Warning: The only copies are on the app's own device. They do not protect against device loss.")
+			}
+			if entry.BlockedCode != "" {
+				fmt.Fprintf(&output, "  Blocked: %s\n", entry.BlockedCode)
+			}
+			for _, target := range entry.Targets {
+				fmt.Fprintf(&output, "  Destination %s: %s  Failure: %s\n", target.DestinationID, target.State, target.FailureCode)
+				if target.LastGood != nil {
+					fmt.Fprintf(&output, "    Last good: %s  Snapshot: %s\n", target.LastGood.StartedAt.Format(time.RFC3339), target.LastGood.SnapshotID)
+					for _, code := range target.LastGood.WarningCodes {
+						fmt.Fprintf(&output, "    Warning: %s\n", code)
+					}
+				}
+			}
+			if a.result.ProtectionUpdate != nil && entry.App.Definition != nil {
+				for _, path := range entry.App.Definition.Paths {
+					fmt.Fprintf(&output, "  %-8s %s  %s\n", path.Status, path.Source, path.Reason)
+				}
+			}
+		}
+	}
 	for _, app := range a.result.Apps {
 		presence := "present"
 		if !app.Present {
@@ -135,6 +182,9 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 				}
 				if len(result.RestartPending) > 0 {
 					fmt.Fprintf(&output, "Restart pending: %s\n", strings.Join(result.RestartPending, ", "))
+				}
+				for _, code := range result.WarningCodes {
+					fmt.Fprintf(&output, "Warning: %s\n", code)
 				}
 			}
 		}

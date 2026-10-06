@@ -94,6 +94,33 @@ func TestProtectionPersistsAutoProtectOptOutAndOfflineResults(t *testing.T) {
 		t.Fatalf("initializers: %d %v", len(initializers), err)
 	}
 	schedule := initializers[0].Schedule
+	private, err := s.DestinationPlan(t.Context(), ca.InstallationID(), node, session, ring)
+	if err != nil || len(private.Schedules) != 1 || len(private.Ready) != 0 {
+		t.Fatalf("scheduled agent plan: %v %v", err, errors.Unwrap(err))
+	}
+	recovery, err := repository.DecodeCatalog(private.Catalog)
+	if err != nil || !recovery.AutoProtect || len(recovery.Protection) != 2 || len(recovery.Destinations) != 1 || recovery.Destinations[0].Credentials.Password != entry.Credentials.Password {
+		t.Fatalf("recovery choices missing: %v", err)
+	}
+	var wrapped []byte
+	if err := s.db.QueryRowContext(t.Context(), `SELECT envelope FROM recovery_catalog`).Scan(&wrapped); err != nil {
+		t.Fatal(err)
+	}
+	var envelope secret.Envelope
+	if json.Unmarshal(wrapped, &envelope) != nil {
+		t.Fatal("recovery cache is not wrapped")
+	}
+	plain, err := ring.Open(secret.Binding{InstallationID: ca.InstallationID(), OwnerType: "recovery_catalog", OwnerID: ca.InstallationID(), CredentialID: ca.InstallationID(), Version: private.Revision}, envelope)
+	if err != nil || !bytes.Equal(plain, private.Catalog) {
+		t.Fatalf("recovery cache cannot be authenticated: %v", err)
+	}
+	clear(plain)
+	now = now.Add(time.Second)
+	repeated, err := s.DestinationPlan(t.Context(), ca.InstallationID(), node, session, ring)
+	if err != nil || !bytes.Equal(private.Catalog, repeated.Catalog) {
+		t.Fatalf("same revision changed the recovery catalog: %v", err)
+	}
+	now = now.Add(-time.Second)
 	op, err := s.CreateInitializationBackup(t.Context(), schedule.ID, entry.Destination.ID, schedule.Due(now))
 	if err != nil {
 		t.Fatal(err, errors.Unwrap(err))
@@ -105,7 +132,7 @@ func TestProtectionPersistsAutoProtectOptOutAndOfflineResults(t *testing.T) {
 	if err := s.RemoveDestination(t.Context(), entry.Destination.ID, "admin", "remove"); code(err) != OperationConflict {
 		t.Fatalf("removed a selected destination: %v", err)
 	}
-	result := backup.Result{SnapshotID: request.ID, DestinationID: request.DestinationID, StartedAt: now, CompletedAt: now.Add(time.Minute), FileBytes: 128, RepositoryOpened: true}
+	result := backup.Result{SnapshotID: request.ID, DestinationID: request.DestinationID, StartedAt: now, CompletedAt: now.Add(time.Minute), FileBytes: 128, RepositoryOpened: true, WarningCodes: []string{"catalog_write_failed"}}
 	if err := s.RecordBackupEvent(t.Context(), node, session, backup.Event{ID: request.ID, Status: "succeeded", Result: result}); err != nil {
 		t.Fatal(err, errors.Unwrap(err))
 	}
@@ -119,9 +146,15 @@ func TestProtectionPersistsAutoProtectOptOutAndOfflineResults(t *testing.T) {
 	}
 	index := slices.IndexFunc(plan.Apps, func(app backup.AppPlan) bool { return app.App.ID == appID })
 	app := plan.Apps[index]
-	if app.State != "protected" || app.DataLossWindowSeconds == nil || *app.DataLossWindowSeconds != 3600 || len(app.Targets) != 1 || app.Targets[0].LastGood.SnapshotID != request.ID {
+	if app.State != backup.Warning || app.DataLossWindowSeconds == nil || *app.DataLossWindowSeconds != 3600 || len(app.Targets) != 1 || app.Targets[0].LastGood.SnapshotID != request.ID {
 		t.Fatal("status does not show the saved snapshot and data-loss window")
 	}
+	now = now.AddDate(0, 0, 1)
+	overdue, err := s.ProtectionPlan(t.Context())
+	if err != nil || overdue.Apps[index].State != backup.Overdue {
+		t.Fatal("a maintenance warning hid an overdue backup")
+	}
+	now = now.AddDate(0, 0, -1)
 	update = backup.ProtectionUpdate{ID: uuid.New(), ExpectedRevision: plan.Revision, AppIDs: []uuid.UUID{appID}, Enabled: false}
 	if _, err := s.UpdateProtection(t.Context(), ca.InstallationID(), update, "admin", "off"); err != nil {
 		t.Fatal(err)

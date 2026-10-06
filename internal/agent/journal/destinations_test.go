@@ -30,12 +30,18 @@ func TestDestinationCacheRestartConflictAndRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { j.Close() })
-	plan := destination.Plan{Revision: 2, Destinations: []destination.Entry{{Destination: destination.Destination{ID: uuid.New(), Name: "Home", NodeID: node, Location: repository.Location{Kind: "local", Path: "/backup"}}, Credentials: repository.Credentials{Password: "private-passphrase-not-in-the-journal"}}}}
+	plan := destination.Plan{InstallationID: installation, Revision: 2, Destinations: []destination.Entry{{Destination: destination.Destination{ID: uuid.New(), Name: "Home", NodeID: node, Location: repository.Location{Kind: "local", Path: "/backup"}}, Credentials: repository.Credentials{Password: "private-passphrase-not-in-the-journal"}}}}
 	if _, err := j.DestinationPlan(t.Context(), ring); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("empty cache: %v", err)
 	}
 	if err := j.SaveDestinationPlan(t.Context(), ring, plan); err != nil {
 		t.Fatal(err)
+	}
+	foreign := plan
+	foreign.InstallationID = uuid.New()
+	foreign.Revision++
+	if err := j.SaveDestinationPlan(t.Context(), ring, foreign); !errors.Is(err, ErrConflict) {
+		t.Fatalf("foreign installation plan accepted: %v", err)
 	}
 	if err := j.SaveDestinationPlan(t.Context(), ring, plan); err != nil {
 		t.Fatal(err)
@@ -82,7 +88,7 @@ func TestDestinationCacheRestartConflictAndRemoval(t *testing.T) {
 	if _, err := j.DestinationPlan(t.Context(), wrongRing); err == nil {
 		t.Fatal("wrong enrolled key opened cache")
 	}
-	if err := j.SaveDestinationPlan(t.Context(), ring, destination.Plan{Revision: 3, Destinations: []destination.Entry{}}); err != nil {
+	if err := j.SaveDestinationPlan(t.Context(), ring, destination.Plan{InstallationID: installation, Revision: 3, Destinations: []destination.Entry{}}); err != nil {
 		t.Fatal(err)
 	}
 	saved, err = j.DestinationPlan(t.Context(), ring)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/backup"
 	_ "modernc.org/sqlite"
 )
 
@@ -21,7 +23,7 @@ var (
 	ErrConflict           = errors.New("journal input or state conflicts with the saved record")
 	ErrInspectionRequired = errors.New("journal work already started; inspect its effects before completion")
 	ErrNotFound           = errors.New("journal record not found")
-	ErrBusy               = errors.New("journal has 64 undelivered records; deliver results before admitting work")
+	ErrBusy               = errors.New("journal has 64 pending jobs; finish work before admitting another job")
 )
 
 type State string
@@ -40,7 +42,8 @@ type Record struct {
 	Progress []byte
 }
 
-// Journal keeps at most 64 undelivered records. Each input and result is at most 1 MiB.
+// Journal keeps at most 64 pending jobs. Undelivered results stay on disk until acknowledged.
+// Each input and result is at most 1 MiB. Reads return at most 512 records.
 type Journal struct {
 	db                     *sql.DB
 	installationID, nodeID uuid.UUID
@@ -88,12 +91,17 @@ func Open(ctx context.Context, path string, installationID, nodeID uuid.UUID) (*
  singleton INTEGER PRIMARY KEY CHECK (singleton=1), installation_id TEXT NOT NULL, node_id TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS destination_plan (
  singleton INTEGER PRIMARY KEY CHECK (singleton=1), revision INTEGER NOT NULL CHECK (revision>0), envelope BLOB NOT NULL);
+ CREATE TABLE IF NOT EXISTS opened_destinations (id TEXT PRIMARY KEY);
+ CREATE TABLE IF NOT EXISTS backup_history (
+ app_id TEXT NOT NULL, destination_id TEXT NOT NULL, last_success INTEGER NOT NULL,
+ PRIMARY KEY (app_id,destination_id));
  CREATE TABLE IF NOT EXISTS records (
  id TEXT PRIMARY KEY, input_hash BLOB NOT NULL CHECK (length(input_hash)=32),
  state TEXT NOT NULL CHECK (state IN ('queued','running','terminal')),
  input BLOB, result BLOB, progress BLOB, acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged IN (0,1)),
  CHECK (length(input)<=1048576), CHECK (length(result)<=1048576), CHECK (length(progress)<=4194304),
  CHECK (acknowledged=0 OR (state='terminal' AND input IS NULL AND result IS NULL AND progress IS NULL)));
+ CREATE INDEX IF NOT EXISTS records_pending ON records(state) WHERE state!='terminal';
  INSERT INTO identity (singleton,installation_id,node_id) VALUES (1,?,?) ON CONFLICT DO NOTHING`, installationID, nodeID); err != nil {
 		return nil, fmt.Errorf("initialize journal: %w", err)
 	}
@@ -137,7 +145,7 @@ func (j *Journal) Admit(ctx context.Context, id uuid.UUID, input []byte) (Record
 		return Record{}, fmt.Errorf("read journal work %s: %w", id, err)
 	}
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM records WHERE acknowledged=0`).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM records WHERE state!='terminal'`).Scan(&count); err != nil {
 		return Record{}, err
 	}
 	if count >= 64 {
@@ -179,8 +187,8 @@ func (j *Journal) Complete(ctx context.Context, id uuid.UUID, result []byte) err
 	}
 	defer tx.Rollback()
 	var state State
-	var previous []byte
-	if err := tx.QueryRowContext(ctx, `SELECT state,result FROM records WHERE id=?`, id).Scan(&state, &previous); err != nil {
+	var previous, input []byte
+	if err := tx.QueryRowContext(ctx, `SELECT state,result,input FROM records WHERE id=?`, id).Scan(&state, &previous, &input); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -192,6 +200,30 @@ func (j *Journal) Complete(ctx context.Context, id uuid.UUID, result []byte) err
 	if state != Running {
 		return ErrConflict
 	}
+	var job backup.Request
+	if json.Unmarshal(input, &job) == nil && job.Validate() == nil {
+		var saved backup.Result
+		if json.Unmarshal(result, &saved) != nil || job.ID != id || job.InstallationID != j.installationID || job.NodeID != j.nodeID {
+			return ErrConflict
+		}
+		status := "succeeded"
+		if saved.FailureCode != "" {
+			status = "failed"
+		}
+		if (backup.Event{ID: id, Request: &job, Status: status, Result: saved}).Validate(job) != nil {
+			return ErrConflict
+		}
+		if saved.RepositoryOpened {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO opened_destinations (id) VALUES (?) ON CONFLICT DO NOTHING`, job.DestinationID); err != nil {
+				return fmt.Errorf("save opened destination %s: %w", job.DestinationID, err)
+			}
+		}
+		if status == "succeeded" {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO backup_history (app_id,destination_id,last_success) VALUES (?,?,?) ON CONFLICT(app_id,destination_id) DO UPDATE SET last_success=max(last_success,excluded.last_success)`, job.AppID, job.DestinationID, saved.StartedAt.UnixMilli()); err != nil {
+				return fmt.Errorf("save backup history %s: %w", job.ID, err)
+			}
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE records SET state='terminal',result=?,progress=NULL WHERE id=?`, result, id); err != nil {
 		return fmt.Errorf("save journal result %s: %w", id, err)
 	}
@@ -201,9 +233,9 @@ func (j *Journal) Complete(ctx context.Context, id uuid.UUID, result []byte) err
 	return nil
 }
 
-// Records returns undelivered work and results. A caller must inspect running work before it resumes.
+// Records returns a bounded delivery batch. Terminal results go first to clear an outage backlog.
 func (j *Journal) Records(ctx context.Context) ([]Record, error) {
-	rows, err := j.db.QueryContext(ctx, `SELECT id,state,input,result,progress FROM records WHERE acknowledged=0 ORDER BY id`)
+	rows, err := j.db.QueryContext(ctx, `SELECT id,state,input,result,progress FROM records WHERE acknowledged=0 ORDER BY state!='terminal',id LIMIT 512`)
 	if err != nil {
 		return nil, fmt.Errorf("read journal records: %w", err)
 	}
@@ -215,6 +247,25 @@ func (j *Journal) Records(ctx context.Context) ([]Record, error) {
 			return nil, err
 		}
 		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+// Pending returns admitted work even when many results await a controller connection.
+// A caller must recover running work before it starts queued work.
+func (j *Journal) Pending(ctx context.Context) ([]Record, error) {
+	rows, err := j.db.QueryContext(ctx, `SELECT id,state,input,result,progress FROM records WHERE state!='terminal' ORDER BY state!='running',id LIMIT 64`)
+	if err != nil {
+		return nil, fmt.Errorf("read pending journal work: %w", err)
+	}
+	defer rows.Close()
+	var records []Record
+	for rows.Next() {
+		var record Record
+		if err := rows.Scan(&record.ID, &record.State, &record.Input, &record.Result, &record.Progress); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
 	}
 	return records, rows.Err()
 }

@@ -15,5 +15,16 @@ func newAppsCommand(app *app) *cobra.Command {
 			}
 			return err
 		}})
+	group.AddCommand(&cobra.Command{Use: "status", Short: "Show protection, settings delivery, and the data-loss window", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := app.connect(cmd, nil); err != nil {
+				return err
+			}
+			plan, err := app.api.ProtectionPlan(cmd.Context())
+			if err == nil {
+				app.result.Protection = &plan
+			}
+			return err
+		}})
 	return group
 }

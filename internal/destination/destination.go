@@ -12,10 +12,11 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/repository"
 )
 
-const MaxPlanBytes = 512 << 10
+const MaxPlanBytes = 900 << 10
 const MaxEntryBytes = 32 << 10
 const MaxDestinations = 64
 
@@ -41,9 +42,13 @@ func (Entry) GoString() string { return "[private destination settings]" }
 
 // Plan replaces all settings on one device. An empty plan removes its cached credentials.
 type Plan struct {
-	Revision     int64   `json:"revision"`
-	Destinations []Entry `json:"destinations"`
-	Peers        []Peer  `json:"peers,omitempty"`
+	InstallationID uuid.UUID         `json:"installation_id"`
+	Revision       int64             `json:"revision"`
+	Destinations   []Entry           `json:"destinations"`
+	Peers          []Peer            `json:"peers,omitempty"`
+	Ready          []uuid.UUID       `json:"ready,omitempty"`
+	Schedules      []backup.Schedule `json:"schedules,omitempty"`
+	Catalog        []byte            `json:"catalog,omitempty"`
 }
 
 func (Plan) String() string   { return "[private destination plan]" }
@@ -64,6 +69,7 @@ func ValidAddress(address string, allowEmptyHost bool) bool {
 }
 
 type Delivery struct {
+	SessionID      string     `json:"-"`
 	NodeID         uuid.UUID  `json:"node_id"`
 	NodeName       string     `json:"node_name"`
 	Revision       int64      `json:"revision"`
@@ -98,7 +104,7 @@ func (e Entry) Validate() error {
 }
 
 func (p Plan) Validate(nodeID uuid.UUID) error {
-	if p.Revision < 1 || nodeID == uuid.Nil || len(p.Destinations) > MaxDestinations {
+	if p.InstallationID == uuid.Nil || p.Revision < 1 || nodeID == uuid.Nil || len(p.Destinations) > MaxDestinations {
 		return ErrInvalid
 	}
 	ids := make(map[uuid.UUID]bool)
@@ -118,6 +124,29 @@ func (p Plan) Validate(nodeID uuid.UUID) error {
 			return ErrInvalid
 		}
 		certificates[peer.CertificateSHA256] = true
+	}
+	ready := make(map[uuid.UUID]bool)
+	for _, id := range p.Ready {
+		if !ids[id] || ready[id] {
+			return ErrInvalid
+		}
+		ready[id] = true
+	}
+	if len(p.Schedules) > 512 {
+		return ErrInvalid
+	}
+	apps := make(map[uuid.UUID]bool)
+	for _, schedule := range p.Schedules {
+		if schedule.Validate() != nil || schedule.NodeID != nodeID || apps[schedule.AppID] || schedule.InstallationID != p.InstallationID {
+			return ErrInvalid
+		}
+		apps[schedule.AppID] = true
+	}
+	if len(p.Catalog) > 0 {
+		catalog, err := repository.DecodeCatalog(p.Catalog)
+		if err != nil || catalog.Generation != uint64(p.Revision) || p.InstallationID != catalog.InstallationID {
+			return ErrInvalid
+		}
 	}
 	raw, err := json.Marshal(p)
 	defer clear(raw)

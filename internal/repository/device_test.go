@@ -82,7 +82,7 @@ func TestDeviceRepositorySurvivesRestartAndKeepsLocalRecovery(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "repository")
 	id := uuid.New()
 	entry := destination.Entry{Destination: destination.Destination{ID: id, NodeID: owner, Name: "Peer", Location: repository.Location{Kind: "device", Path: directory, Device: &repository.DeviceLocation{NodeID: owner, DestinationID: id}}}, Credentials: repository.Credentials{Password: "private-device-repository-password"}}
-	plan := destination.Plan{Revision: 1, Destinations: []destination.Entry{entry}, Peers: []destination.Peer{{NodeID: owner, CertificateSHA256: hashes[owner]}, {NodeID: source, CertificateSHA256: hashes[source]}}}
+	plan := destination.Plan{InstallationID: installation, Revision: 1, Destinations: []destination.Entry{entry}, Peers: []destination.Peer{{NodeID: owner, CertificateSHA256: hashes[owner]}, {NodeID: source, CertificateSHA256: hashes[source]}}}
 	cachePath := filepath.Join(t.TempDir(), "agent.db")
 	cache, err := journal.Open(t.Context(), cachePath, installation, owner)
 	if err != nil {

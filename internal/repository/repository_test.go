@@ -21,7 +21,7 @@ import (
 
 func testCatalog() Catalog {
 	node := uuid.New()
-	return Catalog{Version: 1, InstallationID: uuid.New(), Generation: 1, WrittenAt: time.Now().UTC().Truncate(time.Millisecond), Devices: []Device{{ID: node, Name: "private-catalog-marker", Architecture: "arm64"}}, Apps: []inventory.App{{ID: uuid.New(), NodeID: node, NodeName: "private-catalog-marker", ObservedAt: time.Now().UTC().Truncate(time.Millisecond), Present: true, Definition: &agentv1.DiscoveredApp{Key: "compose:notes", Name: "notes", Kind: "compose", Containers: []*agentv1.DiscoveredContainer{{Id: "web", Name: "web", Image: "nginx:stable"}}}}}}
+	return Catalog{Version: 1, InstallationID: uuid.New(), Generation: 1, WrittenAt: time.Now().UTC().Truncate(time.Millisecond), Devices: []Device{{ID: node, Name: "private-catalog-marker", Architecture: "arm64"}}, Apps: []inventory.App{{ID: uuid.NewSHA1(node, []byte("compose:notes")), NodeID: node, NodeName: "private-catalog-marker", ObservedAt: time.Now().UTC().Truncate(time.Millisecond), Present: true, Definition: &agentv1.DiscoveredApp{Key: "compose:notes", Name: "notes", Kind: "compose", Containers: []*agentv1.DiscoveredContainer{{Id: "web", Name: "web", Image: "nginx:stable"}}}}}}
 }
 
 func TestEncryptedCatalogNeedsNoLocalConnectionState(t *testing.T) {

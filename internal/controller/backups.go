@@ -35,30 +35,55 @@ func deliverBackups(ctx context.Context, metadata *store.Store, stream *controls
 
 // sendBackupJobs waits for current credentials at the source and at a device destination.
 func sendBackupJobs(ctx context.Context, metadata *store.Store, stream *controlstream.Server) error {
-	jobs, err := metadata.BackupRequests(ctx)
-	if err != nil {
-		return err
-	}
 	listing, err := metadata.ListDestinations(ctx)
 	if err != nil {
 		return err
 	}
-	current := make(map[uuid.UUID]bool)
+	current := make(map[uuid.UUID]string)
 	for _, delivery := range listing.Delivery {
-		current[delivery.NodeID] = delivery.Current
+		if delivery.Current {
+			current[delivery.NodeID] = delivery.SessionID
+		}
 	}
 	destinations := make(map[uuid.UUID]destination.Destination)
 	for _, destination := range listing.Destinations {
 		destinations[destination.ID] = destination
 	}
 	var failures []error
+	initializers, err := metadata.PendingInitializations(ctx)
+	if err != nil {
+		return err
+	}
+	seen := make(map[uuid.UUID]bool)
+	for _, candidate := range initializers {
+		target, exists := destinations[candidate.DestinationID]
+		peer, online := stream.Session(candidate.Schedule.NodeID)
+		if !exists || !online || seen[candidate.DestinationID] || current[candidate.Schedule.NodeID] != peer.SessionID || !slices.Contains(peer.Capabilities, "backup.exec") || (target.Location.Kind == "device" && current[target.NodeID] == "") {
+			continue
+		}
+		seen[candidate.DestinationID] = true
+		slot := candidate.Schedule.Due(time.Now())
+		if slot.IsZero() {
+			continue
+		}
+		if _, err := metadata.CreateInitializationBackup(ctx, candidate.Schedule.ID, candidate.DestinationID, slot); err != nil {
+			if failure, ok := errors.AsType[*store.Error](err); ok && slices.Contains([]store.ErrorCode{store.BackupInitializing, store.NotFound, store.OperationConflict}, failure.Code) {
+				continue
+			}
+			failures = append(failures, err)
+		}
+	}
+	jobs, err := metadata.BackupRequests(ctx)
+	if err != nil {
+		return err
+	}
 	for _, job := range jobs {
 		target, exists := destinations[job.DestinationID]
-		if !exists || !current[job.NodeID] || (target.Location.Kind == "device" && !current[target.NodeID]) {
+		if !exists || current[job.NodeID] == "" || (target.Location.Kind == "device" && current[target.NodeID] == "") {
 			continue
 		}
 		peer, ok := stream.Session(job.NodeID)
-		if !ok || !slices.Contains(peer.Capabilities, "backup.exec") {
+		if !ok || peer.SessionID != current[job.NodeID] || !slices.Contains(peer.Capabilities, "backup.exec") {
 			continue
 		}
 		raw, err := json.Marshal(job)
