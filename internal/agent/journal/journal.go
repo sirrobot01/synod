@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
+	"syscall"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
@@ -45,12 +47,20 @@ func Open(ctx context.Context, path string, installationID, nodeID uuid.UUID) (*
 	if path == "" || installationID == uuid.Nil || nodeID == uuid.Nil {
 		return nil, ErrConflict
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve journal path: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open journal %s: %w", path, err)
 	}
-	if err := file.Close(); err != nil {
-		return nil, err
+	info, statErr := file.Stat()
+	if err := errors.Join(statErr, file.Close()); err != nil {
+		return nil, fmt.Errorf("check journal %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		return nil, fmt.Errorf("journal %s must be a regular file owned by this user; set owner-only permissions", path)
 	}
 	u := url.URL{Scheme: "file", Path: path}
 	query := url.Values{"_pragma": {"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(FULL)"}, "_txlock": {"immediate"}}

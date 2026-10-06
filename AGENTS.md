@@ -96,12 +96,11 @@ Use real dependencies for critical transaction and orchestration tests.
 
 - Run tests with `-race -p 1`. Without `-p 1`, packages compete for Docker and fail on timing.
 - Before a commit, run only the affected packages. Run the full suite only after a major change.
-- Give tests their dependencies with the fixture scripts. Each script starts a disposable container on a free port:
-  `SYNOD_TEST_DOCKER_HOST=unix://<docker socket> ./scripts/test-etcd.sh ./scripts/test-postgres.sh go test -race -p 1 -count=1 <packages>`.
-- For heavy Docker packages (`internal/runtime/docker`, `internal/engine/postgres`), use `-run` to select the tests you touched.
+- Controller tests use SQLite files in temporary directories. Run `go test -race -p 1 -count=1 <packages>`.
+- For a Docker test, set `SYNOD_TEST_DOCKER_HOST=unix://<docker socket>`. Use disposable containers and free ports. Use `-run` to select heavy tests.
 - Never change the tree while a `go test` run is in flight. Never use `git stash` to get a baseline. Use a separate worktree at the base revision.
 - A failure that also happens on the base revision is not yours. Record it in the task note in `TASKS.md`.
-- Known flaky tests: `TestRunnerReleasesASlotWhenNoOwnerIsElected` in `internal/controller/runner`, and the enrollment tests in `internal/api` under heavy load. Run a flaky test again alone before you draw a conclusion.
+- Enrollment tests in `internal/api` can fail on timing under heavy load. Run a failed timing test again alone before you draw a conclusion.
 - For web changes, run `npx svelte-check`, `npx vitest run`, and `npm run build` in `web/`. The `dist` output is committed.
 - Some behaviour needs real Linux hosts: host networking, `/proc`, and mTLS between machines. Read `HOSTS.md` before you use them.
 

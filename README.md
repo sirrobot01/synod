@@ -1,366 +1,220 @@
 # Synod
 
-Synod pools the devices of a home lab and runs any container on them.
-Devices can be amd64 or arm64, and some devices are online only part of the time.
-Apps run in three tiers: databases (tier 1), single-writer apps (tier 2), and parallel apps (tier 3).
-Clients use normal protocols through a router on every device.
+Synod backs up the Docker apps of a home lab and restores them on another device.
+Devices can use amd64 or arm64.
+Some devices can be offline between backups.
 
 ## Status
 
-Synod is under active development. v0.1 is not released.
-The plan for v0.1 is in the product brief. It includes the three app tiers, backups,
-upgrades, an install script, and a web UI around apps and devices.
-A completed development milestone does not imply that the release is ready.
+Synod is under development. v0.1 is not released.
+The current build creates an installation, joins devices, and approves them.
+It provides user accounts, API tokens, operation records, and a web shell.
+The controller stores its metadata in SQLite through `modernc.org/sqlite`.
+It requires no PostgreSQL server or etcd service.
 
-## Development
+App discovery, backups, restore, repository recovery, and the recovery kit are not available yet.
+The current build does not protect app data.
+Synod does not place running apps or provide automatic failover.
 
-Use the Go version declared in go.mod.
-Read [AGENTS.md](AGENTS.md) before making changes.
+## Build and checks
 
-### Task commands
+Use the Go version in [go.mod](go.mod).
+Read [AGENTS.md](AGENTS.md) before you change code.
 
-[Task](https://taskfile.dev) runs the local commands. Install it, then run `task` to
-list them. Every command below also works without Task. The sections that follow give
-the direct form.
+```sh
+go build -o dist/synod ./cmd/synod
+go vet ./...
+go test -race -p 1 -count=1 ./...
+```
+
+The controller tests use SQLite files in temporary directories.
+They need no external database.
+A test that needs Docker requires `SYNOD_TEST_DOCKER_HOST`.
+Set it to the Unix socket URL of your test daemon.
+Use disposable test resources.
+
+Build and check the browser application:
+
+```sh
+cd web
+npm ci
+npx svelte-check
+npx vitest run
+npm run build
+```
+
+The build writes to `internal/web/dist`.
+Commit that output with a web change.
+
+## Local development
+
+[Task](https://taskfile.dev) runs the commands in [Taskfile.yml](Taskfile.yml).
+Run `task` to list them.
 
 | Command | Action |
 | --- | --- |
-| `task build` | Build the `synod` binary into `dist/` |
-| `task build:web` | Build the browser application into `internal/web/dist` |
-| `task check` | Vet the Go code and type-check the browser application |
-| `task test` | Run the Go tests that need no dependency |
-| `task test:all` | Run the whole Go suite with PostgreSQL and race detection |
-| `task test:web` | Run the browser application tests |
-| `task dev` | Run the controller on `https://127.0.0.1:8443` |
-| `task dev:web` | Serve the browser application with hot reload |
-| `task dev:user -- alice` | Create the first operator account |
-| `task cli -- db get NAME` | Run the command line against the development controller |
-| `task dev:reset` | Empty the development metadata database |
-| `task dev:down` | Stop the development containers and keep their data |
+| `task build` | Build the binary into `dist/`. |
+| `task build:web` | Build the web application. |
+| `task check` | Run Go vet and the web type check. |
+| `task test` | Run Go tests with race detection, one package at a time. |
+| `task test:web` | Run the web tests. |
+| `task dev` | Create a local installation and run its controller. |
+| `task dev:web` | Run the web development server. |
+| `task dev:user -- alice` | Create an operator account. |
+| `task cli -- node list` | List the joined devices. |
+| `task dev:reset` | Delete the local installation in `.dev/`. |
+| `task proto` | Generate Go code from the agent protocol. |
 
-A test command passes its arguments straight to `go test`, and those arguments replace
-the package list. Pass the whole tail:
+Run the controller in one terminal:
+
+```sh
+task dev
+```
+
+Create an account from another terminal:
+
+```sh
+task dev:user -- alice
+```
+
+Open `https://127.0.0.1:8443`.
+The local certificate uses a private CA.
+Check that this is your local controller before you accept a browser certificate warning.
+Sign in with the account that you created.
+
+The `.dev/` directory holds the SQLite database and the installation credentials.
+Git ignores this directory.
+Keep it private.
+
+For a focused Go test, pass the package list after the flags:
 
 ```sh
 task test -- -run TestName ./internal/api/...
 ```
 
-### Development controller in one command
+A changed migration causes a checksum error on an existing development database.
+Run `task dev:reset` only when you can delete that installation.
+Then run `task dev` to create a new one.
 
-`task dev` starts a local PostgreSQL container, writes development credentials to
-`.dev/`, and runs the controller. The first run creates the credentials.
+## Create an installation
 
-```sh
-task dev                                    # in one terminal
-task dev:user -- alice                      # in another; it prompts for a password
-```
-
-Then open `https://127.0.0.1:8443` and sign in. The certificate is self-signed, so the
-browser warns once.
-
-The credentials in `.dev/` are for one workstation. The certificate is self-signed and
-the development database trusts any password. Never use them anywhere else. Git ignores
-the directory.
-
-This development command starts no worker. Worker dispatch needs the agent transport,
-a credential wrapping key, and an approved node.
-Use `synod server init --dir DIRECTORY` to create installation material.
-
-Run `task dev:reset` after you change a migration. AGENTS.md requires a dropped
-development database, never a repair migration.
-
-### Browser application with hot reload
-
-`task dev:web` serves the application on `https://localhost:5173` and sends `/v1` to the
-controller. Run `task dev` in another terminal first.
-
-The development server uses the same certificate as the controller, because the session
-cookie carries the `__Host-` prefix and a browser stores it only over HTTPS.
-
-## Test fixtures
-
-`./scripts/test-postgres.sh` starts the PostgreSQL database that the tests need.
-Docker must be available.
-The script uses a pinned image and a random localhost port.
-It removes its container after the command exits.
-It exports `SYNOD_TEST_DATABASE_URL` for the test process.
-Pass a command after the script name to run a focused check.
-
-Run the whole suite:
+One binary holds the CLI, the controller, and the agent.
+Build it before you create service files.
+Use an address that the other devices can reach.
 
 ```sh
-./scripts/test-postgres.sh go test -race -p 1 ./...
+./dist/synod server init --dir /private/path/synod --address 192.168.0.20
+./dist/synod server --config /private/path/synod/controller.json
 ```
 
-A test that needs a dependency skips when its variable is absent.
+Replace the example path and address with your own values.
+Init writes the certificates, keys, administrator token, SQLite database, and controller configuration.
+It prints a join token for one device.
+That token expires after seven days.
+Init refuses to replace existing installation material.
 
-## Development controller
+The API listens on port 8443.
+The agent transport listens on port 8444.
+Use `--listen` and `--agent-listen` to change these addresses when you start the controller.
+A join token must name the API address that the device can reach.
 
-The controller accepts app requests.
-It records desired state and a pending operation in PostgreSQL.
-A configured worker runs the app containers on approved agents.
-The API-only development command leaves operations pending.
-The database catalog contains PostgreSQL 17 (17.11) and Redis 8.2 (8.2.7).
-These versions are local test candidates. They are not a qualified release matrix.
+On Linux, init also writes a systemd service file.
+It installs the file if it can write to the systemd directory.
+Use `--systemd-dir /path/to/units` to select another directory.
+Init does not start the service.
+Start it through systemd only after you check its paths.
 
-Build Synod with `go build -o dist/synod ./cmd/synod`.
-One binary holds the CLI, the controller (`synod server`), and the agent (`synod agent`).
-Create a metadata PostgreSQL database before startup.
-Use one stable installation UUID for all controllers in that installation.
-Keep that UUID with the installation recovery records.
-Use a trusted TLS certificate for the API address.
-Store the TLS key and administrator token in files with mode 0600.
-The token must contain 32 to 256 visible ASCII bytes.
-One final line ending is permitted in its file.
+The controller accepts a JSON configuration file with `--config` or `SYNOD_CONFIG`.
+Environment variables override the file.
+Flags override environment variables.
+Use `synod server --help` for the available settings.
+The `database_path` setting, or `SYNOD_DATABASE_PATH`, must name an absolute file path.
+Keep the database in a private directory on a local disk.
+Database files must belong to the current user and have owner-only permissions.
+SQLite uses WAL mode, full synchronous writes, and foreign key checks.
 
-Set the following environment variables:
+## Join and approve devices
 
-```sh
-export SYNOD_INSTALLATION_ID='<stable-uuid>'
-export SYNOD_DATABASE_URL='postgres://synod@localhost/synod?sslmode=verify-full'
-export SYNOD_ADMIN_TOKEN_FILE='/path/to/admin.token'
-export SYNOD_TLS_CERT_FILE='/path/to/api.crt'
-export SYNOD_TLS_KEY_FILE='/path/to/api.key'
-./dist/synod server
-```
-
-The default API address is `127.0.0.1:8443`.
-Use `--listen` to change it.
-Use `synod server --help` to list the settings.
-Explicit flags override environment variables.
-Environment variables override a JSON file supplied with `--config` or `SYNOD_CONFIG`.
-The JSON keys use the names shown in [the controller configuration](internal/config/controller.go).
-Use a protected file or environment for a database URL that contains a password.
-Startup applies the metadata schema migrations.
-
-See [the initial API schema](api/openapi.json). It does not describe the app endpoints yet.
-Send the administrator token in `Authorization: Bearer <token>`.
-Send one `Idempotency-Key` header with every create request.
-Use 1 to 128 visible ASCII bytes for the key.
-Keep that key and the same request body until the result is known.
-A retry returns the original app and operation IDs.
-A changed request with the same key returns HTTP 409.
-An uncertain commit returns HTTP 503 with `outcome_unknown`.
-Retry that result with the same key and body.
-An accepted request returns HTTP 202 and an operation URL in `Location`.
-
-Example request body for `POST /v1/apps` that creates a database:
-
-```json
-{
-  "schema_version": 1,
-  "name": "photos-db",
-  "tier": 1,
-  "copies": 1,
-  "database": {"engine": "postgres", "version": "17", "databases": ["immich"]},
-  "replication": {"standbys": 1, "interval_seconds": 0, "failover_after_seconds": 90, "failback": "manual", "failback_stable_seconds": 600},
-  "router": {"protocol": "tcp", "port": 5432, "reader_port": 5433}
-}
-```
-
-Read `GET /v1/apps/{id}` to inspect the app, its copies, and its routes.
-Read `GET /v1/operations/{id}` to inspect its operation.
-An operation with `plan_version: 0` has no executable plan.
-An operation stays pending until a configured worker can produce and run its plan.
-
-## Operator access
-
-The controller authenticates three credentials.
-Agents use mutual TLS. The command line uses an API token.
-A browser uses a session cookie that a username and a password create.
-
-The bootstrap token file creates the first account.
-Keep it after that. It is the only credential that works when no account can sign in.
-
-```sh
-synod user create alice --password-file /path/to/password
-synod token create "deploy pipeline"
-```
-
-`synod token create` prints the secret once. Store it then, because no later call repeats it.
-A password never uses a flag, because a flag value reaches the process table.
-Supply `--password-file` with a private file, or answer the prompt.
-
-Set `SYNOD_PUBLIC_ORIGIN` to the browser origin of the API before you serve a web UI.
-A session request that changes state must prove its origin.
-
-## Running operations
-
-The controller runs an operation only when you supply the agent transport.
-Without it the controller admits requests and records desired state, and no worker starts.
-Controllers elect app owners in the metadata PostgreSQL database.
-
-One controller elects itself owner of an app, claims that app's operation,
-and runs one worker for it.
-A second controller waits for the election and takes over after the claim expires.
-Shutdown stops management dispatch. It never stops native work that an agent accepted.
-
-Database apps need a credential wrapping key.
-Use `--secret-key-file` and `--secret-key-id` to configure it.
-Placement reads the node shape from the approved node records.
-Use `--engine-endpoint-first-port` and `--engine-endpoint-last-port` to set the host ports of database copies.
-
-## Databases
-
-A database is a tier 1 app. The engine replicates its data to standby copies.
-PostgreSQL uses logical replication. Redis uses replica mode.
-A primary and its standbys can run on different architectures.
-
-Create a PostgreSQL database with one standby:
-
-```sh
-synod db create photos-db --version 17 --standbys 1 --prefer server --allow odin --writer-port 5432 --reader-port 5433
-```
-
-The version is a major version that the engine catalog serves.
-The default engine is `postgres`. Use `--engine redis` for Redis.
-`--database` names a PostgreSQL database. The default is the app name with `-` replaced by `_`.
-The writer route and the optional reader route listen on every device.
-
-Read the primary, the standbys, and the routes:
-
-```sh
-synod db get photos-db
-```
-
-Each standby reports its state and its lag.
-A standby that copies its data is not usable for failover.
-
-Read the client login and the connection URLs:
-
-```sh
-synod db credentials photos-db
-```
-
-The result is always JSON and contains a password. Keep that output private.
-Do not copy it into logs or shared files.
-The server records the actor and the credential version before it returns the password.
-PostgreSQL clients log in as `app`. Redis clients log in as `default`.
-Engine TLS uses the node certificate, which carries no host name.
-Clients verify the installation CA only. PostgreSQL URLs use `sslmode=verify-ca`.
-
-Move the primary to another device after the standby catches up:
-
-```sh
-synod db switchover photos-db --to odin
-```
-
-Use `synod db stop`, `synod db start`, and `synod db delete` with the app ID.
-Add `--yes` to confirm a delete.
-Delete removes the containers and the app data directories.
-
-## Join a node
-
-`synod server init` prints a join token when it can reach the metadata database.
-A join token enrolls one node. It is valid for seven days.
-To get a token for another node, run this command:
-
-```sh
-synod node join-token --ttl 24h
-```
-
-The command needs `SYNOD_CA_FILE` or `--ca-file`. The join token pins that API CA.
-
-On the new node, run this command:
+Run this command on a device that has Docker:
 
 ```sh
 synod agent join TOKEN
 ```
 
-The command does these steps:
-1. It verifies the API CA against the fingerprint in the token.
-2. It enrolls the node and keeps the node ID in `node-id`.
-3. It initializes the agent journal.
-4. It writes `agent.json` and `synod-agent.service`.
+Replace `TOKEN` with the token from init.
+The command creates a private agent directory and writes the configuration and service file.
+The default directory is `/var/lib/synod/agent`.
+Use `--dir` to select another directory.
+The default Docker socket is `/var/run/docker.sock`.
+Use `--docker-socket` to select another socket.
+The agent user must have access to that socket.
 
-The default directory is `/var/lib/synod/agent`. Use `--dir` to change it.
-Use `--storage-path` and `--storage-id` to name the storage pool.
-If the command stops before it writes `agent.json`, run it again with the same token and directory.
-The controller must run before a node can join, because the agent needs the recovery generation.
-
-Start the agent. Then approve the node:
+Start the agent with its saved configuration:
 
 ```sh
-synod node approve NODE_ID
+synod agent run --config /var/lib/synod/agent/agent.json
 ```
 
-Approval takes the architecture, runtime version, storage ID, and headroom from the facts that the agent measured.
-The default headroom is one tenth of each measured resource.
-The node can run all engine versions that the controller serves.
-Use the flags of `synod node approve` to change a value.
-If the agent has not reported its facts, approval fails with `node_facts_unavailable`.
-
-## Agent configuration
-
-`synod agent join` writes this file. You can also write it yourself.
-
-An agent reads one JSON file. Give it with `--config`.
-The file must belong to the agent user. It must have no group or other permission.
-Unknown fields are refused.
-
-| Field | Required | Meaning |
-| --- | --- | --- |
-| `installation_id` | yes | The installation UUID. |
-| `node_id` | yes | The node UUID from the enrollment token. |
-| `enrollment_dir` | yes | The completed enrollment state directory. |
-| `journal_dir` | yes | The journal directory. It must not be inside `enrollment_dir`. |
-| `recovery_generation` | yes | The installation recovery generation UUID. Read it with `synod installation get`. |
-| `controller_endpoints` | yes | One to eight controller agent addresses as `host:port`. |
-| `storage_id` | yes | The storage pool identity. Use the same value as `synod node approve --storage-id`. |
-| `storage_path` | no | The filesystem that capacity is measured on. The default is `journal_dir`. |
-| `min_free_bytes` | no | The free space that new work must leave on `storage_path`. |
-| `docker_socket` | no | The Docker socket path. The default is `/var/run/docker.sock`. |
-
-Put `storage_path` on the filesystem that holds the Docker data and the app directories.
-Without `storage_id`, the agent cannot report capacity, so it refuses to start.
-
-`synod installation get` shows `installation_id` and `recovery_generation`.
-The recovery generation can change after controller recovery. Read it when you write a new configuration.
-It is available after a controller with the agent transport starts.
-
-Run `synod agent journal init --config FILE` once after enrollment.
-Then run `synod agent run --config FILE`.
-
-A journal or inventory refusal prints its cause in the `detail` field of the error.
-Other errors print fixed text only, because an argument error can repeat raw input.
-
-Before the first release, the agent protocol can change without a migration.
-A new agent refuses a journal that holds commands from an older build.
-It reports `journal_recovery_required`, and `detail` names the saved command it refused.
-Upgrade an agent only when its node has no app copy. Then create a new journal directory.
-
-## Client addresses
-
-Set the node's client address with `synod node approve --client-address ADDRESS`.
-Supply the other required node policy flags with that command.
-Use a canonical IPv4 or IPv6 address that clients can reach.
-Private LAN addresses are valid. Loopback and wildcard addresses are refused.
-App endpoints and database URLs use this address.
-
-## Web application
-
-The controller serves a browser application from its own API origin.
-Open the API address in a browser and sign in with an operator account.
-
-Settings manages accounts and API tokens through the API.
-An operation link opens the live state of that operation.
-The other screens show examples. Each example is marked.
-The web UI has no app screens yet. Use the command line for apps and databases.
-
-The application is built from `web/` and committed under `internal/web/dist`.
-Building the controller therefore needs no JavaScript toolchain.
-
-Rebuild it after a change under `web/`:
+Set the administrator shell variables that init printed.
+Then list the devices and approve the new device by its name or ID:
 
 ```sh
-task build:web && task test:web
+synod node list
+synod node approve DEVICE
 ```
 
-Or without Task:
+The agent must connect and report its facts before approval.
+The Nodes screen can also approve it.
+To join another device, create a new one-use token:
 
 ```sh
-cd web && npm install && npm run build && npm test
+synod node join-token
 ```
 
-The content security policy allows this origin only.
-It forbids inline script and every foreign origin.
+Agents use mutual TLS after enrollment.
+A device keeps its identity and certificates in its enrollment directory.
+
+## Operator access
+
+The CLI uses the token file in `SYNOD_ADMIN_TOKEN_FILE`.
+Set `SYNOD_API_URL` to the controller HTTPS origin.
+Set `SYNOD_CA_FILE` to the API CA certificate.
+Init prints the paths for its installation.
+
+Create an account or an API token:
+
+```sh
+synod user create alice
+synod token create "backup automation"
+```
+
+The user command prompts for a password.
+Use `--password-file` to read it from a private file.
+An API token secret appears once.
+Store it when the command prints it.
+Keep the bootstrap administrator token private for account recovery.
+
+A browser signs in with a username and password.
+Set `--public-origin` to its API origin when needed.
+A browser request that changes state must prove that origin.
+
+## Operation records
+
+The operation core stores work and its result across controller restarts.
+Read recent records with these commands:
+
+```sh
+synod operation list
+synod operation get ID
+synod operation wait ID
+```
+
+Interrupting `wait` does not cancel the work.
+A failed or cancelled operation gives `wait` a nonzero exit status.
+The current build has no backup worker that creates these records.
+The agent journal records input before execution and keeps results until acknowledgement.
+A running journal record requires inspection after a restart.
+The backup worker will use this journal in a later task.
+
+See [the API schema](api/openapi.json) for enrollment, device, and operation routes.
+It does not yet describe account and session routes.

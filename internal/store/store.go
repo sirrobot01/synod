@@ -10,8 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"modernc.org/sqlite"
@@ -56,6 +59,21 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("open metadata: the database path is empty")
 	}
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve metadata path: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open metadata %s: %w", path, err)
+	}
+	info, statErr := file.Stat()
+	if err := errors.Join(statErr, file.Close()); err != nil {
+		return nil, fmt.Errorf("check metadata %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		return nil, fmt.Errorf("metadata %s must be a regular file owned by this user; set owner-only permissions", path)
+	}
 	// IMMEDIATE transactions take the write lock at BEGIN, so two writers queue on
 	// the busy timeout instead of failing when a read lock tries to upgrade.
 	query := url.Values{}
@@ -63,7 +81,8 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		query.Add("_pragma", pragma)
 	}
 	query.Set("_txlock", "immediate")
-	db, err := sql.Open("sqlite", "file:"+path+"?"+query.Encode())
+	dsn := url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}
+	db, err := sql.Open("sqlite", dsn.String())
 	if err != nil {
 		return nil, fmt.Errorf("open metadata %s: %w", path, err)
 	}

@@ -3,6 +3,7 @@ package journal
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -76,6 +77,39 @@ func TestJournalRecoveryAndResultDelivery(t *testing.T) {
 	}
 	if _, err := Open(t.Context(), path, installation, uuid.New()); !errors.Is(err, ErrConflict) {
 		t.Fatalf("wrong device opened journal: %v", err)
+	}
+}
+
+func TestJournalUsesPrivateLiteralPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal?#%.db")
+	installation, node, id := uuid.New(), uuid.New(), uuid.New()
+	j, err := Open(t.Context(), path, installation, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.Admit(t.Context(), id, []byte("saved input")); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+	j, err = Open(t.Context(), path, installation, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := j.Records(t.Context())
+	if err != nil || len(records) != 1 || records[0].ID != id {
+		t.Fatalf("reopened wrong journal: %+v %v", records, err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if other, err := Open(t.Context(), path, installation, node); err == nil {
+		other.Close()
+		t.Fatal("journal accepted public permissions")
 	}
 }
 
