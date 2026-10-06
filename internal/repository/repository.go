@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/kopia/kopia/repo"
 	"github.com/kopia/kopia/repo/blob"
 	"github.com/kopia/kopia/repo/content"
@@ -123,4 +124,28 @@ func Connect(ctx context.Context, location Location, credentials Credentials, in
 		}
 	}
 	return open(ctx, st, credentials.Password)
+}
+
+// CheckInstallation refuses to mix the recovery state of two Synod installations.
+func (r *Repository) CheckInstallation(ctx context.Context, installationID uuid.UUID) error {
+	if installationID == uuid.Nil {
+		return ErrCatalogInvalid
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := r.repo.Refresh(ctx); err != nil {
+		return &Error{Action: "refresh installation state", Cause: err}
+	}
+	for _, kind := range []string{"synod.catalog", "synod.backup"} {
+		entries, err := r.repo.FindManifests(ctx, map[string]string{"type": kind})
+		if err != nil {
+			return &Error{Action: "check installation state", Cause: err}
+		}
+		for _, entry := range entries {
+			if entry.Labels["installation"] != installationID.String() {
+				return ErrCatalogConflict
+			}
+		}
+	}
+	return nil
 }

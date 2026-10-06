@@ -119,6 +119,13 @@ func (s *Store) RemoveDestination(ctx context.Context, id uuid.UUID, actorID, re
 	if removed.Valid {
 		return nil
 	}
+	var busy bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE kind='backup' AND status NOT IN ('succeeded','failed','cancelled') AND json_extract(CAST(input AS TEXT),'$.destination_id')=?)`, id).Scan(&busy); err != nil {
+		return storeError(err)
+	}
+	if busy {
+		return &Error{Code: OperationConflict}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE destinations SET credentials=NULL,removed_at=? WHERE id=?`, s.now().UnixMilli(), id); err != nil {
 		return storeError(err)
 	}

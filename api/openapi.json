@@ -3,7 +3,7 @@
   "info": {
     "title": "Synod development API",
     "version": "0.1.0-dev",
-    "description": "Development API for device enrollment, app discovery, destinations, approval, and operation inspection. Account and session endpoints are not described here yet."
+    "description": "Development API for device enrollment, app discovery, destinations, approval, backups, and operation inspection. Account and session endpoints are not described here yet."
   },
   "servers": [
     {
@@ -1216,6 +1216,104 @@
           }
         }
       }
+    },
+    "/v1/backups": {
+      "post": {
+        "operationId": "createBackup",
+        "description": "Save an immutable backup request. The agent starts it after destination settings arrive. Read /v1/operations/{id} for its state and result. A client disconnect does not cancel the backup.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupSubmission"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved operation. A repeated ID with the same input returns the same operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or a local destination on another device.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The app or destination is unavailable. The source device must be approved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting input, a full operation queue, or repository creation in progress.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded. Retry after one second.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable. Retry with the same ID and input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1307,6 +1405,9 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "result": {
+            "$ref": "#/components/schemas/BackupResult"
           }
         },
         "required": [
@@ -1923,6 +2024,93 @@
             }
           }
         }
+      },
+      "BackupSubmission": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Use the same ID and input for a retry."
+          },
+          "app_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "stop",
+              "live"
+            ],
+            "default": "stop"
+          }
+        },
+        "required": [
+          "id",
+          "app_id",
+          "destination_id"
+        ]
+      },
+      "BackupResult": {
+        "type": "object",
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Present after a successful backup."
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "downtime_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          },
+          "file_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          },
+          "failure_code": {
+            "type": "string"
+          },
+          "repository_opened": {
+            "type": "boolean",
+            "default": false
+          },
+          "restart_pending": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "Containers that the agent must restart before it can finish."
+          }
+        },
+        "required": [
+          "destination_id",
+          "started_at",
+          "completed_at",
+          "downtime_ms",
+          "file_bytes"
+        ]
       }
     },
     "parameters": {},

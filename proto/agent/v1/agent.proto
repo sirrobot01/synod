@@ -49,6 +49,7 @@ message AgentMessage {
     Heartbeat heartbeat = 2;
     AppInventory inventory = 3;
     DestinationAck destination_ack = 4;
+    BackupEvent backup_event = 5;
   }
 }
 
@@ -57,6 +58,8 @@ message ControllerMessage {
     Session session = 1;
     ProtocolError error = 2;
     DestinationPlan destination_plan = 3;
+    BackupJob backup_job = 4;
+    BackupAck backup_ack = 5;
   }
 }
 
@@ -107,3 +110,9 @@ message DiscoveredPath {
 message DestinationPlan { bytes settings_json = 1; }
 // The agent sends this only after its encrypted local transaction commits.
 message DestinationAck { int64 revision = 1; }
+
+// A job is immutable. Its JSON contains IDs and choices, without credentials.
+message BackupJob { bytes request_json = 1; }
+// The agent keeps a terminal event until the controller commits and acknowledges it.
+message BackupEvent { bytes event_json = 1; }
+message BackupAck { string operation_id = 1; }

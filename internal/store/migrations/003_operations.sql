@@ -5,6 +5,8 @@ CREATE TABLE operations (
     actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 256),
     kind TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 64),
     status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'waiting', 'cancelling', 'succeeded', 'failed', 'cancelled')),
+    input BLOB NOT NULL DEFAULT '{}' CHECK (length(input)<=8192 AND json_valid(CAST(input AS TEXT))),
+    result BLOB CHECK (length(result)<=65536 AND json_valid(CAST(result AS TEXT))),
     failure_code TEXT NOT NULL DEFAULT '' CHECK (length(failure_code) <= 128),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,

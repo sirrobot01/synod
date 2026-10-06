@@ -79,6 +79,12 @@ func TestSnapshotRestoresFinalContentWithoutControllerState(t *testing.T) {
 	if err != nil || retry.FilesID != saved.FilesID {
 		t.Fatalf("publish retry: %v", err)
 	}
+	foreign := metadata
+	foreign.ID = uuid.New()
+	foreign.InstallationID = uuid.New()
+	if _, err := r.PublishSnapshot(t.Context(), prepared, foreign); !errors.Is(err, ErrCatalogConflict) {
+		t.Fatalf("mixed installations in one repository: %v", err)
+	}
 	metadata.DowntimeMillis++
 	if _, err := r.PublishSnapshot(t.Context(), prepared, metadata); !errors.Is(err, ErrCatalogConflict) {
 		t.Fatalf("conflicting retry: %v", err)

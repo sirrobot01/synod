@@ -1,8 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 
 	"github.com/google/uuid"
@@ -11,16 +13,19 @@ import (
 
 const OperationConflict ErrorCode = "operation_conflict"
 
-const operationColumns = `id,app_id,node_id,actor_id,kind,status,failure_code,created_at,updated_at,finished_at`
+const operationColumns = `id,app_id,node_id,actor_id,kind,status,failure_code,created_at,updated_at,finished_at,input,result`
 
 // operationFields keeps every operation query in the same column order.
 func operationFields(op *operation.Operation) []any {
-	return []any{&op.ID, &op.AppID, &op.NodeID, &op.ActorID, &op.Kind, &op.Status, &op.FailureCode, millis{&op.CreatedAt}, millis{&op.UpdatedAt}, optionalMillis{&op.FinishedAt}}
+	return []any{&op.ID, &op.AppID, &op.NodeID, &op.ActorID, &op.Kind, &op.Status, &op.FailureCode, millis{&op.CreatedAt}, millis{&op.UpdatedAt}, optionalMillis{&op.FinishedAt}, &op.Input, operationResult{&op.Result}}
 }
 
 // CreateOperation records pending work on an approved device. An exact retry keeps the first record.
 func (s *Store) CreateOperation(ctx context.Context, op operation.Operation) (operation.Operation, error) {
-	if op.ID == uuid.Nil || op.AppID == uuid.Nil || op.NodeID == uuid.Nil || !printableWithin(op.ActorID, 256) || !printableWithin(op.Kind, 64) {
+	if len(op.Input) == 0 {
+		op.Input = []byte("{}")
+	}
+	if len(op.Input) > 8192 || !json.Valid(op.Input) || op.ID == uuid.Nil || op.AppID == uuid.Nil || op.NodeID == uuid.Nil || !printableWithin(op.ActorID, 256) || !printableWithin(op.Kind, 64) {
 		return operation.Operation{}, &Error{Code: InvalidRequest}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -31,7 +36,7 @@ func (s *Store) CreateOperation(ctx context.Context, op operation.Operation) (op
 	var prior operation.Operation
 	err = tx.QueryRowContext(ctx, `SELECT `+operationColumns+` FROM operations WHERE id=?`, op.ID).Scan(operationFields(&prior)...)
 	if err == nil {
-		if prior.AppID != op.AppID || prior.NodeID != op.NodeID || prior.ActorID != op.ActorID || prior.Kind != op.Kind {
+		if prior.AppID != op.AppID || prior.NodeID != op.NodeID || prior.ActorID != op.ActorID || prior.Kind != op.Kind || !bytes.Equal(prior.Input, op.Input) {
 			return operation.Operation{}, &Error{Code: IdempotencyConflict}
 		}
 		return prior, nil
@@ -47,7 +52,7 @@ func (s *Store) CreateOperation(ctx context.Context, op operation.Operation) (op
 		return operation.Operation{}, &Error{Code: OperationConflict}
 	}
 	now := s.now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO operations (id,app_id,node_id,actor_id,kind,status,created_at,updated_at) VALUES (?,?,?,?,?,'pending',?,?)`, op.ID, op.AppID, op.NodeID, op.ActorID, op.Kind, now, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO operations (id,app_id,node_id,actor_id,kind,status,created_at,updated_at,input) VALUES (?,?,?,?,?,'pending',?,?,?)`, op.ID, op.AppID, op.NodeID, op.ActorID, op.Kind, now, now, op.Input); err != nil {
 		return operation.Operation{}, storeError(err)
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT `+operationColumns+` FROM operations WHERE id=?`, op.ID).Scan(operationFields(&op)...); err != nil {
@@ -98,7 +103,7 @@ func (s *Store) TransitionOperation(ctx context.Context, id uuid.UUID, from, to 
 	if to.Terminal() {
 		finished = now
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE operations SET status=?,failure_code=?,updated_at=?,finished_at=? WHERE id=? AND status=?`, to, failureCode, now, finished, id, from)
+	result, err := s.db.ExecContext(ctx, `UPDATE operations SET status=?,failure_code=?,updated_at=?,finished_at=? WHERE id=? AND status=? AND NOT (kind='backup' AND coalesce(json_extract(CAST(input AS TEXT),'$.id'),'')=id)`, to, failureCode, now, finished, id, from)
 	if err != nil {
 		return storeError(err)
 	}
@@ -108,6 +113,23 @@ func (s *Store) TransitionOperation(ctx context.Context, id uuid.UUID, from, to 
 	}
 	if changed == 0 {
 		return &Error{Code: OperationConflict}
+	}
+	return nil
+}
+
+// operationResult preserves SQL NULL as an absent JSON result.
+type operationResult struct{ target *json.RawMessage }
+
+func (r operationResult) Scan(value any) error {
+	switch v := value.(type) {
+	case nil:
+		*r.target = nil
+	case []byte:
+		*r.target = bytes.Clone(v)
+	case string:
+		*r.target = json.RawMessage(v)
+	default:
+		return errors.New("invalid operation result storage type")
 	}
 	return nil
 }

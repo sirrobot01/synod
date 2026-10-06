@@ -13,8 +13,9 @@ It provides user accounts, API tokens, operation records, and a web shell.
 The controller stores its metadata in SQLite through `modernc.org/sqlite`.
 It requires no PostgreSQL server or etcd service.
 
-Backups, restore, repository recovery, and the recovery kit are not available yet.
-The current build does not protect app data.
+On-demand Stop and Live backups are available for file-based apps.
+They use encrypted local, Synod-device, SFTP, or S3 repositories.
+Schedules, database dumps, app restore, repository recovery, and the recovery kit are not available yet.
 Synod does not place running apps or provide automatic failover.
 
 ## Build and checks
@@ -198,7 +199,7 @@ Each path has a proposed status:
 
 | Status | Current meaning |
 | --- | --- |
-| Included | App files or state. No backup has run. |
+| Included | App files or state selected for each backup. |
 | Large | Media or more than 20 GiB. Skipped by default. |
 | Dumped | A detected database data path. Dump execution is not available yet. |
 | Never | A host system path or an unsupported mount. |
@@ -317,7 +318,61 @@ Removing a destination keeps all repository data.
 It removes the saved credentials from the active controller record.
 An offline agent removes its copy when it receives the next plan.
 Removal does not revoke credentials at the storage provider.
-Backups, app destination selection, and schedules are later tasks.
+A destination cannot be removed while a backup operation uses it.
+App schedules and saved destination choices are later tasks.
+
+## Back up an app
+
+Select an app from `synod app list`.
+Add a destination before its first backup.
+
+```sh
+synod backup notes --destination peer
+synod backup notes --device server --destination peer --method live
+synod backup APP_ID --destination DESTINATION_ID --wait=false
+synod operation get OPERATION_ID
+synod operation wait OPERATION_ID
+```
+
+The default method is Stop.
+Synod first uploads the files while the app runs.
+It then stops the running containers and reads the final files again.
+Kopia sends only new content blocks.
+Synod restarts the containers before it publishes the snapshot.
+The result shows the snapshot ID, file bytes, and measured downtime.
+Containers that were stopped or paused before the backup keep that state.
+
+Live copies files while the containers run.
+Use it only when the app permits a live copy.
+SQLite backup API support is not available yet.
+Detected PostgreSQL, MySQL, MariaDB, and Redis apps are refused until dump support is available.
+
+Each snapshot holds the discovered app manifest, included paths, and private container definitions.
+A standalone container also gets a generated Compose file.
+An unsupported standalone setting causes a failure.
+The full Docker inspect data stays in the encrypted snapshot.
+Host paths, media, and excluded database paths remain excluded inside parent copies.
+The manifest records additional exclusions found during the copy.
+A backup does not copy its own destination or the agent identity files.
+
+The command waits by default.
+Use `--wait=false` to return after admission.
+An interruption of the command does not cancel the operation.
+Use an app ID or `--device` when app names repeat.
+Use `--destination` when the app can reach more than one destination.
+The first job creates a repository if it does not exist.
+Repository creation has one owner at a time, even if destination names refer to the same directory.
+Other agents open the repository after that owner confirms its connection.
+
+The agent saves work before execution.
+It saves restart intent before each container stop.
+After a crash, it resumes affected containers before it takes more work.
+A lost stop response causes a confirmed stop before restart.
+A failed restart stays pending in the journal and is retried.
+An admitted backup continues through a controller outage.
+Its result survives an agent restart and remains until the controller acknowledges it.
+The repository library restores files into a new directory for the backup tests.
+File restore commands and complete app restore remain later tasks.
 
 ## Repository library
 

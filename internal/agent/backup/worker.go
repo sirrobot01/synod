@@ -108,6 +108,10 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if err := w.save(ctx, &state); err != nil {
 		return backup.Result{}, err
 	}
+	if err := r.CheckInstallation(ctx, w.InstallationID); err != nil {
+		state.FailureCode = "repository_installation_conflict"
+		return w.finish(ctx, request, &state, r)
+	}
 	filters := make(client.Filters)
 	if name, ok := strings.CutPrefix(request.SourceKey, "compose:"); ok {
 		filters.Add("label", "com.docker.compose.project="+name)

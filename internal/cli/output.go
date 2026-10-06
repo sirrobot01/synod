@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/client"
 	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/inventory"
@@ -125,6 +127,17 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 	}
 	if op := a.result.Operation; op != nil {
 		fmt.Fprintf(&output, "Operation: %s\nKind: %s\nStatus: %s\nFailure: %s\n", op.ID, op.Kind, op.Status, op.FailureCode)
+		if op.Kind == "backup" && len(op.Result) > 0 {
+			var result backup.Result
+			if json.Unmarshal(op.Result, &result) == nil {
+				if result.SnapshotID != uuid.Nil {
+					fmt.Fprintf(&output, "Snapshot: %s\nFiles: %d bytes\nDowntime: %d ms\n", result.SnapshotID, result.FileBytes, result.DowntimeMillis)
+				}
+				if len(result.RestartPending) > 0 {
+					fmt.Fprintf(&output, "Restart pending: %s\n", strings.Join(result.RestartPending, ", "))
+				}
+			}
+		}
 	}
 	for _, op := range a.result.Operations {
 		fmt.Fprintf(&output, "%s  %-16s %s\n", op.ID, op.Kind, op.Status)

@@ -3,11 +3,13 @@ package agentstream
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/store"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -18,7 +20,10 @@ import (
 var ErrUnsupportedMessage = errors.New("unsupported agent message")
 
 // Receiver records agent sessions and heartbeats in the metadata store.
-type Receiver struct{ Store *store.Store }
+type Receiver struct {
+	Store *store.Store
+	Send  func(uuid.UUID, string, *agentv1.ControllerMessage) error
+}
 
 // Handle records one message. It returns nil only after the record commits.
 func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
@@ -47,6 +52,21 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 			hello.DestinationAddress = net.JoinHostPort(host, port)
 		}
 		return r.Store.RecordAgentSession(ctx, peer.NodeID, sessionID, hello)
+	case *agentv1.AgentMessage_BackupEvent:
+		if value.BackupEvent == nil || len(value.BackupEvent.EventJson) > 64<<10 {
+			return ErrUnsupportedMessage
+		}
+		var event backup.Event
+		if json.Unmarshal(value.BackupEvent.EventJson, &event) != nil {
+			return ErrUnsupportedMessage
+		}
+		if err := r.Store.RecordBackupEvent(ctx, peer.NodeID, sessionID, event); err != nil {
+			return err
+		}
+		if (event.Status == "succeeded" || event.Status == "failed") && r.Send != nil {
+			return r.Send(peer.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_BackupAck{BackupAck: &agentv1.BackupAck{OperationId: event.ID.String()}}})
+		}
+		return nil
 	case *agentv1.AgentMessage_DestinationAck:
 		if value.DestinationAck == nil {
 			return ErrUnsupportedMessage

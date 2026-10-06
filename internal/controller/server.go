@@ -28,6 +28,7 @@ import (
 	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store"
 	"github.com/sirrobot01/synod/internal/web"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"github.com/spf13/cobra"
 )
 
@@ -175,22 +176,29 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	go func() { stopped <- server.ServeTLS(listener, "", "") }()
 	logger.Info("controller API listening", "address", listener.Addr().String(), "installation_id", settings.InstallationID)
 	if agentTLS != nil {
+		receiver := agentstream.Receiver{Store: metadata}
 		agentServer, err := controlstream.New(controlstream.Config{
 			InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Logger: logger,
 			Authorize: func(ctx context.Context, _, nodeID uuid.UUID, certificate *x509.Certificate) error {
 				return metadata.CheckAgentCertificate(ctx, nodeID, certificate)
 			},
-			Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve"},
-			Handle:       (agentstream.Receiver{Store: metadata}).Handle,
+			Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec"},
+			Handle: func(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
+				return receiver.Handle(ctx, peer, message)
+			},
 		})
 		if err != nil {
 			return err
 		}
+		receiver.Send = agentServer.Send
 		defer agentServer.Stop()
 		deliveryCtx, stopDelivery := context.WithCancel(ctx)
 		var delivery sync.WaitGroup
 		delivery.Go(func() {
 			deliverDestinations(deliveryCtx, uuid.MustParse(settings.InstallationID), metadata, keyring, agentServer, logger)
+		})
+		delivery.Go(func() {
+			deliverBackups(deliveryCtx, metadata, agentServer, logger)
 		})
 		defer func() { stopDelivery(); delivery.Wait() }()
 		agentListener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", settings.AgentListen)

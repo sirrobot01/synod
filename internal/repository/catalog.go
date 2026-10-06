@@ -52,6 +52,9 @@ func (r *Repository) WriteCatalog(ctx context.Context, catalog Catalog) error {
 	}
 	r.write.Lock()
 	defer r.write.Unlock()
+	if err := r.CheckInstallation(ctx, catalog.InstallationID); err != nil {
+		return err
+	}
 	previous, err := r.ReadCatalog(ctx)
 	if err != nil && !errors.Is(err, ErrCatalogMissing) {
 		return err

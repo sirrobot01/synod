@@ -75,6 +75,9 @@ func (r *Repository) PublishSnapshot(ctx context.Context, prepared *snapshot.Man
 	}
 	r.write.Lock()
 	defer r.write.Unlock()
+	if err := r.CheckInstallation(ctx, metadata.InstallationID); err != nil {
+		return backup.Snapshot{}, err
+	}
 	previous, err := r.Snapshot(ctx, metadata.ID)
 	if err == nil {
 		prior := previous

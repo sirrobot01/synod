@@ -27,6 +27,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	root.AddCommand(
 		newNodeCommand(app),
 		newAppsCommand(app),
+		newBackupCommand(app),
 		newDestinationCommand(app),
 		newOperationCommand(app),
 		newInstallationCommand(app),

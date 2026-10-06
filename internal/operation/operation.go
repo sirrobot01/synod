@@ -2,6 +2,7 @@
 package operation
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,16 +21,18 @@ const (
 )
 
 type Operation struct {
-	ID          uuid.UUID  `json:"id"`
-	AppID       uuid.UUID  `json:"app_id"`
-	NodeID      uuid.UUID  `json:"node_id"`
-	ActorID     string     `json:"actor_id"`
-	Kind        string     `json:"kind"`
-	Status      Status     `json:"status"`
-	FailureCode string     `json:"failure_code"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	FinishedAt  *time.Time `json:"finished_at"`
+	Input       []byte          `json:"-"`
+	Result      json.RawMessage `json:"result,omitempty"`
+	ID          uuid.UUID       `json:"id"`
+	AppID       uuid.UUID       `json:"app_id"`
+	NodeID      uuid.UUID       `json:"node_id"`
+	ActorID     string          `json:"actor_id"`
+	Kind        string          `json:"kind"`
+	Status      Status          `json:"status"`
+	FailureCode string          `json:"failure_code"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+	FinishedAt  *time.Time      `json:"finished_at"`
 }
 
 func (s Status) Terminal() bool {

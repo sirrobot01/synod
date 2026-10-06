@@ -11,6 +11,8 @@ CREATE TABLE destinations (
     definition BLOB NOT NULL,
     credentials BLOB,
     input_bytes INTEGER NOT NULL,
+    initializer_id TEXT REFERENCES operations (id),
+    initialized_at INTEGER,
     removed_at INTEGER
 );
 CREATE UNIQUE INDEX destination_live_name ON destinations (name) WHERE removed_at IS NULL;
