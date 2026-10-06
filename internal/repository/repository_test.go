@@ -174,3 +174,43 @@ func TestConflictingPublishedCatalogsFailClosed(t *testing.T) {
 		t.Fatalf("conflicting generation was selected: %v", err)
 	}
 }
+
+func TestConnectRequiresInitializationPermissionAndKeepsExistingKeys(t *testing.T) {
+	location := Location{Kind: "local", Path: t.TempDir()}
+	credentials := Credentials{Password: "private-connect-password"}
+	if r, err := Connect(t.Context(), location, credentials, false); !errors.Is(err, ErrUninitialized) {
+		if r != nil {
+			r.Close(t.Context())
+		}
+		t.Fatalf("unassigned initializer accepted: %v", err)
+	}
+	r, err := Connect(t.Context(), location, credentials, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := testCatalog()
+	if err := r.WriteCatalog(t.Context(), catalog); err != nil {
+		r.Close(t.Context())
+		t.Fatal(err)
+	}
+	if err := r.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	wrong := credentials
+	wrong.Password = "wrong-connect-password"
+	if r, err := Connect(t.Context(), location, wrong, true); !errors.Is(err, repo.ErrInvalidPassword) {
+		if r != nil {
+			r.Close(t.Context())
+		}
+		t.Fatalf("wrong password could recreate the repository: %v", err)
+	}
+	r, err = Connect(t.Context(), location, credentials, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close(context.Background())
+	got, err := r.ReadCatalog(t.Context())
+	if err != nil || !reflect.DeepEqual(got, catalog) {
+		t.Fatalf("connect changed the repository keys: %v", err)
+	}
+}

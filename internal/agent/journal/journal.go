@@ -33,10 +33,11 @@ const (
 )
 
 type Record struct {
-	ID     uuid.UUID
-	State  State
-	Input  []byte
-	Result []byte
+	ID       uuid.UUID
+	State    State
+	Input    []byte
+	Result   []byte
+	Progress []byte
 }
 
 // Journal keeps at most 64 undelivered records. Each input and result is at most 1 MiB.
@@ -90,9 +91,9 @@ func Open(ctx context.Context, path string, installationID, nodeID uuid.UUID) (*
  CREATE TABLE IF NOT EXISTS records (
  id TEXT PRIMARY KEY, input_hash BLOB NOT NULL CHECK (length(input_hash)=32),
  state TEXT NOT NULL CHECK (state IN ('queued','running','terminal')),
- input BLOB, result BLOB, acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged IN (0,1)),
- CHECK (length(input)<=1048576), CHECK (length(result)<=1048576),
- CHECK (acknowledged=0 OR (state='terminal' AND input IS NULL AND result IS NULL)));
+ input BLOB, result BLOB, progress BLOB, acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged IN (0,1)),
+ CHECK (length(input)<=1048576), CHECK (length(result)<=1048576), CHECK (length(progress)<=4194304),
+ CHECK (acknowledged=0 OR (state='terminal' AND input IS NULL AND result IS NULL AND progress IS NULL)));
  INSERT INTO identity (singleton,installation_id,node_id) VALUES (1,?,?) ON CONFLICT DO NOTHING`, installationID, nodeID); err != nil {
 		return nil, fmt.Errorf("initialize journal: %w", err)
 	}
@@ -125,7 +126,7 @@ func (j *Journal) Admit(ctx context.Context, id uuid.UUID, input []byte) (Record
 	defer tx.Rollback()
 	r := Record{ID: id}
 	var savedHash []byte
-	err = tx.QueryRowContext(ctx, `SELECT state,input,result,input_hash FROM records WHERE id=?`, id).Scan(&r.State, &r.Input, &r.Result, &savedHash)
+	err = tx.QueryRowContext(ctx, `SELECT state,input,result,input_hash,progress FROM records WHERE id=?`, id).Scan(&r.State, &r.Input, &r.Result, &savedHash, &r.Progress)
 	if err == nil {
 		if !bytes.Equal(savedHash, hash[:]) {
 			return Record{}, ErrConflict
@@ -191,7 +192,7 @@ func (j *Journal) Complete(ctx context.Context, id uuid.UUID, result []byte) err
 	if state != Running {
 		return ErrConflict
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE records SET state='terminal',result=? WHERE id=?`, result, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE records SET state='terminal',result=?,progress=NULL WHERE id=?`, result, id); err != nil {
 		return fmt.Errorf("save journal result %s: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -202,7 +203,7 @@ func (j *Journal) Complete(ctx context.Context, id uuid.UUID, result []byte) err
 
 // Records returns undelivered work and results. A caller must inspect running work before it resumes.
 func (j *Journal) Records(ctx context.Context) ([]Record, error) {
-	rows, err := j.db.QueryContext(ctx, `SELECT id,state,input,result FROM records WHERE acknowledged=0 ORDER BY id`)
+	rows, err := j.db.QueryContext(ctx, `SELECT id,state,input,result,progress FROM records WHERE acknowledged=0 ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("read journal records: %w", err)
 	}
@@ -210,7 +211,7 @@ func (j *Journal) Records(ctx context.Context) ([]Record, error) {
 	var records []Record
 	for rows.Next() {
 		var r Record
-		if err := rows.Scan(&r.ID, &r.State, &r.Input, &r.Result); err != nil {
+		if err := rows.Scan(&r.ID, &r.State, &r.Input, &r.Result, &r.Progress); err != nil {
 			return nil, err
 		}
 		records = append(records, r)
@@ -220,9 +221,28 @@ func (j *Journal) Records(ctx context.Context) ([]Record, error) {
 
 // Acknowledge releases payloads after durable delivery. The input hash stays to prevent replay.
 func (j *Journal) Acknowledge(ctx context.Context, id uuid.UUID) error {
-	result, err := j.db.ExecContext(ctx, `UPDATE records SET acknowledged=1,input=NULL,result=NULL WHERE id=? AND state='terminal'`, id)
+	result, err := j.db.ExecContext(ctx, `UPDATE records SET acknowledged=1,input=NULL,result=NULL,progress=NULL WHERE id=? AND state='terminal'`, id)
 	if err != nil {
 		return fmt.Errorf("acknowledge journal result %s: %w", id, err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// SaveProgress commits recovery state before the worker changes an external resource.
+func (j *Journal) SaveProgress(ctx context.Context, id uuid.UUID, progress []byte) error {
+	if len(progress) == 0 || len(progress) > 4<<20 {
+		return ErrConflict
+	}
+	result, err := j.db.ExecContext(ctx, `UPDATE records SET progress=? WHERE id=? AND state='running'`, progress, id)
+	if err != nil {
+		return fmt.Errorf("save journal progress %s: %w", id, err)
 	}
 	changed, err := result.RowsAffected()
 	if err != nil {

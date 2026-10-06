@@ -69,7 +69,7 @@ func TestDockerVolumeBoundary(t *testing.T) {
 		{"/var/lib/docker/volumes/test/_data", false, true},
 		{"/var/lib/docker/volumes/test/_data/../../", true, true},
 	} {
-		if got := forbidden(test.path, test.volume); got != test.forbidden {
+		if got := Forbidden(test.path, test.volume); got != test.forbidden {
 			t.Fatalf("%+v: %t", test, got)
 		}
 	}

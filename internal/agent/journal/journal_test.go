@@ -147,3 +147,54 @@ func TestJournalBoundsPendingWork(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestProgressSurvivesRestartUntilCompletion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.db")
+	installation, node, id := uuid.New(), uuid.New(), uuid.New()
+	j, err := Open(t.Context(), path, installation, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if j != nil {
+			j.Close()
+		}
+	}()
+	if _, err := j.Admit(t.Context(), id, []byte("immutable request")); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.SaveProgress(t.Context(), id, []byte("too early")); !errors.Is(err, ErrConflict) {
+		t.Fatalf("queued progress accepted: %v", err)
+	}
+	if err := j.Start(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	progress := []byte(`{"restart":["container-id"]}`)
+	if err := j.SaveProgress(t.Context(), id, progress); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+	j, err = Open(t.Context(), path, installation, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := j.Records(t.Context())
+	if err != nil || len(records) != 1 || !bytes.Equal(records[0].Progress, progress) {
+		t.Fatalf("recovery intent lost: %v", err)
+	}
+	if err := j.Start(t.Context(), id); !errors.Is(err, ErrInspectionRequired) {
+		t.Fatalf("running work restarted blindly: %v", err)
+	}
+	if err := j.Complete(t.Context(), id, []byte("recovered result")); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.SaveProgress(t.Context(), id, progress); !errors.Is(err, ErrConflict) {
+		t.Fatalf("terminal progress changed: %v", err)
+	}
+	records, err = j.Records(t.Context())
+	if err != nil || len(records) != 1 || len(records[0].Progress) != 0 {
+		t.Fatalf("completed progress not released: %v", err)
+	}
+}

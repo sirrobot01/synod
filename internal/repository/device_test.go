@@ -26,11 +26,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/kopia/kopia/fs/localfs"
+	"github.com/kopia/kopia/snapshot"
 	"github.com/sirrobot01/synod/internal/agent/blobserver"
 	"github.com/sirrobot01/synod/internal/agent/journal"
+	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/destination"
+	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/repository"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
 func TestDeviceRepositorySurvivesRestartAndKeepsLocalRecovery(t *testing.T) {
@@ -125,6 +130,25 @@ func TestDeviceRepositorySurvivesRestartAndKeepsLocalRecovery(t *testing.T) {
 	if got, err := r.ReadCatalog(t.Context()); err != nil || !reflect.DeepEqual(got, catalog) {
 		t.Fatalf("remote read: %v", err)
 	}
+
+	snapshotSource := t.TempDir()
+	content := bytes.Repeat([]byte("private-device-snapshot-data\n"), 4096)
+	if err := os.WriteFile(filepath.Join(snapshotSource, "state"), content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	fileRoot, err := localfs.NewEntry(snapshotSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fileRoot.Close()
+	copied, err := r.UploadFiles(t.Context(), fileRoot, snapshot.SourceInfo{Host: source.String(), UserName: "test", Path: "test-app"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedSnapshot, err := r.PublishSnapshot(t.Context(), copied, backup.Snapshot{ID: uuid.New(), InstallationID: installation, DestinationID: id, App: inventory.App{ID: uuid.New(), NodeID: source, Definition: &agentv1.DiscoveredApp{Key: "compose:test", Name: "test", Kind: "compose"}}, Method: backup.Live, Architecture: "arm64", StartedAt: time.Now().UTC(), CompletedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := r.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +163,7 @@ func TestDeviceRepositorySurvivesRestartAndKeepsLocalRecovery(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if bytes.Contains(data, []byte(credentials.Password)) || bytes.Contains(data, []byte("private-device-catalog-marker")) {
+		if bytes.Contains(data, []byte(credentials.Password)) || bytes.Contains(data, []byte("private-device-catalog-marker")) || bytes.Contains(data, []byte("private-device-snapshot-data")) {
 			t.Error("destination contains plaintext backup content")
 		}
 		return nil
@@ -154,6 +178,15 @@ func TestDeviceRepositorySurvivesRestartAndKeepsLocalRecovery(t *testing.T) {
 	got, err := local.ReadCatalog(t.Context())
 	if err != nil || !reflect.DeepEqual(got, catalog) {
 		t.Fatalf("local recovery: %v", err)
+	}
+
+	targetDirectory := filepath.Join(t.TempDir(), "restored")
+	if err := local.RestoreFiles(t.Context(), savedSnapshot.ID, targetDirectory); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := os.ReadFile(filepath.Join(targetDirectory, "state"))
+	if err != nil || !bytes.Equal(restored, content) {
+		t.Fatalf("device snapshot local recovery differs: %v", err)
 	}
 	if err := local.Close(t.Context()); err != nil {
 		t.Fatal(err)

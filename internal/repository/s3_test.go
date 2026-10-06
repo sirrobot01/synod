@@ -7,14 +7,19 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/kopia/kopia/fs/localfs"
 	"github.com/kopia/kopia/repo"
+	"github.com/kopia/kopia/snapshot"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/sirrobot01/synod/internal/backup"
 )
 
 func TestMinIOEncryptedCatalog(t *testing.T) {
@@ -60,6 +65,25 @@ func TestMinIOEncryptedCatalog(t *testing.T) {
 		r.Close(t.Context())
 		t.Fatal(err)
 	}
+
+	source := t.TempDir()
+	content := bytes.Repeat([]byte("private-S3-snapshot-content\n"), 4096)
+	if err := os.WriteFile(filepath.Join(source, "state"), content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := localfs.NewEntry(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	copied, err := r.UploadFiles(t.Context(), root, snapshot.SourceInfo{Host: "test", UserName: "test", Path: "test-app"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := r.PublishSnapshot(t.Context(), copied, backup.Snapshot{ID: uuid.New(), InstallationID: catalog.InstallationID, DestinationID: uuid.New(), App: catalog.Apps[0], Method: backup.Live, Architecture: "arm64", StartedAt: time.Now().UTC(), CompletedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := r.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +95,15 @@ func TestMinIOEncryptedCatalog(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, catalog) {
 		r.Close(t.Context())
 		t.Fatalf("S3 catalog after reopen: %v", err)
+	}
+
+	target := filepath.Join(t.TempDir(), "restore")
+	if err := r.RestoreFiles(t.Context(), saved.ID, target); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := os.ReadFile(filepath.Join(target, "state"))
+	if err != nil || !bytes.Equal(restored, content) {
+		t.Fatalf("S3 snapshot restore differs: %v", err)
 	}
 	if err := r.Close(t.Context()); err != nil {
 		t.Fatal(err)
@@ -88,7 +121,7 @@ func TestMinIOEncryptedCatalog(t *testing.T) {
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		if bytes.Contains(data, []byte("private-catalog-marker")) || bytes.Contains(data, []byte(keys.Password)) {
+		if bytes.Contains(data, []byte("private-catalog-marker")) || bytes.Contains(data, []byte(keys.Password)) || bytes.Contains(data, []byte("private-S3-snapshot-content")) {
 			t.Fatal("S3 holds plaintext catalog data")
 		}
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/kopia/kopia/repo"
 	"github.com/kopia/kopia/repo/blob"
 	"github.com/kopia/kopia/repo/content"
+	"github.com/kopia/kopia/repo/format"
 )
 
 // Error keeps provider details out of logs while preserving errors.Is and errors.As.
@@ -95,4 +96,31 @@ func (r *Repository) Close(ctx context.Context) error {
 		return &Error{Action: "close", Cause: errors.Join(err, ctx.Err())}
 	}
 	return nil
+}
+
+var ErrUninitialized = errors.New("repository is not initialized")
+
+// Connect may create a repository only for its one designated initialization job.
+// The controller must not assign another initializer until that job is terminal.
+func Connect(ctx context.Context, location Location, credentials Credentials, initialize bool) (*Repository, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	st, err := storage(ctx, location, credentials, initialize)
+	if err != nil {
+		return nil, &Error{Action: "connect storage", Cause: errors.Join(err, ctx.Err())}
+	}
+	defer st.Close(context.WithoutCancel(ctx))
+	_, err = st.GetMetadata(ctx, format.KopiaRepositoryBlobID)
+	if err != nil {
+		if !errors.Is(err, blob.ErrBlobNotFound) {
+			return nil, &Error{Action: "check repository", Cause: errors.Join(err, ctx.Err())}
+		}
+		if !initialize {
+			return nil, ErrUninitialized
+		}
+		if err := repo.Initialize(ctx, st, nil, credentials.Password); err != nil {
+			return nil, &Error{Action: "initialize", Cause: errors.Join(err, ctx.Err())}
+		}
+	}
+	return open(ctx, st, credentials.Password)
 }

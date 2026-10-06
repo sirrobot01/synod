@@ -15,8 +15,8 @@ import (
 
 const largeBytes = 20 << 30
 
-// forbidden checks before a path is opened. Broad host roots are not app data.
-func forbidden(path string, volume bool) bool {
+// Forbidden checks before a path is opened. Broad host roots are not app data.
+func Forbidden(path string, volume bool) bool {
 	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) || slices.Contains([]string{"/", "/var", "/home", "/Users", "/mnt", "/media", "/srv", "/opt", "/tmp", "/private"}, path) {
 		return true
@@ -39,7 +39,7 @@ func measure(ctx context.Context, path *agentv1.DiscoveredPath) {
 		return
 	}
 	volume := path.Kind == "volume"
-	if forbidden(path.Source, volume) || strings.HasSuffix(path.Target, ".sock") {
+	if Forbidden(path.Source, volume) || strings.HasSuffix(path.Target, ".sock") {
 		path.Status, path.Reason = "Never", "Host system paths are never copied."
 		return
 	}
@@ -57,7 +57,7 @@ func measure(ctx context.Context, path *agentv1.DiscoveredPath) {
 		path.Reason += " Size is unknown. Check that the path exists and is readable on this device."
 		return
 	}
-	if forbidden(resolved, volume) {
+	if Forbidden(resolved, volume) {
 		path.Status, path.Reason = "Never", "This path resolves to a host system path."
 		return
 	}
@@ -100,7 +100,7 @@ func measure(ctx context.Context, path *agentv1.DiscoveredPath) {
 			if entries > 100000 || path.SizeBytes > largeBytes {
 				return fs.SkipAll
 			}
-			if name != "." && forbidden(filepath.Join(resolved, name), volume) {
+			if name != "." && Forbidden(filepath.Join(resolved, name), volume) {
 				return errors.New("directory contains a host system path")
 			}
 			if entry.Type()&os.ModeSymlink != 0 {
