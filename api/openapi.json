@@ -3,7 +3,7 @@
   "info": {
     "title": "Synod development API",
     "version": "0.1.0-dev",
-    "description": "Development API for device enrollment, approval, and operation inspection. Account and session endpoints are not described here yet."
+    "description": "Development API for device enrollment, app discovery, approval, and operation inspection. Account and session endpoints are not described here yet."
   },
   "servers": [
     {
@@ -970,6 +970,27 @@
           }
         ]
       }
+    },
+    "/v1/apps": {
+      "get": {
+        "operationId": "listApps",
+        "description": "Read saved apps and the last scan attempt for each device. A failed scan keeps the last successful app list.",
+        "responses": {
+          "200": {
+            "description": "Saved app inventory",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppCatalog"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1264,6 +1285,206 @@
           "connected_at",
           "last_seen_at"
         ]
+      },
+      "DiscoveredPath": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "volume": {
+            "type": "string"
+          },
+          "container_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "Included",
+              "Large",
+              "Dumped",
+              "Never"
+            ]
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "size_known": {
+            "type": "boolean"
+          },
+          "read_only": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DiscoveredContainer": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string"
+          },
+          "image_id": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "database": {
+            "type": "string"
+          },
+          "repo_digests": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "DiscoveredApp": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "compose",
+              "container"
+            ]
+          },
+          "project_directory": {
+            "type": "string"
+          },
+          "containers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiscoveredContainer"
+            }
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiscoveredPath"
+            }
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "App": {
+        "type": "object",
+        "required": [
+          "id",
+          "node_id",
+          "node_name",
+          "observed_at",
+          "present",
+          "definition"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "present": {
+            "type": "boolean"
+          },
+          "definition": {
+            "$ref": "#/components/schemas/DiscoveredApp"
+          }
+        }
+      },
+      "DiscoveryState": {
+        "type": "object",
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "received_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "failure_code": {
+            "type": "string"
+          }
+        }
+      },
+      "AppCatalog": {
+        "type": "object",
+        "required": [
+          "apps",
+          "devices"
+        ],
+        "properties": {
+          "apps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/App"
+            }
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiscoveryState"
+            }
+          }
+        }
       }
     },
     "parameters": {},

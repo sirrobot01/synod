@@ -168,14 +168,18 @@ func (c *Client) requestWith(ctx context.Context, method, path string, body any,
 			failure = &Error{Code: "transport_error", Message: "The HTTPS request failed. Check the API address, connection, and trusted CA.", cause: err}
 			continue
 		}
-		data, readErr := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+		limit := 1 << 20
+		if path == "/v1/apps" {
+			limit = 16 << 20
+		}
+		data, readErr := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 		response.Body.Close()
 		if readErr != nil {
 			failure = &Error{Code: "transport_error", Message: "The API response was interrupted. Retry mutations with the same key, revision, and body.", cause: readErr}
 			continue
 		}
-		if len(data) > 1<<20 {
-			return &Error{Code: "invalid_response", Message: "The API response exceeds 1 MiB."}
+		if len(data) > limit {
+			return &Error{Code: "invalid_response", Message: "The API response exceeds its size limit."}
 		}
 		if response.StatusCode == status {
 			// A no-content reply carries no document, so there is nothing to decode.

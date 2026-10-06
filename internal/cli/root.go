@@ -26,6 +26,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	app.bindFlags(root.PersistentFlags())
 	root.AddCommand(
 		newNodeCommand(app),
+		newAppsCommand(app),
 		newOperationCommand(app),
 		newInstallationCommand(app),
 		newUserCommand(app),

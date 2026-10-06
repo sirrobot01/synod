@@ -176,7 +176,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 			Authorize: func(ctx context.Context, _, nodeID uuid.UUID, certificate *x509.Certificate) error {
 				return metadata.CheckAgentCertificate(ctx, nodeID, certificate)
 			},
-			Capabilities: []string{"runtime.docker"},
+			Capabilities: []string{"runtime.docker", "apps.discovery"},
 			Handle:       (agentstream.Receiver{Store: metadata}).Handle,
 		})
 		if err != nil {

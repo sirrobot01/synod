@@ -46,6 +46,7 @@ message AgentMessage {
   oneof message {
     Hello hello = 1;
     Heartbeat heartbeat = 2;
+    AppInventory inventory = 3;
   }
 }
 
@@ -54,4 +55,47 @@ message ControllerMessage {
     Session session = 1;
     ProtocolError error = 2;
   }
+}
+
+// An inventory is complete. A failed scan has a failure code and no apps.
+message AppInventory {
+  google.protobuf.Timestamp observed_at = 1;
+  repeated DiscoveredApp apps = 2;
+  string failure_code = 3;
+}
+
+// Discovery contains metadata only. It never carries file or environment contents.
+message DiscoveredApp {
+  string key = 1;
+  string name = 2;
+  string kind = 3;
+  string project_directory = 4;
+  repeated DiscoveredContainer containers = 5;
+  repeated DiscoveredPath paths = 6;
+  repeated string issues = 7;
+}
+
+message DiscoveredContainer {
+  string id = 1;
+  string name = 2;
+  string service = 3;
+  string image = 4;
+  string image_id = 5;
+  repeated string repo_digests = 6;
+  string platform = 7;
+  string state = 8;
+  string database = 9;
+}
+
+message DiscoveredPath {
+  string source = 1;
+  string target = 2;
+  string kind = 3;
+  string volume = 4;
+  string container_id = 5;
+  string status = 6;
+  string reason = 7;
+  int64 size_bytes = 8;
+  bool size_known = 9;
+  bool read_only = 10;
 }

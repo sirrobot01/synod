@@ -107,6 +107,7 @@ func NewServer(metadata *store.Store, admin *auth.AdminToken, installationID uui
 			signed.Post("/users/{id}/actions/set-password", server.setUserPassword)
 			signed.Group(func(admin chi.Router) {
 				admin.Use(server.requireAdmin)
+				admin.Get("/apps", server.listApps)
 				admin.Get("/operations", server.listOperations)
 				admin.Get("/operations/{id}", server.getOperation)
 				admin.Get("/nodes", server.listNodes)

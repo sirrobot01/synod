@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,7 +55,7 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	hello := &agentv1.Hello{
 		InstallationId: config.InstallationID, NodeId: config.NodeID,
 		Protocol:     &agentv1.VersionRange{Minimum: controlstream.ProtocolVersion, Maximum: controlstream.ProtocolVersion},
-		Capabilities: []string{"runtime.docker"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
+		Capabilities: []string{"runtime.docker", "apps.discovery"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
 		Hostname: hostname, AgentVersion: Version,
 	}
 	stream, err := transport.New(transport.Config{
@@ -70,6 +71,16 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("%w: build the agent transport: %w", ErrConfiguration, err)
 	}
+	api, err := client.New(client.WithHost("unix://"+config.DockerSocket), client.WithAPIVersionNegotiation())
+	if err != nil {
+		return fmt.Errorf("%w: open Docker for app discovery: %w", ErrRuntime, err)
+	}
+	defer api.Close()
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	defer stopWorker()
+	var worker sync.WaitGroup
+	worker.Go(func() { discover(workerCtx, api, stream, logger) })
+	defer func() { stopWorker(); worker.Wait() }()
 	logger.Info("agent_started", "node_id", config.NodeID, "architecture", facts.architecture, "runtime_version", facts.version)
 	err = stream.Run(ctx)
 	if ctx.Err() == nil {

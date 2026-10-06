@@ -1,0 +1,160 @@
+// Package discovery reads Docker app metadata and proposes paths for backup.
+package discovery
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/client"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+// Scan returns a complete inventory. Filters can restrict a scan to test projects.
+// A Docker failure returns no inventory, so a partial scan cannot remove saved apps.
+func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*agentv1.AppInventory, error) {
+	listed, err := api.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
+	if err != nil {
+		return nil, fmt.Errorf("list Docker containers: %w", err)
+	}
+	inventory := &agentv1.AppInventory{ObservedAt: timestamppb.Now()}
+	apps := make(map[string]*agentv1.DiscoveredApp)
+	for _, summary := range listed.Items {
+		inspected, err := api.ContainerInspect(ctx, summary.ID, client.ContainerInspectOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("inspect container %s: %w", summary.ID, err)
+		}
+		c := inspected.Container
+		if c.Config == nil {
+			return nil, fmt.Errorf("inspect container %s: configuration is absent", summary.ID)
+		}
+		labels := c.Config.Labels
+		project := labels["com.docker.compose.project"]
+		key, kind, name := "container:"+c.ID, "container", strings.TrimPrefix(c.Name, "/")
+		if project != "" {
+			key, kind, name = "compose:"+project, "compose", project
+		}
+		app := apps[key]
+		if app == nil {
+			app = &agentv1.DiscoveredApp{Key: key, Name: name, Kind: kind}
+			apps[key] = app
+			inventory.Apps = append(inventory.Apps, app)
+		}
+		item := &agentv1.DiscoveredContainer{Id: c.ID, Name: strings.TrimPrefix(c.Name, "/"), Service: labels["com.docker.compose.service"], Image: c.Config.Image, ImageId: c.Image}
+		if c.State != nil {
+			item.State = string(c.State.Status)
+		}
+		image, err := api.ImageInspect(ctx, c.Image)
+		if err != nil {
+			app.Issues = append(app.Issues, "image_metadata_unavailable:"+c.ID)
+		} else {
+			item.RepoDigests = image.RepoDigests
+			item.Platform = image.Os + "/" + image.Architecture
+			if image.Variant != "" {
+				item.Platform += "/" + image.Variant
+			}
+		}
+		databasePath := ""
+		imageName := strings.Split(strings.Split(filepath.Base(c.Config.Image), "@")[0], ":")[0]
+		switch filepath.Base(imageName) {
+		case "postgres":
+			item.Database, databasePath = "postgres", "/var/lib/postgresql/data"
+			for _, variable := range c.Config.Env {
+				if value, ok := strings.CutPrefix(variable, "PGDATA="); ok && filepath.IsAbs(value) {
+					databasePath = filepath.Clean(value)
+				}
+			}
+		case "mysql", "mariadb":
+			item.Database, databasePath = filepath.Base(imageName), "/var/lib/mysql"
+		case "redis":
+			item.Database, databasePath = "redis", "/data"
+		}
+		app.Containers = append(app.Containers, item)
+		if project != "" {
+			working := labels["com.docker.compose.project.working_dir"]
+			if working == "" || !filepath.IsAbs(working) {
+				app.Issues = append(app.Issues, "project_directory_unavailable:"+c.ID)
+			} else {
+				if app.ProjectDirectory != "" && app.ProjectDirectory != working {
+					app.Issues = append(app.Issues, "project_directories_differ")
+				}
+				app.ProjectDirectory = working
+				app.Paths = append(app.Paths, &agentv1.DiscoveredPath{Source: working, Kind: "project"})
+				app.Paths = append(app.Paths, &agentv1.DiscoveredPath{Source: filepath.Join(working, ".env"), Kind: "env"})
+			}
+			files := labels["com.docker.compose.project.config_files"]
+			if files == "" {
+				app.Issues = append(app.Issues, "compose_files_unavailable:"+c.ID)
+			}
+			for _, file := range strings.Split(files, ",") {
+				if file == "" {
+					continue
+				}
+				if !filepath.IsAbs(file) && filepath.IsAbs(working) {
+					file = filepath.Join(working, file)
+				}
+				app.Paths = append(app.Paths, &agentv1.DiscoveredPath{Source: file, Kind: "compose"})
+			}
+			for _, file := range strings.Split(labels["com.docker.compose.project.environment_file"], ",") {
+				if file != "" {
+					if !filepath.IsAbs(file) && filepath.IsAbs(working) {
+						file = filepath.Join(working, file)
+					}
+					app.Paths = append(app.Paths, &agentv1.DiscoveredPath{Source: file, Kind: "env"})
+				}
+			}
+		}
+		for _, m := range c.Mounts {
+			path := &agentv1.DiscoveredPath{Source: m.Source, Target: m.Destination, Kind: string(m.Type), Volume: m.Name, ContainerId: c.ID, ReadOnly: !m.RW}
+			if m.Type != mount.TypeBind && m.Type != mount.TypeVolume {
+				path.Status, path.Reason = "Never", "This mount has no persistent host data."
+			} else if m.Type == mount.TypeVolume && m.Driver != "local" {
+				path.Status, path.Reason = "Never", "This volume needs a supported local mount."
+			} else if databasePath != "" && databasePath == m.Destination {
+				path.Status, path.Reason = "Dumped", "Database data needs a dump. Dump execution is not available yet."
+			}
+			if m.Type == mount.TypeVolume && path.Status != "Never" {
+				volume, err := api.VolumeInspect(ctx, m.Name, client.VolumeInspectOptions{})
+				if err != nil {
+					return nil, fmt.Errorf("inspect volume %s: %w", m.Name, err)
+				}
+				if len(volume.Volume.Options) != 0 {
+					// Driver mounts can hide host paths behind a volume data directory.
+					path.Status, path.Reason = "Never", "Volumes with driver mount options need an explicit backup method."
+				}
+			}
+			app.Paths = append(app.Paths, path)
+			if path.Status != "Never" && databasePath != "" && databasePath != m.Destination && strings.HasPrefix(databasePath, strings.TrimSuffix(m.Destination, "/")+"/") {
+				data := proto.Clone(path).(*agentv1.DiscoveredPath)
+				data.Source = filepath.Join(m.Source, strings.TrimPrefix(databasePath, strings.TrimSuffix(m.Destination, "/")+"/"))
+				data.Target = databasePath
+				data.Status, data.Reason = "Dumped", "Database data needs a dump. Dump execution is not available yet."
+				app.Paths = append(app.Paths, data)
+			}
+		}
+	}
+	for _, app := range inventory.Apps {
+		slices.SortFunc(app.Containers, func(a, b *agentv1.DiscoveredContainer) int { return strings.Compare(a.Id, b.Id) })
+		slices.SortFunc(app.Paths, func(a, b *agentv1.DiscoveredPath) int {
+			return strings.Compare(a.Source+"\x00"+a.Kind+"\x00"+a.ContainerId+"\x00"+a.Target, b.Source+"\x00"+b.Kind+"\x00"+b.ContainerId+"\x00"+b.Target)
+		})
+		app.Paths = slices.CompactFunc(app.Paths, func(a, b *agentv1.DiscoveredPath) bool {
+			return a.Source == b.Source && a.Kind == b.Kind && a.ContainerId == b.ContainerId && a.Target == b.Target
+		})
+		for _, path := range app.Paths {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			measure(ctx, path)
+		}
+		slices.Sort(app.Issues)
+		app.Issues = slices.Compact(app.Issues)
+	}
+	slices.SortFunc(inventory.Apps, func(a, b *agentv1.DiscoveredApp) int { return strings.Compare(a.Key, b.Key) })
+	return inventory, nil
+}

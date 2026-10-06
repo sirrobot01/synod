@@ -8,11 +8,12 @@ Some devices can be offline between backups.
 
 Synod is under development. v0.1 is not released.
 The current build creates an installation, joins devices, and approves them.
+It discovers Docker apps and their paths.
 It provides user accounts, API tokens, operation records, and a web shell.
 The controller stores its metadata in SQLite through `modernc.org/sqlite`.
 It requires no PostgreSQL server or etcd service.
 
-App discovery, backups, restore, repository recovery, and the recovery kit are not available yet.
+Backups, restore, repository recovery, and the recovery kit are not available yet.
 The current build does not protect app data.
 Synod does not place running apps or provide automatic failover.
 
@@ -174,6 +175,57 @@ synod node join-token
 Agents use mutual TLS after enrollment.
 A device keeps its identity and certificates in its enrollment directory.
 
+## Discover apps
+
+The agent scans Docker once a minute.
+It reads running and stopped containers.
+Compose project labels group services into one app.
+Each standalone container is one app.
+The agent must run on the Docker host to measure local paths.
+Docker Desktop stores named volumes inside its VM, so a Mac agent cannot measure them.
+
+```sh
+synod app list
+synod --json app list
+```
+
+The list shows project files, environment file paths, bind mounts, and named volumes.
+It shows image references, local digests, and the local image platform in JSON.
+It does not claim that a local image supports another platform.
+File contents, container environment values, and volume driver options do not leave the agent during discovery.
+
+Each path has a proposed status:
+
+| Status | Current meaning |
+| --- | --- |
+| Included | App files or state. No backup has run. |
+| Large | Media or more than 20 GiB. Skipped by default. |
+| Dumped | A detected database data path. Dump execution is not available yet. |
+| Never | A host system path or an unsupported mount. |
+
+Discovery checks host system exclusions before it scans files.
+It does not follow links during a directory scan.
+Media paths are not scanned for size.
+A size scan stops after five seconds, 100,000 entries, or more than 20 GiB.
+An incomplete size is shown as unknown or as a lower bound.
+Sizes are file lengths, not disk usage.
+A failed Docker scan keeps the last app list and shows a failure code.
+A complete scan marks absent apps as missing and keeps their records.
+The scan time remains visible when a device disconnects.
+An inventory report supports up to 512 apps and 900 KiB per device.
+An excessive report shows `inventory_limit` and keeps the prior list.
+The CLI accepts an app list of up to 16 MiB.
+
+To run the local Docker discovery test, load its pinned image first:
+
+```sh
+docker pull alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock go test -race -p 1 -count=1 ./internal/agent/discovery
+```
+
+The test creates private containers and a volume.
+It removes them after the test.
+
 ## Operator access
 
 The CLI uses the token file in `SYNOD_ADMIN_TOKEN_FILE`.
@@ -216,5 +268,5 @@ The agent journal records input before execution and keeps results until acknowl
 A running journal record requires inspection after a restart.
 The backup worker will use this journal in a later task.
 
-See [the API schema](api/openapi.json) for enrollment, device, and operation routes.
+See [the API schema](api/openapi.json) for enrollment, device, app, and operation routes.
 It does not yet describe account and session routes.

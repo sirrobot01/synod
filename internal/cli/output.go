@@ -10,12 +10,15 @@ import (
 	"time"
 
 	"github.com/sirrobot01/synod/internal/client"
+	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/spf13/cobra"
 )
 
 // Result is the single JSON document that the CLI writes to stdout.
 type Result struct {
+	Apps            []inventory.App         `json:"apps,omitempty"`
+	Discovery       []inventory.Device      `json:"discovery,omitempty"`
 	Operation       *operation.Operation    `json:"operation,omitzero"`
 	Operations      []operation.Operation   `json:"operations,omitempty"`
 	EnrollmentToken *client.EnrollmentToken `json:"enrollment_token,omitzero"`
@@ -65,6 +68,32 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 		return code
 	}
 	var output strings.Builder
+	for _, device := range a.result.Discovery {
+		if device.ReceivedAt == nil {
+			fmt.Fprintf(&output, "Device %s: no app scan received.\n", device.NodeName)
+		} else if device.FailureCode != "" {
+			fmt.Fprintf(&output, "Device %s: %s. The last app list is kept.\n", device.NodeName, device.FailureCode)
+		}
+	}
+	for _, app := range a.result.Apps {
+		presence := "present"
+		if !app.Present {
+			presence = "not found in the last scan"
+		}
+		fmt.Fprintf(&output, "%s  %s  %s  %s  scanned %s\n", app.ID, app.Definition.Name, app.NodeName, presence, app.ObservedAt.Format(time.RFC3339))
+		for _, path := range app.Definition.Paths {
+			size := "unknown size"
+			if path.SizeKnown {
+				size = fmt.Sprintf("%d bytes", path.SizeBytes)
+			} else if path.SizeBytes > 0 {
+				size = fmt.Sprintf("at least %d bytes", path.SizeBytes)
+			}
+			fmt.Fprintf(&output, "  %-8s %s  %s  %s\n", path.Status, path.Source, size, path.Reason)
+		}
+		for _, issue := range app.Definition.Issues {
+			fmt.Fprintf(&output, "  Issue: %s\n", issue)
+		}
+	}
 	if op := a.result.Operation; op != nil {
 		fmt.Fprintf(&output, "Operation: %s\nKind: %s\nStatus: %s\nFailure: %s\n", op.ID, op.Kind, op.Status, op.FailureCode)
 	}

@@ -30,6 +30,8 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 	switch value := message.Message.(type) {
 	case *agentv1.AgentMessage_Hello:
 		return r.Store.RecordAgentSession(ctx, peer.NodeID, sessionID, value.Hello)
+	case *agentv1.AgentMessage_Inventory:
+		return r.Store.RecordInventory(ctx, peer.NodeID, sessionID, value.Inventory)
 	case *agentv1.AgentMessage_Heartbeat:
 		return r.Store.RecordAgentHeartbeat(ctx, peer.NodeID, sessionID, value.Heartbeat)
 	default:

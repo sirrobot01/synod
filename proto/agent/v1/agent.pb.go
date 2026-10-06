@@ -378,6 +378,7 @@ type AgentMessage struct {
 	//
 	//	*AgentMessage_Hello
 	//	*AgentMessage_Heartbeat
+	//	*AgentMessage_Inventory
 	Message       isAgentMessage_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -438,6 +439,15 @@ func (x *AgentMessage) GetHeartbeat() *Heartbeat {
 	return nil
 }
 
+func (x *AgentMessage) GetInventory() *AppInventory {
+	if x != nil {
+		if x, ok := x.Message.(*AgentMessage_Inventory); ok {
+			return x.Inventory
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Message interface {
 	isAgentMessage_Message()
 }
@@ -450,9 +460,15 @@ type AgentMessage_Heartbeat struct {
 	Heartbeat *Heartbeat `protobuf:"bytes,2,opt,name=heartbeat,proto3,oneof"`
 }
 
+type AgentMessage_Inventory struct {
+	Inventory *AppInventory `protobuf:"bytes,3,opt,name=inventory,proto3,oneof"`
+}
+
 func (*AgentMessage_Hello) isAgentMessage_Message() {}
 
 func (*AgentMessage_Heartbeat) isAgentMessage_Message() {}
+
+func (*AgentMessage_Inventory) isAgentMessage_Message() {}
 
 type ControllerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -536,6 +552,384 @@ func (*ControllerMessage_Session) isControllerMessage_Message() {}
 
 func (*ControllerMessage_Error) isControllerMessage_Message() {}
 
+// An inventory is complete. A failed scan has a failure code and no apps.
+type AppInventory struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ObservedAt    *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Apps          []*DiscoveredApp       `protobuf:"bytes,2,rep,name=apps,proto3" json:"apps,omitempty"`
+	FailureCode   string                 `protobuf:"bytes,3,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppInventory) Reset() {
+	*x = AppInventory{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppInventory) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppInventory) ProtoMessage() {}
+
+func (x *AppInventory) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppInventory.ProtoReflect.Descriptor instead.
+func (*AppInventory) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *AppInventory) GetObservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObservedAt
+	}
+	return nil
+}
+
+func (x *AppInventory) GetApps() []*DiscoveredApp {
+	if x != nil {
+		return x.Apps
+	}
+	return nil
+}
+
+func (x *AppInventory) GetFailureCode() string {
+	if x != nil {
+		return x.FailureCode
+	}
+	return ""
+}
+
+// Discovery contains metadata only. It never carries file or environment contents.
+type DiscoveredApp struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Key              string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Name             string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Kind             string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	ProjectDirectory string                 `protobuf:"bytes,4,opt,name=project_directory,json=projectDirectory,proto3" json:"project_directory,omitempty"`
+	Containers       []*DiscoveredContainer `protobuf:"bytes,5,rep,name=containers,proto3" json:"containers,omitempty"`
+	Paths            []*DiscoveredPath      `protobuf:"bytes,6,rep,name=paths,proto3" json:"paths,omitempty"`
+	Issues           []string               `protobuf:"bytes,7,rep,name=issues,proto3" json:"issues,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *DiscoveredApp) Reset() {
+	*x = DiscoveredApp{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiscoveredApp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiscoveredApp) ProtoMessage() {}
+
+func (x *DiscoveredApp) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiscoveredApp.ProtoReflect.Descriptor instead.
+func (*DiscoveredApp) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *DiscoveredApp) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *DiscoveredApp) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *DiscoveredApp) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *DiscoveredApp) GetProjectDirectory() string {
+	if x != nil {
+		return x.ProjectDirectory
+	}
+	return ""
+}
+
+func (x *DiscoveredApp) GetContainers() []*DiscoveredContainer {
+	if x != nil {
+		return x.Containers
+	}
+	return nil
+}
+
+func (x *DiscoveredApp) GetPaths() []*DiscoveredPath {
+	if x != nil {
+		return x.Paths
+	}
+	return nil
+}
+
+func (x *DiscoveredApp) GetIssues() []string {
+	if x != nil {
+		return x.Issues
+	}
+	return nil
+}
+
+type DiscoveredContainer struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Service       string                 `protobuf:"bytes,3,opt,name=service,proto3" json:"service,omitempty"`
+	Image         string                 `protobuf:"bytes,4,opt,name=image,proto3" json:"image,omitempty"`
+	ImageId       string                 `protobuf:"bytes,5,opt,name=image_id,json=imageId,proto3" json:"image_id,omitempty"`
+	RepoDigests   []string               `protobuf:"bytes,6,rep,name=repo_digests,json=repoDigests,proto3" json:"repo_digests,omitempty"`
+	Platform      string                 `protobuf:"bytes,7,opt,name=platform,proto3" json:"platform,omitempty"`
+	State         string                 `protobuf:"bytes,8,opt,name=state,proto3" json:"state,omitempty"`
+	Database      string                 `protobuf:"bytes,9,opt,name=database,proto3" json:"database,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiscoveredContainer) Reset() {
+	*x = DiscoveredContainer{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiscoveredContainer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiscoveredContainer) ProtoMessage() {}
+
+func (x *DiscoveredContainer) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiscoveredContainer.ProtoReflect.Descriptor instead.
+func (*DiscoveredContainer) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *DiscoveredContainer) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *DiscoveredContainer) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *DiscoveredContainer) GetService() string {
+	if x != nil {
+		return x.Service
+	}
+	return ""
+}
+
+func (x *DiscoveredContainer) GetImage() string {
+	if x != nil {
+		return x.Image
+	}
+	return ""
+}
+
+func (x *DiscoveredContainer) GetImageId() string {
+	if x != nil {
+		return x.ImageId
+	}
+	return ""
+}
+
+func (x *DiscoveredContainer) GetRepoDigests() []string {
+	if x != nil {
+		return x.RepoDigests
+	}
+	return nil
+}
+
+func (x *DiscoveredContainer) GetPlatform() string {
+	if x != nil {
+		return x.Platform
+	}
+	return ""
+}
+
+func (x *DiscoveredContainer) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *DiscoveredContainer) GetDatabase() string {
+	if x != nil {
+		return x.Database
+	}
+	return ""
+}
+
+type DiscoveredPath struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Source        string                 `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	Target        string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	Kind          string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	Volume        string                 `protobuf:"bytes,4,opt,name=volume,proto3" json:"volume,omitempty"`
+	ContainerId   string                 `protobuf:"bytes,5,opt,name=container_id,json=containerId,proto3" json:"container_id,omitempty"`
+	Status        string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`
+	Reason        string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	SizeBytes     int64                  `protobuf:"varint,8,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	SizeKnown     bool                   `protobuf:"varint,9,opt,name=size_known,json=sizeKnown,proto3" json:"size_known,omitempty"`
+	ReadOnly      bool                   `protobuf:"varint,10,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiscoveredPath) Reset() {
+	*x = DiscoveredPath{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiscoveredPath) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiscoveredPath) ProtoMessage() {}
+
+func (x *DiscoveredPath) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiscoveredPath.ProtoReflect.Descriptor instead.
+func (*DiscoveredPath) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *DiscoveredPath) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *DiscoveredPath) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *DiscoveredPath) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *DiscoveredPath) GetVolume() string {
+	if x != nil {
+		return x.Volume
+	}
+	return ""
+}
+
+func (x *DiscoveredPath) GetContainerId() string {
+	if x != nil {
+		return x.ContainerId
+	}
+	return ""
+}
+
+func (x *DiscoveredPath) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *DiscoveredPath) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *DiscoveredPath) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+func (x *DiscoveredPath) GetSizeKnown() bool {
+	if x != nil {
+		return x.SizeKnown
+	}
+	return false
+}
+
+func (x *DiscoveredPath) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
+}
+
 var File_proto_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_agent_proto_rawDesc = "" +
@@ -569,15 +963,55 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"observedAt\"=\n" +
 	"\rProtocolError\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\x83\x01\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xc1\x01\n" +
 	"\fAgentMessage\x12-\n" +
 	"\x05hello\x18\x01 \x01(\v2\x15.synod.agent.v1.HelloH\x00R\x05hello\x129\n" +
-	"\theartbeat\x18\x02 \x01(\v2\x19.synod.agent.v1.HeartbeatH\x00R\theartbeatB\t\n" +
+	"\theartbeat\x18\x02 \x01(\v2\x19.synod.agent.v1.HeartbeatH\x00R\theartbeat\x12<\n" +
+	"\tinventory\x18\x03 \x01(\v2\x1c.synod.agent.v1.AppInventoryH\x00R\tinventoryB\t\n" +
 	"\amessage\"\x8a\x01\n" +
 	"\x11ControllerMessage\x123\n" +
 	"\asession\x18\x01 \x01(\v2\x17.synod.agent.v1.SessionH\x00R\asession\x125\n" +
 	"\x05error\x18\x02 \x01(\v2\x1d.synod.agent.v1.ProtocolErrorH\x00R\x05errorB\t\n" +
-	"\amessage2^\n" +
+	"\amessage\"\xa1\x01\n" +
+	"\fAppInventory\x12;\n" +
+	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"observedAt\x121\n" +
+	"\x04apps\x18\x02 \x03(\v2\x1d.synod.agent.v1.DiscoveredAppR\x04apps\x12!\n" +
+	"\ffailure_code\x18\x03 \x01(\tR\vfailureCode\"\x89\x02\n" +
+	"\rDiscoveredApp\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\x12+\n" +
+	"\x11project_directory\x18\x04 \x01(\tR\x10projectDirectory\x12C\n" +
+	"\n" +
+	"containers\x18\x05 \x03(\v2#.synod.agent.v1.DiscoveredContainerR\n" +
+	"containers\x124\n" +
+	"\x05paths\x18\x06 \x03(\v2\x1e.synod.agent.v1.DiscoveredPathR\x05paths\x12\x16\n" +
+	"\x06issues\x18\a \x03(\tR\x06issues\"\xf5\x01\n" +
+	"\x13DiscoveredContainer\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
+	"\aservice\x18\x03 \x01(\tR\aservice\x12\x14\n" +
+	"\x05image\x18\x04 \x01(\tR\x05image\x12\x19\n" +
+	"\bimage_id\x18\x05 \x01(\tR\aimageId\x12!\n" +
+	"\frepo_digests\x18\x06 \x03(\tR\vrepoDigests\x12\x1a\n" +
+	"\bplatform\x18\a \x01(\tR\bplatform\x12\x14\n" +
+	"\x05state\x18\b \x01(\tR\x05state\x12\x1a\n" +
+	"\bdatabase\x18\t \x01(\tR\bdatabase\"\x9a\x02\n" +
+	"\x0eDiscoveredPath\x12\x16\n" +
+	"\x06source\x18\x01 \x01(\tR\x06source\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\x12\x16\n" +
+	"\x06volume\x18\x04 \x01(\tR\x06volume\x12!\n" +
+	"\fcontainer_id\x18\x05 \x01(\tR\vcontainerId\x12\x16\n" +
+	"\x06status\x18\x06 \x01(\tR\x06status\x12\x16\n" +
+	"\x06reason\x18\a \x01(\tR\x06reason\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\b \x01(\x03R\tsizeBytes\x12\x1d\n" +
+	"\n" +
+	"size_known\x18\t \x01(\bR\tsizeKnown\x12\x1b\n" +
+	"\tread_only\x18\n" +
+	" \x01(\bR\breadOnly2^\n" +
 	"\fAgentService\x12N\n" +
 	"\aConnect\x12\x1c.synod.agent.v1.AgentMessage\x1a!.synod.agent.v1.ControllerMessage(\x010\x01B4Z2github.com/sirrobot01/synod/proto/agent/v1;agentv1b\x06proto3"
 
@@ -593,7 +1027,7 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_proto_agent_v1_agent_proto_rawDescData
 }
 
-var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*VersionRange)(nil),          // 0: synod.agent.v1.VersionRange
 	(*Hello)(nil),                 // 1: synod.agent.v1.Hello
@@ -602,25 +1036,34 @@ var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*ProtocolError)(nil),         // 4: synod.agent.v1.ProtocolError
 	(*AgentMessage)(nil),          // 5: synod.agent.v1.AgentMessage
 	(*ControllerMessage)(nil),     // 6: synod.agent.v1.ControllerMessage
-	(*durationpb.Duration)(nil),   // 7: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(*AppInventory)(nil),          // 7: synod.agent.v1.AppInventory
+	(*DiscoveredApp)(nil),         // 8: synod.agent.v1.DiscoveredApp
+	(*DiscoveredContainer)(nil),   // 9: synod.agent.v1.DiscoveredContainer
+	(*DiscoveredPath)(nil),        // 10: synod.agent.v1.DiscoveredPath
+	(*durationpb.Duration)(nil),   // 11: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
-	0, // 0: synod.agent.v1.Hello.protocol:type_name -> synod.agent.v1.VersionRange
-	7, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
-	7, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
-	8, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
-	1, // 4: synod.agent.v1.AgentMessage.hello:type_name -> synod.agent.v1.Hello
-	3, // 5: synod.agent.v1.AgentMessage.heartbeat:type_name -> synod.agent.v1.Heartbeat
-	2, // 6: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
-	4, // 7: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
-	5, // 8: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
-	6, // 9: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
-	9, // [9:10] is the sub-list for method output_type
-	8, // [8:9] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	0,  // 0: synod.agent.v1.Hello.protocol:type_name -> synod.agent.v1.VersionRange
+	11, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
+	11, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
+	12, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	1,  // 4: synod.agent.v1.AgentMessage.hello:type_name -> synod.agent.v1.Hello
+	3,  // 5: synod.agent.v1.AgentMessage.heartbeat:type_name -> synod.agent.v1.Heartbeat
+	7,  // 6: synod.agent.v1.AgentMessage.inventory:type_name -> synod.agent.v1.AppInventory
+	2,  // 7: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
+	4,  // 8: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
+	12, // 9: synod.agent.v1.AppInventory.observed_at:type_name -> google.protobuf.Timestamp
+	8,  // 10: synod.agent.v1.AppInventory.apps:type_name -> synod.agent.v1.DiscoveredApp
+	9,  // 11: synod.agent.v1.DiscoveredApp.containers:type_name -> synod.agent.v1.DiscoveredContainer
+	10, // 12: synod.agent.v1.DiscoveredApp.paths:type_name -> synod.agent.v1.DiscoveredPath
+	5,  // 13: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
+	6,  // 14: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
+	14, // [14:15] is the sub-list for method output_type
+	13, // [13:14] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -631,6 +1074,7 @@ func file_proto_agent_v1_agent_proto_init() {
 	file_proto_agent_v1_agent_proto_msgTypes[5].OneofWrappers = []any{
 		(*AgentMessage_Hello)(nil),
 		(*AgentMessage_Heartbeat)(nil),
+		(*AgentMessage_Inventory)(nil),
 	}
 	file_proto_agent_v1_agent_proto_msgTypes[6].OneofWrappers = []any{
 		(*ControllerMessage_Session)(nil),
@@ -642,7 +1086,7 @@ func file_proto_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_agent_proto_rawDesc), len(file_proto_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

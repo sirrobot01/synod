@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/inventory"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
@@ -60,6 +61,11 @@ func NegotiateHello(hello *agentv1.Hello, supported []string) ([]string, error) 
 // CheckAgentMessage validates the wire shape of one agent message after Hello.
 func CheckAgentMessage(message *agentv1.AgentMessage) error {
 	switch value := message.GetMessage().(type) {
+	case *agentv1.AgentMessage_Inventory:
+		if inventory.Validate(value.Inventory) != nil {
+			return ErrMessage
+		}
+		return nil
 	case *agentv1.AgentMessage_Heartbeat:
 		if value.Heartbeat == nil || value.Heartbeat.Sequence == 0 || value.Heartbeat.ObservedAt.CheckValid() != nil {
 			return ErrMessage
