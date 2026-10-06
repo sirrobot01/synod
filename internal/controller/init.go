@@ -19,22 +19,15 @@ import (
 	"io"
 	"math/big"
 	"net"
-	"net/netip"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/moby/moby/api/types/container"
-	"github.com/moby/moby/api/types/mount"
-	"github.com/moby/moby/api/types/network"
-	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/jointoken"
 	"github.com/sirrobot01/synod/internal/pki"
-	"github.com/sirrobot01/synod/internal/store/postgres"
+	"github.com/sirrobot01/synod/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -44,11 +37,8 @@ const caLifetime = 10 * 365 * 24 * time.Hour
 // controllerCertLifetime is how long the controller transport certificate lasts.
 const controllerCertLifetime = 30 * 24 * time.Hour
 
-// metadataPostgresImage is the pinned image used for the compact metadata container.
-const metadataPostgresImage = "postgres:17"
-
 const systemdServiceTemplate = `[Unit]
-Description=Synod Database Controller
+Description=Synod Controller
 After=network.target docker.service
 Wants=docker.service
 
@@ -67,26 +57,23 @@ WantedBy=multi-user.target
 type InitOptions struct {
 	Address        string
 	Directory      string
-	DatabaseURL    string
 	InstallationID string
 	SystemdDir     string
-	NoContainer    bool
 }
 
 type materialResult struct {
-	id               uuid.UUID
-	wrappingID       uuid.UUID
-	caCertPEM        []byte
-	apiCACertPEM     []byte
-	adminToken       string
-	metadataPassword string
+	id           uuid.UUID
+	wrappingID   uuid.UUID
+	caCertPEM    []byte
+	apiCACertPEM []byte
+	adminToken   string
 }
 
 type controllerJSON struct {
 	InstallationID   string `json:"installation_id"`
 	Listen           string `json:"listen"`
 	AgentListen      string `json:"agent_listen"`
-	DatabaseURL      string `json:"database_url"`
+	DatabasePath     string `json:"database_path"`
 	AdminTokenFile   string `json:"admin_token_file"`
 	TLSCertFile      string `json:"tls_cert_file"`
 	TLSKeyFile       string `json:"tls_key_file"`
@@ -103,7 +90,7 @@ func initCommand() *cobra.Command {
 	var options InitOptions
 	command := &cobra.Command{
 		Use:   "init",
-		Short: "Initialize a controller installation with material, configuration, and dependencies",
+		Short: "Initialize a controller installation with its material and configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runInit(cmd.Context(), options, cmd.OutOrStdout())
@@ -111,10 +98,8 @@ func initCommand() *cobra.Command {
 	}
 	command.Flags().StringVar(&options.Address, "address", "127.0.0.1", "Routable address or hostname for the controller")
 	command.Flags().StringVar(&options.Directory, "dir", "", "Directory to write the installation material and configuration into (required)")
-	command.Flags().StringVar(&options.DatabaseURL, "database-url", "", "PostgreSQL URL for an existing metadata database")
 	command.Flags().StringVar(&options.InstallationID, "installation-id", "", "Installation UUID; one is generated when absent")
 	command.Flags().StringVar(&options.SystemdDir, "systemd-dir", "/etc/systemd/system", "Systemd units directory to install the service into")
-	command.Flags().BoolVar(&options.NoContainer, "no-container", false, "Do not run the metadata PostgreSQL container")
 	return command
 }
 
@@ -132,30 +117,6 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		return err
 	}
 
-	databaseURL := options.DatabaseURL
-	if databaseURL == "" && !options.NoContainer {
-		var containerErr error
-		databaseURL, containerErr = bootstrapMetadataContainer(ctx, dir, res.metadataPassword, output)
-		if containerErr != nil {
-			return fmt.Errorf("bootstrap metadata container: %w", containerErr)
-		}
-	} else if databaseURL != "" {
-		if err := waitForPostgres(ctx, databaseURL, 10*time.Second); err != nil {
-			return fmt.Errorf("connect to metadata database: %w", err)
-		}
-		pool, err := pgxpool.New(ctx, databaseURL)
-		if err != nil {
-			return fmt.Errorf("connect to metadata database: %w", err)
-		}
-		defer pool.Close()
-		store := postgres.New(pool)
-		if err := store.Migrate(ctx); err != nil {
-			return fmt.Errorf("migrate metadata database: %w", err)
-		}
-	} else {
-		databaseURL = fmt.Sprintf("postgres://synod:%s@127.0.0.1:5432/synod?sslmode=disable", res.metadataPassword)
-	}
-
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		absDir = dir
@@ -165,7 +126,7 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		InstallationID:   res.id.String(),
 		Listen:           net.JoinHostPort(address, "8443"),
 		AgentListen:      net.JoinHostPort(address, "8444"),
-		DatabaseURL:      databaseURL,
+		DatabasePath:     filepath.Join(absDir, "synod.db"),
 		AdminTokenFile:   filepath.Join(absDir, "admin.token"),
 		TLSCertFile:      filepath.Join(absDir, "api.crt"),
 		TLSKeyFile:       filepath.Join(absDir, "api.key"),
@@ -209,14 +170,16 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		}
 	}
 
-	joinNote := "No metadata database is reachable yet. Start the controller, then run synod node join-token to create a join token."
-	if options.DatabaseURL != "" || !options.NoContainer {
-		encoded, err := registerJoinToken(ctx, databaseURL, res.id, address, res.apiCACertPEM)
-		if err != nil {
-			return err
-		}
-		joinNote = fmt.Sprintf("Join token for one agent node (valid for 7 days):\n  %s\n\nTo join an agent node, run on that node:\n  synod agent join %s\n\nTo join more nodes, run synod node join-token for each node.", encoded, encoded)
+	metadata, err := store.Open(ctx, cfg.DatabasePath)
+	if err != nil {
+		return err
 	}
+	defer metadata.Close()
+	encoded, err := registerJoinToken(ctx, metadata, res.id, address, res.apiCACertPEM)
+	if err != nil {
+		return err
+	}
+	joinNote := fmt.Sprintf("Join token for one device (valid for 7 days):\n  %s\n\nTo join a device, run on that device:\n  synod agent join %s\n\nTo join more devices, run synod node join-token for each one.", encoded, encoded)
 
 	serviceNote := fmt.Sprintf("Wrote systemd service to %s.", serviceLocalPath)
 	if installedService {
@@ -241,7 +204,7 @@ To administer this installation:
   export SYNOD_ADMIN_TOKEN_FILE=%s
 `,
 		res.id, absDir,
-		databaseURL,
+		cfg.DatabasePath,
 		configPath,
 		serviceNote,
 		joinNote,
@@ -255,24 +218,18 @@ To administer this installation:
 }
 
 // registerJoinToken stores the verifier of a one-use join token that binds no node yet.
-func registerJoinToken(ctx context.Context, databaseURL string, installationID uuid.UUID, address string, apiCACertPEM []byte) (string, error) {
+func registerJoinToken(ctx context.Context, metadata *store.Store, installationID uuid.UUID, address string, apiCACertPEM []byte) (string, error) {
 	block, _ := pem.Decode(apiCACertPEM)
 	if block == nil {
 		return "", errors.New("decode the API CA certificate for the join token")
 	}
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		return "", fmt.Errorf("connect to metadata database: %w", err)
-	}
-	defer pool.Close()
 	token := jointoken.Token{
 		Address:        net.JoinHostPort(address, "8443"),
 		InstallationID: installationID,
 		Fingerprint:    jointoken.Fingerprint(block.Bytes),
 		Secret:         jointoken.NewSecret(),
 	}
-	if _, err := postgres.New(pool).RegisterEnrollmentToken(ctx, postgres.TokenRegistration{
-		InstallationID: installationID,
+	if _, err := metadata.RegisterEnrollmentToken(ctx, store.TokenRegistration{
 		RequestID:      uuid.NewString(),
 		ActorID:        "synod-server-init",
 		IdempotencyKey: uuid.NewString(),
@@ -342,10 +299,6 @@ func writeMaterialWithAddress(directory, installation, address string, output io
 	if err != nil {
 		return materialResult{}, fmt.Errorf("generate admin token: %w", err)
 	}
-	metadataPassword, err := generateSecret(16)
-	if err != nil {
-		return materialResult{}, fmt.Errorf("generate metadata password: %w", err)
-	}
 
 	written := []struct {
 		name string
@@ -365,7 +318,6 @@ func writeMaterialWithAddress(directory, installation, address string, output io
 		{"installation-id", 0o644, []byte(id.String() + "\n")},
 		{"secret-key-id", 0o644, []byte(wrappingID.String() + "\n")},
 		{"admin.token", 0o600, []byte(adminToken + "\n")},
-		{"metadata.password", 0o600, []byte(metadataPassword + "\n")},
 	}
 	for _, file := range written {
 		if _, err := os.Stat(filepath.Join(directory, file.name)); err == nil {
@@ -378,12 +330,11 @@ func writeMaterialWithAddress(directory, installation, address string, output io
 		}
 	}
 	return materialResult{
-		id:               id,
-		wrappingID:       wrappingID,
-		caCertPEM:        certificatePEM,
-		apiCACertPEM:     apiCACertPEM,
-		adminToken:       adminToken,
-		metadataPassword: metadataPassword,
+		id:           id,
+		wrappingID:   wrappingID,
+		caCertPEM:    certificatePEM,
+		apiCACertPEM: apiCACertPEM,
+		adminToken:   adminToken,
 	}, nil
 }
 
@@ -541,139 +492,4 @@ func installationID(declared string) (uuid.UUID, error) {
 		return uuid.Nil, errors.New("installation-id must be a nonzero UUID")
 	}
 	return id, nil
-}
-
-func bootstrapMetadataContainer(ctx context.Context, dir, password string, output io.Writer) (string, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return "", fmt.Errorf("connect to Docker: %w", err)
-	}
-	defer cli.Close()
-
-	if _, err := cli.Ping(ctx, client.PingOptions{}); err != nil {
-		return "", fmt.Errorf("Docker daemon is unreachable: %w; start Docker or supply --database-url", err)
-	}
-
-	containerName := "synod-metadata"
-	inspect, err := cli.ContainerInspect(ctx, containerName, client.ContainerInspectOptions{})
-	if err == nil {
-		if inspect.Container.State != nil && !inspect.Container.State.Running {
-			if _, err := cli.ContainerStart(ctx, inspect.Container.ID, client.ContainerStartOptions{}); err != nil {
-				return "", fmt.Errorf("start existing metadata container: %w", err)
-			}
-		}
-	} else {
-		port, err := findAvailablePort(5432)
-		if err != nil {
-			return "", fmt.Errorf("find port for metadata database: %w", err)
-		}
-		if _, err := cli.ImageInspect(ctx, metadataPostgresImage); err != nil {
-			reader, pullErr := cli.ImagePull(ctx, metadataPostgresImage, client.ImagePullOptions{})
-			if pullErr == nil {
-				io.Copy(io.Discard, reader)
-				reader.Close()
-			}
-		}
-		tcpPort, err := network.ParsePort("5432/tcp")
-		if err != nil {
-			return "", fmt.Errorf("parse port: %w", err)
-		}
-		cfg := &container.Config{
-			Image: metadataPostgresImage,
-			Env: []string{
-				"POSTGRES_USER=synod",
-				"POSTGRES_PASSWORD=" + password,
-				"POSTGRES_DB=synod",
-			},
-			ExposedPorts: network.PortSet{tcpPort: struct{}{}},
-		}
-		hostCfg := &container.HostConfig{
-			PortBindings: network.PortMap{
-				tcpPort: []network.PortBinding{{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: strconv.Itoa(port)}},
-			},
-			Mounts: []mount.Mount{
-				{Type: mount.TypeVolume, Source: "synod-metadata-data", Target: "/var/lib/postgresql/data"},
-			},
-			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
-		}
-		created, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
-			Name:       containerName,
-			Config:     cfg,
-			HostConfig: hostCfg,
-		})
-		if err != nil {
-			return "", fmt.Errorf("create metadata container: %w", err)
-		}
-		if _, err := cli.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
-			return "", fmt.Errorf("start metadata container: %w", err)
-		}
-	}
-
-	inspect, err = cli.ContainerInspect(ctx, containerName, client.ContainerInspectOptions{})
-	if err != nil {
-		return "", fmt.Errorf("inspect metadata container: %w", err)
-	}
-	port := 5432
-	if inspect.Container.HostConfig != nil {
-		tcpPort, _ := network.ParsePort("5432/tcp")
-		bindings := inspect.Container.HostConfig.PortBindings[tcpPort]
-		if len(bindings) > 0 && bindings[0].HostPort != "" {
-			p, err := strconv.Atoi(bindings[0].HostPort)
-			if err == nil && p > 0 {
-				port = p
-			}
-		}
-	}
-
-	databaseURL := fmt.Sprintf("postgres://synod:%s@127.0.0.1:%d/synod?sslmode=disable", password, port)
-	if err := waitForPostgres(ctx, databaseURL, 30*time.Second); err != nil {
-		return "", fmt.Errorf("wait for metadata database: %w", err)
-	}
-
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		return "", fmt.Errorf("connect to metadata database for migrations: %w", err)
-	}
-	defer pool.Close()
-
-	store := postgres.New(pool)
-	if err := store.Migrate(ctx); err != nil {
-		return "", fmt.Errorf("migrate metadata database: %w", err)
-	}
-
-	return databaseURL, nil
-}
-
-func waitForPostgres(ctx context.Context, dsn string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		pool, err := pgxpool.New(ctx, dsn)
-		if err == nil {
-			pingErr := pool.Ping(ctx)
-			pool.Close()
-			if pingErr == nil {
-				return nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-	return errors.New("timed out waiting for PostgreSQL to be ready")
-}
-
-func findAvailablePort(preferred int) (int, error) {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", preferred))
-	if err == nil {
-		ln.Close()
-		return preferred, nil
-	}
-	ln, err = net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port, nil
 }

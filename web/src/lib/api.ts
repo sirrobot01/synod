@@ -53,14 +53,24 @@ export interface Operation {
   app_id: string;
   kind: string;
   status: OperationStatus;
-  plan_version: number;
-  desired_revision: number;
-  attempts: number;
-  failure_code: string | null;
-  cancellation_requested_at: string | null;
+  node_id: string;
+  actor_id: string;
+  failure_code: string;
   finished_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface Node {
+  id: string;
+  name: string;
+  architecture: string;
+  runtime_version: string;
+  agent_version: string;
+  enrolled_at: string;
+  approved_at: string | null;
+  connected_at: string | null;
+  last_seen_at: string | null;
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -100,6 +110,9 @@ function asError(payload: unknown, response: Response): APIError {
 
 
 export const api = {
+  nodes: () => call<Node[]>("GET", "/v1/nodes"),
+  approveNode: (id: string) => call<Node>("POST", `/v1/nodes/${encodeURIComponent(id)}/actions/approve`, {}),
+  operations: () => call<Operation[]>("GET", "/v1/operations"),
   signIn: (username: string, password: string) => call<User>("POST", "/v1/sessions", { username, password }),
   currentSession: () => call<Session>("GET", "/v1/sessions/current"),
   signOut: () => call<void>("DELETE", "/v1/sessions/current"),

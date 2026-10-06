@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	appmodel "github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/client"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/spf13/cobra"
@@ -17,19 +16,16 @@ import (
 
 // Result is the single JSON document that the CLI writes to stdout.
 type Result struct {
-	App                *appmodel.App            `json:"app,omitzero"`
-	AppAdmission       *appmodel.Admission      `json:"app_admission,omitzero"`
-	EnrollmentToken    *client.EnrollmentToken  `json:"enrollment_token,omitzero"`
-	Operation          *operation.Operation     `json:"operation,omitzero"`
-	User               *client.User             `json:"user,omitzero"`
-	Token              *client.APIToken         `json:"token,omitzero"`
-	Tokens             []client.APIToken        `json:"tokens,omitempty"`
-	NodePolicy         *client.NodePolicyResult `json:"node_policy,omitzero"`
-	Error              *client.Error            `json:"error,omitzero"`
-	IdempotencyKey     string                   `json:"idempotency_key,omitempty"`
-	ExpectedRevision   int64                    `json:"expected_revision,omitzero"`
-	DatabaseCredential *DatabaseCredential      `json:"database_credential,omitzero"`
-	Installation       *client.Installation     `json:"installation,omitzero"`
+	Operation       *operation.Operation    `json:"operation,omitzero"`
+	Operations      []operation.Operation   `json:"operations,omitempty"`
+	EnrollmentToken *client.EnrollmentToken `json:"enrollment_token,omitzero"`
+	User            *client.User            `json:"user,omitzero"`
+	Token           *client.APIToken        `json:"token,omitzero"`
+	Tokens          []client.APIToken       `json:"tokens,omitempty"`
+	Node            *client.Node            `json:"node,omitzero"`
+	Nodes           []client.Node           `json:"nodes,omitempty"`
+	Error           *client.Error           `json:"error,omitzero"`
+	Installation    *client.Installation    `json:"installation,omitzero"`
 	// JoinToken is the one secret an operator copies to the joining node.
 	JoinToken string `json:"join_token,omitempty"`
 }
@@ -37,10 +33,6 @@ type Result struct {
 // finish closes the connection and writes the result of a client command to stdout.
 // Progress and diagnostics stay on stderr. It returns the exit status.
 func (a *app) finish(selected *cobra.Command, err error) int {
-	// Credential output is always JSON.
-	if selected != nil && selected.Name() == "credentials" {
-		a.json = true
-	}
 	if a.api != nil {
 		a.api.Close()
 	}
@@ -60,14 +52,7 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			}
 		}
 		a.result.Error = failure
-		switch failure.Code {
-		case "wait_timeout":
-			code = 2
-		case "operation_failed":
-			code = 3
-		case "operation_cancelled":
-			code = 4
-		case "interrupted":
+		if failure.Code == "interrupted" {
 			code = 130
 		}
 		fmt.Fprintln(a.stderr, failure.Code+": "+failure.Message)
@@ -80,60 +65,31 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 		return code
 	}
 	var output strings.Builder
-	if a.result.EnrollmentToken != nil && a.result.JoinToken == "" {
-		value := a.result.EnrollmentToken
-		fmt.Fprintf(&output, "Enrollment registration: %s\nNode: %s\nExpires: %s\nReplayed: %t\nToken file: %s\n", value.ID, value.NodeID, value.ExpiresAt.Format(time.RFC3339), value.Replayed, value.TokenFile)
+	if op := a.result.Operation; op != nil {
+		fmt.Fprintf(&output, "Operation: %s\nKind: %s\nStatus: %s\nFailure: %s\n", op.ID, op.Kind, op.Status, op.FailureCode)
+	}
+	for _, op := range a.result.Operations {
+		fmt.Fprintf(&output, "%s  %-16s %s\n", op.ID, op.Kind, op.Status)
 	}
 	if a.result.JoinToken != "" && a.result.EnrollmentToken != nil {
-		fmt.Fprintf(&output, "Join token for one agent node, valid until %s:\n  %s\n\nOn that node, run:\n  synod agent join %s\n", a.result.EnrollmentToken.ExpiresAt.Format(time.RFC3339), a.result.JoinToken, a.result.JoinToken)
+		fmt.Fprintf(&output, "Join token for one device, valid until %s:\n  %s\n\nOn that device, run:\n  synod agent join %s\n", a.result.EnrollmentToken.ExpiresAt.Format(time.RFC3339), a.result.JoinToken, a.result.JoinToken)
 	}
-	if a.result.AppAdmission != nil {
-		fmt.Fprintf(&output, "Accepted app: %s\nOperation: %s\nDesired revision: %d\nIdempotency key: %s\n", a.result.AppAdmission.AppID, a.result.AppAdmission.OperationID, a.result.AppAdmission.DesiredRevision, a.result.IdempotencyKey)
+	if node := a.result.Node; node != nil {
+		fmt.Fprintf(&output, "Device: %s\nName: %s\nArchitecture: %s\nApproved: %t\n", node.ID, node.Name, node.Architecture, node.ApprovedAt != nil)
 	}
-	if item := a.result.App; item != nil {
-		fmt.Fprintf(&output, "App: %s\nName: %s\nDesired: %s (revision %d)\nObserved: %s (revision %d)\n", item.ID, item.Name, item.DesiredLifecycle, item.DesiredRevision, item.ObservedLifecycle, item.ObservedRevision)
-		if item.Status != nil {
-			fmt.Fprintf(&output, "State: %s\nOperation: %s (%s)\n", item.Status.State, item.Status.OperationID, item.Status.OperationState)
-			if item.Status.FailureCode != "" {
-				fmt.Fprintf(&output, "Failure: %s\n", item.Status.FailureCode)
-			}
-			if item.Tier != appmodel.TierParallel {
-				fmt.Fprintf(&output, "Active device: %s\nWriter epoch: %d\nPlacement: %s\n", item.Status.ActiveNodeID, item.Status.WriterEpoch, item.Status.Placement)
-				if item.Status.LossWindowSeconds != nil {
-					fmt.Fprintf(&output, "Loss window: %.1f seconds\n", *item.Status.LossWindowSeconds)
-				} else {
-					fmt.Fprintln(&output, "Loss window: no usable replica")
-				}
-				fmt.Fprintf(&output, "Snapshot pause: %.3f seconds (maximum %.3f)\nSkipped snapshots: %d\n", item.Status.LastPauseSeconds, item.Status.MaxPauseSeconds, item.Status.SkippedSnapshots)
-				for _, standby := range item.Status.Standbys {
-					fmt.Fprintf(&output, "Standby: %s (epoch %d, sequence %d, usable: %t)\n", standby.NodeID, standby.Epoch, standby.Sequence, standby.Usable)
-					if standby.State != "" {
-						fmt.Fprintf(&output, "  State: %s\n", standby.State)
-					}
-					if standby.CompletedAt != nil {
-						fmt.Fprintf(&output, "  Completed: %s\n", standby.CompletedAt.Format(time.RFC3339))
-					}
-					if standby.LagSeconds != nil {
-						fmt.Fprintf(&output, "  Lag: %.1f seconds\n", *standby.LagSeconds)
-					}
-					if standby.FailureCode != "" {
-						fmt.Fprintf(&output, "  Failure: %s\n", standby.FailureCode)
-					}
-				}
-			}
-			for _, copy := range item.Status.Copies {
-				fmt.Fprintf(&output, "Copy %d: %s on %s (%s, %s, %s)\n", copy.CopyIndex, copy.ID, copy.NodeID, copy.Role, copy.ObservedState, copy.Health)
-			}
-			for _, endpoint := range item.Status.Endpoints {
-				fmt.Fprintf(&output, "Endpoint: %s (ready: %t)\n", endpoint.Address, endpoint.Ready)
-			}
+	for _, node := range a.result.Nodes {
+		state := "pending approval"
+		if node.ApprovedAt != nil {
+			state = "approved"
 		}
+		seen := "never connected"
+		if node.LastSeenAt != nil {
+			seen = "seen " + node.LastSeenAt.Format(time.RFC3339)
+		}
+		fmt.Fprintf(&output, "%s  %-20s %-6s %-17s %s\n", node.ID, node.Name, node.Architecture, state, seen)
 	}
 	if a.result.Installation != nil {
-		fmt.Fprintf(&output, "Installation: %s\nRecovery generation: %s\n", a.result.Installation.InstallationID, a.result.Installation.RecoveryGeneration)
-	}
-	if a.result.Operation != nil {
-		fmt.Fprintf(&output, "Operation: %s\nStatus: %s\nPlan version: %d\n", a.result.Operation.ID, a.result.Operation.Status, a.result.Operation.PlanVersion)
+		fmt.Fprintf(&output, "Installation: %s\n", a.result.Installation.InstallationID)
 	}
 	if a.result.User != nil {
 		fmt.Fprintf(&output, "User: %s\nUsername: %s\nRole: %s\n", a.result.User.ID, a.result.User.Username, a.result.User.Role)

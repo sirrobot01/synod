@@ -8,17 +8,16 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/daemon"
 )
 
-// A journal or inventory refusal names its cause. Other failures keep fixed text, because an
+// A runtime refusal names its cause. Other failures keep fixed text, because an
 // argument error can echo raw input.
-func TestFailureDetailOnlyForJournalAndInventory(t *testing.T) {
-	cause := "validate the saved command 5f0c: pooler settings are invalid"
+func TestFailureDetailOnlyForRuntime(t *testing.T) {
+	cause := "read the runtime version from /var/run/docker.sock: connection refused"
 	for name, test := range map[string]struct {
 		err    error
 		code   string
 		detail bool
 	}{
-		"journal":       {fmt.Errorf("%w: %s", daemon.ErrJournal, cause), "journal_recovery_required", true},
-		"inventory":     {fmt.Errorf("%w: %s", daemon.ErrInventory, cause), "inventory_recovery_required", true},
+		"runtime":       {fmt.Errorf("%w: %s", daemon.ErrRuntime, cause), "runtime_unavailable", true},
 		"configuration": {fmt.Errorf("%w: %s", daemon.ErrConfiguration, cause), "invalid_configuration", false},
 		"argument":      {errors.New("unknown flag --token=" + cause), "invalid_configuration", false},
 	} {

@@ -11,27 +11,27 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
-	"github.com/sirrobot01/synod/internal/store/postgres"
+	"github.com/sirrobot01/synod/internal/store"
 	"golang.org/x/time/rate"
 )
 
 const operatorPassword = "correct horse battery"
 const bootstrapToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-func identityServer(t *testing.T) (*Server, *postgres.Store, uuid.UUID) {
+func identityServer(t *testing.T) (*Server, *store.Store, uuid.UUID) {
 	t.Helper()
-	store, _, _ := apiTestStore(t)
+	metadata := apiTestStore(t)
 	admin, err := auth.NewAdminToken(bootstrapToken, "bootstrap-admin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	installation := uuid.New()
-	server, err := NewServer(store, admin, installation, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server, err := NewServer(metadata, admin, installation, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	server.PublicOrigin = "https://synod.example.com"
-	return server, store, installation
+	return server, metadata, installation
 }
 
 // call runs one request and returns its recorder.
@@ -90,7 +90,7 @@ func createOperator(t *testing.T, server *Server, username string) uuid.UUID {
 	if rec.Code != 201 {
 		t.Fatalf("create user: %d %s", rec.Code, rec.Body)
 	}
-	var user postgres.User
+	var user store.User
 	if err := json.Unmarshal(rec.Body.Bytes(), &user); err != nil {
 		t.Fatal(err)
 	}
@@ -98,12 +98,12 @@ func createOperator(t *testing.T, server *Server, username string) uuid.UUID {
 }
 
 func TestBootstrapCredentialCreatesTheFirstOperator(t *testing.T) {
-	server, store, installation := identityServer(t)
-	if total, err := store.CountUsers(t.Context(), installation); err != nil || total != 0 {
+	server, metadata, _ := identityServer(t)
+	if total, err := metadata.CountUsers(t.Context()); err != nil || total != 0 {
 		t.Fatalf("a new installation has %d accounts: %v", total, err)
 	}
 	createOperator(t, server, "operator")
-	if total, err := store.CountUsers(t.Context(), installation); err != nil || total != 1 {
+	if total, err := metadata.CountUsers(t.Context()); err != nil || total != 1 {
 		t.Fatalf("accounts=%d: %v", total, err)
 	}
 	// Creating an account needs a credential.

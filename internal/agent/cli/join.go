@@ -41,8 +41,6 @@ WantedBy=multi-user.target
 // joinOptions holds the flags of synod agent join.
 type joinOptions struct {
 	dir          string
-	storagePath  string
-	storageID    string
 	dockerSocket string
 	systemdDir   string
 	// controllerEndpoint replaces the agent endpoint that enrollment returns.
@@ -53,26 +51,23 @@ func joinCommand() *cobra.Command {
 	var options joinOptions
 	command := &cobra.Command{
 		Use:   "join TOKEN",
-		Short: "Enroll this node with a join token and prepare the agent to run",
-		Long: `Join enrolls this node, initializes the agent journal, and writes the agent
-configuration and service unit. Run it again with the same token and directory
-to resume after a failure.`,
+		Short: "Enroll this device with a join token and prepare the agent to run",
+		Long: `Join enrolls this device and writes the agent configuration and service unit.
+Run it again with the same token and directory to resume after a failure.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return join(cmd.Context(), args[0], options, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return join(cmd.Context(), args[0], options, cmd.OutOrStdout())
 		},
 	}
 	flags := command.Flags()
 	flags.StringVar(&options.dir, "dir", "/var/lib/synod/agent", "Private directory for the agent state and configuration")
-	flags.StringVar(&options.storagePath, "storage-path", "", "Local storage pool to measure (default: the agent directory)")
-	flags.StringVar(&options.storageID, "storage-id", "local", "Stable identity of the local storage pool")
 	flags.StringVar(&options.dockerSocket, "docker-socket", "/var/run/docker.sock", "Docker Engine socket")
 	flags.StringVar(&options.controllerEndpoint, "controller-endpoint", "", "Controller agent transport host:port (default: the address enrollment returns)")
 	flags.StringVar(&options.systemdDir, "systemd-dir", "/etc/systemd/system", "Systemd units directory to install the service into")
 	return command
 }
 
-func join(ctx context.Context, encoded string, options joinOptions, stdout, stderr io.Writer) error {
+func join(ctx context.Context, encoded string, options joinOptions, stdout io.Writer) error {
 	token, err := jointoken.Decode(encoded)
 	if err != nil {
 		return fmt.Errorf("%w: %w", enrollment.ErrConfiguration, err)
@@ -115,22 +110,8 @@ func join(ctx context.Context, encoded string, options joinOptions, stdout, stde
 		InstallationID:      token.InstallationID.String(),
 		NodeID:              nodeID.String(),
 		EnrollmentDir:       filepath.Join(dir, "enrollment"),
-		JournalDir:          filepath.Join(dir, "journal"),
-		RecoveryGeneration:  credentials.RecoveryGeneration.String(),
 		ControllerEndpoints: []string{endpoint},
 		DockerSocket:        options.dockerSocket,
-		StoragePath:         options.storagePath,
-		StorageID:           options.storageID,
-		AppsDir:             filepath.Join(dir, "apps"),
-		ReplicationListen:   daemon.DefaultReplicationListen,
-	}
-	// A rerun after a journal was created keeps that journal.
-	if _, err := os.Lstat(config.JournalDir); errors.Is(err, os.ErrNotExist) {
-		if _, err := daemon.Initialize(ctx, config, stderr); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return fmt.Errorf("%w: check %s: %w", daemon.ErrJournal, config.JournalDir, err)
 	}
 
 	executable, err := os.Executable()
@@ -158,15 +139,15 @@ func join(ctx context.Context, encoded string, options joinOptions, stdout, stde
 	if err := os.WriteFile(configPath, append(encodedConfig, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", configPath, err)
 	}
-	_, err = fmt.Fprintf(stdout, `Node %s joined installation %s.
+	_, err = fmt.Fprintf(stdout, `Device %s joined installation %s.
 
 Agent configuration: %s
 Service unit: %s
 
-Start the agent on this node:
+Start the agent on this device:
   systemctl daemon-reload && systemctl enable --now synod-agent
 
-Then approve the node from an administrator shell:
+Then approve the device from an administrator shell:
   synod node approve %s
 `, nodeID, token.InstallationID, configPath, servicePath, nodeID)
 	return err

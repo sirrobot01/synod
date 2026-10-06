@@ -25,14 +25,14 @@ import (
 )
 
 func TestAgentEnrollmentRecoversCommittedHTTPReply(t *testing.T) {
-	store, pool, _ := apiTestStore(t)
+	metadata, pool := apiTestDatabase(t)
 	identity := enrollment.Identity{InstallationID: uuid.New(), NodeID: uuid.New()}
 	adminToken := strings.Repeat("integration-admin-", 3)
 	admin, err := auth.NewAdminToken(adminToken, "test-admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	caCert, caKey, err := pki.CreateCA(identity.InstallationID, time.Now(), 7*24*time.Hour)
+	caCert, caKey, err := pki.CreateCA(identity.InstallationID, time.Now(), 60*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestAgentEnrollmentRecoversCommittedHTTPReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(store, admin, identity.InstallationID, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server, err := NewServer(metadata, admin, identity.InstallationID, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,13 +121,13 @@ func TestAgentEnrollmentRecoversCommittedHTTPReply(t *testing.T) {
 		t.Fatalf("lost reply outcome=%v", err)
 	}
 	var count int
-	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM node_certificates").Scan(&count); err != nil || count != 1 {
+	if err := pool.QueryRowContext(t.Context(), "SELECT count(*) FROM node_certificates").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("committed certificate count=%d err=%v", count, err)
 	}
 	if err := state.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(t.Context(), "UPDATE enrollment_tokens SET created_at=clock_timestamp()-interval '2 minutes', expires_at=clock_timestamp()-interval '1 second' WHERE node_id=$1", identity.NodeID); err != nil {
+	if _, err := pool.ExecContext(t.Context(), "UPDATE enrollment_tokens SET created_at=created_at-120000, expires_at=created_at-119000 WHERE node_id=?", identity.NodeID); err != nil {
 		t.Fatal(err)
 	}
 	state, err = enrollment.Open(statePath, enrollment.Options{Identity: identity})
@@ -145,10 +145,10 @@ func TestAgentEnrollmentRecoversCommittedHTTPReply(t *testing.T) {
 	if credentials.Identity != identity || credentials.RequestID != first.RequestID || credentials.CACertificatePEM != string(caCert) {
 		t.Fatal("incorrect enrolled identity")
 	}
-	if err := store.CheckAgentCertificate(t.Context(), identity.InstallationID, identity.NodeID, credentials.Certificate.Leaf); err != nil {
+	if err := metadata.CheckAgentCertificate(t.Context(), identity.NodeID, credentials.Certificate.Leaf); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM node_certificates").Scan(&count); err != nil || count != 1 {
+	if err := pool.QueryRowContext(t.Context(), "SELECT count(*) FROM node_certificates").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("replay created certificates: %d %v", count, err)
 	}
 	if err := state.Close(); err != nil {

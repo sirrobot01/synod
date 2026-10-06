@@ -14,14 +14,14 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/google/uuid"
-	"github.com/sirrobot01/synod/internal/store/postgres"
+	"github.com/sirrobot01/synod/internal/store"
 )
 
 // decodeJSON applies the same bounded wire contract to all JSON mutations.
 func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		s.writeError(w, r, http.StatusUnsupportedMediaType, "unsupported_media_type", "Use application/json.", uuid.Nil)
+		s.writeError(w, r, http.StatusUnsupportedMediaType, "unsupported_media_type", "Use application/json.")
 		return false
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
@@ -34,10 +34,10 @@ func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, target any) 
 		}
 	}
 	if _, large := errors.AsType[*http.MaxBytesError](err); large {
-		s.writeError(w, r, http.StatusRequestEntityTooLarge, "request_too_large", "The request exceeds 64 KiB.", uuid.Nil)
+		s.writeError(w, r, http.StatusRequestEntityTooLarge, "request_too_large", "The request exceeds 64 KiB.")
 		return false
 	}
-	s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use one valid JSON object with known fields.", uuid.Nil)
+	s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use one valid JSON object with known fields.")
 	return false
 }
 
@@ -56,7 +56,7 @@ func (s *Server) registerEnrollmentToken(w http.ResponseWriter, r *http.Request)
 	identity := r.Context().Value(identityKey{}).(requestIdentity)
 	keys := r.Header.Values("Idempotency-Key")
 	if len(keys) != 1 || keys[0] == "" {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "One Idempotency-Key header is required.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "One Idempotency-Key header is required.")
 		return
 	}
 	var input struct {
@@ -69,10 +69,10 @@ func (s *Server) registerEnrollmentToken(w http.ResponseWriter, r *http.Request)
 	}
 	verifier, valid := enrollmentVerifier(input.Token)
 	if !valid {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a canonical base64url token with 32 random bytes.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a canonical base64url token with 32 random bytes.")
 		return
 	}
-	result, err := s.store.RegisterEnrollmentToken(r.Context(), postgres.TokenRegistration{InstallationID: s.installationID, NodeID: input.NodeID, ActorID: identity.actorID, RequestID: identity.requestID, IdempotencyKey: keys[0], TokenVerifier: verifier, TTLSeconds: input.TTLSeconds})
+	result, err := s.store.RegisterEnrollmentToken(r.Context(), store.TokenRegistration{NodeID: input.NodeID, ActorID: identity.actorID, RequestID: identity.requestID, IdempotencyKey: keys[0], TokenVerifier: verifier, TTLSeconds: input.TTLSeconds})
 	if err != nil {
 		s.storeError(w, r, err)
 		return
@@ -95,7 +95,7 @@ func (s *Server) enrollAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if !valid {
 		w.Header().Set("WWW-Authenticate", "Bearer")
-		s.writeError(w, r, http.StatusUnauthorized, "enrollment_unauthorized", "The enrollment credential is invalid.", uuid.Nil)
+		s.writeError(w, r, http.StatusUnauthorized, "enrollment_unauthorized", "The enrollment credential is invalid.")
 		return
 	}
 	var input struct {
@@ -106,7 +106,7 @@ func (s *Server) enrollAgent(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeJSON(w, r, &input) {
 		return
 	}
-	result, err := s.store.EnrollAgent(r.Context(), postgres.EnrollmentRequest{InstallationID: s.installationID, NodeID: input.NodeID, RequestID: input.RequestID, TokenVerifier: verifier, CSRDER: input.CSRDER}, s.EnrollmentAuthority)
+	result, err := s.store.EnrollAgent(r.Context(), store.EnrollmentRequest{NodeID: input.NodeID, RequestID: input.RequestID, TokenVerifier: verifier, CSRDER: input.CSRDER}, s.EnrollmentAuthority)
 	if err != nil {
 		s.storeError(w, r, err)
 		return
@@ -130,7 +130,7 @@ func (s *Server) revokeAgentCertificate(w http.ResponseWriter, r *http.Request) 
 	nodeID, nodeErr := uuid.Parse(chi.URLParam(r, "id"))
 	certificateID, certificateErr := uuid.Parse(chi.URLParam(r, "certificate_id"))
 	if nodeErr != nil || certificateErr != nil || nodeID == uuid.Nil || certificateID == uuid.Nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use valid node and certificate IDs.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use valid node and certificate IDs.")
 		return
 	}
 	// An empty object makes future unsupported mutation fields explicit errors.
@@ -139,11 +139,11 @@ func (s *Server) revokeAgentCertificate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if input == nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use an empty JSON object.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use an empty JSON object.")
 		return
 	}
 	identity := r.Context().Value(identityKey{}).(requestIdentity)
-	if err := s.store.RevokeAgentCertificate(r.Context(), s.installationID, nodeID, certificateID, identity.actorID, identity.requestID); err != nil {
+	if err := s.store.RevokeAgentCertificate(r.Context(), nodeID, certificateID, identity.actorID, identity.requestID); err != nil {
 		s.storeError(w, r, err)
 		return
 	}

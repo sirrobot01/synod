@@ -2,10 +2,8 @@ package cli
 
 import (
 	"cmp"
-	"context"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,12 +15,11 @@ import (
 // app holds what the client commands share during one invocation: the API settings,
 // the connection, and the one result that finish writes.
 type app struct {
-	settings          client.Config
-	api               *client.Client
-	result            Result
-	json              bool
-	timeout, interval time.Duration
-	stdout, stderr    io.Writer
+	settings       client.Config
+	api            *client.Client
+	result         Result
+	json           bool
+	stdout, stderr io.Writer
 	// ran is set once a client command starts, so help alone writes no result.
 	ran bool
 }
@@ -51,30 +48,13 @@ func (a *app) bindFlags(flags *pflag.FlagSet) {
 	flags.DurationVar(&a.settings.RequestTimeout, "request-timeout", 10*time.Second, "Timeout for each HTTPS attempt")
 	flags.IntVar(&a.settings.Attempts, "attempts", 3, "Maximum attempts per request (1 to 5)")
 	flags.BoolVar(&a.json, "json", false, "Write one JSON result to stdout")
-	flags.DurationVar(&a.timeout, "timeout", time.Minute, "Maximum operation wait time; does not cancel server work")
-	flags.DurationVar(&a.interval, "poll-interval", time.Second, "Interval between operation reads while waiting")
 }
 
 // connect opens the API client before a client command runs.
 func (a *app) connect(*cobra.Command, []string) error {
 	a.ran = true
-	if a.timeout <= 0 || a.interval <= 0 {
-		return &client.Error{Code: "invalid_request", Message: "Use positive wait timeout and poll interval values."}
-	}
 	var err error
 	a.api, err = client.New(a.settings)
-	return err
-}
-
-// wait reads the operation until it ends or --timeout passes. The timeout never
-// cancels the server work.
-func (a *app) wait(ctx context.Context, id uuid.UUID) error {
-	waiting, cancel := context.WithTimeout(ctx, a.timeout)
-	defer cancel()
-	value, err := a.api.Wait(waiting, id, a.interval)
-	if value.ID != uuid.Nil {
-		a.result.Operation = &value
-	}
 	return err
 }
 
@@ -85,19 +65,4 @@ func parseID(value, message string) (uuid.UUID, error) {
 		return uuid.Nil, &client.Error{Code: "invalid_request", Message: message}
 	}
 	return id, nil
-}
-
-// idempotencyKey returns key, or a new key when key is empty.
-func idempotencyKey(key string) (string, error) {
-	if key == "" {
-		generated, err := uuid.NewRandom()
-		if err != nil {
-			return "", &client.Error{Code: "local_error", Message: "Create an idempotency key failed."}
-		}
-		key = generated.String()
-	}
-	if len(key) > 128 || strings.ContainsFunc(key, func(r rune) bool { return r < '!' || r > '~' }) {
-		return "", &client.Error{Code: "invalid_request", Message: "Use an idempotency key with 1 to 128 visible ASCII bytes."}
-	}
-	return key, nil
 }

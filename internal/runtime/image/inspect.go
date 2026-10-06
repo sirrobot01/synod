@@ -1,4 +1,4 @@
-// Package image reads image platforms before app placement.
+// Package image reads the platforms an image supports.
 package image
 
 import (
@@ -16,7 +16,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/moby/moby/client"
-	"github.com/sirrobot01/synod/internal/app"
 )
 
 type ErrorCode string
@@ -44,19 +43,20 @@ type Inspector struct {
 	Docker    *client.Client
 }
 
-// Resolution pins the service image and replaces caller-supplied architecture claims.
-// LocalOnly restricts placement to the node whose Docker daemon supplied the evidence.
+// Resolution is a pinned image and the Linux architectures it runs on.
+// LocalOnly reports evidence that only one Docker daemon's cached image supplied.
 type Resolution struct {
-	Service   app.ServiceSpec
-	LocalOnly bool
+	Image         string
+	Architectures []string
+	LocalOnly     bool
 }
 
 // Resolve reads registry metadata without downloading image layers.
-// It returns no service on failure. Calls have a 20-second upper bound.
-func (i Inspector) Resolve(ctx context.Context, service app.ServiceSpec) (Resolution, error) {
+// It returns no resolution on failure. Calls have a 20-second upper bound.
+func (i Inspector) Resolve(ctx context.Context, image string) (Resolution, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	ref, err := name.ParseReference(service.Image)
+	ref, err := name.ParseReference(image)
 	if err != nil {
 		return Resolution{}, &Error{Code: InvalidReference, Cause: err}
 	}
@@ -72,7 +72,7 @@ func (i Inspector) Resolve(ctx context.Context, service app.ServiceSpec) (Resolu
 		if i.Docker == nil || ctx.Err() != nil {
 			return Resolution{}, &Error{Code: Unavailable, Cause: err}
 		}
-		cached, localErr := i.Docker.ImageInspect(ctx, service.Image)
+		cached, localErr := i.Docker.ImageInspect(ctx, image)
 		if localErr != nil {
 			return Resolution{}, &Error{Code: Unavailable, Cause: errors.Join(err, localErr)}
 		}
@@ -82,9 +82,7 @@ func (i Inspector) Resolve(ctx context.Context, service app.ServiceSpec) (Resolu
 		if _, err := v1.NewHash(cached.ID); err != nil {
 			return Resolution{}, &Error{Code: InvalidManifest, Cause: err}
 		}
-		service.Image = cached.ID
-		service.SupportedArchitectures = []string{cached.Architecture}
-		return Resolution{Service: service, LocalOnly: true}, nil
+		return Resolution{Image: cached.ID, Architectures: []string{cached.Architecture}, LocalOnly: true}, nil
 	}
 	pinned := ref.Context().Digest(descriptor.Digest.String()).Name()
 	architectures := map[string]struct{}{}
@@ -112,7 +110,7 @@ func (i Inspector) Resolve(ctx context.Context, service app.ServiceSpec) (Resolu
 				return Resolution{}, &Error{Code: InvalidManifest, Cause: err}
 			}
 			for _, child := range manifest.Manifests {
-				// Attestations and non-Linux descriptors are not runnable app copies.
+				// Attestations and non-Linux descriptors do not run.
 				if child.Platform != nil && (child.Platform.OS != "linux" || (child.Platform.Architecture != "amd64" && child.Platform.Architecture != "arm64")) {
 					continue
 				}
@@ -138,11 +136,11 @@ func (i Inspector) Resolve(ctx context.Context, service app.ServiceSpec) (Resolu
 				queue = append(queue, next)
 			}
 		case types.OCIManifestSchema1, types.DockerManifestSchema2:
-			image, err := current.Image()
+			manifestImage, err := current.Image()
 			if err != nil {
 				return Resolution{}, &Error{Code: InvalidManifest, Cause: err}
 			}
-			config, err := image.ConfigFile()
+			config, err := manifestImage.ConfigFile()
 			if err != nil {
 				return Resolution{}, &Error{Code: InvalidManifest, Cause: err}
 			}
@@ -161,7 +159,5 @@ func (i Inspector) Resolve(ctx context.Context, service app.ServiceSpec) (Resolu
 	if len(architectures) == 0 {
 		return Resolution{}, &Error{Code: UnsupportedPlatform}
 	}
-	service.Image = pinned
-	service.SupportedArchitectures = slices.Sorted(maps.Keys(architectures))
-	return Resolution{Service: service}, nil
+	return Resolution{Image: pinned, Architectures: slices.Sorted(maps.Keys(architectures))}, nil
 }

@@ -5,8 +5,6 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
-
-	"github.com/google/uuid"
 )
 
 // contentPolicy forbids inline code and every foreign origin.
@@ -26,12 +24,12 @@ const contentPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; 
 // path returns index.html, because the application routes in the browser.
 func (s *Server) serveApp(w http.ResponseWriter, r *http.Request) {
 	if s.assets == nil {
-		s.writeError(w, r, http.StatusNotFound, "not_found", "This server carries no web application.", uuid.Nil)
+		s.writeError(w, r, http.StatusNotFound, "not_found", "This server carries no web application.")
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
-		s.writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "The endpoint does not support this method.", uuid.Nil)
+		s.writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "The endpoint does not support this method.")
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/")
@@ -39,13 +37,13 @@ func (s *Server) serveApp(w http.ResponseWriter, r *http.Request) {
 	// real miss. Answering it with the index would return HTML where a script is
 	// expected, and the browser would report a parse error instead of a plain 404.
 	if strings.HasPrefix(name, assetPrefix) && !s.hasAsset(name) {
-		s.writeError(w, r, http.StatusNotFound, "not_found", "The asset was not found.", uuid.Nil)
+		s.writeError(w, r, http.StatusNotFound, "not_found", "The asset was not found.")
 		return
 	}
 	file, actual, err := s.openAsset(name)
 	if err != nil {
 		s.logger.Warn("open web asset failed", "path", name, "error", err)
-		s.writeError(w, r, http.StatusNotFound, "not_found", "The application is unavailable.", uuid.Nil)
+		s.writeError(w, r, http.StatusNotFound, "not_found", "The application is unavailable.")
 		return
 	}
 	defer file.Close()
@@ -53,7 +51,7 @@ func (s *Server) serveApp(w http.ResponseWriter, r *http.Request) {
 	reader, seekable := file.(io.ReadSeeker)
 	if err != nil || !seekable {
 		s.logger.Warn("read web asset failed", "path", actual, "seekable", seekable, "error", err)
-		s.writeError(w, r, http.StatusNotFound, "not_found", "The application is unavailable.", uuid.Nil)
+		s.writeError(w, r, http.StatusNotFound, "not_found", "The application is unavailable.")
 		return
 	}
 	header := w.Header()

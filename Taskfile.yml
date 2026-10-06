@@ -3,34 +3,16 @@ version: "3"
 # Local development commands for Synod.
 # Run `task` to list them.
 #
-# The test fixtures are ephemeral. Each one starts a container, runs the command,
-# and removes the container. The development dependencies under `dev:` are
-# persistent, because a local controller needs its metadata between runs.
+# The development installation lives in .dev/. `task dev:init` creates it with
+# `synod server init`, and the controller keeps its metadata in .dev/synod.db.
 
 vars:
-  PG_CONTAINER: synod-dev-postgres
-  PG_VOLUME: synod-dev-postgres-data
-  PG_PORT: "55432"
-  # Pinned to the digest that scripts/test-postgres.sh uses.
-  PG_IMAGE: postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
-  ETCD_CONTAINER: synod-dev-etcd
-  ETCD_PORT: "52379"
-  ETCD_PEER_PORT: "52380"
-  # Pinned to the digest that scripts/test-etcd.sh uses.
-  ETCD_IMAGE: quay.io/coreos/etcd@sha256:dfd3941bf6ced5fdb700f9b2d98b22b7bca7ceee13aec16224f93ff30d9a59c4
   LISTEN: 127.0.0.1:8443
 
-# Configure the agent transport before you set SYNOD_ETCD_ENDPOINTS.
-# The local etcd fixture also requires SYNOD_ETCD_ALLOW_PLAINTEXT=true.
-# Without etcd, the controller records desired state and starts no worker.
 env:
-  SYNOD_DATABASE_URL: postgres://postgres@127.0.0.1:{{.PG_PORT}}/synod?sslmode=disable
-  SYNOD_ADMIN_TOKEN_FILE: .dev/admin.token
-  SYNOD_TLS_CERT_FILE: .dev/api.crt
-  SYNOD_TLS_KEY_FILE: .dev/api.key
-  SYNOD_PUBLIC_ORIGIN: https://{{.LISTEN}}
   SYNOD_API_URL: https://{{.LISTEN}}
-  SYNOD_CA_FILE: .dev/api.crt
+  SYNOD_CA_FILE: .dev/api-ca.crt
+  SYNOD_ADMIN_TOKEN_FILE: .dev/admin.token
 
 tasks:
   default:
@@ -85,36 +67,12 @@ tasks:
   # ----------------------------------------------------------------- tests ---
 
   test:
-    desc: Run the Go tests that need no dependency
+    desc: Run the Go test suite with race detection, one package at a time
     summary: |
-      A test that needs PostgreSQL, etcd, or Docker skips itself here.
-      Run `task test:all` before you call a stateful change complete.
-
+      A test that needs Docker skips itself unless SYNOD_TEST_DOCKER_HOST is set.
       Arguments replace the package list, so pass the whole tail:
       task test -- -run TestName ./internal/api/...
-    cmds: ['go test {{default "./..." .CLI_ARGS}}']
-
-  test:all:
-    desc: Run the whole Go suite with PostgreSQL, etcd, and race detection
-    summary: |
-      Arguments replace the package list, so pass the whole tail:
-      task test:all -- -run TestName ./internal/controller/...
-    cmds:
-      - ./scripts/test-etcd.sh ./scripts/test-postgres.sh go test -race {{default "./..." .CLI_ARGS}}
-    preconditions:
-      - sh: docker info
-        msg: Docker is not running. The test fixtures need it.
-
-  test:pg:
-    desc: 'Run a focused test with PostgreSQL only, for example: task test:pg -- ./internal/store/...'
-    summary: |
-      Arguments replace the package list, so pass the whole tail:
-      task test:pg -- -run TestName ./internal/store/...
-    cmds:
-      - ./scripts/test-postgres.sh go test -race {{default "./..." .CLI_ARGS}}
-    preconditions:
-      - sh: docker info
-        msg: Docker is not running. The test fixtures need it.
+    cmds: ['go test -race -p 1 {{default "./..." .CLI_ARGS}}']
 
   test:web:
     desc: Run the browser application tests
@@ -123,132 +81,37 @@ tasks:
 
   # ------------------------------------------------------------ dev set-up ---
 
-  dev:certs:
-    desc: Create the development token, TLS certificate, and installation ID
+  dev:init:
+    desc: Create the development installation in .dev/
     summary: |
-      These credentials are for one workstation. The certificate is self-signed
-      and the database trusts any password, so nothing here is safe anywhere else.
+      The material in .dev/ is for one workstation. Never use it anywhere else.
     status:
-      - test -s .dev/admin.token
-      - test -s .dev/api.crt
-      - test -s .dev/installation-id
+      - test -s .dev/controller.json
     cmds:
-      - mkdir -p .dev
-      - openssl rand -hex 32 > .dev/admin.token
-      - chmod 600 .dev/admin.token
-      - >-
-        openssl req -x509 -newkey rsa:2048 -nodes -days 365
-        -keyout .dev/api.key -out .dev/api.crt
-        -subj "/CN=synod-dev"
-        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-        2>/dev/null
-      - chmod 600 .dev/api.key
-      - uuidgen | tr 'A-Z' 'a-z' > .dev/installation-id
-      - 'echo "Wrote .dev/. The token, key, and certificate are development-only."'
-
-  dev:up:
-    desc: Start the persistent metadata database
-    deps: [dev:certs]
-    cmds:
-      - task: dev:postgres
-    preconditions:
-      - sh: docker info
-        msg: Docker is not running.
-
-  dev:postgres:
-    internal: true
-    status:
-      - test "$(docker inspect -f '{{`{{.State.Running}}`}}' {{.PG_CONTAINER}} 2>/dev/null)" = true
-    cmds:
-      - docker rm --force {{.PG_CONTAINER}} >/dev/null 2>&1 || true
-      - >-
-        docker run --detach
-        --name {{.PG_CONTAINER}}
-        --publish 127.0.0.1:{{.PG_PORT}}:5432
-        --volume {{.PG_VOLUME}}:/var/lib/postgresql/data
-        --env POSTGRES_HOST_AUTH_METHOD=trust
-        --env POSTGRES_DB=synod
-        {{.PG_IMAGE}}
-      - |
-        for attempt in $(seq 30); do
-          if docker exec {{.PG_CONTAINER}} pg_isready --host 127.0.0.1 --username postgres --dbname synod >/dev/null 2>&1; then
-            exit 0
-          fi
-          sleep 1
-        done
-        echo 'PostgreSQL did not become ready.' >&2
-        exit 1
-      - 'echo "PostgreSQL listens on 127.0.0.1:{{.PG_PORT}}."'
-
-  dev:etcd:
-    desc: Start the persistent etcd node
-    summary: |
-      This local development node has no TLS or authentication.
-      Configure the controller agent transport before you enable workers.
-      Set SYNOD_ETCD_ENDPOINTS to 127.0.0.1:{{.ETCD_PORT}}.
-      Set SYNOD_ETCD_ALLOW_PLAINTEXT=true for this fixture.
-    status:
-      - test "$(docker inspect -f '{{`{{.State.Running}}`}}' {{.ETCD_CONTAINER}} 2>/dev/null)" = true
-    cmds:
-      - docker rm --force {{.ETCD_CONTAINER}} >/dev/null 2>&1 || true
-      - >-
-        docker run --detach
-        --name {{.ETCD_CONTAINER}}
-        --publish 127.0.0.1:{{.ETCD_PORT}}:2379
-        {{.ETCD_IMAGE}}
-        /usr/local/bin/etcd
-        --name synod-dev
-        --data-dir /etcd-data
-        --listen-client-urls http://0.0.0.0:2379
-        --advertise-client-urls http://127.0.0.1:{{.ETCD_PORT}}
-        --listen-peer-urls http://127.0.0.1:{{.ETCD_PEER_PORT}}
-        --initial-advertise-peer-urls http://127.0.0.1:{{.ETCD_PEER_PORT}}
-        --initial-cluster synod-dev=http://127.0.0.1:{{.ETCD_PEER_PORT}}
-      - |
-        for attempt in $(seq 30); do
-          if docker exec {{.ETCD_CONTAINER}} etcdctl --endpoints http://127.0.0.1:2379 endpoint health >/dev/null 2>&1; then
-            exit 0
-          fi
-          sleep 1
-        done
-        echo 'etcd did not become ready.' >&2
-        exit 1
-      - 'echo "etcd listens on 127.0.0.1:{{.ETCD_PORT}}."'
-
-  dev:down:
-    desc: Remove the development containers and keep their data
-    cmds:
-      - docker rm --force {{.PG_CONTAINER}} {{.ETCD_CONTAINER}} >/dev/null 2>&1 || true
-      - 'echo "Removed the development containers. The volume {{.PG_VOLUME}} still holds the metadata."'
+      - go run ./cmd/synod server init --dir .dev --address 127.0.0.1 --systemd-dir .dev/no-systemd
 
   dev:reset:
-    desc: Drop the development metadata database and create an empty one
+    desc: Delete the development installation
     summary: |
       A changed migration fails the checksum check on an existing database.
-      AGENTS.md requires a dropped development database, never a repair migration.
-      This command destroys every local metadata record.
-    deps: [dev:up]
+      AGENTS.md requires a new development database, never a repair migration.
+      This command destroys every local metadata record and the installation material.
+    prompt: This deletes .dev/. Continue?
     cmds:
-      # --force ends a running controller's connections. Without it the drop fails
-      # whenever `task dev` is open in another terminal, which is the usual case.
-      - docker exec {{.PG_CONTAINER}} dropdb --username postgres --if-exists --force synod
-      - docker exec {{.PG_CONTAINER}} createdb --username postgres synod
-      # etcd holds the elections. It is cleared only when it is running.
-      - cmd: docker exec {{.ETCD_CONTAINER}} etcdctl --endpoints http://127.0.0.1:2379 del --prefix /synod >/dev/null 2>&1
-        ignore_error: true
-      - 'echo "The metadata database is empty. The next start applies the migrations."'
+      - rm -rf .dev
+      - 'echo "Run task dev:init to create a new installation."'
 
   # ---------------------------------------------------------------- running ---
 
   dev:
-    desc: Run the controller against the development dependencies
+    desc: Run the controller of the development installation
     summary: |
-      This serves the API and the browser application on https://127.0.0.1:8443.
-      It starts no worker, because worker dispatch needs the agent transport.
-    deps: [dev:up]
+      This serves the API and the browser application on https://127.0.0.1:8443,
+      and the agent transport on 127.0.0.1:8444.
+    deps: [dev:init]
     cmds:
       - 'echo "Open https://{{.LISTEN}} and sign in. The certificate is self-signed, so the browser warns once."'
-      - go run ./cmd/synod server --listen {{.LISTEN}} --installation-id "$(cat .dev/installation-id)" {{.CLI_ARGS}}
+      - go run ./cmd/synod server --config .dev/controller.json --public-origin https://{{.LISTEN}} {{.CLI_ARGS}}
 
   dev:web:
     desc: Serve the browser application with hot reload against a running controller
@@ -262,32 +125,24 @@ tasks:
       - npm run dev
 
   cli:
-    desc: 'Run the command line against the development controller, for example: task cli -- db get ID'
-    deps: [dev:certs]
+    desc: 'Run the command line against the development controller, for example: task cli -- node list'
+    deps: [dev:init]
     cmds:
-      - go run ./cmd/synod --token-file .dev/admin.token {{.CLI_ARGS}}
+      - go run ./cmd/synod {{.CLI_ARGS}}
 
   dev:user:
     desc: 'Create the first operator account, for example: task dev:user -- alice'
-    deps: [dev:certs]
+    deps: [dev:init]
     cmds:
       - |
         if [ -z '{{.CLI_ARGS}}' ]; then
           echo 'Name the account: task dev:user -- alice' >&2
           exit 1
         fi
-      - go run ./cmd/synod --token-file .dev/admin.token user create {{.CLI_ARGS}}
+      - go run ./cmd/synod user create {{.CLI_ARGS}}
 
   # ---------------------------------------------------------------- tidying ---
 
   clean:
     desc: Remove the built binaries
     cmds: ["rm -rf dist"]
-
-  clean:all:
-    desc: Remove the binaries, the development credentials, and the container data
-    prompt: This deletes .dev/ and the local metadata volume. Continue?
-    cmds:
-      - task: dev:down
-      - rm -rf dist .dev
-      - docker volume rm {{.PG_VOLUME}} >/dev/null 2>&1 || true

@@ -13,17 +13,16 @@ import (
 	"github.com/sirrobot01/synod/internal/auth"
 )
 
-// An administrator reads the installation ID and recovery generation. Before a runner
-// records a generation, the read says why no agent can be configured yet.
+// An administrator reads the installation ID.
 func TestInstallationRead(t *testing.T) {
-	store, _, _ := apiTestStore(t)
+	metadata := apiTestStore(t)
 	token := strings.Repeat("secret-", 8)
 	verifier, err := auth.NewAdminToken(token, "test-admin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	installation := uuid.New()
-	server, err := NewServer(store, verifier, installation, testCatalog(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server, err := NewServer(metadata, verifier, installation, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,19 +51,11 @@ func TestInstallationRead(t *testing.T) {
 	if status, data := read(""); status != http.StatusUnauthorized {
 		t.Fatalf("anonymous read: %d %s", status, data)
 	}
-	if status, data := read(token); status != http.StatusServiceUnavailable || !strings.Contains(string(data), `"recovery_generation_unavailable"`) {
-		t.Fatalf("read before a runner: %d %s", status, data)
-	}
-	generation := uuid.New()
-	if err := store.InitializeGeneration(t.Context(), installation, generation); err != nil {
-		t.Fatal(err)
-	}
 	status, data := read(token)
 	var value struct {
-		InstallationID     uuid.UUID `json:"installation_id"`
-		RecoveryGeneration uuid.UUID `json:"recovery_generation"`
+		InstallationID uuid.UUID `json:"installation_id"`
 	}
-	if status != http.StatusOK || json.Unmarshal(data, &value) != nil || value.InstallationID != installation || value.RecoveryGeneration != generation {
+	if status != http.StatusOK || json.Unmarshal(data, &value) != nil || value.InstallationID != installation {
 		t.Fatalf("installation read: %d %s", status, data)
 	}
 }

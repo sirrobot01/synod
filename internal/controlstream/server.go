@@ -1,4 +1,4 @@
-// Package controlstream provides authenticated controller sessions without execution policy.
+// Package controlstream provides authenticated controller sessions for agents.
 package controlstream
 
 import (
@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/pki"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/grpc"
@@ -33,12 +32,10 @@ var ErrMessage = errors.New("invalid transport message")
 
 // Peer is the authenticated identity of one connected agent session.
 type Peer struct {
-	InstallationID    uuid.UUID
-	NodeID            uuid.UUID
-	SessionID         string
-	BootID            string
-	JournalGeneration string
-	Capabilities      []string
+	InstallationID uuid.UUID
+	NodeID         uuid.UUID
+	SessionID      string
+	Capabilities   []string
 }
 
 // Config holds the settings of one control stream server.
@@ -138,7 +135,7 @@ func New(config Config) (*Server, error) {
 
 func (s *Server) Serve(listener net.Listener) error { return s.grpc.Serve(listener) }
 
-// Stop closes management streams. It does not invoke runtime or database operations.
+// Stop closes agent streams.
 func (s *Server) Stop() { s.grpc.Stop() }
 
 // Session returns the live peer for a node and reports whether one is connected.
@@ -156,7 +153,7 @@ func (s *Server) Session(nodeID uuid.UUID) (Peer, bool) {
 
 // Send binds delivery to the expected session. Success means queued, not admitted.
 func (s *Server) Send(nodeID uuid.UUID, sessionID string, message *agentv1.ControllerMessage) error {
-	if CheckControllerMessage(message, s.config.InstallationID.String(), nodeID.String()) != nil || message.GetSession() != nil || message.GetResultAck() != nil || proto.Size(message) > s.config.MaxMessageBytes {
+	if CheckControllerMessage(message) != nil || message.GetSession() != nil || proto.Size(message) > s.config.MaxMessageBytes {
 		return ErrMessage
 	}
 	s.mu.Lock()
@@ -287,19 +284,11 @@ func (s *Server) receive(ctx context.Context, stream grpc.BidiStreamingServer[ag
 	if hello == nil || hello.InstallationId != identity.InstallationID.String() || hello.NodeId != identity.SubjectID.String() {
 		return status.Error(codes.PermissionDenied, "Hello identity mismatch")
 	}
-	for _, id := range []string{hello.BootId, hello.JournalGeneration} {
-		parsed, err := uuid.Parse(id)
-		if err != nil || parsed == uuid.Nil || parsed.String() != id {
-			return status.Error(codes.InvalidArgument, "invalid Hello identity")
-		}
-	}
-	capabilities, err := operation.NegotiateHello(hello, s.config.Capabilities)
+	capabilities, err := NegotiateHello(hello, s.config.Capabilities)
 	if err != nil {
 		return status.Error(codes.FailedPrecondition, "incompatible agent protocol")
 	}
 	current.peer.Capabilities = slices.Clone(capabilities)
-	current.peer.BootID = hello.BootId
-	current.peer.JournalGeneration = hello.JournalGeneration
 	if err := s.authorize(ctx, identity, leaf); err != nil {
 		return err
 	}
@@ -315,7 +304,7 @@ func (s *Server) receive(ctx context.Context, stream grpc.BidiStreamingServer[ag
 		if err != nil {
 			return status.Error(codes.Unavailable, "agent stream closed")
 		}
-		if message.GetHello() != nil || CheckAgentMessage(message, identity.InstallationID.String(), identity.SubjectID.String()) != nil {
+		if CheckAgentMessage(message) != nil {
 			return status.Error(codes.InvalidArgument, "invalid agent message")
 		}
 		if err := s.authorize(ctx, identity, leaf); err != nil {
@@ -328,11 +317,6 @@ func (s *Server) receive(ctx context.Context, stream grpc.BidiStreamingServer[ag
 		case activity <- struct{}{}:
 		default:
 		}
-		// Keep acknowledgement identity detached from application-owned input.
-		var ack *agentv1.ResultAck
-		if result := message.GetTerminalResult(); result != nil {
-			ack = &agentv1.ResultAck{CommandId: result.CommandId, Sequence: result.Sequence, Epoch: proto.Clone(result.Epoch).(*agentv1.Epoch)}
-		}
 		callbackPeer := current.peer
 		callbackPeer.Capabilities = slices.Clone(callbackPeer.Capabilities)
 		if err := s.config.Handle(ctx, callbackPeer, message); err != nil || ctx.Err() != nil {
@@ -340,13 +324,6 @@ func (s *Server) receive(ctx context.Context, stream grpc.BidiStreamingServer[ag
 				s.config.Logger.Warn("agent message refused", "node_id", callbackPeer.NodeID, "session_id", callbackPeer.SessionID, "message", fmt.Sprintf("%T", message.Message), "error", err)
 			}
 			return status.Error(codes.Unavailable, "durable receive handling failed")
-		}
-		if ack != nil {
-			select {
-			case current.outgoing <- &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_ResultAck{ResultAck: ack}}:
-			case <-ctx.Done():
-				return status.Error(codes.Canceled, "session closed")
-			}
 		}
 	}
 }
@@ -399,7 +376,7 @@ func (s *Server) publishSession(ctx context.Context, current *session, first *ag
 		return status.Error(codes.ResourceExhausted, "session capacity reached")
 	}
 	s.sessions[current.peer.NodeID] = current
-	current.outgoing <- &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Session{Session: &agentv1.Session{ProtocolVersion: operation.ProtocolVersion, SessionId: current.peer.SessionID, HeartbeatInterval: durationpb.New(s.config.HeartbeatInterval), StaleAfter: durationpb.New(s.config.StaleAfter), MaxMessageBytes: uint32(s.config.MaxMessageBytes), MaxQueuedCommands: uint32(s.config.QueueSize), Capabilities: capabilities}}}
+	current.outgoing <- &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Session{Session: &agentv1.Session{ProtocolVersion: ProtocolVersion, SessionId: current.peer.SessionID, HeartbeatInterval: durationpb.New(s.config.HeartbeatInterval), StaleAfter: durationpb.New(s.config.StaleAfter), MaxMessageBytes: uint32(s.config.MaxMessageBytes), MaxQueuedMessages: uint32(s.config.QueueSize), Capabilities: capabilities}}}
 	if old != nil {
 		old.cancel()
 	}

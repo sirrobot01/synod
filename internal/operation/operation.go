@@ -1,3 +1,4 @@
+// Package operation defines durable work and its state transitions.
 package operation
 
 import (
@@ -6,7 +7,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Status is the durable state of one operation.
 type Status string
 
 const (
@@ -19,27 +19,35 @@ const (
 	Cancelled  Status = "cancelled"
 )
 
-// Operation describes durable work. PlanVersion zero forbids command dispatch.
 type Operation struct {
-	ID                      uuid.UUID  `json:"id"`
-	InstallationID          uuid.UUID  `json:"installation_id"`
-	AppID                   uuid.UUID  `json:"app_id"`
-	ActorID                 string     `json:"actor_id"`
-	APIOperation            string     `json:"api_operation"`
-	RequestHash             [32]byte   `json:"-"`
-	IdempotencyKey          string     `json:"-"`
-	DesiredRevision         int64      `json:"desired_revision"`
-	Kind                    string     `json:"kind"`
-	Status                  Status     `json:"status"`
-	PlanVersion             int        `json:"plan_version"`
-	OwnerID                 *string    `json:"owner_id"`
-	ExecutionEpoch          int64      `json:"execution_epoch"`
-	ClaimExpiresAt          *time.Time `json:"claim_expires_at"`
-	Attempts                int        `json:"attempts"`
-	NextAttemptAt           *time.Time `json:"next_attempt_at"`
-	CancellationRequestedAt *time.Time `json:"cancellation_requested_at"`
-	CreatedAt               time.Time  `json:"created_at"`
-	UpdatedAt               time.Time  `json:"updated_at"`
-	FinishedAt              *time.Time `json:"finished_at"`
-	FailureCode             *string    `json:"failure_code"`
+	ID          uuid.UUID  `json:"id"`
+	AppID       uuid.UUID  `json:"app_id"`
+	NodeID      uuid.UUID  `json:"node_id"`
+	ActorID     string     `json:"actor_id"`
+	Kind        string     `json:"kind"`
+	Status      Status     `json:"status"`
+	FailureCode string     `json:"failure_code"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	FinishedAt  *time.Time `json:"finished_at"`
+}
+
+func (s Status) Terminal() bool {
+	return s == Succeeded || s == Failed || s == Cancelled
+}
+
+// CanTransition rejects changes to a terminal result. Waiting work needs inspection before it resumes.
+func (s Status) CanTransition(next Status) bool {
+	switch s {
+	case Pending:
+		return next == Running || next == Cancelled
+	case Running:
+		return next == Waiting || next == Cancelling || next == Succeeded || next == Failed
+	case Waiting:
+		return next == Running || next == Cancelling || next == Failed
+	case Cancelling:
+		return next == Cancelled || next == Failed
+	default:
+		return false
+	}
 }

@@ -1,10 +1,7 @@
 <script lang="ts">
   import { api, detail, type APIToken, type MintedToken, type Session } from "../lib/api";
   import { errorView, type APIError } from "../lib/state";
-  import { accounts, components, credentials, gaps, targets } from "../lib/mock";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
-  import Mark from "../lib/ui/Mark.svelte";
-  import Mocked from "../lib/ui/Mocked.svelte";
   import Panel from "../lib/ui/Panel.svelte";
 
   let { session }: { session: Session } = $props();
@@ -134,72 +131,8 @@
 <div class="screen">
   <header>
     <h1>Settings</h1>
-    <p class="note">Backup targets, credential metadata, component health, and access.</p>
+    <p class="note">Accounts and API access.</p>
   </header>
-
-  <Panel title="Installation health">
-    <div class="mock-strip"><Mocked gap={gaps.health} /></div>
-    <div class="components">
-      {#each components as component (component.name)}
-        <div class="component" class:hatched={component.stale}>
-          <div class="component-head">
-            <Mark mark={component.mark} text={false} />
-            <span class="mono label-text">{component.label}</span>
-          </div>
-          <span class="mono meta">{component.meta}</span>
-          <span class="note">{component.note}</span>
-        </div>
-      {/each}
-    </div>
-  </Panel>
-
-  <div class="columns">
-    <Panel title="Backup targets">
-      <div class="mock-strip"><Mocked gap={gaps.backups} /></div>
-      {#each targets as target (target.name)}
-        <div class="entry">
-          <div class="entry-head">
-            <Mark mark={target.mark} text={false} />
-            <span class="mono name">{target.name}</span>
-            <span class="chip mono">{target.kind}</span>
-            <span class="mono checked">{target.checked}</span>
-          </div>
-          <p class="mono uri">{target.uri}</p>
-          <p class="mono target-note" style="color: var(--{target.mark.tone})">{target.note}</p>
-        </div>
-      {/each}
-    </Panel>
-
-    <Panel title="Credentials — metadata only">
-      <div class="promise">
-        <Mark mark={{ glyph: "→", shape: "circle-open", tone: "active", label: "policy" }} text={false} />
-        <span>
-          No secret value is rendered on this screen, kept in browser storage, or placed in a URL.
-          Reveal is a separately authorized, audited action.
-        </span>
-      </div>
-      <div class="mock-strip"><Mocked gap={gaps.credentials} /></div>
-      {#each credentials as credential (credential.purpose)}
-        <div class="entry">
-          <div class="entry-head">
-            <Mark mark={credential.mark} text={false} />
-            <span class="mono name">{credential.purpose}</span>
-            <span class="mono checked">{credential.owner}</span>
-          </div>
-          <dl class="facts mono">
-            <dt>version</dt><dd>{credential.version}</dd>
-            <dt>rotation</dt>
-            <dd style="color: var(--{credential.rotationTone})">{credential.rotation}</dd>
-            <dt>last_rotated</dt><dd>{credential.rotated}</dd>
-          </dl>
-          <div class="buttons">
-            <button type="button" disabled>Rotate…</button>
-            <button type="button" disabled>Reveal — audited</button>
-          </div>
-        </div>
-      {/each}
-    </Panel>
-  </div>
 
   <Panel title="Your account" note="this writes to the API">
     <div class="pad">
@@ -299,23 +232,8 @@
         <button type="submit" disabled={accountBusy}>{accountBusy ? "Sending" : "Disable"}</button>
       </form>
 
-      <Mocked gap={gaps.collections} />
     </div>
 
-    <div class="scroll">
-      <div class="grid accounts">
-        <div class="head">Username</div>
-        <div class="head">Role</div>
-        <div class="head">State</div>
-        <div class="head">Created</div>
-        {#each accounts as account (account.username)}
-          <div class="cell">{account.username}</div>
-          <div class="cell">{account.role}</div>
-          <div class="cell">{account.disabled ? "disabled" : "live"}</div>
-          <div class="cell dim">{account.createdAt}</div>
-        {/each}
-      </div>
-    </div>
   </Panel>
 </div>
 
@@ -334,9 +252,6 @@
   header .note {
     font-size: 13px;
   }
-  .mock-strip {
-    padding: 12px 16px 0;
-  }
   .pad {
     padding: 16px;
     display: flex;
@@ -344,92 +259,6 @@
     gap: 16px;
   }
 
-  .components {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 1px;
-    background: var(--line);
-    border-top: 1px solid var(--line);
-    margin-top: 12px;
-  }
-  .component {
-    flex: 1 1 232px;
-    background-color: var(--panel);
-    padding: 12px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-  }
-  .component-head {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-  }
-  .label-text {
-    font-size: 12px;
-    color: var(--ink);
-  }
-  .component .meta {
-    font-size: 10px;
-    color: var(--ink-muted);
-    line-height: 1.55;
-  }
-  .component .note {
-    font-size: 11px;
-  }
-
-  .columns {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
-    gap: 20px;
-    align-items: start;
-  }
-  .entry {
-    padding: 14px 16px;
-    border-top: 1px solid var(--line);
-  }
-  .entry-head {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    flex-wrap: wrap;
-  }
-  .name {
-    font-size: 12px;
-    color: var(--ink);
-  }
-  .chip {
-    font-size: 10px;
-    border: 1px solid var(--line-strong);
-    color: var(--ink-muted);
-    padding: 2px 6px;
-  }
-  .checked {
-    margin-left: auto;
-    font-size: 11px;
-    color: var(--ink-dim);
-  }
-  .uri {
-    margin: 6px 0 0;
-    font-size: 11px;
-    color: var(--ink-body);
-    word-break: break-all;
-  }
-  .target-note {
-    margin: 7px 0 0;
-    font-size: 11px;
-    line-height: 1.55;
-  }
-  .promise {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 11px 16px;
-    border-bottom: 1px solid var(--line);
-    font-size: 12px;
-    color: var(--ink-body);
-    line-height: 1.5;
-  }
   .facts {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -451,13 +280,6 @@
     color: var(--ink-body);
     overflow-wrap: anywhere;
   }
-  .buttons {
-    display: flex;
-    gap: 8px;
-    margin-top: 9px;
-    flex-wrap: wrap;
-  }
-
   form {
     display: grid;
     grid-template-columns: 150px minmax(0, 300px);
@@ -501,10 +323,6 @@
       minmax(120px, 1fr) minmax(110px, 0.8fr) minmax(170px, 1fr)
       minmax(170px, 1fr) minmax(170px, 1fr) minmax(80px, 0.5fr) minmax(90px, 0.5fr);
     min-width: 1020px;
-  }
-  .grid.accounts {
-    grid-template-columns: minmax(140px, 1fr) minmax(100px, 0.7fr) minmax(100px, 0.7fr) minmax(190px, 1.1fr);
-    min-width: 640px;
   }
   .cell button {
     padding: 3px 9px;

@@ -1,13 +1,12 @@
 // Browser routing over the history API.
 //
-// Specification 17 requires an operation ID to survive a reload, so a route lives in
+// An operation ID must survive a reload, so a route lives in
 // the path and never in memory alone. The controller returns the application for every
 // path outside /v1, so a deep link and a reload both reach the same screen.
 
 export type ScreenName =
   | "fleet"
   | "nodes"
-  | "backups"
   | "operations"
   | "operation"
   | "settings"
@@ -27,8 +26,6 @@ export function match(pathname: string): Route {
   switch (first) {
     case "nodes":
       return { screen: "nodes", id: second ?? "" };
-    case "backups":
-      return { screen: "backups", id: second ?? "" };
     case "operations":
       if (second === undefined) return { screen: "operations", id: "" };
       return { screen: "operation", id: second };
@@ -47,8 +44,6 @@ export function path(screen: ScreenName, id = ""): string {
       return "/";
     case "nodes":
       return id === "" ? "/nodes" : `/nodes/${encoded}`;
-    case "backups":
-      return "/backups";
     case "operations":
       return "/operations";
     case "operation":

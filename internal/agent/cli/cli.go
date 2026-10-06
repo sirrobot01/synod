@@ -1,118 +1,36 @@
-// Package cli exposes protected agent enrollment commands.
+// Package cli exposes the agent commands: join and run.
 package cli
 
 import (
-	"bytes"
 	"context"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
-	"fmt"
 	"io"
-	"os"
-	"syscall"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/agent/daemon"
 	"github.com/sirrobot01/synod/internal/agent/enrollment"
 	"github.com/spf13/cobra"
 )
 
-// Identity is the public enrollment result that the CLI prints.
-type Identity struct {
-	InstallationID uuid.UUID `json:"installation_id"`
-	NodeID         uuid.UUID `json:"node_id"`
-	RequestID      uuid.UUID `json:"request_id"`
-	CertificateID  uuid.UUID `json:"certificate_id"`
-	AcceptedAt     time.Time `json:"accepted_at"`
-	ExpiresAt      time.Time `json:"expires_at"`
-}
-
 // Failure is the bounded error that the CLI prints for a failed command.
 type Failure struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
-	// Detail names the cause of a journal or inventory refusal. Those errors carry paths,
-	// identities, and states, never arguments or secrets. Other failures leave it empty.
+	// Detail names the cause of a runtime refusal. Those errors carry paths, never
+	// arguments or secrets. Other failures leave it empty.
 	Detail string `json:"detail,omitempty"`
 }
 
-// Command returns the agent command tree. Enrollment output contains public identity
-// only. Report writes its failures.
+// Command returns the agent command tree. Report writes its failures.
 func Command() *cobra.Command {
-	var installationID, nodeID, statePath, caPath string
-	var config enrollment.Config
-	root := &cobra.Command{Use: "agent", Short: "Enroll and run a protected local agent", SilenceErrors: true, SilenceUsage: true}
-	group := &cobra.Command{Use: "enroll", Short: "Create or recover agent enrollment"}
-	flags := group.PersistentFlags()
-	flags.StringVar(&installationID, "installation-id", "", "Assigned installation UUID (required)")
-	flags.StringVar(&nodeID, "node-id", "", "Assigned node UUID (required)")
-	flags.StringVar(&statePath, "state-dir", "", "Protected enrollment state directory (required)")
-	flags.StringVar(&config.Endpoint, "api-url", "", "Verified HTTPS API origin for pending enrollment")
-	flags.StringVar(&config.TokenFile, "token-file", "", "Private enrollment token file for pending enrollment")
-	flags.StringVar(&caPath, "ca-file", "", "API CA PEM file; omit to use system trust")
-	flags.DurationVar(&config.RequestTimeout, "request-timeout", 10*time.Second, "Timeout per HTTPS attempt (at most 1m)")
-	flags.IntVar(&config.Attempts, "attempts", 3, "Maximum HTTPS attempts (1 to 5)")
-	for _, mode := range []string{"bootstrap", "retry"} {
-		command := &cobra.Command{Use: mode, Short: map[string]string{"bootstrap": "Create first enrollment state in an absent directory", "retry": "Retry saved enrollment or read its completed identity"}[mode], Args: cobra.NoArgs,
-			RunE: func(cmd *cobra.Command, _ []string) error {
-				installation, err := uuid.Parse(installationID)
-				if err != nil {
-					return fmt.Errorf("%w: parse --installation-id: %w", enrollment.ErrConfiguration, err)
-				}
-				if installation == uuid.Nil {
-					return fmt.Errorf("%w: --installation-id must be a nonzero UUID", enrollment.ErrConfiguration)
-				}
-				node, err := uuid.Parse(nodeID)
-				if err != nil {
-					return fmt.Errorf("%w: parse --node-id: %w", enrollment.ErrConfiguration, err)
-				}
-				if node == uuid.Nil || statePath == "" {
-					return fmt.Errorf("%w: --node-id must be a nonzero UUID and --state-dir must be set", enrollment.ErrConfiguration)
-				}
-				if config.RequestTimeout <= 0 || config.RequestTimeout > time.Minute || config.Attempts < 1 || config.Attempts > 5 {
-					return fmt.Errorf("%w: use a request timeout of up to a minute and 1 to 5 attempts", enrollment.ErrConfiguration)
-				}
-				if mode == "bootstrap" {
-					if _, err := os.Lstat(statePath); !errors.Is(err, os.ErrNotExist) {
-						return enrollment.ErrState
-					}
-				}
-				state, err := enrollment.Open(statePath, enrollment.Options{Identity: enrollment.Identity{InstallationID: installation, NodeID: node}, AllowCreate: mode == "bootstrap"})
-				if err != nil {
-					return err
-				}
-				defer state.Close()
-				credentials, err := state.Credentials()
-				if err != nil {
-					if caPath != "" {
-						config.RootCAs, err = readTrust(caPath)
-						if err != nil {
-							return err
-						}
-					}
-					credentials, err = state.Submit(cmd.Context(), config)
-					if err != nil {
-						return err
-					}
-				}
-				if err := state.Close(); err != nil {
-					return err
-				}
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(Identity{InstallationID: credentials.Identity.InstallationID, NodeID: credentials.Identity.NodeID, RequestID: credentials.RequestID, CertificateID: credentials.CertificateID, AcceptedAt: credentials.AcceptedAt, ExpiresAt: credentials.Certificate.Leaf.NotAfter})
-			}}
-		group.AddCommand(command)
-	}
-	root.AddCommand(group)
-	var configPath, testBootID string
-	run := &cobra.Command{Use: "run", Short: "Run an enrolled agent with existing journal state", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	root := &cobra.Command{Use: "agent", Short: "Join this device and run its agent", SilenceErrors: true, SilenceUsage: true}
+	var configPath string
+	run := &cobra.Command{Use: "run", Short: "Run the agent of a joined device", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		config, err := daemon.Load(configPath)
 		if err != nil {
 			return err
 		}
-		if err := daemon.Run(cmd.Context(), config, testBootID, cmd.ErrOrStderr()); err != nil {
+		if err := daemon.Run(cmd.Context(), config, cmd.ErrOrStderr()); err != nil {
 			return err
 		}
 		return json.NewEncoder(cmd.ErrOrStderr()).Encode(struct {
@@ -120,22 +38,7 @@ func Command() *cobra.Command {
 		}{Event: "agent_stopped"})
 	}}
 	run.Flags().StringVar(&configPath, "config", "", "Private agent JSON configuration file (required)")
-	run.Flags().StringVar(&testBootID, "test-boot-id", "", "Explicit macOS fixture boot UUID; forbidden on Linux")
-	journalCommand := &cobra.Command{Use: "journal", Short: "Initialize the first journal after empty native inventory"}
-	initialize := &cobra.Command{Use: "init", Short: "Create a first journal in an absent directory", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		config, err := daemon.Load(configPath)
-		if err != nil {
-			return err
-		}
-		identity, err := daemon.Initialize(cmd.Context(), config, cmd.ErrOrStderr())
-		if err != nil {
-			return err
-		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(identity)
-	}}
-	initialize.Flags().StringVar(&configPath, "config", "", "Private agent JSON configuration file (required)")
-	journalCommand.AddCommand(initialize)
-	root.AddCommand(joinCommand(), run, journalCommand)
+	root.AddCommand(joinCommand(), run)
 	return root
 }
 
@@ -149,7 +52,7 @@ func Report(err error, stderr io.Writer) int {
 	return 1
 }
 
-// failureOf maps an error to its stable code and fixed message. Only a journal or inventory
+// failureOf maps an error to its stable code and fixed message. Only a runtime
 // refusal adds its cause as detail.
 func failureOf(err error) Failure {
 	failure := Failure{Code: "invalid_configuration", Message: "Check command arguments and protected enrollment inputs. Use command help."}
@@ -162,62 +65,16 @@ func failureOf(err error) Failure {
 		{enrollment.ErrConflict, "enrollment_conflict"}, {enrollment.ErrUnavailable, "outcome_unavailable"},
 		{enrollment.ErrTransport, "transport_failed"},
 		{daemon.ErrConfiguration, "invalid_configuration"}, {daemon.ErrEnrollment, "enrollment_recovery_required"},
-		{daemon.ErrJournal, "journal_recovery_required"}, {daemon.ErrInventory, "inventory_recovery_required"},
-		{daemon.ErrPlatform, "unsupported_platform"}, {daemon.ErrExecution, "agent_failed"},
+		{daemon.ErrRuntime, "runtime_unavailable"}, {daemon.ErrExecution, "agent_failed"},
 		{context.Canceled, "cancelled"}, {context.DeadlineExceeded, "deadline_exceeded"},
 	} {
 		if errors.Is(err, known.err) {
 			failure = Failure{Code: known.code, Message: known.err.Error()}
-			if known.err == daemon.ErrJournal || known.err == daemon.ErrInventory {
+			if known.err == daemon.ErrRuntime {
 				failure.Detail = err.Error()
 			}
 			break
 		}
 	}
 	return failure
-}
-
-func readTrust(path string) (*x509.CertPool, error) {
-	const limit = 1 << 20
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, fmt.Errorf("%w: open the trust file: %w", enrollment.ErrConfiguration, err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("%w: stat the trust file: %w", enrollment.ErrConfiguration, err)
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > limit {
-		return nil, fmt.Errorf("%w: the trust file must be a regular file of at most 1 MiB that nobody else can write", enrollment.ErrConfiguration)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil {
-		return nil, fmt.Errorf("%w: read the trust file: %w", enrollment.ErrConfiguration, err)
-	}
-	if len(data) > limit {
-		return nil, fmt.Errorf("%w: the trust file exceeds 1 MiB", enrollment.ErrConfiguration)
-	}
-	roots := x509.NewCertPool()
-	count := 0
-	for len(bytes.TrimSpace(data)) > 0 {
-		if !bytes.HasPrefix(bytes.TrimSpace(data), []byte("-----BEGIN CERTIFICATE-----")) {
-			return nil, fmt.Errorf("%w: the trust file carries content that is not a certificate block after %d certificates", enrollment.ErrConfiguration, count)
-		}
-		block, rest := pem.Decode(data)
-		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
-			return nil, fmt.Errorf("%w: trust file entry %d is not a bare CERTIFICATE block", enrollment.ErrConfiguration, count+1)
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("%w: parse trust file entry %d: %w", enrollment.ErrConfiguration, count+1, err)
-		}
-		roots.AddCert(cert)
-		count++
-		data = rest
-	}
-	if count == 0 {
-		return nil, enrollment.ErrConfiguration
-	}
-	return roots, nil
 }

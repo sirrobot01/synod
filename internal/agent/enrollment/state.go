@@ -62,10 +62,8 @@ type Response struct {
 	CACertificatePEM string    `json:"ca_certificate_pem"`
 	AcceptedAt       time.Time `json:"accepted_at"`
 	Replayed         bool      `json:"replayed"`
-	// RecoveryGeneration and AgentEndpoint are what a joining agent writes into its
-	// configuration. An older controller leaves them empty.
-	RecoveryGeneration uuid.UUID `json:"recovery_generation,omitzero"`
-	AgentEndpoint      string    `json:"agent_endpoint,omitempty"`
+	// AgentEndpoint is what a joining agent writes into its configuration.
+	AgentEndpoint string `json:"agent_endpoint,omitempty"`
 }
 type diskState struct {
 	Version   int       `json:"version"`
@@ -85,9 +83,8 @@ type Credentials struct {
 	AcceptedAt       time.Time
 	Certificate      tls.Certificate `json:"-"`
 	CACertificatePEM string
-	// RecoveryGeneration and AgentEndpoint come from the enrollment response.
-	RecoveryGeneration uuid.UUID
-	AgentEndpoint      string
+	// AgentEndpoint comes from the enrollment response.
+	AgentEndpoint string
 }
 
 // String and GoString redact the credentials, which hold the private key.
@@ -447,7 +444,7 @@ func (s *State) credentials() (Credentials, error) {
 	if err != nil {
 		return Credentials{}, fmt.Errorf("%w: load the issued certificate and the saved node key as a pair: %w", ErrCertificate, err)
 	}
-	return Credentials{Identity: s.state.Identity, RequestID: s.state.Request.RequestID, CertificateID: response.CertificateID, AcceptedAt: response.AcceptedAt, Certificate: pair, CACertificatePEM: response.CACertificatePEM, RecoveryGeneration: response.RecoveryGeneration, AgentEndpoint: response.AgentEndpoint}, nil
+	return Credentials{Identity: s.state.Identity, RequestID: s.state.Request.RequestID, CertificateID: response.CertificateID, AcceptedAt: response.AcceptedAt, Certificate: pair, CACertificatePEM: response.CACertificatePEM, AgentEndpoint: response.AgentEndpoint}, nil
 }
 
 // Close releases the process lock. It is safe to call more than once.

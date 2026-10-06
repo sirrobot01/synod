@@ -90,7 +90,7 @@
     <div class="gate">
       <div class="brand">
         <span class="mono name">synod</span>
-        <span class="mono tagline">database control plane</span>
+        <span class="mono tagline">Docker app backups</span>
       </div>
       {#if phase === "checking"}
         <p class="note">Checking the session.</p>

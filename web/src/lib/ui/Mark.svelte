@@ -16,7 +16,7 @@
   }: { mark: Mark; text?: boolean; shapeOnly?: boolean; decorative?: boolean; title?: string } = $props();
 </script>
 
-<span class="mark" style="--c: var(--{mark.tone})">
+<span class="mark {mark.tone}">
   <span class="shape {mark.shape}" aria-hidden="true" title={title || undefined}></span>
   {#if shapeOnly}
     <span class="sr">{title || mark.label}</span>
@@ -33,6 +33,13 @@
     align-items: center;
     color: var(--c);
   }
+  .ok { --c: var(--ok); }
+  .attn { --c: var(--attn); }
+  .fail { --c: var(--fail); }
+  .active { --c: var(--active); }
+  .unc { --c: var(--unc); }
+  .neutral { --c: var(--neutral); }
+  .dim { --c: var(--dim); }
   .shape {
     width: 12px;
     height: 12px;

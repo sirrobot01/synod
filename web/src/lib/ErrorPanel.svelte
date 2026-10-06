@@ -14,10 +14,10 @@
   let { view, actions = undefined, footnote = "" }: Props = $props();
 </script>
 
-<div class="failure" style="border-color: var(--{view.mark.tone})" role="alert">
+<div class="failure {view.mark.tone}" role="alert">
   <p class="head">
     <Mark mark={view.mark} text={false} />
-    <span class="code mono" style="color: var(--{view.mark.tone})">{view.code}</span>
+    <span class="code mono">{view.code}</span>
   </p>
   <p class="consequence">{view.consequence}</p>
   {#if view.requestID || view.operationID}
@@ -40,13 +40,20 @@
 
 <style>
   .failure {
-    border: 1px solid var(--fail);
+    border: 1px solid var(--error-color, var(--fail));
     background: var(--panel);
     padding: 16px;
     display: flex;
     flex-direction: column;
     gap: 10px;
   }
+  .failure.ok { --error-color: var(--ok); }
+  .failure.attn { --error-color: var(--attn); }
+  .failure.fail { --error-color: var(--fail); }
+  .failure.active { --error-color: var(--active); }
+  .failure.unc { --error-color: var(--unc); }
+  .failure.neutral { --error-color: var(--neutral); }
+  .failure.dim { --error-color: var(--dim); }
   .failure p {
     margin: 0;
   }
@@ -56,6 +63,7 @@
     gap: 8px;
   }
   .code {
+    color: var(--error-color, var(--fail));
     font-size: 12px;
     font-weight: 500;
   }

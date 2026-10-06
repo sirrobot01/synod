@@ -8,20 +8,15 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
-	"fmt"
-	"log/slog"
 	"net"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/controlstream"
-	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/pki"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/grpc"
@@ -29,6 +24,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type fixture struct {
@@ -107,7 +103,7 @@ func newFixture(t *testing.T, handle func(context.Context, controlstream.Peer, *
 		}
 		pairs[role] = pair
 	}
-	f := &fixture{ca: ca, tls: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{pairs[pki.Agent]}}, hello: &agentv1.Hello{InstallationId: installation.String(), NodeId: node.String(), BootId: uuid.NewString(), JournalGeneration: uuid.NewString(), Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, Capabilities: []string{"runtime.docker", "unsupported"}, ActivePayloadVersions: []uint32{1}}}
+	f := &fixture{ca: ca, tls: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{pairs[pki.Agent]}}, hello: &agentv1.Hello{InstallationId: installation.String(), NodeId: node.String(), Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, Capabilities: []string{"runtime.docker", "unsupported"}, Architecture: "arm64", Hostname: "odin"}}
 	config := controlstream.Config{InstallationID: installation, TLS: &tls.Config{MinVersion: tls.VersionTLS12, ClientCAs: roots, Certificates: []tls.Certificate{pairs[pki.Controller]}}, Capabilities: []string{"runtime.docker"}, HelloTimeout: 500 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond, StaleAfter: 2 * time.Second, RecheckInterval: 20 * time.Millisecond, AuthorizationTimeout: time.Second, MaxSessions: 1, QueueSize: 2, Handle: handle}
 	config.Authorize = func(ctx context.Context, i, n uuid.UUID, cert *x509.Certificate) error {
 		if i != installation || n != node || cert == nil || !cert.Equal(pairs[pki.Agent].Leaf) {
@@ -161,88 +157,18 @@ func (f *fixture) stream(t *testing.T, hello *agentv1.Hello) (agentv1.AgentServi
 	return stream, message.GetSession()
 }
 
-func result(f *fixture) *agentv1.AgentMessage {
-	return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_TerminalResult{TerminalResult: &agentv1.TerminalResult{CommandId: uuid.NewString(), InputHash: make([]byte, 32), Sequence: 1, State: "succeeded", Epoch: &agentv1.Epoch{InstallationId: f.hello.InstallationId, NodeId: f.hello.NodeId, AppId: uuid.NewString(), RecoveryGeneration: uuid.NewString(), ExecutionEpoch: 1}}}}
-}
-
-func TestDurableAcknowledgementAndReplacement(t *testing.T) {
-	entered, commit := make(chan struct{}), make(chan struct{})
-	f := newFixture(t, func(ctx context.Context, _ controlstream.Peer, message *agentv1.AgentMessage) error {
-		if message.GetTerminalResult() != nil {
-			close(entered)
-			select {
-			case <-commit:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		return nil
-	}, nil)
-	stream, session := f.stream(t, f.hello)
-	if len(session.Capabilities) != 1 || session.Capabilities[0] != "runtime.docker" {
-		t.Fatal("capability negotiation failed")
-	}
-	terminal := result(f)
-	if err := stream.Send(terminal); err != nil {
-		t.Fatal(err)
-	}
-	<-entered
-	received := make(chan *agentv1.ControllerMessage, 1)
-	go func() { message, _ := stream.Recv(); received <- message }()
-	select {
-	case <-received:
-		t.Fatal("acknowledged before durable handling")
-	case <-time.After(50 * time.Millisecond):
-	}
-	close(commit)
-	select {
-	case message := <-received:
-		if message.GetResultAck() == nil || message.GetResultAck().CommandId != terminal.GetTerminalResult().CommandId {
-			t.Fatal("wrong durable acknowledgement")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no acknowledgement")
-	}
-	replacement, next := f.stream(t, f.hello)
-	if next.SessionId == session.SessionId {
-		t.Fatal("replacement reused session ID")
-	}
-	if _, err := stream.Recv(); err == nil {
-		t.Fatal("old session remained open")
-	}
-	node := uuid.MustParse(f.hello.NodeId)
-	current, ok := f.server.Session(node)
-	if !ok || current.SessionID != next.SessionId {
-		t.Fatal("old teardown removed replacement")
-	}
-	inventory := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Inventory{Inventory: &agentv1.InventoryRequest{PageSize: 5}}}
-	if err := f.server.Send(node, session.SessionId, inventory); !errors.Is(err, controlstream.ErrDisconnected) {
-		t.Fatal("stale send handle accepted")
-	}
-	if err := f.server.Send(node, next.SessionId, inventory); err != nil {
-		t.Fatal(err)
-	}
-	message, err := replacement.Recv()
-	if err != nil || message.GetInventory() == nil {
-		t.Fatal("replacement did not receive send")
-	}
-}
-
 func TestHelloRejectionAndRevocation(t *testing.T) {
 	f := newFixture(t, func(context.Context, controlstream.Peer, *agentv1.AgentMessage) error { return nil }, nil)
-	for _, kind := range []string{"node", "boot", "protocol", "payload", "missing", "duplicate"} {
+	for _, kind := range []string{"node", "architecture", "protocol", "missing", "duplicate"} {
 		t.Run(kind, func(t *testing.T) {
 			hello := proto.Clone(f.hello).(*agentv1.Hello)
 			switch kind {
 			case "node":
 				hello.NodeId = uuid.NewString()
-			case "boot":
-				hello.BootId = "invalid"
+			case "architecture":
+				hello.Architecture = "riscv64"
 			case "protocol":
 				hello.Protocol.Maximum = 0
-			case "payload":
-				hello.ActivePayloadVersions = []uint32{99}
 			}
 			conn, err := grpc.NewClient(f.address, grpc.WithTransportCredentials(credentials.NewTLS(f.tls)))
 			if err != nil {
@@ -315,64 +241,6 @@ func TestMutualTLSRequired(t *testing.T) {
 	}
 }
 
-func TestReconnectReplaysOnlyUnacknowledgedResults(t *testing.T) {
-	var persisted, hellos, acks atomic.Int32
-	f := newFixture(t, func(_ context.Context, _ controlstream.Peer, message *agentv1.AgentMessage) error {
-		if message.GetHello() != nil {
-			hellos.Add(1)
-		}
-		if message.GetTerminalResult() != nil && persisted.Add(1) == 1 {
-			return errors.New("unknown commit secret")
-		}
-		return nil
-	}, nil)
-	terminal := result(f)
-	var client *transport.Client
-	var err error
-	acknowledged := make(chan struct{})
-	client, err = transport.New(transport.Config{Endpoints: []string{"127.0.0.1:1", f.address}, TLS: f.tls, Hello: f.hello, HandshakeTimeout: 150 * time.Millisecond, BackoffMin: 10 * time.Millisecond, BackoffMax: 30 * time.Millisecond, Handle: func(ctx context.Context, message *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
-		if message.GetSession() != nil && acks.Load() == 0 {
-			return terminal, nil
-		}
-		if message.GetResultAck() != nil {
-			if message.GetResultAck().CommandId != terminal.GetTerminalResult().CommandId {
-				return nil, errors.New("wrong ack")
-			}
-			if acks.Add(1) == 1 {
-				close(acknowledged)
-			}
-		}
-		return nil, nil
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- client.Run(ctx) }()
-	select {
-	case <-acknowledged:
-	case <-time.After(4 * time.Second):
-		t.Fatalf("no replay acknowledgement; hellos=%d results=%d", hellos.Load(), persisted.Load())
-	}
-	if hellos.Load() < 2 || persisted.Load() != 2 || acks.Load() != 1 {
-		t.Fatal("lost reply did not replay correctly")
-	}
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("shutdown blocked")
-	}
-	if err := client.Send(terminal); !errors.Is(err, controlstream.ErrDisconnected) {
-		t.Fatal("send after shutdown accepted")
-	}
-}
-
 func TestServerQueueBoundsAndSnapshots(t *testing.T) {
 	var block atomic.Bool
 	entered, release := make(chan struct{}, 1), make(chan struct{})
@@ -397,27 +265,27 @@ func TestServerQueueBoundsAndSnapshots(t *testing.T) {
 	stream, session := f.stream(t, f.hello)
 	node := uuid.MustParse(f.hello.NodeId)
 	block.Store(true)
-	message := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Inventory{Inventory: &agentv1.InventoryRequest{Cursor: "first"}}}
+	message := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Error{Error: &agentv1.ProtocolError{Code: "first"}}}
 	if err := f.server.Send(node, session.SessionId, message); err != nil {
 		t.Fatal(err)
 	}
 	<-entered
-	message.GetInventory().Cursor = "second"
+	message.GetError().Code = "second"
 	if err := f.server.Send(node, session.SessionId, message); err != nil {
 		t.Fatal(err)
 	}
-	message.GetInventory().Cursor = "mutated"
+	message.GetError().Code = "mutated"
 	if err := f.server.Send(node, session.SessionId, message); !errors.Is(err, controlstream.ErrBusy) {
 		t.Fatalf("queue limit ignored: %v", err)
 	}
 	close(release)
 	for _, want := range []string{"first", "second"} {
 		reply, err := stream.Recv()
-		if err != nil || reply.GetInventory().Cursor != want {
+		if err != nil || reply.GetError().GetCode() != want {
 			t.Fatalf("queued snapshot changed: %v %v", reply, err)
 		}
 	}
-	oversized := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Inventory{Inventory: &agentv1.InventoryRequest{Cursor: strings.Repeat("x", (1<<20)+1)}}}
+	oversized := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_Error{Error: &agentv1.ProtocolError{Code: "large", Message: strings.Repeat("x", 2048)}}}
 	if err := f.server.Send(node, session.SessionId, oversized); !errors.Is(err, controlstream.ErrMessage) {
 		t.Fatal("oversized outbound message accepted")
 	}
@@ -449,12 +317,17 @@ func TestExpiryAndAuthorizationFailure(t *testing.T) {
 		}
 	})
 	t.Run("controller expiry", func(t *testing.T) {
-		f := newFixture(t, func(context.Context, controlstream.Peer, *agentv1.AgentMessage) error { return nil }, nil, pki.Controller)
-		ready := make(chan context.Context, 1)
-		client, err := transport.New(transport.Config{Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello, HandshakeTimeout: time.Second, BackoffMin: 10 * time.Millisecond, BackoffMax: 20 * time.Millisecond, Handle: func(ctx context.Context, message *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
-			if message.GetSession() != nil {
-				ready <- ctx
+		ready := make(chan struct{}, 1)
+		f := newFixture(t, func(_ context.Context, _ controlstream.Peer, message *agentv1.AgentMessage) error {
+			if message.GetHello() != nil {
+				select {
+				case ready <- struct{}{}:
+				default:
+				}
 			}
+			return nil
+		}, nil, pki.Controller)
+		client, err := transport.New(transport.Config{Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello, HandshakeTimeout: time.Second, BackoffMin: 10 * time.Millisecond, BackoffMax: 20 * time.Millisecond, Handle: func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
 			return nil, nil
 		}})
 		if err != nil {
@@ -464,16 +337,21 @@ func TestExpiryAndAuthorizationFailure(t *testing.T) {
 		defer cancel()
 		done := make(chan error, 1)
 		go func() { done <- client.Run(ctx) }()
-		var sessionContext context.Context
 		select {
-		case sessionContext = <-ready:
+		case <-ready:
 		case <-time.After(time.Second):
 			t.Fatal("client did not connect")
 		}
-		select {
-		case <-sessionContext.Done():
-		case <-time.After(3 * time.Second):
-			t.Fatal("controller expiry did not close session")
+		node := uuid.MustParse(f.hello.NodeId)
+		deadline := time.Now().Add(4 * time.Second)
+		for {
+			if _, ok := f.server.Session(node); !ok {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("controller expiry did not close the session")
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
 		cancel()
 		<-done
@@ -484,7 +362,7 @@ func TestInboundBoundsAndCancelledHandling(t *testing.T) {
 	t.Run("message bytes", func(t *testing.T) {
 		f := newFixture(t, func(context.Context, controlstream.Peer, *agentv1.AgentMessage) error { return nil }, func(config *controlstream.Config) { config.MaxMessageBytes = 1024 })
 		stream, _ := f.stream(t, f.hello)
-		stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_Inventory{Inventory: &agentv1.InventoryPage{NextCursor: strings.Repeat("x", 2048)}}})
+		stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_Hello{Hello: &agentv1.Hello{Hostname: strings.Repeat("x", 2048)}}})
 		if _, err := stream.Recv(); err == nil {
 			t.Fatal("oversized inbound message accepted")
 		}
@@ -506,10 +384,10 @@ func TestInboundBoundsAndCancelledHandling(t *testing.T) {
 			t.Fatalf("missing Hello did not expire: %v", err)
 		}
 	})
-	t.Run("durable handler cancellation", func(t *testing.T) {
+	t.Run("handler cancellation", func(t *testing.T) {
 		entered, exited := make(chan struct{}), make(chan struct{})
 		f := newFixture(t, func(ctx context.Context, _ controlstream.Peer, message *agentv1.AgentMessage) error {
-			if message.GetTerminalResult() != nil {
+			if message.GetHeartbeat() != nil {
 				close(entered)
 				<-ctx.Done()
 				close(exited)
@@ -518,7 +396,7 @@ func TestInboundBoundsAndCancelledHandling(t *testing.T) {
 			return nil
 		}, nil)
 		stream, _ := f.stream(t, f.hello)
-		stream.Send(result(f))
+		stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_Heartbeat{Heartbeat: &agentv1.Heartbeat{Sequence: 1, ObservedAt: timestamppb.Now()}}})
 		<-entered
 		f.server.Stop()
 		select {
@@ -526,48 +404,10 @@ func TestInboundBoundsAndCancelledHandling(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("handler was not cancelled")
 		}
-		if message, err := stream.Recv(); err == nil || message.GetResultAck() != nil {
-			t.Fatal("cancelled durable handling acknowledged")
+		if _, err := stream.Recv(); err == nil {
+			t.Fatal("stream survived a stopped server")
 		}
 	})
-}
-
-func TestAgentQueuePressure(t *testing.T) {
-	f := newFixture(t, func(context.Context, controlstream.Peer, *agentv1.AgentMessage) error { return nil }, nil)
-	ready := make(chan struct{}, 1)
-	client, err := transport.New(transport.Config{Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello, QueueSize: 1, Handle: func(ctx context.Context, message *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
-		if message.GetSession() != nil {
-			ready <- struct{}{}
-		}
-		return nil, nil
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- client.Run(ctx) }()
-	select {
-	case <-ready:
-	case <-time.After(time.Second):
-		t.Fatal("client did not connect")
-	}
-	message := &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Inventory{Inventory: &agentv1.InventoryPage{NextCursor: strings.Repeat("x", 500<<10)}}}
-	busy := false
-	for range 100 {
-		if err := client.Send(message); errors.Is(err, controlstream.ErrBusy) {
-			busy = true
-			break
-		} else if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if !busy {
-		t.Fatal("agent queue did not apply backpressure")
-	}
-	cancel()
-	<-done
 }
 
 func TestExactCertificateAuthorization(t *testing.T) {
@@ -611,302 +451,37 @@ func TestExactCertificateAuthorization(t *testing.T) {
 	}
 }
 
-func TestRefusedMessageKeepsTheConnection(t *testing.T) {
-	for name, refusal := range map[string]error{
-		"stale owner":    operation.ErrStaleOwner,
-		"journal busy":   journal.ErrBusy,
-		"transport busy": controlstream.ErrBusy,
-	} {
-		t.Run(name, func(t *testing.T) {
-			var hellos atomic.Int32
-			peers := make(chan controlstream.Peer, 4)
-			f := newFixture(t, func(_ context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
-				if message.GetHello() != nil {
-					hellos.Add(1)
-					select {
-					case peers <- peer:
-					default:
-					}
-				}
-				return nil
-			}, nil)
-			logs, err := os.CreateTemp(t.TempDir(), "transport-log")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { logs.Close() })
-			refused, accepted := make(chan struct{}), make(chan struct{})
-			var seen atomic.Int32
-			client, err := transport.New(transport.Config{
-				Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello,
-				Logger:           slog.New(slog.NewJSONHandler(logs, nil)),
-				HandshakeTimeout: time.Second, BackoffMin: 10 * time.Millisecond, BackoffMax: 30 * time.Millisecond,
-				Handle: func(_ context.Context, message *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
-					if message.GetCapacityRequest() == nil {
-						return nil, nil
-					}
-					if seen.Add(1) == 1 {
-						close(refused)
-						return nil, fmt.Errorf("private-refusal-token: %w", refusal)
-					}
-					close(accepted)
-					return nil, nil
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithCancel(t.Context())
-			done := make(chan struct{})
-			go func() { defer close(done); _ = client.Run(ctx) }()
-			t.Cleanup(func() { cancel(); <-done })
-			var peer controlstream.Peer
-			select {
-			case peer = <-peers:
-			case <-time.After(4 * time.Second):
-				t.Fatal("no connection established")
-			}
-			challenge := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CapacityRequest{
-				CapacityRequest: &agentv1.CapacityRequest{
-					ProbeId: uuid.NewString(), ProbeRevision: 1, ExpiresUnixMs: time.Now().Add(time.Minute).UnixMilli(),
-					SessionId: peer.SessionID, BootId: peer.BootID, JournalGeneration: peer.JournalGeneration,
-				},
-			}}
-			if err := f.server.Send(peer.NodeID, peer.SessionID, challenge); err != nil {
-				t.Fatal(err)
-			}
-			select {
-			case <-refused:
-			case <-time.After(4 * time.Second):
-				t.Fatal("the first challenge never reached the agent")
-			}
-			if err := f.server.Send(peer.NodeID, peer.SessionID, challenge); err != nil {
-				t.Fatalf("the refusal closed the session: %v", err)
-			}
-			select {
-			case <-accepted:
-			case <-time.After(4 * time.Second):
-				t.Fatal("the connection did not survive a refused message")
-			}
-			if hellos.Load() != 1 {
-				t.Fatalf("hellos=%d, want one connection", hellos.Load())
-			}
-			logged, err := os.ReadFile(logs.Name())
-			if err != nil {
-				t.Fatal(err)
-			}
-			code := "agent_busy"
-			if errors.Is(refusal, operation.ErrStaleOwner) {
-				code = "stale_owner"
-			}
-			if !strings.Contains(string(logged), `"reason":"`+code+`"`) || !strings.Contains(string(logged), "agent_message_refused") || !strings.Contains(string(logged), "CapacityRequest") || strings.Contains(string(logged), "private-refusal-token") {
-				t.Fatalf("refusal log lacks context or exposes private text: %s", logged)
-			}
-		})
-	}
-}
-
-func TestFatalMessageHandlingReconnectsAndRedacts(t *testing.T) {
-	for name, test := range map[string]struct {
-		session bool
-		failure error
-		reason  string
-	}{
-		"session refusal":             {session: true, failure: fmt.Errorf("private-failure-token: %w", operation.ErrStaleOwner), reason: "session_installation_failed"},
-		"recovery required with busy": {failure: errors.Join(journal.ErrRecoveryRequired, journal.ErrBusy, errors.New("private-failure-token")), reason: "recovery_required"},
-		"protocol fault with busy":    {failure: errors.Join(controlstream.ErrMessage, journal.ErrBusy, errors.New("private-failure-token")), reason: "invalid_controller_message"},
-		"private handler fault":       {failure: errors.New("private-failure-token"), reason: "handler_failed"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			peers := make(chan controlstream.Peer, 4)
-			f := newFixture(t, func(_ context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
-				if message.GetHello() != nil {
-					select {
-					case peers <- peer:
-					default:
-					}
-				}
-				return nil
-			}, nil)
-			logs, err := os.CreateTemp(t.TempDir(), "transport-log")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { logs.Close() })
-			installed := make(chan string, 4)
-			var sessions atomic.Int32
-			client, err := transport.New(transport.Config{
-				Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello,
-				Logger:           slog.New(slog.NewJSONHandler(logs, nil)),
-				HandshakeTimeout: time.Second, BackoffMin: 10 * time.Millisecond, BackoffMax: 30 * time.Millisecond,
-				Handle: func(_ context.Context, message *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
-					if session := message.GetSession(); session != nil {
-						if sessions.Add(1) == 1 && test.session {
-							return nil, test.failure
-						}
-						select {
-						case installed <- session.SessionId:
-						default:
-						}
-					}
-					if message.GetCapacityRequest() != nil {
-						return nil, test.failure
-					}
-					return nil, nil
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithCancel(t.Context())
-			done := make(chan struct{})
-			go func() { defer close(done); _ = client.Run(ctx) }()
-			t.Cleanup(func() { cancel(); <-done })
-			var first controlstream.Peer
-			select {
-			case first = <-peers:
-			case <-time.After(4 * time.Second):
-				t.Fatal("no connection established")
-			}
-			if !test.session {
-				select {
-				case <-installed:
-				case <-time.After(4 * time.Second):
-					t.Fatal("first session was not installed")
-				}
-				challenge := &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CapacityRequest{
-					CapacityRequest: &agentv1.CapacityRequest{
-						ProbeId: uuid.NewString(), ProbeRevision: 1, ExpiresUnixMs: time.Now().Add(time.Minute).UnixMilli(),
-						SessionId: first.SessionID, BootId: first.BootID, JournalGeneration: first.JournalGeneration,
-					},
-				}}
-				if err := f.server.Send(first.NodeID, first.SessionID, challenge); err != nil {
-					t.Fatal(err)
-				}
-			}
-			select {
-			case next := <-installed:
-				if next == first.SessionID {
-					t.Fatal("fatal handling reused the refused session")
-				}
-			case <-time.After(4 * time.Second):
-				t.Fatal("fatal handling did not reconnect")
-			}
-			logged, err := os.ReadFile(logs.Name())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(string(logged), `"reason":"`+test.reason+`"`) || !strings.Contains(string(logged), "agent_stream_ended") || !strings.Contains(string(logged), `"message":"*agentv1.ControllerMessage_`) || strings.Contains(string(logged), "private-failure-token") || strings.Contains(string(logged), "agent_message_refused") {
-				t.Fatalf("fatal log misclassified the error or exposed private text: %s", logged)
-			}
-		})
-	}
-}
-
-func TestHeartbeatCarriesBoundedAppObservations(t *testing.T) {
-	received := make(chan *agentv1.AgentMessage, 1)
+func TestClientSendsHeartbeats(t *testing.T) {
+	beats := make(chan uint64, 8)
 	f := newFixture(t, func(_ context.Context, _ controlstream.Peer, message *agentv1.AgentMessage) error {
-		if message.GetHeartbeat() != nil {
+		if heartbeat := message.GetHeartbeat(); heartbeat != nil {
 			select {
-			case received <- proto.Clone(message).(*agentv1.AgentMessage):
-			default:
-			}
-		}
-		return nil
-	}, func(c *controlstream.Config) { c.MaxMessageBytes = 1024 })
-	observation := &agentv1.Observation{ResourceId: uuid.NewString(), Lifecycle: "running", Health: "healthy", Ports: []*agentv1.PortBinding{{ContainerPort: 80, HostAddress: "0.0.0.0", HostPort: 32100, Transport: "tcp"}}}
-	client, err := transport.New(transport.Config{Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello, Observations: func() []*agentv1.Observation {
-		return []*agentv1.Observation{proto.Clone(observation).(*agentv1.Observation), {ResourceId: strings.Repeat("x", 2048)}}
-	}, Handle: func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) { return nil, nil }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- client.Run(ctx) }()
-	defer func() { cancel(); <-done }()
-	select {
-	case message := <-received:
-		got := message.GetHeartbeat().Observations
-		if len(got) != 1 || !proto.Equal(got[0], observation) || proto.Size(message) > 1024 {
-			t.Fatalf("heartbeat observations: %v", message)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no observation reached the controller")
-	}
-}
-
-func TestHeartbeatRotatesObservationsAcrossFrames(t *testing.T) {
-	received := make(chan *agentv1.AgentMessage, 16)
-	f := newFixture(t, func(_ context.Context, _ controlstream.Peer, message *agentv1.AgentMessage) error {
-		if message.GetHeartbeat() != nil {
-			select {
-			case received <- message:
-			default:
-			}
-		}
-		return nil
-	}, func(c *controlstream.Config) { c.MaxMessageBytes = 1024 })
-	var observations []*agentv1.Observation
-	for range 5 {
-		observation := &agentv1.Observation{ResourceId: uuid.NewString(), Lifecycle: "running", Health: "healthy"}
-		for port := range 20 {
-			observation.Ports = append(observation.Ports, &agentv1.PortBinding{ContainerPort: uint32(80 + port), HostPort: uint32(32000 + port), HostAddress: "127.0.0.1", Transport: "tcp"})
-		}
-		observations = append(observations, observation)
-	}
-	client, err := transport.New(transport.Config{Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello, Observations: func() []*agentv1.Observation { return observations }, Handle: func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) { return nil, nil }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	done := make(chan error, 1)
-	go func() { done <- client.Run(ctx) }()
-	defer func() { cancel(); <-done }()
-	seen := map[string]bool{}
-	for len(seen) < len(observations) {
-		select {
-		case message := <-received:
-			if proto.Size(message) > 1024 {
-				t.Fatal("heartbeat exceeds negotiated limit")
-			}
-			for _, observation := range message.GetHeartbeat().Observations {
-				seen[observation.ResourceId] = true
-			}
-		case <-ctx.Done():
-			t.Fatalf("observations starved: received %d of %d", len(seen), len(observations))
-		}
-	}
-}
-
-func TestHeartbeatCarriesReplicaStatus(t *testing.T) {
-	received := make(chan *agentv1.AgentMessage, 1)
-	f := newFixture(t, func(_ context.Context, _ controlstream.Peer, message *agentv1.AgentMessage) error {
-		if message.GetHeartbeat() != nil {
-			select {
-			case received <- proto.Clone(message).(*agentv1.AgentMessage):
+			case beats <- heartbeat.Sequence:
 			default:
 			}
 		}
 		return nil
 	}, nil)
-	status := &agentv1.ReplicaStatus{AppId: uuid.NewString(), Role: "standby", Epoch: 2, Sequence: 7}
-	client, err := transport.New(transport.Config{Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello, Replicas: func() []*agentv1.ReplicaStatus {
-		return []*agentv1.ReplicaStatus{proto.Clone(status).(*agentv1.ReplicaStatus)}
-	}, Handle: func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) { return nil, nil }})
+	client, err := transport.New(transport.Config{Endpoints: []string{f.address}, TLS: f.tls, Hello: f.hello, Handle: func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error) {
+		return nil, nil
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- client.Run(ctx) }()
-	defer func() { cancel(); <-done }()
-	select {
-	case message := <-received:
-		if got := message.GetHeartbeat().Replicas; len(got) != 1 || !proto.Equal(got[0], status) {
-			t.Fatalf("heartbeat replicas: %v", message)
+	for want := uint64(1); want <= 2; want++ {
+		select {
+		case got := <-beats:
+			if got != want {
+				t.Fatalf("heartbeat %d arrived as %d", want, got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("heartbeat %d did not arrive", want)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no replica status reached the controller")
 	}
+	cancel()
+	<-done
 }

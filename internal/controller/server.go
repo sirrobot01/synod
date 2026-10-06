@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -10,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,37 +18,17 @@ import (
 	"encoding/base64"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sirrobot01/synod/internal/agent/replication"
 	"github.com/sirrobot01/synod/internal/api"
 	"github.com/sirrobot01/synod/internal/auth"
 	"github.com/sirrobot01/synod/internal/config"
 	"github.com/sirrobot01/synod/internal/controller/agentstream"
-	"github.com/sirrobot01/synod/internal/controller/capacity"
-	"github.com/sirrobot01/synod/internal/controller/provision"
-	"github.com/sirrobot01/synod/internal/controller/runner"
 	"github.com/sirrobot01/synod/internal/controlstream"
-	"github.com/sirrobot01/synod/internal/coordinator"
-	"github.com/sirrobot01/synod/internal/engine"
-	postgresengine "github.com/sirrobot01/synod/internal/engine/postgres"
-	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
 	"github.com/sirrobot01/synod/internal/pki"
-	"github.com/sirrobot01/synod/internal/placement"
 	"github.com/sirrobot01/synod/internal/secret"
-	"github.com/sirrobot01/synod/internal/store/postgres"
+	"github.com/sirrobot01/synod/internal/store"
 	"github.com/sirrobot01/synod/internal/web"
-	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"github.com/spf13/cobra"
 )
-
-// ownerID identifies this controller process in claims and elections.
-func ownerID() string {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		host = "controller"
-	}
-	return host + "/" + strconv.Itoa(os.Getpid())
-}
 
 // Command returns the server command. It runs the controller, and its init
 // subcommand writes the installation material.
@@ -146,42 +126,25 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 			return err
 		}
 	}
-	var ring *secret.Keyring
 	if settings.SecretKeyFile != "" {
-		ring, err = loadKeyring(settings.SecretKeyFile, settings.SecretKeyID)
-		if err != nil {
+		if _, err := loadKeyring(settings.SecretKeyFile, settings.SecretKeyID); err != nil {
 			return err
 		}
 	}
 	startup, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	// pgxpool.New repeats the DSN in its error and the DSN carries the database
-	// password, so this one reports the failure without its cause.
-	pool, err := pgxpool.New(startup, settings.DatabaseURL)
-	if err != nil {
-		return errors.New("configure metadata connection failed")
-	}
-	defer pool.Close()
-	if err := pool.Ping(startup); err != nil {
-		return fmt.Errorf("connect to metadata PostgreSQL: %w", err)
-	}
-	store := postgres.New(pool)
-	if err := store.Migrate(startup); err != nil {
-		return fmt.Errorf("migrate metadata PostgreSQL: %w", err)
-	}
-	// What this installation serves. Tier 1 admission refuses other engine versions.
-	catalog, err := engine.NewCatalog(postgresengine.New(), redisengine.New())
+	metadata, err := store.Open(startup, settings.DatabasePath)
 	if err != nil {
 		return err
 	}
-	handler, err := api.NewServer(store, admin, uuid.MustParse(settings.InstallationID), catalog, logger)
+	defer metadata.Close()
+	handler, err := api.NewServer(metadata, admin, uuid.MustParse(settings.InstallationID), logger)
 	if err != nil {
 		return err
 	}
 	handler.EnrollmentAuthority = authority
 	handler.PublicOrigin = settings.PublicOrigin
 	handler.AgentListen = settings.AgentListen
-	handler.SecretKeyring = ring
 	assets, err := web.Assets()
 	if err != nil {
 		return fmt.Errorf("load the web application: %w", err)
@@ -204,150 +167,34 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}},
 		ErrorLog:  slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
-	var agentServer *controlstream.Server
-	var agentListener net.Listener
-	var operations *runner.Runner
-	var capacityDriver *capacity.Driver
+	stopped := make(chan error, 2)
+	go func() { stopped <- server.ServeTLS(listener, "", "") }()
+	logger.Info("controller API listening", "address", listener.Addr().String(), "installation_id", settings.InstallationID)
 	if agentTLS != nil {
-		// The runner needs the transport and the transport needs the runner's routing,
-		// so the handler reads the pointer that the runner build fills in below.
-		handle := (agentstream.Receiver{Store: store}).Handle
-		agentServer, err = controlstream.New(controlstream.Config{InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Authorize: store.CheckAgentCertificate, Capabilities: []string{"runtime.docker", controlstream.CommandInspectionCapability, controlstream.RouterCapability, replication.Capability}, Logger: logger,
-			Handle: func(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
-				if operations != nil {
-					return operations.Handle(ctx, peer, message)
-				}
-				return handle(ctx, peer, message)
-			}})
+		agentServer, err := controlstream.New(controlstream.Config{
+			InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Logger: logger,
+			Authorize: func(ctx context.Context, _, nodeID uuid.UUID, certificate *x509.Certificate) error {
+				return metadata.CheckAgentCertificate(ctx, nodeID, certificate)
+			},
+			Capabilities: []string{"runtime.docker"},
+			Handle:       (agentstream.Receiver{Store: metadata}).Handle,
+		})
 		if err != nil {
 			return err
 		}
 		defer agentServer.Stop()
-		agentListener, err = (&net.ListenConfig{}).Listen(ctx, "tcp", settings.AgentListen)
+		agentListener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", settings.AgentListen)
 		if err != nil {
 			return fmt.Errorf("listen for agent transport on %s: %w", settings.AgentListen, err)
 		}
-		defer func() {
-			if err := agentListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-				logger.Error("close the agent transport listener", "error", err)
-			}
-		}()
-		elector, err := coordinator.New(pool)
-		if err != nil {
-			return err
-		}
-		// App plans need no database credential key. Database plans still require one.
-		runnerConfig := runner.Config{
-			Store: store, Transport: agentServer, Coordinator: elector,
-			InstallationID: uuid.MustParse(settings.InstallationID), OwnerID: ownerID(), Logger: logger,
-		}
-		{
-			capacityDriver, err = capacity.New(capacity.Config{Store: store, Transport: agentServer, Logger: logger})
-			if err != nil {
-				return err
-			}
-			planner, err := provision.New(provision.Config{
-				Store: store, Decider: capacityDriver, Keyring: ring,
-				DatabaseImages: databaseImages,
-				Budget:         provisionBudget,
-				EndpointPorts: placement.PortRange{
-					First: uint16(settings.EngineEndpointFirstPort),
-					Last:  uint16(settings.EngineEndpointLastPort),
-				},
-			})
-			if err != nil {
-				return err
-			}
-			runnerConfig.Keyring, runnerConfig.Planner = ring, planner
-		}
-		operations, err = runner.New(runnerConfig)
-		if err != nil {
-			return err
-		}
-	}
-	stopped := make(chan error, 2)
-	serving := 1
-	go func() { stopped <- server.ServeTLS(listener, "", "") }()
-	logger.Info("controller API listening", "address", listener.Addr().String(), "installation_id", settings.InstallationID)
-	if agentServer != nil {
-		serving++
 		go func() { stopped <- agentServer.Serve(agentListener) }()
 		logger.Info("controller agent transport listening", "agent_address", agentListener.Addr().String(), "installation_id", settings.InstallationID)
-	}
-	// A failed listener must also stop the runner, so it runs on its own context.
-	runnerCtx, stopRunner := context.WithCancel(ctx)
-	defer stopRunner()
-	routesStopped := make(chan struct{})
-	if agentServer != nil {
-		go func() {
-			defer close(routesStopped)
-			runAppRoutes(runnerCtx, store, agentServer, uuid.MustParse(settings.InstallationID), logger)
-		}()
-	} else {
-		close(routesStopped)
-	}
-	replicationStopped := make(chan struct{})
-	if agentServer != nil {
-		go func() {
-			defer close(replicationStopped)
-			runAppReplication(runnerCtx, store, agentServer, uuid.MustParse(settings.InstallationID), ring, logger)
-		}()
-	} else {
-		close(replicationStopped)
-	}
-	probesStopped := make(chan struct{})
-	if capacityDriver != nil {
-		go func() {
-			defer close(probesStopped)
-			ticker := time.NewTicker(2 * time.Second)
-			defer ticker.Stop()
-			for {
-				work, cancel := context.WithTimeout(runnerCtx, placement.ProbeWindow)
-				snapshot, err := store.ReadPlacementSnapshot(work, uuid.MustParse(settings.InstallationID))
-				if err == nil {
-					_, err = capacityDriver.Refresh(work, snapshot.InstallationID, snapshot)
-				}
-				if err != nil && runnerCtx.Err() == nil {
-					logger.Warn("refresh node facts", "error", err)
-				}
-				cancel()
-				select {
-				case <-runnerCtx.Done():
-					return
-				case <-ticker.C:
-				}
-			}
-		}()
-	} else {
-		close(probesStopped)
-	}
-	running := make(chan struct{})
-	if operations != nil {
-		go func() {
-			defer close(running)
-			if err := operations.Run(runnerCtx); err != nil {
-				logger.Error("controller runner stopped", "error", err.Error())
-			}
-		}()
-		logger.Info("controller runner electing app owners", "installation_id", settings.InstallationID)
-	} else {
-		close(running)
 	}
 	failed := false
 	select {
 	case <-stopped:
-		serving--
 		failed = true
 	case <-ctx.Done():
-	}
-	// Wait for workers before the transport closes, so a late receipt still commits.
-	stopRunner()
-	<-running
-	<-routesStopped
-	<-replicationStopped
-	<-probesStopped
-	if agentServer != nil {
-		agentServer.Stop()
 	}
 	shutdown, stopShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stopShutdown()
@@ -357,9 +204,6 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		// failure is separate evidence and belongs beside the timeout.
 		shutdownErr = errors.Join(shutdownErr, server.Close())
 	}
-	for range serving {
-		<-stopped
-	}
 	if shutdownErr != nil {
 		return fmt.Errorf("API shutdown exceeded its deadline: %w", shutdownErr)
 	}
@@ -367,7 +211,6 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		return errors.New("controller management listener stopped unexpectedly")
 	}
 	return nil
-
 }
 
 func readStartupFile(path string, maximum int64, private bool) ([]byte, error) {
@@ -392,17 +235,6 @@ func readStartupFile(path string, maximum int64, private bool) ([]byte, error) {
 	}
 	return data, nil
 }
-
-// Tier 1 apps use multi-architecture index digests. Each copy pulls the image for its
-// own node's architecture, so a primary and a standby may differ in architecture.
-var databaseImages = []provision.DatabaseImage{
-	{Engine: "postgres", Version: "17.11", Digest: "postgres@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f"},
-	{Engine: "redis", Version: "8.2.7", Digest: "redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3"},
-}
-
-// What one tier 1 copy reserves. The host port it publishes is configuration, because a
-// fleet cannot be described by a constant.
-var provisionBudget = placement.Vector{CPUMillis: 1000, MemoryBytes: 1 << 30, DiskBytes: 8 << 30}
 
 // loadKeyring reads the active credential wrapping key.
 //

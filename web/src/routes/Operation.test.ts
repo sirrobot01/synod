@@ -21,10 +21,10 @@ vi.mock("../lib/api", async () => {
   };
 });
 
-function operation(id: string, status: string, kind = "app.start", attempts = 1) {
+function operation(id: string, status: string, kind = "backup", attempts = 1) {
   return {
-    id, app_id: "c1", kind, status, plan_version: 2, desired_revision: 3,
-    attempts, failure_code: null, cancellation_requested_at: null,
+    id, app_id: "c1", kind, status, node_id: "n1", actor_id: "admin",
+    failure_code: "",
     finished_at: status === "succeeded" ? "2026-09-19T13:00:00Z" : null,
     created_at: "2026-09-19T12:00:00Z", updated_at: "2026-09-19T12:30:00Z",
   };
@@ -46,8 +46,8 @@ beforeEach(() => {
   hold = false;
   // The two answers differ in their fields, so the screen shows which one it drew.
   answers = {
-    op_running: operation("op_running", "running", "app.delete", 9),
-    op_done: operation("op_done", "succeeded", "app.start", 1),
+    op_running: operation("op_running", "running", "restore", 9),
+    op_done: operation("op_done", "succeeded", "backup", 1),
   };
   vi.useFakeTimers();
 });
@@ -89,8 +89,8 @@ describe("reading an operation", () => {
     held.reverse().forEach((release) => release());
     await settle();
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("op_done");
-    expect(screen.getByText("app.start")).toBeTruthy();
-    expect(screen.queryByText("app.delete")).toBe(null);
+    expect(screen.getByText("backup")).toBeTruthy();
+    expect(screen.queryByText("restore")).toBe(null);
   });
 });
 
@@ -98,12 +98,12 @@ describe("a failed operation", () => {
   beforeEach(() => {
     answers = {
       op_failed: {
-        ...operation("op_failed", "failed", "app.stop", 3),
+        ...operation("op_failed", "failed", "backup", 3),
         failure_code: "dependency_unavailable",
         finished_at: "2026-09-19T13:00:00Z",
       },
-      op_pending: { ...operation("op_pending", "pending", "app.deploy", 0), plan_version: 0 },
-      op_waiting: operation("op_waiting", "waiting", "app.move", 1),
+      op_pending: { ...operation("op_pending", "pending", "backup", 0), plan_version: 0 },
+      op_waiting: operation("op_waiting", "waiting", "restore", 1),
     };
   });
 
@@ -113,46 +113,19 @@ describe("a failed operation", () => {
     expect(screen.getByText("dependency_unavailable")).toBeTruthy();
   });
 
-  it("claims residual resources only where work could have left some", async () => {
-    // A pending operation has provisioned nothing. Listing retained objects under
-    // it would assert an effect that never happened.
-    open("op_pending");
+  it("does not invent resources or offer unsupported actions", async () => {
+    open("op_failed");
     await settle();
     expect(screen.queryByText(/residual resources/i)).toBe(null);
-    cleanup();
-    open("op_failed");
-    await settle();
-    expect(screen.getByText(/residual resources/i)).toBeTruthy();
-    expect(screen.getByText("vol_8812")).toBeTruthy();
+    expect(screen.queryByRole("button", {name:/retry/i})).toBe(null);
+    expect(screen.queryByRole("button", {name:/cancel/i})).toBe(null);
   });
-
-  it("separates acceptance from completion", async () => {
-    open("op_pending");
-    await settle();
-    // Acceptance is its own state: recorded, planned for nothing, claiming nothing.
-    expect(screen.getByText("accepted")).toBeTruthy();
-    expect(screen.getByText("0 — no executable plan yet")).toBeTruthy();
+  it("shows pending work without claiming completion", async () => {
+    open("op_pending"); await settle();
+    expect(screen.getByText("The request is recorded. Work has not started.")).toBeTruthy();
   });
-
-  it("offers no action the API cannot serve, whatever the status permits", async () => {
-    open("op_failed");
-    await settle();
-    // A failed operation permits a retry, and the route does not exist. The
-    // button says which of the two is missing rather than pretending to work.
-    const retry = screen.getByRole("button", { name: /retry/i }) as HTMLButtonElement;
-    expect(retry.disabled).toBe(true);
-    expect(retry.textContent).toContain("no API route");
-    const cancel = screen.getByRole("button", { name: /cancel/i }) as HTMLButtonElement;
-    expect(cancel.disabled).toBe(true);
-    expect(cancel.textContent).toContain("not permitted");
-  });
-
-  it("promises no progress on a waiting operation", async () => {
-    open("op_waiting");
-    await settle();
-    // A spinner would promise progress that an unresolved effect cannot promise.
-    expect(screen.getByText(/not a queue and not a spinner/i)).toBeTruthy();
-    // Waiting is not a failure, so no retry is offered to resolve it.
-    expect((screen.getByRole("button", { name: /retry/i }) as HTMLButtonElement).textContent).toContain("not permitted");
+  it("reports uncertainty when work needs inspection", async () => {
+    open("op_waiting"); await settle();
+    expect(screen.getByText(/The result is unknown/)).toBeTruthy();
   });
 });

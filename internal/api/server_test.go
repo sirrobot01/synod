@@ -2,71 +2,107 @@ package api
 
 import (
 	"bytes"
-	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/auth"
-	"github.com/sirrobot01/synod/internal/engine"
-	postgresengine "github.com/sirrobot01/synod/internal/engine/postgres"
-	redisengine "github.com/sirrobot01/synod/internal/engine/redis"
-	"github.com/sirrobot01/synod/internal/store/postgres"
+	"github.com/sirrobot01/synod/internal/pki"
+	"github.com/sirrobot01/synod/internal/store"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
-// The fixture uses a separate database so API writes cannot affect other suites.
-// testCatalog serves what this installation advertises.
-func testCatalog(t *testing.T) *engine.Catalog {
+// apiTestStore opens a private SQLite metadata database for one test.
+func apiTestStore(t *testing.T) *store.Store {
+	metadata, _ := apiTestDatabase(t)
+	return metadata
+}
+
+// apiTestDatabase also returns a raw connection to the same file, so a test can age rows.
+func apiTestDatabase(t *testing.T) (*store.Store, *sql.DB) {
 	t.Helper()
-	catalog, err := engine.NewCatalog(postgresengine.New(), redisengine.New())
+	path := filepath.Join(t.TempDir(), "synod.db")
+	metadata, err := store.Open(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return catalog
+	t.Cleanup(func() { metadata.Close() })
+	raw, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(10000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	return metadata, raw
 }
 
-func TestHTTPSAdmission(t *testing.T) {
-	store, pool, dsn := apiTestStore(t)
+// enrollTestNode enrolls one node directly through the store and returns its ID.
+func enrollTestNode(t *testing.T, metadata *store.Store) uuid.UUID {
+	t.Helper()
+	installation := uuid.New()
+	certificate, key, err := pki.CreateCA(installation, time.Now(), 2*store.AgentCertificateLifetime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := pki.LoadCA(installation, certificate, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := sha256.Sum256([]byte(uuid.NewString()))
+	if _, err := metadata.RegisterEnrollmentToken(t.Context(), store.TokenRegistration{ActorID: "admin", RequestID: "r1", IdempotencyKey: uuid.NewString(), TokenVerifier: verifier, TTLSeconds: 3600}); err != nil {
+		t.Fatal(err)
+	}
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := uuid.New()
+	if _, err := metadata.EnrollAgent(t.Context(), store.EnrollmentRequest{NodeID: node, TokenVerifier: verifier, RequestID: uuid.New(), CSRDER: request}, ca); err != nil {
+		t.Fatal(err)
+	}
+	return node
+}
+
+func TestHTTPSNodes(t *testing.T) {
+	metadata := apiTestStore(t)
 	token := strings.Repeat("secret-", 8)
 	verifier, err := auth.NewAdminToken(token, "test-admin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	installation := uuid.New()
-	server, err := NewServer(store, verifier, installation, testCatalog(t), logger)
+	server, err := NewServer(metadata, verifier, uuid.New(), slog.New(slog.NewTextHandler(&logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	https := httptest.NewTLSServer(server)
 	defer https.Close()
-	client := https.Client()
-	// This helper keeps the wire checks identical for every success and failure.
-	send := func(method, path, body, key, credential string) (int, http.Header, []byte) {
+	send := func(method, path, credential string) (int, []byte) {
 		t.Helper()
-		request, err := http.NewRequestWithContext(t.Context(), method, https.URL+path, strings.NewReader(body))
+		request, err := http.NewRequestWithContext(t.Context(), method, https.URL+path, strings.NewReader("{}"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		request.Header.Set("Content-Type", "application/json")
-		if key != "" {
-			request.Header.Set("Idempotency-Key", key)
-		}
 		if credential != "" {
 			request.Header.Set("Authorization", "Bearer "+credential)
 		}
-		response, err := client.Do(request)
+		response, err := https.Client().Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -75,132 +111,49 @@ func TestHTTPSAdmission(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if response.Header.Get("X-Request-ID") == "" || response.Header.Get("Cache-Control") != "no-store" {
-			t.Fatal("missing safe response headers")
+		if response.Header.Get("X-Request-ID") == "" || response.Header.Get("Cache-Control") != "no-store" || !json.Valid(data) {
+			t.Fatalf("unsafe or invalid response: %s", data)
 		}
-		if response.Header.Get("Content-Type") != "application/json" || !json.Valid(data) {
-			t.Fatalf("invalid JSON response: %s", data)
-		}
-		if bytes.Contains(data, []byte(token)) {
-			t.Fatal("response exposed credential")
-		}
-		return response.StatusCode, response.Header, data
+		return response.StatusCode, data
 	}
-	body := `{"schema_version":1,"name":"example","tier":3,"copies":1,"service":{"image":"nginx","ports":[{"container_port":80,"protocol":"tcp"}]},"router":{"protocol":"tcp","port":8080}}`
-	t.Run("authenticate before decode", func(t *testing.T) {
-		status, _, _ := send("POST", "/v1/apps", "invalid", "", "")
-		if status != 401 {
-			t.Fatalf("status=%d", status)
-		}
-		var count int
-		if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM apps").Scan(&count); err != nil || count != 0 {
-			t.Fatalf("unauthorized request wrote data: %d %v", count, err)
-		}
-	})
-	status, _, data := send("POST", "/v1/apps", body, "stable-key", token)
-	if status != 202 {
-		t.Fatalf("create: %d %s", status, data)
+	if status, _ := send("GET", "/v1/nodes", ""); status != 401 {
+		t.Fatalf("unauthenticated list: %d", status)
 	}
-	var first app.Admission
-	if err := json.Unmarshal(data, &first); err != nil {
+	node := enrollTestNode(t, metadata)
+	if status, data := send("POST", "/v1/nodes/"+node.String()+"/actions/approve", token); status != 409 || !strings.Contains(string(data), "node_facts_unavailable") {
+		t.Fatalf("unseen node approved: %d %s", status, data)
+	}
+	if err := metadata.RecordAgentSession(t.Context(), node, uuid.New(), &agentv1.Hello{NodeId: node.String(), Architecture: "amd64", Hostname: "server"}); err != nil {
 		t.Fatal(err)
 	}
-	if first.Replayed || first.AppID == uuid.Nil || first.OperationID == uuid.Nil {
-		t.Fatalf("bad admission: %s", data)
+	status, data := send("POST", "/v1/nodes/"+node.String()+"/actions/approve", token)
+	var approved store.Node
+	if status != 200 || json.Unmarshal(data, &approved) != nil || approved.ApprovedAt == nil {
+		t.Fatalf("approve: %d %s", status, data)
 	}
-	status, _, data = send("POST", "/v1/apps", body, "stable-key", token)
-	var replay app.Admission
-	if err := json.Unmarshal(data, &replay); err != nil {
-		t.Fatal(err)
+	status, data = send("GET", "/v1/nodes/by-name/server", token)
+	if status != 200 || !strings.Contains(string(data), node.String()) {
+		t.Fatalf("by name: %d %s", status, data)
 	}
-	if status != 202 || !replay.Replayed || replay.AppID != first.AppID || replay.OperationID != first.OperationID || !replay.AcceptedAt.Equal(first.AcceptedAt) {
-		t.Fatalf("bad replay: %s", data)
-	}
-	status, _, data = send("GET", "/v1/operations/"+first.OperationID.String(), "", "", token)
-	var operation map[string]any
-	if err := json.Unmarshal(data, &operation); err != nil {
-		t.Fatal(err)
-	}
-	if status != 200 || operation["plan_version"] != float64(0) || operation["status"] != "pending" {
-		t.Fatalf("get operation: %d %s", status, data)
+	var nodes []store.Node
+	if status, data := send("GET", "/v1/nodes", token); status != 200 || json.Unmarshal(data, &nodes) != nil || len(nodes) != 1 {
+		t.Fatalf("list: %d %s", status, data)
 	}
 	for _, test := range []struct {
-		name, method, path, body, key string
-		status                        int
+		method, path string
+		status       int
 	}{
-		{"large first object", "POST", "/v1/apps", `{"name":"` + strings.Repeat("x", 65536) + `"}`, "large", 413},
-		{"large trailing space", "POST", "/v1/apps", body + strings.Repeat(" ", 65536), "trailing", 413},
-		{"unknown field", "POST", "/v1/apps", strings.Replace(body, `"name":`, `"password":"private-input","name":`, 1), "unknown", 400},
-		{"invalid ID", "GET", "/v1/apps/not-an-id", "", "", 400},
-		{"missing app", "GET", "/v1/apps/" + uuid.NewString(), "", "", 404},
-		{"missing endpoint", "GET", "/v1/unknown", "", "", 404},
-		{"unsupported method", "PATCH", "/v1/apps/" + first.AppID.String(), "", "", 405},
-		{"removed cluster route", "GET", "/v1/clusters", "", "", 404},
+		{"GET", "/v1/nodes/not-an-id", 400},
+		{"GET", "/v1/nodes/" + uuid.NewString(), 404},
+		{"GET", "/v1/unknown", 404},
+		{"PATCH", "/v1/nodes/" + node.String(), 405},
+		{"GET", "/v1/apps", 404},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, _, data := send(test.method, test.path, test.body, test.key, token)
-			if got != test.status {
-				t.Fatalf("status=%d want=%d: %s", got, test.status, data)
-			}
-			if bytes.Contains(data, []byte("private-input")) {
-				t.Fatal("input leaked")
-			}
-		})
-	}
-	other, err := NewServer(store, verifier, uuid.New(), nil, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{"/v1/apps/" + first.AppID.String(), "/v1/operations/" + first.OperationID.String()} {
-		request := httptest.NewRequest("GET", path, nil)
-		request.Header.Set("Authorization", "Bearer "+token)
-		recorder := httptest.NewRecorder()
-		other.ServeHTTP(recorder, request)
-		if recorder.Code != 404 {
-			t.Fatalf("installation scope: %d %s", recorder.Code, recorder.Body)
+		if got, data := send(test.method, test.path, token); got != test.status {
+			t.Fatalf("%s %s: %d %s", test.method, test.path, got, data)
 		}
 	}
-	if strings.Contains(logs.String(), token) || strings.Contains(logs.String(), "private-input") || strings.Contains(logs.String(), dsn) {
-		t.Fatal("logs exposed credentials or rejected body")
+	if strings.Contains(logs.String(), token) {
+		t.Fatal("logs exposed the credential")
 	}
-}
-
-func apiTestStore(t *testing.T) (*postgres.Store, *pgxpool.Pool, string) {
-	t.Helper()
-	dsn := os.Getenv("SYNOD_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("run scripts/test-postgres.sh")
-	}
-	adminPool, err := pgxpool.New(t.Context(), dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(adminPool.Close)
-	name := "api_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := adminPool.Exec(t.Context(), "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, err := adminPool.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
-			t.Error(err)
-		}
-	})
-	config, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.ConnConfig.Database = name
-	pool, err := pgxpool.NewWithConfig(t.Context(), config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	store := postgres.New(pool)
-	if err := store.Migrate(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-
-	return store, pool, dsn
 }

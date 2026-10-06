@@ -11,8 +11,8 @@ import (
 	"github.com/sirrobot01/synod/internal/client"
 )
 
-func TestInstallationGetPrintsAgentIdentities(t *testing.T) {
-	value := client.Installation{InstallationID: uuid.New(), RecoveryGeneration: uuid.New()}
+func TestInstallationGetPrintsTheIdentity(t *testing.T) {
+	value := client.Installation{InstallationID: uuid.New()}
 	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/installation" {
 			http.Error(w, "unexpected request", http.StatusBadRequest)

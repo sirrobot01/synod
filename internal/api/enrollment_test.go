@@ -19,19 +19,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
 	"github.com/sirrobot01/synod/internal/pki"
-	"github.com/sirrobot01/synod/internal/store/postgres"
+	"github.com/sirrobot01/synod/internal/store"
 	"golang.org/x/time/rate"
 )
 
 func TestHTTPSEnrollment(t *testing.T) {
-	store, pool, dsn := apiTestStore(t)
+	metadata, pool := apiTestDatabase(t)
 	installation, node, requestID := uuid.New(), uuid.New(), uuid.New()
 	adminToken := strings.Repeat("admin-secret-", 4)
 	admin, err := auth.NewAdminToken(adminToken, "test-admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, key, err := pki.CreateCA(installation, time.Now(), 7*24*time.Hour)
+	cert, key, err := pki.CreateCA(installation, time.Now(), 60*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestHTTPSEnrollment(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	server, err := NewServer(store, admin, installation, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+	server, err := NewServer(metadata, admin, installation, slog.New(slog.NewTextHandler(&logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,12 +88,12 @@ func TestHTTPSEnrollment(t *testing.T) {
 	registration, _ := json.Marshal(map[string]any{"node_id": node, "token": token, "ttl_seconds": 600})
 	send("/v1/enrollment-tokens", string(registration), token, "register", 401)
 	data := send("/v1/enrollment-tokens", string(registration), adminToken, "register", 201)
-	var registered postgres.EnrollmentToken
+	var registered store.EnrollmentToken
 	if err := json.Unmarshal(data, &registered); err != nil {
 		t.Fatal(err)
 	}
 	data = send("/v1/enrollment-tokens", string(registration), adminToken, "register", 201)
-	var replayToken postgres.EnrollmentToken
+	var replayToken store.EnrollmentToken
 	if err := json.Unmarshal(data, &replayToken); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestHTTPSEnrollment(t *testing.T) {
 	send("/v1/enrollments", `{"unknown":"private-input"}`, token, "", 400)
 	send("/v1/enrollments", string(enrollment)+strings.Repeat(" ", 65536), token, "", 413)
 	data = send("/v1/enrollments", string(enrollment), token, "", 201)
-	var first postgres.EnrollmentResult
+	var first store.EnrollmentResult
 	if err := json.Unmarshal(data, &first); err != nil {
 		t.Fatal(err)
 	}
@@ -128,17 +128,17 @@ func TestHTTPSEnrollment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CheckAgentCertificate(t.Context(), installation, node, leaf); err != nil {
+	if err := metadata.CheckAgentCertificate(t.Context(), node, leaf); err != nil {
 		t.Fatal(err)
 	}
 	if first.CACertificatePEM != string(cert) || first.Replayed {
 		t.Fatal("incorrect initial CA or replay flag")
 	}
-	if _, err := pool.Exec(t.Context(), "UPDATE enrollment_tokens SET created_at=clock_timestamp()-interval '2 minutes', expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", registered.ID); err != nil {
+	if _, err := pool.ExecContext(t.Context(), "UPDATE enrollment_tokens SET created_at=created_at-120000, expires_at=created_at-119000 WHERE id=?", registered.ID); err != nil {
 		t.Fatal(err)
 	}
 	data = send("/v1/enrollments", string(enrollment), token, "", 201)
-	var replay postgres.EnrollmentResult
+	var replay store.EnrollmentResult
 	if err := json.Unmarshal(data, &replay); err != nil {
 		t.Fatal(err)
 	}
@@ -151,11 +151,11 @@ func TestHTTPSEnrollment(t *testing.T) {
 	send(revoke, "null", adminToken, "", 400)
 	send(revoke, "{}", adminToken, "", 204)
 	send(revoke, "{}", adminToken, "", 204)
-	if err := store.CheckAgentCertificate(t.Context(), installation, node, leaf); err == nil {
+	if err := metadata.CheckAgentCertificate(t.Context(), node, leaf); err == nil {
 		t.Fatal("revoked certificate accepted")
 	}
 	var audits int
-	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM audit_events WHERE action='node.certificate.revoked'").Scan(&audits); err != nil || audits != 1 {
+	if err := pool.QueryRowContext(t.Context(), "SELECT count(*) FROM audit_events WHERE action='node.certificate.revoked'").Scan(&audits); err != nil || audits != 1 {
 		t.Fatalf("revocation audits=%d err=%v", audits, err)
 	}
 	// Expiry before initial consumption rejects the request and leaves no node.
@@ -164,7 +164,7 @@ func TestHTTPSEnrollment(t *testing.T) {
 	token2 := base64.RawURLEncoding.EncodeToString(rawToken)
 	registration2, _ := json.Marshal(map[string]any{"node_id": node2, "token": token2, "ttl_seconds": 60})
 	send("/v1/enrollment-tokens", string(registration2), adminToken, "register2", 201)
-	noIssuer, err := NewServer(store, admin, installation, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	noIssuer, err := NewServer(metadata, admin, installation, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,19 +177,19 @@ func TestHTTPSEnrollment(t *testing.T) {
 		t.Fatalf("issuance without CA: %d %s", missingCAResponse.Code, missingCAResponse.Body)
 	}
 	var nodeCount int
-	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM nodes WHERE id=$1", node2).Scan(&nodeCount); err != nil || nodeCount != 0 {
+	if err := pool.QueryRowContext(t.Context(), "SELECT count(*) FROM nodes WHERE id=?", node2).Scan(&nodeCount); err != nil || nodeCount != 0 {
 		t.Fatalf("failed issuance wrote node: %d %v", nodeCount, err)
 	}
 
-	if _, err := pool.Exec(t.Context(), "UPDATE enrollment_tokens SET created_at=clock_timestamp()-interval '2 minutes', expires_at=clock_timestamp()-interval '1 second' WHERE node_id=$1", node2); err != nil {
+	if _, err := pool.ExecContext(t.Context(), "UPDATE enrollment_tokens SET created_at=created_at-120000, expires_at=created_at-119000 WHERE node_id=?", node2); err != nil {
 		t.Fatal(err)
 	}
 	send("/v1/enrollments", strings.Replace(string(enrollment), node.String(), node2.String(), 1), token2, "", 401)
-	if strings.Contains(logs.String(), token) || strings.Contains(logs.String(), adminToken) || strings.Contains(logs.String(), "private-input") || strings.Contains(logs.String(), dsn) {
+	if strings.Contains(logs.String(), token) || strings.Contains(logs.String(), adminToken) || strings.Contains(logs.String(), "private-input") {
 		t.Fatal("logs exposed sensitive input")
 	}
 	// The security protocol can recover committed work without the signing key.
-	replayServer, err := NewServer(store, admin, installation, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	replayServer, err := NewServer(metadata, admin, installation, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,11 +208,11 @@ func TestEnrollmentAuthenticationAndRateLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(postgres.New(nil), admin, uuid.New(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server, err := NewServer(apiTestStore(t), admin, uuid.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/v1/enrollment-tokens", "/v1/enrollments?token=" + strings.Repeat("a", 43), "/v1/apps"} {
+	for _, path := range []string{"/v1/enrollment-tokens", "/v1/enrollments?token=" + strings.Repeat("a", 43), "/v1/nodes/" + uuid.NewString() + "/actions/approve"} {
 		req := httptest.NewRequest("POST", path, strings.NewReader("invalid"))
 		rec := httptest.NewRecorder()
 		server.ServeHTTP(rec, req)

@@ -2,20 +2,19 @@ package controller
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/base64"
 	"encoding/pem"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirrobot01/synod/internal/config"
 	"github.com/sirrobot01/synod/internal/jointoken"
 	"github.com/sirrobot01/synod/internal/pki"
@@ -174,7 +173,6 @@ func TestServerInitCommand(t *testing.T) {
 	cmd.SetArgs([]string{
 		"--dir", dir,
 		"--address", "192.168.1.100",
-		"--no-container",
 		"--systemd-dir", sysDir,
 	})
 
@@ -186,9 +184,8 @@ func TestServerInitCommand(t *testing.T) {
 	if !strings.Contains(output, "Synod installation") {
 		t.Errorf("output missing installation notice: %s", output)
 	}
-	// Without a reachable metadata database, init cannot register a join token.
-	if strings.Contains(output, "synod_join_") || !strings.Contains(output, "synod node join-token") {
-		t.Errorf("output must point at synod node join-token instead of printing a token: %s", output)
+	if !strings.Contains(output, "synod agent join synod_join_") {
+		t.Errorf("output must print a join token: %s", output)
 	}
 	if !strings.Contains(output, "export SYNOD_API_URL") {
 		t.Errorf("output missing SYNOD_API_URL export: %s", output)
@@ -197,7 +194,7 @@ func TestServerInitCommand(t *testing.T) {
 	// Verify file permissions for secret files.
 	secretFiles := []string{
 		"ca.key", "agent-tls.key", "api-ca.key", "api.key",
-		"secret.key", "admin.token", "metadata.password", "controller.json",
+		"secret.key", "admin.token", "controller.json",
 	}
 	for _, name := range secretFiles {
 		info, err := os.Stat(filepath.Join(dir, name))
@@ -262,7 +259,7 @@ func TestServerInitRefusesReinitialization(t *testing.T) {
 	cmd1 := initCommand()
 	cmd1.SetOut(&out)
 	cmd1.SetErr(&out)
-	cmd1.SetArgs([]string{"--dir", dir, "--no-container"})
+	cmd1.SetArgs([]string{"--dir", dir, "--systemd-dir", filepath.Join(dir, "absent")})
 	if err := cmd1.Execute(); err != nil {
 		t.Fatalf("first init failed: %v", err)
 	}
@@ -270,7 +267,7 @@ func TestServerInitRefusesReinitialization(t *testing.T) {
 	cmd2 := initCommand()
 	cmd2.SetOut(&out)
 	cmd2.SetErr(&out)
-	cmd2.SetArgs([]string{"--dir", dir, "--no-container"})
+	cmd2.SetArgs([]string{"--dir", dir, "--systemd-dir", filepath.Join(dir, "absent")})
 	if err := cmd2.Execute(); err == nil {
 		t.Fatal("expected second init to fail, but it succeeded")
 	}
@@ -283,7 +280,7 @@ func TestServerInitCustomInstallationID(t *testing.T) {
 	cmd := initCommand()
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--dir", dir, "--installation-id", customID, "--no-container"})
+	cmd.SetArgs([]string{"--dir", dir, "--installation-id", customID, "--systemd-dir", filepath.Join(dir, "absent")})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("init with custom id failed: %v", err)
 	}
@@ -303,39 +300,14 @@ func pemBytes(t *testing.T, data string) []byte {
 	return block.Bytes
 }
 
-// init with a metadata database registers a one-use join token that binds no node.
+// init registers a one-use join token that binds no node.
 func TestServerInitRegistersJoinToken(t *testing.T) {
-	dsn := os.Getenv("SYNOD_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("set SYNOD_TEST_DATABASE_URL or run scripts/test-postgres.sh")
-	}
-	admin, err := pgxpool.New(t.Context(), dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(admin.Close)
-	name := "init_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := admin.Exec(t.Context(), "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
-			t.Error(err)
-		}
-	})
-	target, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	target.Path = "/" + name
-	databaseURL := target.String()
-
 	dir := t.TempDir()
 	var out bytes.Buffer
 	cmd := initCommand()
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--dir", dir, "--address", "192.0.2.10", "--database-url", databaseURL, "--systemd-dir", filepath.Join(dir, "absent")})
+	cmd.SetArgs([]string{"--dir", dir, "--address", "192.0.2.10", "--systemd-dir", filepath.Join(dir, "absent")})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("init failed: %v\n%s", err, out.String())
 	}
@@ -354,14 +326,14 @@ func TestServerInitRegistersJoinToken(t *testing.T) {
 	if token.Address != "192.0.2.10:8443" || token.InstallationID != installation || token.Fingerprint != jointoken.Fingerprint(pemBytes(t, readFile(t, dir, "api-ca.crt"))) {
 		t.Fatalf("token=%+v, want the API origin, installation %s, and the API CA pin", token, installation)
 	}
-	pool, err := pgxpool.New(t.Context(), databaseURL)
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "synod.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	defer raw.Close()
 	verifier := sha256.Sum256([]byte(token.Secret))
 	var unbound bool
-	if err := pool.QueryRow(t.Context(), `SELECT node_id IS NULL AND consumed_at IS NULL FROM enrollment_tokens WHERE installation_id=$1 AND token_verifier=$2`, installation, verifier[:]).Scan(&unbound); err != nil || !unbound {
+	if err := raw.QueryRowContext(t.Context(), `SELECT node_id IS NULL AND consumed_at IS NULL FROM enrollment_tokens WHERE token_verifier=?`, verifier[:]).Scan(&unbound); err != nil || !unbound {
 		t.Fatalf("stored join token unbound=%v err=%v, want one unconsumed token with no node", unbound, err)
 	}
 }

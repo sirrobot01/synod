@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,13 +20,11 @@ import (
 	"testing"
 	"time"
 
+	"database/sql"
+
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sirrobot01/synod/internal/app"
 	"github.com/sirrobot01/synod/internal/pki"
-	"github.com/sirrobot01/synod/internal/secret"
-	"github.com/sirrobot01/synod/internal/store/postgres"
+	"github.com/sirrobot01/synod/internal/store"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -120,37 +117,6 @@ func TestStartupSpecialAndCertificateFiles(t *testing.T) {
 }
 
 func TestControllerHTTPSAndShutdown(t *testing.T) {
-	dsn := os.Getenv("SYNOD_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("run scripts/test-postgres.sh")
-	}
-	admin, err := pgxpool.New(t.Context(), dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close()
-	name := "controller_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := admin.Exec(t.Context(), "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
-			t.Error(err)
-		}
-	}()
-	pgconfig, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pgconfig.ConnConfig.Database = name
-	databaseURL, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	databaseURL.Path = "/" + name
-	databaseURL.RawPath = ""
 	tlsFixture := httptest.NewTLSServer(http.NotFoundHandler())
 	tlsFixture.Close()
 	certificate := tlsFixture.TLS.Certificates[0]
@@ -159,6 +125,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "synod.db")
 	certPath, keyPath, tokenPath := filepath.Join(directory, "cert.pem"), filepath.Join(directory, "key.pem"), filepath.Join(directory, "token")
 	token := strings.Repeat("controller-secret-", 3)
 	for path, data := range map[string][]byte{
@@ -180,7 +147,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	if err := os.WriteFile(wrappingKeyPath, []byte(base64.StdEncoding.EncodeToString(wrappingKey)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	caCert, caKey, err := pki.CreateCA(installation, time.Now(), 7*24*time.Hour)
+	caCert, caKey, err := pki.CreateCA(installation, time.Now(), 60*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +195,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	command := Command()
-	command.SetArgs([]string{"--listen", "127.0.0.1:0", "--database-url", databaseURL.String(), "--installation-id", installation.String(), "--ca-cert-file", caCertPath, "--ca-key-file", caKeyPath, "--agent-listen", "127.0.0.1:0", "--agent-tls-cert-file", agentCertPath, "--agent-tls-key-file", agentKeyPath, "--agent-ca-file", caCertPath, "--admin-token-file", tokenPath, "--tls-cert-file", certPath, "--tls-key-file", keyPath, "--secret-key-file", wrappingKeyPath, "--secret-key-id", wrappingKeyID.String()})
+	command.SetArgs([]string{"--listen", "127.0.0.1:0", "--database-path", databasePath, "--installation-id", installation.String(), "--ca-cert-file", caCertPath, "--ca-key-file", caKeyPath, "--agent-listen", "127.0.0.1:0", "--agent-tls-cert-file", agentCertPath, "--agent-tls-key-file", agentKeyPath, "--agent-ca-file", caCertPath, "--admin-token-file", tokenPath, "--tls-cert-file", certPath, "--tls-key-file", keyPath, "--secret-key-file", wrappingKeyPath, "--secret-key-id", wrappingKeyID.String()})
 	command.SetErr(log)
 	go func() { done <- command.ExecuteContext(ctx) }()
 	var address, agentAddress string
@@ -263,72 +230,11 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 			}
 		}
 	}
-	request, err := http.NewRequestWithContext(t.Context(), "POST", "https://"+address+"/v1/apps", strings.NewReader(`{"schema_version":1,"name":"startup","tier":1,"copies":1,"router":{"protocol":"tcp","port":6379},"replication":{"standbys":1,"interval_seconds":0,"failover_after_seconds":90,"failback":"manual","failback_stable_seconds":600},"database":{"engine":"redis","version":"8"}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Idempotency-Key", "startup")
-	response, err := tlsFixture.Client().Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := io.ReadAll(response.Body)
-	response.Body.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != 202 {
-		t.Fatalf("admission: %d %s", response.StatusCode, data)
-	}
-	verification, err := pgxpool.NewWithConfig(t.Context(), pgconfig)
+	verification, err := store.Open(t.Context(), databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer verification.Close()
-	var count int
-	if err := verification.QueryRow(t.Context(), "SELECT count(*) FROM apps WHERE name = $1 AND tier = 1", "startup").Scan(&count); err != nil || count != 1 {
-		t.Fatalf("admission missing from isolated database: count=%d error=%v", count, err)
-	}
-	var admission app.Admission
-	if err := json.Unmarshal(data, &admission); err != nil {
-		t.Fatal(err)
-	}
-	// Credential access uses the startup key even without an etcd-backed runner.
-	password := "startup-password-private"
-	ring, err := secret.NewKeyring(wrappingKeyID, map[uuid.UUID][]byte{wrappingKeyID: wrappingKey})
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentialID := uuid.New()
-	envelope, err := ring.Seal(secret.Binding{InstallationID: installation, OwnerType: "app", OwnerID: admission.AppID, CredentialID: credentialID, Version: 1}, []byte(password))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := postgres.New(verification).RecordAppCredentials(t.Context(), installation, admission.AppID, []postgres.Credential{{CredentialID: credentialID, Version: 1, Purpose: postgres.SuperuserCredential, RoleName: "synod_admin", Envelope: envelope}}); err != nil {
-		t.Fatal(err)
-	}
-	// Removing the file proves that requests use the configured keyring, not a reload.
-	if err := os.Remove(wrappingKeyPath); err != nil {
-		t.Fatal(err)
-	}
-	reveal, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://"+address+"/v1/apps/"+admission.AppID.String()+"/credentials/reveal", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	reveal.Header.Set("Authorization", "Bearer "+token)
-	reveal.Header.Set("Content-Type", "application/json")
-	revealed, err := tlsFixture.Client().Do(reveal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var value app.Credential
-	decodeErr := json.NewDecoder(revealed.Body).Decode(&value)
-	revealed.Body.Close()
-	if revealed.StatusCode != http.StatusOK || decodeErr != nil || value.Password != password || value.CredentialID != credentialID || value.Username != "default" || revealed.Header.Get("Cache-Control") != "no-store" {
-		t.Fatalf("startup keyring did not serve audited reveal: status=%d decode=%v", revealed.StatusCode, decodeErr)
-	}
 	// The executable loads the protected CA and serves the complete enrollment path.
 	enrollmentToken := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	node := uuid.New()
@@ -340,7 +246,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var enrolled postgres.EnrollmentResult
+	var enrolled store.EnrollmentResult
 	for _, endpoint := range []struct {
 		path, credential string
 		body             any
@@ -397,7 +303,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hello := &agentv1.Hello{InstallationId: installation.String(), NodeId: node.String(), BootId: uuid.NewString(), JournalGeneration: uuid.NewString(), Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, Capabilities: []string{"runtime.docker"}, ActivePayloadVersions: []uint32{1}}
+	hello := &agentv1.Hello{InstallationId: installation.String(), NodeId: node.String(), Protocol: &agentv1.VersionRange{Minimum: 1, Maximum: 1}, Capabilities: []string{"runtime.docker"}, Architecture: "arm64", RuntimeVersion: "29.7.2", Hostname: "odin"}
 	if err := stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_Hello{Hello: hello}}); err != nil {
 		t.Fatal(err)
 	}
@@ -405,70 +311,49 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	if err != nil || session.GetSession() == nil {
 		t.Fatalf("agent session failed: %v", err)
 	}
-	presence, err := postgres.New(verification).GetAgentPresence(t.Context(), installation, node)
-	if err != nil || presence.SessionID.String() != session.GetSession().SessionId || presence.Hello.JournalGeneration != hello.JournalGeneration {
-		t.Fatalf("Hello was not durable before publication: %v", err)
+	known, err := verification.GetNode(t.Context(), node)
+	if err != nil || known.ConnectedAt == nil || known.Architecture != "arm64" || known.Name != "odin" {
+		t.Fatalf("Hello was not durable before publication: %+v %v", known, err)
 	}
 	if err := stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_Heartbeat{Heartbeat: &agentv1.Heartbeat{Sequence: 1, ObservedAt: timestamppb.Now()}}}); err != nil {
 		t.Fatal(err)
 	}
-	for presence.Heartbeat == nil {
+	raw, err := sql.Open("sqlite", "file:"+databasePath+"?_pragma=busy_timeout(10000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	for {
+		var sequence int
+		if err := raw.QueryRowContext(t.Context(), `SELECT heartbeat_sequence FROM nodes WHERE id=?`, node).Scan(&sequence); err != nil {
+			t.Fatal(err)
+		}
+		if sequence == 1 {
+			break
+		}
 		select {
 		case <-streamCtx.Done():
 			t.Fatal("heartbeat was not persisted")
 		case <-ticker.C:
 		}
-		presence, err = postgres.New(verification).GetAgentPresence(t.Context(), installation, node)
-		if err != nil {
-			t.Fatal(err)
-		}
 	}
-	if presence.Heartbeat.Sequence != 1 {
-		t.Fatal("incorrect heartbeat sequence")
-	}
-	// A new node gets measured before any policy or workload exists.
-	message, err := stream.Recv()
-	if err != nil || message.GetCapacityRequest() == nil {
-		t.Fatalf("initial capacity challenge: %v %v", message, err)
-	}
-	challenge := message.GetCapacityRequest()
-	report := &agentv1.CapacityReport{ProbeId: challenge.ProbeId, ProbeRevision: challenge.ProbeRevision, SessionId: challenge.SessionId, BootId: challenge.BootId, JournalGeneration: challenge.JournalGeneration, Architecture: "arm64", RuntimeVersion: "29.7.2", StorageId: "local", Capacity: &agentv1.ResourceVector{CpuMillicores: 4000, MemoryBytes: 8 << 30, DiskBytes: 100 << 30}, Used: &agentv1.ResourceVector{}}
-	if err := stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_CapacityReport{CapacityReport: report}}); err != nil {
-		t.Fatal(err)
-	}
-	for {
-		facts, err := postgres.New(verification).ReadNodeCapacityReport(t.Context(), installation, node)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if facts != nil {
-			break
-		}
-		select {
-		case <-streamCtx.Done():
-			t.Fatal("initial facts did not arrive")
-		case <-ticker.C:
-		}
-	}
-	req, err := http.NewRequestWithContext(t.Context(), "PUT", "https://"+address+"/v1/nodes/"+node.String()+"/placement-policy", strings.NewReader(`{"client_address":"192.0.2.1"}`))
+	approve, err := http.NewRequestWithContext(t.Context(), "POST", "https://"+address+"/v1/nodes/"+node.String()+"/actions/approve", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("If-Match", `"0"`)
-	response, err = tlsFixture.Client().Do(req)
+	approve.Header.Set("Authorization", "Bearer "+token)
+	approve.Header.Set("Content-Type", "application/json")
+	response, err := tlsFixture.Client().Do(approve)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, err := io.ReadAll(response.Body)
 	response.Body.Close()
 	if err != nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("approval from initial facts: %d %s %v", response.StatusCode, body, err)
+		t.Fatalf("approval from reported facts: %d %s %v", response.StatusCode, body, err)
 	}
-	policy, err := postgres.New(verification).ReadNodePlacementPolicy(t.Context(), installation, node)
-	if err != nil || policy.Architecture != "arm64" || policy.RuntimeVersion != "29.7.2" {
-		t.Fatalf("measured policy: %+v %v", policy, err)
+	if approved, err := verification.GetNode(t.Context(), node); err != nil || approved.ApprovedAt == nil {
+		t.Fatalf("approval not stored: %+v %v", approved, err)
 	}
 	cancel()
 	select {
@@ -488,7 +373,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(logs), token) || strings.Contains(string(logs), dsn) || strings.Contains(string(logs), password) || strings.Contains(string(logs), base64.StdEncoding.EncodeToString(wrappingKey)) {
+	if strings.Contains(string(logs), token) || strings.Contains(string(logs), base64.StdEncoding.EncodeToString(wrappingKey)) {
 		t.Fatal("startup logs exposed credentials")
 	}
 }

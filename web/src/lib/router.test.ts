@@ -5,13 +5,13 @@ describe("routing", () => {
   it("reads every screen from its path", () => {
     expect(match("/")).toEqual({ screen: "fleet", id: "" });
     expect(match("/nodes")).toEqual({ screen: "nodes", id: "" });
-    expect(match("/backups")).toEqual({ screen: "backups", id: "" });
+    expect(match("/backups")).toEqual({ screen: "unknown", id: "" });
     expect(match("/operations")).toEqual({ screen: "operations", id: "" });
     expect(match("/settings")).toEqual({ screen: "settings", id: "" });
     expect(match("/nowhere")).toEqual({ screen: "unknown", id: "" });
   });
 
-  // Specification 17 requires an operation ID to survive a reload.
+  // An operation ID must survive a reload.
   it("keeps an operation identity in the path", () => {
     const id = "0f9c1a2b-4d5e-4f60-8a71-2b3c4d5e6f70";
     const address = path("operation", id);
@@ -24,7 +24,6 @@ describe("routing", () => {
       ["fleet", ""],
       ["nodes", ""],
       ["nodes", "node-1"],
-      ["backups", ""],
       ["operations", ""],
       ["operation", "op-1"],
       ["settings", ""],

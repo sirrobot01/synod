@@ -12,7 +12,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
-	"github.com/sirrobot01/synod/internal/store/postgres"
 	"github.com/sirrobot01/synod/internal/web"
 )
 
@@ -22,7 +21,7 @@ func appServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(postgres.New(nil), admin, uuid.New(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server, err := NewServer(apiTestStore(t), admin, uuid.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +87,7 @@ func TestAPIKeepsItsJSONAnswers(t *testing.T) {
 	if got := missing.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
 		t.Fatalf("an API failure was served as %q", got)
 	}
-	wrong := call(t, server, "DELETE", "/v1/apps", "", withBootstrap)
+	wrong := call(t, server, "DELETE", "/v1/nodes", "", withBootstrap)
 	if wrong.Code != 405 || wrong.Header().Get("Allow") == "" {
 		t.Fatalf("method not allowed: %d allow=%q", wrong.Code, wrong.Header().Get("Allow"))
 	}
@@ -140,7 +139,7 @@ func TestServerWithoutAssetsStillServesTheAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(postgres.New(nil), admin, uuid.New(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server, err := NewServer(apiTestStore(t), admin, uuid.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

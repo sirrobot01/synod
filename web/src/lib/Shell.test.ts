@@ -10,6 +10,8 @@ vi.mock("./api", async () => {
     ...real,
     api: {
       operation: () => new Promise(() => {}),
+      operations: () => new Promise(() => {}),
+      nodes: () => new Promise(() => {}),
       tokens: () => new Promise(() => {}),
     },
   };

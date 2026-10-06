@@ -12,7 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
-	"github.com/sirrobot01/synod/internal/store/postgres"
+	"github.com/sirrobot01/synod/internal/store"
 )
 
 // SessionCookie is the browser cookie that carries one session.
@@ -42,12 +42,12 @@ func (s *Server) authenticateAny(next http.Handler) http.Handler {
 		presented, err := bearer(r)
 		if err != nil {
 			w.Header().Set("WWW-Authenticate", "Bearer")
-			s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "Authentication is required.", uuid.Nil)
+			s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "Authentication is required.")
 			return
 		}
 		// A Synod token carries its row identity. Anything else is the bootstrap secret.
 		if id, verifier, err := auth.ParseAPIToken(presented); err == nil {
-			token, err := s.store.AuthenticateAPIToken(r.Context(), s.installationID, id, verifier)
+			token, err := s.store.AuthenticateAPIToken(r.Context(), id, verifier)
 			if err != nil {
 				s.credentialError(w, r, err)
 				return
@@ -59,7 +59,7 @@ func (s *Server) authenticateAny(next http.Handler) http.Handler {
 		actorID, err := s.admin.Authenticate(r)
 		if err != nil {
 			w.Header().Set("WWW-Authenticate", "Bearer")
-			s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "Authentication is required.", uuid.Nil)
+			s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "Authentication is required.")
 			return
 		}
 		identity.actorID, identity.role = actorID, "admin"
@@ -72,7 +72,7 @@ func (s *Server) authenticateAny(next http.Handler) http.Handler {
 func (s *Server) requireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Context().Value(identityKey{}).(requestIdentity).role != "admin" {
-			s.writeError(w, r, http.StatusForbidden, "forbidden", "The credential may not perform this action.", uuid.Nil)
+			s.writeError(w, r, http.StatusForbidden, "forbidden", "The credential may not perform this action.")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -89,7 +89,7 @@ func (s *Server) requireOrigin(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		s.writeError(w, r, http.StatusForbidden, "cross_origin", "A session request must prove its origin.", uuid.Nil)
+		s.writeError(w, r, http.StatusForbidden, "cross_origin", "A session request must prove its origin.")
 	})
 }
 
@@ -101,7 +101,7 @@ func (s *Server) requireBrowserOrigin(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		s.writeError(w, r, http.StatusForbidden, "cross_origin", "A sign-in request must prove its origin.", uuid.Nil)
+		s.writeError(w, r, http.StatusForbidden, "cross_origin", "A sign-in request must prove its origin.")
 	})
 }
 
@@ -116,24 +116,24 @@ func (s *Server) sameOrigin(r *http.Request) bool {
 	return origin != "" && s.PublicOrigin != "" && origin == s.PublicOrigin
 }
 
-func (s *Server) signedIn(r *http.Request, cookie string) (postgres.User, postgres.Session, error) {
+func (s *Server) signedIn(r *http.Request, cookie string) (store.User, store.Session, error) {
 	verifier, err := auth.SessionVerifier(cookie)
 	if err != nil {
-		return postgres.User{}, postgres.Session{}, postgres.ErrCredentials
+		return store.User{}, store.Session{}, store.ErrCredentials
 	}
-	return s.store.AuthenticateSession(r.Context(), s.installationID, verifier)
+	return s.store.AuthenticateSession(r.Context(), verifier)
 }
 
 // credentialError keeps 401 for an unusable credential and 403 for a refused account.
 func (s *Server) credentialError(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, postgres.ErrAccountDisabled) {
-		s.writeError(w, r, http.StatusForbidden, "account_disabled", "The account cannot sign in.", uuid.Nil)
+	if errors.Is(err, store.ErrAccountDisabled) {
+		s.writeError(w, r, http.StatusForbidden, "account_disabled", "The account cannot sign in.")
 		return
 	}
-	if errors.Is(err, postgres.ErrCredentials) {
+	if errors.Is(err, store.ErrCredentials) {
 		s.clearSession(w)
 		w.Header().Set("WWW-Authenticate", "Bearer")
-		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "Authentication is required.", uuid.Nil)
+		s.writeError(w, r, http.StatusUnauthorized, "unauthenticated", "Authentication is required.")
 		return
 	}
 	s.storeError(w, r, err)
@@ -177,10 +177,10 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.signInAttempts.allow(strings.ToLower(body.Username), clientAddress(r)) || !s.signInLimit.Allow() {
 		w.Header().Set("Retry-After", "1")
-		s.writeError(w, r, http.StatusTooManyRequests, "rate_limited", "Retry after the indicated delay.", uuid.Nil)
+		s.writeError(w, r, http.StatusTooManyRequests, "rate_limited", "Retry after the indicated delay.")
 		return
 	}
-	user, err := s.store.SignIn(r.Context(), s.installationID, strings.ToLower(body.Username), body.Password)
+	user, err := s.store.SignIn(r.Context(), strings.ToLower(body.Username), body.Password)
 	if err != nil {
 		s.credentialError(w, r, err)
 		return
@@ -188,10 +188,10 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	secret, err := auth.NewSessionSecret()
 	if err != nil {
 		s.logger.Error("session secret unavailable", "user_id", user.ID, "error", err)
-		s.writeError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "The session could not be created.", uuid.Nil)
+		s.writeError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "The session could not be created.")
 		return
 	}
-	if _, err := s.store.CreateSession(r.Context(), s.installationID, user.ID, secret.Verifier); err != nil {
+	if _, err := s.store.CreateSession(r.Context(), user.ID, secret.Verifier); err != nil {
 		s.storeError(w, r, err)
 		return
 	}
@@ -209,7 +209,7 @@ func (s *Server) readSession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(identityKey{}).(requestIdentity)
 	if identity.sessionID != uuid.Nil {
-		if err := s.store.RevokeSession(r.Context(), s.installationID, identity.sessionID); err != nil {
+		if err := s.store.RevokeSession(r.Context(), identity.sessionID); err != nil {
 			s.storeError(w, r, err)
 			return
 		}
@@ -228,16 +228,16 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	username := strings.ToLower(body.Username)
 	if !validUsername(username) {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use 1 to 64 lowercase letters, digits, hyphen, underscore, or dot.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use 1 to 64 lowercase letters, digits, hyphen, underscore, or dot.")
 		return
 	}
 	hash, err := s.hashPassword(w, r, body.Password)
 	if err != nil {
 		return
 	}
-	user, err := s.store.CreateUser(r.Context(), s.installationID, username, hash, "admin")
-	if errors.Is(err, postgres.ErrUsernameTaken) {
-		s.writeError(w, r, http.StatusConflict, "username_taken", "The username is already in use.", uuid.Nil)
+	user, err := s.store.CreateUser(r.Context(), username, hash, "admin")
+	if errors.Is(err, store.ErrUsernameTaken) {
+		s.writeError(w, r, http.StatusConflict, "username_taken", "The username is already in use.")
 		return
 	}
 	if err != nil {
@@ -253,12 +253,12 @@ func (s *Server) setUserPassword(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(identityKey{}).(requestIdentity)
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil || id == uuid.Nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a valid user ID.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a valid user ID.")
 		return
 	}
 	// An operator may change its own password. Any other account needs the admin role.
 	if id != identity.userID && identity.role != "admin" {
-		s.writeError(w, r, http.StatusForbidden, "forbidden", "The credential may not change this password.", uuid.Nil)
+		s.writeError(w, r, http.StatusForbidden, "forbidden", "The credential may not change this password.")
 		return
 	}
 	var body struct {
@@ -272,8 +272,8 @@ func (s *Server) setUserPassword(w http.ResponseWriter, r *http.Request) {
 	// evicts every other session, so self-service needs the current password.
 	// An administrator resetting another account has no password to supply.
 	if id == identity.userID {
-		if _, err := s.store.SignIn(r.Context(), s.installationID, identity.actorID, body.CurrentPassword); err != nil {
-			s.writeError(w, r, http.StatusForbidden, "reauthentication_required", "Supply the current password.", uuid.Nil)
+		if _, err := s.store.SignIn(r.Context(), identity.actorID, body.CurrentPassword); err != nil {
+			s.writeError(w, r, http.StatusForbidden, "reauthentication_required", "Supply the current password.")
 			return
 		}
 	}
@@ -281,7 +281,7 @@ func (s *Server) setUserPassword(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	if err := s.store.SetUserPassword(r.Context(), s.installationID, id, hash, identity.sessionID); err != nil {
+	if err := s.store.SetUserPassword(r.Context(), id, hash, identity.sessionID); err != nil {
 		s.storeError(w, r, err)
 		return
 	}
@@ -292,10 +292,10 @@ func (s *Server) setUserPassword(w http.ResponseWriter, r *http.Request) {
 func (s *Server) disableUser(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil || id == uuid.Nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a valid user ID.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a valid user ID.")
 		return
 	}
-	if err := s.store.DisableUser(r.Context(), s.installationID, id); err != nil {
+	if err := s.store.DisableUser(r.Context(), id); err != nil {
 		s.storeError(w, r, err)
 		return
 	}
@@ -317,20 +317,20 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 		body.ActorID = identity.actorID
 	}
 	if len(body.Name) < 1 || len(body.Name) > 64 {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a name of 1 to 64 bytes.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a name of 1 to 64 bytes.")
 		return
 	}
 	if len(body.ActorID) > 256 {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use an actor identity of at most 256 bytes.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use an actor identity of at most 256 bytes.")
 		return
 	}
 	minted, err := auth.NewAPIToken()
 	if err != nil {
 		s.logger.Error("API token secret unavailable", "actor_id", identity.actorID, "error", err)
-		s.writeError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "The token could not be created.", uuid.Nil)
+		s.writeError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "The token could not be created.")
 		return
 	}
-	token, err := s.store.CreateAPIToken(r.Context(), s.installationID, minted.ID, body.ActorID, body.Name, "admin", minted.Verifier, body.ExpiresAt)
+	token, err := s.store.CreateAPIToken(r.Context(), minted.ID, body.ActorID, body.Name, "admin", minted.Verifier, body.ExpiresAt)
 	if err != nil {
 		s.storeError(w, r, err)
 		return
@@ -338,14 +338,14 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	// The plaintext appears here once and is never stored or logged.
 	s.writeJSON(w, r, struct {
-		postgres.APIToken
+		store.APIToken
 		Token string `json:"token"`
 	}{token, minted.Plaintext})
 	s.logger.Info("API token created", "actor_id", identity.actorID, "token_id", token.ID, "token_actor_id", token.ActorID)
 }
 
 func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
-	tokens, err := s.store.ListAPITokens(r.Context(), s.installationID)
+	tokens, err := s.store.ListAPITokens(r.Context())
 	if err != nil {
 		s.storeError(w, r, err)
 		return
@@ -356,10 +356,10 @@ func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
 func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil || id == uuid.Nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a valid token ID.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a valid token ID.")
 		return
 	}
-	if err := s.store.RevokeAPIToken(r.Context(), s.installationID, id); err != nil {
+	if err := s.store.RevokeAPIToken(r.Context(), id); err != nil {
 		s.storeError(w, r, err)
 		return
 	}
@@ -372,11 +372,11 @@ func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hashPassword(w http.ResponseWriter, r *http.Request, password string) (string, error) {
 	hash, err := auth.HashPassword(password)
 	if errors.Is(err, auth.ErrPasswordLength) {
-		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a password of at most 1024 bytes.", uuid.Nil)
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use a password of at most 1024 bytes.")
 		return "", err
 	}
 	if err != nil {
-		s.writeError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "The password could not be stored.", uuid.Nil)
+		s.writeError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "The password could not be stored.")
 		return "", err
 	}
 	return hash, nil

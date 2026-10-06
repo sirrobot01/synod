@@ -15,9 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/controlstream"
-	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/pki"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/grpc"
@@ -41,16 +39,9 @@ type Config struct {
 	// Logger records why a connection ended. Run reconnects on its own, so a stream
 	// that fails repeatedly is otherwise invisible.
 	Logger *slog.Logger
-	// Handle returns an optional response only after required durable handling commits.
-	// Session is delivered first on each connection. Replay durable results with Send.
-	// Callbacks must honor cancellation. They must not stop database processes on disconnect.
+	// Handle receives each controller message after the Session and returns an optional response.
+	// Callbacks must honor cancellation.
 	Handle func(context.Context, *agentv1.ControllerMessage) (*agentv1.AgentMessage, error)
-	// Observations returns an in-memory snapshot. It must not block on I/O.
-	Observations func() []*agentv1.Observation
-	// Replicas returns the tier 2 replica state for heartbeats. It must not block on I/O.
-	Replicas func() []*agentv1.ReplicaStatus
-	// WriterClock returns CLOCK_BOOTTIME nanoseconds, or zero when unavailable.
-	WriterClock func() uint64
 }
 
 type connection struct {
@@ -75,7 +66,7 @@ func New(config Config) (*Client, error) {
 	if slices.Contains(config.Endpoints, "") {
 		return nil, errors.New("empty controller endpoint")
 	}
-	if _, err := operation.NegotiateHello(config.Hello, config.Hello.Capabilities); err != nil {
+	if _, err := controlstream.NegotiateHello(config.Hello, config.Hello.Capabilities); err != nil {
 		return nil, fmt.Errorf("invalid agent Hello: %w", err)
 	}
 	if config.MaxMessageBytes == 0 {
@@ -142,14 +133,14 @@ func New(config Config) (*Client, error) {
 	return &Client{config: config}, nil
 }
 
-// Send snapshots a message into the current bounded queue. The journal retains results.
+// Send snapshots a message into the current bounded queue.
 func (c *Client) Send(message *agentv1.AgentMessage) error {
 	return c.send(nil, message)
 }
 
 // A callback response belongs to the connection that delivered its request.
 func (c *Client) send(expected *connection, message *agentv1.AgentMessage) error {
-	if controlstream.CheckAgentMessage(message, c.config.Hello.InstallationId, c.config.Hello.NodeId) != nil {
+	if controlstream.CheckAgentMessage(message) != nil {
 		return controlstream.ErrMessage
 	}
 	c.mu.Lock()
@@ -169,7 +160,7 @@ func (c *Client) send(expected *connection, message *agentv1.AgentMessage) error
 	}
 }
 
-// Run reconnects until cancellation. It never changes a database or local journal.
+// Run reconnects until cancellation.
 func (c *Client) Run(ctx context.Context) error {
 	c.mu.Lock()
 	if c.running {
@@ -258,7 +249,7 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 	expires := info.State.PeerCertificates[0].NotAfter
 	failure = "session_rejected"
 	session := first.GetSession()
-	if session == nil || session.ProtocolVersion != operation.ProtocolVersion || session.HeartbeatInterval == nil || session.HeartbeatInterval.CheckValid() != nil || session.HeartbeatInterval.AsDuration() <= 0 || session.StaleAfter == nil || session.StaleAfter.CheckValid() != nil || session.StaleAfter.AsDuration() <= session.HeartbeatInterval.AsDuration() || session.MaxMessageBytes < 1024 || session.MaxMessageBytes > uint32(c.config.MaxMessageBytes) || session.MaxQueuedCommands == 0 || session.MaxQueuedCommands > 256 {
+	if session == nil || session.ProtocolVersion != controlstream.ProtocolVersion || session.HeartbeatInterval == nil || session.HeartbeatInterval.CheckValid() != nil || session.HeartbeatInterval.AsDuration() <= 0 || session.StaleAfter == nil || session.StaleAfter.CheckValid() != nil || session.StaleAfter.AsDuration() <= session.HeartbeatInterval.AsDuration() || session.MaxMessageBytes < 1024 || session.MaxMessageBytes > uint32(c.config.MaxMessageBytes) || session.MaxQueuedMessages == 0 || session.MaxQueuedMessages > 256 {
 		cause = errors.New("the session offer is absent or outside the protocol's limits")
 		return false
 	}
@@ -282,7 +273,7 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 		return false
 	}
 	sessionID = session.SessionId
-	active := &connection{ctx: ctx, outgoing: make(chan *agentv1.AgentMessage, min(c.config.QueueSize, int(session.MaxQueuedCommands))), maxBytes: int(session.MaxMessageBytes)}
+	active := &connection{ctx: ctx, outgoing: make(chan *agentv1.AgentMessage, min(c.config.QueueSize, int(session.MaxQueuedMessages))), maxBytes: int(session.MaxMessageBytes)}
 	c.mu.Lock()
 	c.active = active
 	c.mu.Unlock()
@@ -295,13 +286,11 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 	}()
 	done := make(chan string, 2)
 	handled := make(chan string, 1)
-	// One writer owns stream.Send. Heartbeats bypass the reliable queue only when
-	// selected; queued terminal results are never dropped to make room for metrics.
+	// One writer owns stream.Send. Queued messages and heartbeats share it.
 	go func() {
 		tick := time.NewTicker(session.HeartbeatInterval.AsDuration())
 		defer tick.Stop()
 		var sequence uint64
-		observationOffset := 0
 		for {
 			var message *agentv1.AgentMessage
 			select {
@@ -311,32 +300,6 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 			case <-tick.C:
 				sequence++
 				message = &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Heartbeat{Heartbeat: &agentv1.Heartbeat{Sequence: sequence, ObservedAt: timestamppb.Now()}}}
-				if c.config.WriterClock != nil {
-					message.GetHeartbeat().WriterClockNanos = c.config.WriterClock()
-				}
-				if c.config.Replicas != nil {
-					heartbeat := message.GetHeartbeat()
-					// Replica state is small. If it cannot fit, send the heartbeat without it.
-					if heartbeat.Replicas = c.config.Replicas(); proto.Size(message) > active.maxBytes {
-						heartbeat.Replicas = nil
-					}
-				}
-				if c.config.Observations != nil {
-					heartbeat := message.GetHeartbeat()
-					observations := c.config.Observations()
-					for range observations {
-						observationOffset %= len(observations)
-						observation := observations[observationOffset]
-						heartbeat.Observations = append(heartbeat.Observations, observation)
-						if proto.Size(message) > active.maxBytes {
-							heartbeat.Observations = heartbeat.Observations[:len(heartbeat.Observations)-1]
-							if len(heartbeat.Observations) != 0 {
-								break
-							}
-						}
-						observationOffset++
-					}
-				}
 			}
 			if err := stream.Send(message); err != nil {
 				done <- "send_failed"
@@ -345,41 +308,20 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 		}
 	}()
 	go func() {
-		message := first
 		for {
-			if controlstream.CheckControllerMessage(message, c.config.Hello.InstallationId, c.config.Hello.NodeId) != nil {
+			message, err := stream.Recv()
+			if err != nil {
+				done <- "receive_failed"
+				return
+			}
+			if message.GetSession() != nil || controlstream.CheckControllerMessage(message) != nil {
 				done <- "invalid_controller_message"
 				return
 			}
 			response, err := c.config.Handle(ctx, message)
-
-			// Keep ordinary admission refusals on this session. A failed session setup
-			// or a fault joined with a refusal must still close the connection.
-			refusal := ""
-			switch {
-			case errors.Is(err, operation.ErrStaleOwner):
-				refusal = "stale_owner"
-			case errors.Is(err, journal.ErrBusy), errors.Is(err, controlstream.ErrBusy):
-				refusal = "agent_busy"
-			}
-			if message.GetSession() == nil && refusal != "" && !errors.Is(err, journal.ErrRecoveryRequired) && !errors.Is(err, controlstream.ErrMessage) {
-				if c.config.Logger != nil {
-					c.config.Logger.Warn("agent_message_refused", "session_id", session.SessionId, "reason", refusal, "message", fmt.Sprintf("%T", message.Message))
-				}
-				err, response = nil, nil
-			}
 			if err != nil {
-				reason := "handler_failed"
-				switch {
-				case errors.Is(err, journal.ErrRecoveryRequired):
-					reason = "recovery_required"
-				case errors.Is(err, controlstream.ErrMessage):
-					reason = "invalid_controller_message"
-				case message.GetSession() != nil:
-					reason = "session_installation_failed"
-				}
 				handled <- fmt.Sprintf("%T", message.Message)
-				done <- reason
+				done <- "handler_failed"
 				return
 			}
 			if ctx.Err() != nil {
@@ -390,15 +332,6 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 					done <- "response_not_queued"
 					return
 				}
-			}
-			message, err = stream.Recv()
-			if err != nil {
-				done <- "receive_failed"
-				return
-			}
-			if message.GetSession() != nil {
-				done <- "unexpected_session"
-				return
 			}
 		}
 	}()

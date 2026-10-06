@@ -27,7 +27,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/google/uuid"
 	"github.com/moby/moby/client"
-	"github.com/sirrobot01/synod/internal/app"
 )
 
 func TestResolveRegistryPlatforms(t *testing.T) {
@@ -64,27 +63,24 @@ func TestResolveRegistryPlatforms(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			input := app.ServiceSpec{Image: ref.Name(), Command: []string{"serve"}, SupportedArchitectures: []string{"forged"}}
+			input := ref.Name()
 			result, err := (Inspector{}).Resolve(t.Context(), input)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.LocalOnly || result.Service.Image != repository+"@"+digest.String() || !reflect.DeepEqual(result.Service.SupportedArchitectures, []string{"amd64", "arm64"}) || !reflect.DeepEqual(result.Service.Command, input.Command) {
+			if result.LocalOnly || result.Image != repository+"@"+digest.String() || !reflect.DeepEqual(result.Architectures, []string{"amd64", "arm64"}) {
 				t.Fatalf("resolution: %+v", result)
-			}
-			if input.SupportedArchitectures[0] != "forged" || input.Image != ref.Name() {
-				t.Fatal("input mutated")
 			}
 			// Reusing the pin must preserve its architectures after the tag moves.
 			if err := remote.Write(ref, amd64, remote.WithContext(t.Context())); err != nil {
 				t.Fatal(err)
 			}
-			pinned, err := (Inspector{}).Resolve(t.Context(), result.Service)
-			if err != nil || !reflect.DeepEqual(pinned.Service.SupportedArchitectures, []string{"amd64", "arm64"}) {
+			pinned, err := (Inspector{}).Resolve(t.Context(), result.Image)
+			if err != nil || !reflect.DeepEqual(pinned.Architectures, []string{"amd64", "arm64"}) {
 				t.Fatalf("pin changed: %+v %v", pinned, err)
 			}
 			moved, err := (Inspector{}).Resolve(t.Context(), input)
-			if err != nil || !reflect.DeepEqual(moved.Service.SupportedArchitectures, []string{"amd64"}) {
+			if err != nil || !reflect.DeepEqual(moved.Architectures, []string{"amd64"}) {
 				t.Fatalf("single image: %+v %v", moved, err)
 			}
 		})
@@ -98,8 +94,8 @@ func TestResolveRegistryPlatforms(t *testing.T) {
 	if err := remote.WriteIndex(ref, nested, remote.WithContext(t.Context())); err != nil {
 		t.Fatal(err)
 	}
-	result, err := (Inspector{}).Resolve(t.Context(), app.ServiceSpec{Image: ref.Name()})
-	if err != nil || !reflect.DeepEqual(result.Service.SupportedArchitectures, []string{"arm64"}) {
+	result, err := (Inspector{}).Resolve(t.Context(), ref.Name())
+	if err != nil || !reflect.DeepEqual(result.Architectures, []string{"arm64"}) {
 		t.Fatalf("nested: %+v %v", result, err)
 	}
 }
@@ -135,14 +131,14 @@ func TestResolveRefusesUnusableManifests(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := (Inspector{}).Resolve(t.Context(), app.ServiceSpec{Image: ref.Name(), SupportedArchitectures: []string{"amd64"}})
+			result, err := (Inspector{}).Resolve(t.Context(), ref.Name())
 			failure, ok := errors.AsType[*Error](err)
-			if !ok || failure.Code != test.code || result.Service.Image != "" {
+			if !ok || failure.Code != test.code || result.Image != "" {
 				t.Fatalf("result: %+v %v", result, err)
 			}
 		})
 	}
-	_, err = (Inspector{}).Resolve(t.Context(), app.ServiceSpec{Image: "https://bad/image"})
+	_, err = (Inspector{}).Resolve(t.Context(), "https://bad/image")
 	if failure, ok := errors.AsType[*Error](err); !ok || failure.Code != InvalidReference {
 		t.Fatalf("invalid reference: %v", err)
 	}
@@ -169,9 +165,9 @@ func TestResolveLocalDockerFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer daemon.Close()
-	spec := app.ServiceSpec{Image: strings.TrimPrefix(unavailable.URL, "http://") + "/local:latest", SupportedArchitectures: []string{"amd64", "arm64"}}
+	spec := strings.TrimPrefix(unavailable.URL, "http://") + "/local:latest"
 	result, err := (Inspector{Docker: daemon}).Resolve(t.Context(), spec)
-	if err != nil || !result.LocalOnly || result.Service.Image != imageID || !reflect.DeepEqual(result.Service.SupportedArchitectures, []string{"arm64"}) || calls.Load() != 1 {
+	if err != nil || !result.LocalOnly || result.Image != imageID || !reflect.DeepEqual(result.Architectures, []string{"arm64"}) || calls.Load() != 1 {
 		t.Fatalf("fallback: %+v %v, calls %d", result, err, calls.Load())
 	}
 	_, err = (Inspector{}).Resolve(t.Context(), spec)
@@ -215,11 +211,11 @@ func TestResolveAuthenticatedRegistry(t *testing.T) {
 	if err := remote.Write(ref, image, remote.WithContext(t.Context()), remote.WithAuthFromKeychain(testKeychain{})); err != nil {
 		t.Fatal(err)
 	}
-	result, err := (Inspector{Keychain: testKeychain{}}).Resolve(t.Context(), app.ServiceSpec{Image: ref.Name()})
-	if err != nil || !reflect.DeepEqual(result.Service.SupportedArchitectures, []string{"amd64"}) {
+	result, err := (Inspector{Keychain: testKeychain{}}).Resolve(t.Context(), ref.Name())
+	if err != nil || !reflect.DeepEqual(result.Architectures, []string{"amd64"}) {
 		t.Fatalf("authenticated read: %+v %v", result, err)
 	}
-	_, err = (Inspector{}).Resolve(t.Context(), app.ServiceSpec{Image: ref.Name()})
+	_, err = (Inspector{}).Resolve(t.Context(), ref.Name())
 	if failure, ok := errors.AsType[*Error](err); !ok || failure.Code != Unavailable {
 		t.Fatalf("anonymous read: %v", err)
 	}
@@ -264,13 +260,13 @@ func TestResolveRealDockerCache(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	result, err := (Inspector{Docker: daemon}).Resolve(t.Context(), app.ServiceSpec{Image: ref.Name()})
-	if err != nil || !result.LocalOnly || !strings.HasPrefix(result.Service.Image, "sha256:") || !reflect.DeepEqual(result.Service.SupportedArchitectures, []string{"amd64"}) {
+	result, err := (Inspector{Docker: daemon}).Resolve(t.Context(), ref.Name())
+	if err != nil || !result.LocalOnly || !strings.HasPrefix(result.Image, "sha256:") || !reflect.DeepEqual(result.Architectures, []string{"amd64"}) {
 		t.Fatalf("real cache resolution: %+v %v", result, err)
 	}
 	// Docker can change the imported config. The returned ID must still find the same cached image.
-	pinned, err := daemon.ImageInspect(t.Context(), result.Service.Image)
-	if err != nil || pinned.ID != result.Service.Image || pinned.Architecture != "amd64" {
+	pinned, err := daemon.ImageInspect(t.Context(), result.Image)
+	if err != nil || pinned.ID != result.Image || pinned.Architecture != "amd64" {
 		t.Fatalf("cached pin: %+v %v", pinned, err)
 	}
 }
@@ -285,8 +281,8 @@ func TestResolveMalformedRegistryManifest(t *testing.T) {
 		_, _ = io.WriteString(w, `{"schemaVersion":2,"manifests":"invalid"}`)
 	}))
 	defer server.Close()
-	result, err := (Inspector{}).Resolve(t.Context(), app.ServiceSpec{Image: strings.TrimPrefix(server.URL, "http://") + "/invalid:latest"})
-	if failure, ok := errors.AsType[*Error](err); !ok || failure.Code != InvalidManifest || result.Service.Image != "" {
+	result, err := (Inspector{}).Resolve(t.Context(), strings.TrimPrefix(server.URL, "http://")+"/invalid:latest")
+	if failure, ok := errors.AsType[*Error](err); !ok || failure.Code != InvalidManifest || result.Image != "" {
 		t.Fatalf("malformed manifest: %+v %v", result, err)
 	}
 }
@@ -316,9 +312,9 @@ func TestResolveRejectsInvalidDockerEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer daemon.Close()
-			result, err := (Inspector{Docker: daemon}).Resolve(t.Context(), app.ServiceSpec{Image: strings.TrimPrefix(registry.URL, "http://") + "/local:latest"})
+			result, err := (Inspector{Docker: daemon}).Resolve(t.Context(), strings.TrimPrefix(registry.URL, "http://")+"/local:latest")
 			failure, ok := errors.AsType[*Error](err)
-			if !ok || failure.Code != test.code || result.Service.Image != "" {
+			if !ok || failure.Code != test.code || result.Image != "" {
 				t.Fatalf("unsafe local evidence: %+v %v", result, err)
 			}
 		})

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -24,7 +25,7 @@ type Controller struct {
 	AgentCAFile      string `json:"agent_ca_file"`
 	InstallationID   string `json:"installation_id"`
 	Listen           string `json:"listen"`
-	DatabaseURL      string `json:"database_url"`
+	DatabasePath     string `json:"database_path"`
 	AdminTokenFile   string `json:"admin_token_file"`
 	ActorID          string `json:"actor_id"`
 	TLSCertFile      string `json:"tls_cert_file"`
@@ -34,16 +35,9 @@ type Controller struct {
 	PublicOrigin     string `json:"public_origin"`
 	LogLevel         string `json:"log_level"`
 	// SecretKeyFile holds the base64 of one 32-byte wrapping key, and SecretKeyID
-	// names it. A controller without both seals nothing, so it admits apps and
-	// cannot provision them: a credential this installation cannot name later is
-	// worse than a provision that did not start.
+	// names it. Destination credentials are sealed with it.
 	SecretKeyFile string `json:"secret_key_file"`
 	SecretKeyID   string `json:"secret_key_id"`
-	// The host ports a tier 1 copy may publish on. Copies use host networking, so
-	// a port is a host resource the plan reserves, and placement chooses one from this
-	// span. A node carries as many copies as the span has free ports.
-	EngineEndpointFirstPort int `json:"engine_endpoint_first_port"`
-	EngineEndpointLastPort  int `json:"engine_endpoint_last_port"`
 }
 
 // BindController registers the controller flags on flags. The returned function
@@ -59,7 +53,7 @@ func BindController(flags *pflag.FlagSet) func() (Controller, error) {
 	flags.StringVar(&override.AgentCAFile, "agent-ca-file", "", "installation CA trust bundle for agent transport")
 	flags.StringVar(&override.InstallationID, "installation-id", "", "stable installation UUID")
 	flags.StringVar(&override.Listen, "listen", defaults.Listen, "HTTPS listen address")
-	flags.StringVar(&override.DatabaseURL, "database-url", "", "metadata PostgreSQL URL")
+	flags.StringVar(&override.DatabasePath, "database-path", "", "metadata SQLite database file")
 	flags.StringVar(&override.AdminTokenFile, "admin-token-file", "", "protected administrator token file")
 	flags.StringVar(&override.ActorID, "actor-id", defaults.ActorID, "administrator audit identity")
 	flags.StringVar(&override.TLSCertFile, "tls-cert-file", "", "API TLS certificate file")
@@ -68,8 +62,6 @@ func BindController(flags *pflag.FlagSet) func() (Controller, error) {
 	flags.StringVar(&override.CAKeyFile, "ca-key-file", "", "protected enrollment CA private key file")
 	flags.StringVar(&override.SecretKeyFile, "secret-key-file", "", "protected file holding the base64 of one 32-byte credential wrapping key")
 	flags.StringVar(&override.SecretKeyID, "secret-key-id", "", "UUID naming the active credential wrapping key")
-	flags.IntVar(&override.EngineEndpointFirstPort, "engine-endpoint-first-port", 0, "lowest host port an engine may publish on (default 5432)")
-	flags.IntVar(&override.EngineEndpointLastPort, "engine-endpoint-last-port", 0, "highest host port an engine may publish on (default 5531)")
 	flags.StringVar(&override.PublicOrigin, "public-origin", "", "browser origin of this API, such as https://synod.example.com")
 	flags.StringVar(&override.LogLevel, "log-level", defaults.LogLevel, "debug, info, warn, or error")
 	return func() (Controller, error) {
@@ -118,7 +110,7 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 		{"SYNOD_AGENT_CA_FILE", &config.AgentCAFile},
 		{"SYNOD_INSTALLATION_ID", &config.InstallationID},
 		{"SYNOD_LISTEN", &config.Listen},
-		{"SYNOD_DATABASE_URL", &config.DatabaseURL},
+		{"SYNOD_DATABASE_PATH", &config.DatabasePath},
 		{"SYNOD_ADMIN_TOKEN_FILE", &config.AdminTokenFile},
 		{"SYNOD_ACTOR_ID", &config.ActorID},
 		{"SYNOD_TLS_CERT_FILE", &config.TLSCertFile},
@@ -132,21 +124,6 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 	} {
 		if value, present := os.LookupEnv(field.name); present {
 			*field.value = value
-		}
-	}
-	for _, field := range []struct {
-		name  string
-		value *int
-	}{
-		{"SYNOD_ENGINE_ENDPOINT_FIRST_PORT", &config.EngineEndpointFirstPort},
-		{"SYNOD_ENGINE_ENDPOINT_LAST_PORT", &config.EngineEndpointLastPort},
-	} {
-		if value, present := os.LookupEnv(field.name); present {
-			number, err := strconv.Atoi(value)
-			if err != nil {
-				return Controller{}, fmt.Errorf("%s must be a number: %w", field.name, err)
-			}
-			*field.value = number
 		}
 	}
 	flags.Visit(func(value *pflag.Flag) {
@@ -163,8 +140,8 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 			config.InstallationID = override.InstallationID
 		case "listen":
 			config.Listen = override.Listen
-		case "database-url":
-			config.DatabaseURL = override.DatabaseURL
+		case "database-path":
+			config.DatabasePath = override.DatabasePath
 		case "admin-token-file":
 			config.AdminTokenFile = override.AdminTokenFile
 		case "actor-id":
@@ -175,10 +152,6 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 			config.TLSKeyFile = override.TLSKeyFile
 		case "ca-cert-file":
 			config.CACertFile = override.CACertFile
-		case "engine-endpoint-first-port":
-			config.EngineEndpointFirstPort = override.EngineEndpointFirstPort
-		case "engine-endpoint-last-port":
-			config.EngineEndpointLastPort = override.EngineEndpointLastPort
 		case "secret-key-file":
 			config.SecretKeyFile = override.SecretKeyFile
 		case "secret-key-id":
@@ -202,12 +175,8 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 	if portNumber < 0 || portNumber > 65535 {
 		return Controller{}, errors.New("listen port must be between 0 and 65535")
 	}
-	// url.Error repeats the URL it failed on, and a PostgreSQL DSN carries the
-	// database password. The cause stays out of this message for that reason, not
-	// because it was overlooked.
-	database, err := url.Parse(config.DatabaseURL)
-	if err != nil || (database.Scheme != "postgres" && database.Scheme != "postgresql") || database.Hostname() == "" {
-		return Controller{}, errors.New("database_url must be a PostgreSQL URL with a host")
+	if !filepath.IsAbs(config.DatabasePath) {
+		return Controller{}, errors.New("database_path must be an absolute file path")
 	}
 	if id, err := uuid.Parse(config.InstallationID); err != nil || id == uuid.Nil {
 		return Controller{}, errors.New("installation_id must be a nonzero UUID")
@@ -222,17 +191,6 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 		if id, err := uuid.Parse(config.SecretKeyID); err != nil || id == uuid.Nil {
 			return Controller{}, errors.New("secret_key_id must be a nonzero UUID")
 		}
-	}
-	if config.EngineEndpointFirstPort == 0 {
-		config.EngineEndpointFirstPort = 5432
-	}
-	if config.EngineEndpointLastPort == 0 {
-		// A hundred ports is a hundred apps on one node, which is past what any
-		// other limit here allows. An operator narrows it when the host is shared.
-		config.EngineEndpointLastPort = config.EngineEndpointFirstPort + 99
-	}
-	if config.EngineEndpointFirstPort < 1 || config.EngineEndpointLastPort > 65535 || config.EngineEndpointFirstPort > config.EngineEndpointLastPort {
-		return Controller{}, errors.New("engine_endpoint_first_port and engine_endpoint_last_port must be a port range")
 	}
 	agentFields := 0
 	for _, value := range []string{config.AgentListen, config.AgentTLSCertFile, config.AgentTLSKeyFile, config.AgentCAFile} {

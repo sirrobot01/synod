@@ -258,7 +258,7 @@ func TestRejectInvalidIssuance(t *testing.T) {
 		t.Fatal("accepted expired agent")
 	}
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
-		t.Fatalf("agent certificate refused for replication serving: %v", err)
+		t.Fatalf("agent certificate refused for destination serving: %v", err)
 	}
 }
 

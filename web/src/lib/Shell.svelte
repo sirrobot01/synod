@@ -1,27 +1,19 @@
 <script lang="ts">
   import { follow, Router, path, type ScreenName } from "./router.svelte";
   import type { Session } from "./api";
-  import { components, gaps } from "./mock";
-  import Mark from "./ui/Mark.svelte";
   import Operations from "../routes/Operations.svelte";
   import Operation from "../routes/Operation.svelte";
   import Settings from "../routes/Settings.svelte";
   import Fleet from "../routes/Fleet.svelte";
   import Nodes from "../routes/Nodes.svelte";
-  import Backups from "../routes/Backups.svelte";
 
   let { session, busy, onSignOut }: { session: Session; busy: boolean; onSignOut: () => void } = $props();
 
   const router = new Router();
 
-  // The navigation names the screens that specification 17 requires, in the order
-  // an operator works through them: what is wrong, then where, then what to change.
-  // The design puts a count beside each one. A count of apps or nodes would be
-  // an observation the API does not serve, so none is drawn rather than invented.
   const destinations: { screen: ScreenName; label: string }[] = [
     { screen: "fleet", label: "Dashboard" },
     { screen: "nodes", label: "Nodes" },
-    { screen: "backups", label: "Backups" },
     { screen: "operations", label: "Operations" },
     { screen: "settings", label: "Settings" },
   ];
@@ -37,7 +29,6 @@
   let titles: Record<ScreenName, string> = {
     fleet: "Dashboard",
     nodes: "Nodes",
-    backups: "Backups",
     operations: "Operations",
     operation: "Operation",
     settings: "Settings",
@@ -58,11 +49,6 @@
     return steps;
   });
 
-  // Installation health belongs to the chrome, not to a screen, so it is drawn
-  // here. The API serves none of it, which the tag beside it states.
-  let installation = $derived(components.slice(0, 2));
-
-  /** navigate keeps a link a link. Specification 17 requires an address that survives a reload. */
   function navigate(event: MouseEvent, screen: ScreenName, id = "") {
     follow(event, () => router.go(screen, id));
   }
@@ -72,7 +58,7 @@
   <nav aria-label="Screens">
     <div class="brand">
       <span class="mono name">synod</span>
-      <span class="mono where">database control plane</span>
+      <span class="mono where">Docker app backups</span>
     </div>
     <ul>
       {#each destinations as destination (destination.screen)}
@@ -86,15 +72,6 @@
       {/each}
     </ul>
     <div class="foot">
-      <div class="label">
-        Installation health <span class="tag mono" title={gaps.health}>MOCK</span>
-      </div>
-      {#each installation as component (component.name)}
-        <div class="health">
-          <Mark mark={component.mark} text={false} />
-          <span class="mono">{component.label}</span>
-        </div>
-      {/each}
       <p class="who mono">
         {session.actor_id}<br /><span class="dim">{session.role}</span>
       </p>
@@ -127,8 +104,6 @@
         <Fleet go={(screen, id) => router.go(screen, id)} />
       {:else if route.screen === "nodes"}
         <Nodes id={route.id} onOpen={(id) => router.go("nodes", id)} />
-      {:else if route.screen === "backups"}
-        <Backups />
       {:else if route.screen === "operations"}
         <Operations onOpen={(id) => router.go("operation", id)} />
       {:else if route.screen === "operation"}
@@ -205,24 +180,6 @@
     flex-direction: column;
     gap: 8px;
     border-top: 1px solid var(--line);
-  }
-  .foot .label {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-  .tag {
-    font-size: 9px;
-    letter-spacing: 0.12em;
-    border: 1px dashed var(--line-strong);
-    padding: 1px 4px;
-    color: var(--ink-dim);
-  }
-  .health {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 11px;
   }
   .who {
     font-size: 10px;

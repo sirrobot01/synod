@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sirrobot01/synod/internal/operation"
 )
 
 // Config holds the settings of one API client.
@@ -38,11 +36,10 @@ type Client struct {
 
 // Error is a bounded API failure with a stable code.
 type Error struct {
-	Code        string    `json:"code"`
-	Message     string    `json:"message"`
-	RequestID   string    `json:"request_id,omitempty"`
-	OperationID uuid.UUID `json:"operation_id,omitzero"`
-	cause       error
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id,omitempty"`
+	cause     error
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -112,52 +109,6 @@ func New(config Config) (*Client, error) {
 }
 
 func (c *Client) Close() { c.http.CloseIdleConnections() }
-
-// GetOperation reads one operation and checks that the reply names it.
-func (c *Client) GetOperation(ctx context.Context, id uuid.UUID) (operation.Operation, error) {
-	var value operation.Operation
-	err := c.request(ctx, http.MethodGet, "/v1/operations/"+id.String(), nil, "", http.StatusOK, &value)
-	if err == nil && (id == uuid.Nil || value.ID != id) {
-		err = &Error{Code: "invalid_response", Message: "The API returned an unexpected operation identity."}
-	}
-	return value, err
-}
-
-// Wait polls one operation until it ends or ctx ends.
-func (c *Client) Wait(ctx context.Context, id uuid.UUID, interval time.Duration) (operation.Operation, error) {
-	var last operation.Operation
-	if interval <= 0 {
-		return last, &Error{Code: "invalid_request", Message: "Use a positive poll interval."}
-	}
-	for {
-		value, err := c.GetOperation(ctx, id)
-		if ctx.Err() != nil {
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return last, &Error{Code: "wait_timeout", Message: "The wait timed out. The server operation was not cancelled.", OperationID: id}
-			}
-			return last, &Error{Code: "interrupted", Message: "The wait was interrupted. The server operation was not cancelled.", OperationID: id}
-		}
-		if err != nil {
-			return last, err
-		}
-		last = value
-		switch value.Status {
-		case operation.Succeeded:
-			return value, nil
-		case operation.Failed:
-			return value, &Error{Code: "operation_failed", Message: "The server operation failed.", OperationID: id}
-		case operation.Cancelled:
-			return value, &Error{Code: "operation_cancelled", Message: "The server operation was cancelled.", OperationID: id}
-		case operation.Pending, operation.Running, operation.Waiting, operation.Cancelling:
-		default:
-			return last, &Error{Code: "invalid_response", Message: "The API returned an unknown operation status.", OperationID: id}
-		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(interval):
-		}
-	}
-}
 
 // request owns authentication, bounded replies, and replay of the same immutable body.
 // request sends one call with no revision precondition.
@@ -241,13 +192,12 @@ func (c *Client) requestWith(ctx context.Context, method, path string, body any,
 		if json.Unmarshal(data, &wire) == nil {
 			// Server messages and unrecognized codes may contain private input.
 			switch wire.Code {
-			case "unauthenticated", "invalid_request", "unsupported_spec", "idempotency_conflict", "name_conflict", "operation_conflict", "revision_conflict", "confirmation_required", "not_found", "outcome_unknown", "dependency_unavailable", "internal_error", "request_too_large", "unsupported_media_type", "method_not_allowed", "rate_limited", "node_facts_unavailable":
+			case "unauthenticated", "invalid_request", "unsupported_spec", "idempotency_conflict", "name_conflict", "operation_conflict", "revision_conflict", "confirmation_required", "not_found", "outcome_unknown", "dependency_unavailable", "internal_error", "request_too_large", "unsupported_media_type", "method_not_allowed", "rate_limited", "node_facts_unavailable", "ambiguous_name", "enrollment_conflict":
 				apiError.Code = wire.Code
 			}
 			if _, err := uuid.Parse(wire.RequestID); err == nil {
 				apiError.RequestID = wire.RequestID
 			}
-			apiError.OperationID = wire.OperationID
 		}
 		if apiError.Code == "outcome_unknown" {
 			apiError.Message = "The admission outcome is unknown. Retry with the same idempotency key, revision, and body."

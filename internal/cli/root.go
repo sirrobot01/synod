@@ -18,18 +18,15 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	server := controller.Command()
 	agent := agentcli.Command()
 
-	root := &cobra.Command{Use: "synod", Short: "Deploy and manage Synod apps and databases", SilenceErrors: true, SilenceUsage: true,
+	root := &cobra.Command{Use: "synod", Short: "Back up the Docker apps of your devices and restore them anywhere", SilenceErrors: true, SilenceUsage: true,
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true}}
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	app.bindFlags(root.PersistentFlags())
 	root.AddCommand(
-		newDatabaseCommand(app),
-		newAppCommand(app),
-		newOperationCommand(app),
 		newNodeCommand(app),
-		newEnrollmentTokenCommand(app),
+		newOperationCommand(app),
 		newInstallationCommand(app),
 		newUserCommand(app),
 		newTokenCommand(app),

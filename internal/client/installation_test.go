@@ -12,9 +12,8 @@ import (
 
 func TestGetInstallationChecksIdentities(t *testing.T) {
 	for name, value := range map[string]Installation{
-		"complete":           {InstallationID: uuid.New(), RecoveryGeneration: uuid.New()},
-		"missing generation": {InstallationID: uuid.New()},
-		"missing identity":   {RecoveryGeneration: uuid.New()},
+		"complete":         {InstallationID: uuid.New()},
+		"missing identity": {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

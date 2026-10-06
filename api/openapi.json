@@ -3,7 +3,7 @@
   "info": {
     "title": "Synod development API",
     "version": "0.1.0-dev",
-    "description": "Development API for node enrollment, node policy, and operation inspection. The app endpoints are not described here yet."
+    "description": "Development API for device enrollment, approval, and operation inspection. Account and session endpoints are not described here yet."
   },
   "servers": [
     {
@@ -480,133 +480,10 @@
         ]
       }
     },
-    "/v1/nodes/{id}/placement-policy": {
-      "put": {
-        "operationId": "putNodePlacementPolicy",
-        "description": "Declare placement and client address policy for an enrolled node. Requires administrator access. Use revision zero for a node with no policy. Later updates must name the current policy revision. No host operation is created.",
-        "security": [
-          {
-            "adminBearer": []
-          },
-          {
-            "adminSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "If-Match",
-            "in": "header",
-            "required": true,
-            "description": "Exactly one nonnegative policy revision, with optional double quotes. Zero creates the first policy.",
-            "schema": {
-              "type": "string",
-              "pattern": "^(?:0|[1-9][0-9]*|\"(?:0|[1-9][0-9]*)\")$"
-            }
-          },
-          {
-            "$ref": "#/components/parameters/BrowserOrigin"
-          },
-          {
-            "$ref": "#/components/parameters/BrowserFetchSite"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/NodePlacementPolicy"
-              }
-            }
-          }
-        },
-        "responses": {
-          "400": {
-            "$ref": "#/components/responses/NodePolicyBadRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/ActionUnauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/ActionForbidden"
-          },
-          "404": {
-            "$ref": "#/components/responses/NodePolicyNotFound"
-          },
-          "405": {
-            "$ref": "#/components/responses/ActionMethodNotAllowed"
-          },
-          "429": {
-            "$ref": "#/components/responses/ActionRateLimit"
-          },
-          "500": {
-            "$ref": "#/components/responses/ActionInternalError"
-          },
-          "503": {
-            "$ref": "#/components/responses/ConnectionUnavailable"
-          },
-          "412": {
-            "$ref": "#/components/responses/ActionRevisionConflict"
-          },
-          "413": {
-            "$ref": "#/components/responses/ActionTooLarge"
-          },
-          "415": {
-            "$ref": "#/components/responses/ActionMediaType"
-          },
-          "422": {
-            "$ref": "#/components/responses/NodePolicyUnsupported"
-          },
-          "200": {
-            "description": "The placement policy was stored with its new revision.",
-            "headers": {
-              "X-Request-ID": {
-                "schema": {
-                  "type": "string",
-                  "format": "uuid"
-                }
-              },
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              },
-              "X-Content-Type-Options": {
-                "schema": {
-                  "const": "nosniff"
-                }
-              },
-              "ETag": {
-                "schema": {
-                  "type": "string"
-                },
-                "description": "Quoted policy revision."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NodePolicyResult"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/installation": {
       "get": {
         "operationId": "getInstallation",
-        "description": "Read the installation ID and the current recovery generation. An agent configuration needs both. The recovery generation can change after controller recovery. Read it when you write a new agent configuration. Before a controller runner records a generation, the API returns 503 with code recovery_generation_unavailable.",
+        "description": "Read the installation ID.",
         "responses": {
           "200": {
             "description": "The installation identity.",
@@ -660,6 +537,439 @@
           }
         }
       }
+    },
+    "/v1/operations": {
+      "get": {
+        "operationId": "listOperations",
+        "responses": {
+          "200": {
+            "description": "Current resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Operation"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable or commit outcome unknown; retry with the same key and body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded. Retry after one second.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/nodes": {
+      "get": {
+        "operationId": "listNodes",
+        "responses": {
+          "200": {
+            "description": "Current resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Node"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable or commit outcome unknown; retry with the same key and body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded. Retry after one second.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/nodes/{id}": {
+      "get": {
+        "operationId": "getNode",
+        "responses": {
+          "200": {
+            "description": "Current resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable or commit outcome unknown; retry with the same key and body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded. Retry after one second.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/nodes/by-name/{name}": {
+      "get": {
+        "operationId": "getNodeByName",
+        "responses": {
+          "200": {
+            "description": "Current resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable or commit outcome unknown; retry with the same key and body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded. Retry after one second.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/nodes/{id}/actions/approve": {
+      "post": {
+        "operationId": "approveNode",
+        "responses": {
+          "200": {
+            "description": "Current resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource or endpoint not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable or commit outcome unknown; retry with the same key and body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded. Retry after one second.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The device has not reported its facts. Start its agent before approval.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -698,10 +1008,6 @@
           "request_id": {
             "type": "string",
             "format": "uuid"
-          },
-          "operation_id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
@@ -712,88 +1018,25 @@
             "type": "string",
             "format": "uuid"
           },
-          "installation_id": {
+          "app_id": {
             "type": "string",
             "format": "uuid"
           },
-          "app_id": {
+          "node_id": {
             "type": "string",
             "format": "uuid"
           },
           "actor_id": {
             "type": "string"
           },
-          "api_operation": {
-            "type": "string"
-          },
           "kind": {
             "type": "string"
           },
-          "desired_revision": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "plan_version": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "execution_epoch": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "attempts": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "owner_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "failure_code": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "claim_expires_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "next_attempt_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "cancellation_requested_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "finished_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
+            "type": "string"
           },
           "status": {
+            "type": "string",
             "enum": [
               "pending",
               "running",
@@ -804,32 +1047,33 @@
               "cancelled"
             ]
           },
-          "retry_of": {
+          "created_at": {
             "type": "string",
-            "format": "uuid",
-            "description": "The prior failed or cancelled replica-add operation. Absent for an initial operation."
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           }
         },
         "required": [
           "id",
-          "installation_id",
           "app_id",
+          "node_id",
           "actor_id",
-          "api_operation",
           "kind",
-          "desired_revision",
-          "plan_version",
-          "execution_epoch",
-          "attempts",
-          "owner_id",
           "failure_code",
-          "claim_expires_at",
-          "next_attempt_at",
-          "cancellation_requested_at",
-          "finished_at",
+          "status",
           "created_at",
           "updated_at",
-          "status"
+          "finished_at"
         ]
       },
       "RegisterEnrollmentToken": {
@@ -951,535 +1195,78 @@
         "required": [],
         "properties": {}
       },
-      "NodePlacementPolicy": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "architecture",
-          "runtime_version",
-          "storage_id",
-          "engines",
-          "headroom"
-        ],
-        "properties": {
-          "architecture": {
-            "type": "string",
-            "enum": [
-              "amd64",
-              "arm64"
-            ]
-          },
-          "runtime_version": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[!-~]{1,128}$"
-          },
-          "storage_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[!-~]{1,128}$"
-          },
-          "client_address": {
-            "type": "string",
-            "description": "Optional canonical unicast IPv4 or IPv6 literal. Private LAN addresses are valid. Refuse loopback, link-local, multicast, unspecified, mapped, zone-bearing, and noncanonical addresses. Empty or omitted keeps the node eligible but endpoint discovery reports client_address_required. This is declared operator intent, not an address inferred from a control connection.",
-            "anyOf": [
-              {
-                "const": ""
-              },
-              {
-                "format": "ipv4"
-              },
-              {
-                "format": "ipv6"
-              }
-            ]
-          },
-          "engines": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 32,
-            "uniqueItems": true,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "engine",
-                "version"
-              ],
-              "properties": {
-                "engine": {
-                  "type": "string",
-                  "enum": [
-                    "postgres",
-                    "redis"
-                  ]
-                },
-                "version": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128,
-                  "pattern": "^[!-~]{1,128}$"
-                }
-              }
-            }
-          },
-          "labels": {
-            "type": "object",
-            "maxProperties": 32,
-            "propertyNames": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[!-~]{1,128}$"
-            },
-            "additionalProperties": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[!-~]{1,128}$"
-            }
-          },
-          "failure_domains": {
-            "type": "object",
-            "maxProperties": 32,
-            "propertyNames": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[!-~]{1,128}$"
-            },
-            "additionalProperties": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[!-~]{1,128}$"
-            }
-          },
-          "headroom": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "cpu_millis",
-              "memory_bytes",
-              "disk_bytes"
-            ],
-            "properties": {
-              "cpu_millis": {
-                "type": "integer",
-                "format": "int64",
-                "minimum": 1
-              },
-              "memory_bytes": {
-                "type": "integer",
-                "format": "int64",
-                "minimum": 1
-              },
-              "disk_bytes": {
-                "type": "integer",
-                "format": "int64",
-                "minimum": 1
-              }
-            }
-          },
-          "cordoned": {
-            "type": "boolean"
-          },
-          "maintenance": {
-            "type": "boolean"
-          }
-        }
-      },
-      "NodePolicyResult": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "node_id",
-          "revision"
-        ],
-        "properties": {
-          "node_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "revision": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 1
-          }
-        }
-      },
       "Installation": {
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "installation_id",
-          "recovery_generation"
+          "installation_id"
         ],
         "properties": {
           "installation_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "Node": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
           },
-          "recovery_generation": {
+          "architecture": {
+            "type": "string"
+          },
+          "runtime_version": {
+            "type": "string"
+          },
+          "agent_version": {
+            "type": "string"
+          },
+          "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "enrolled_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "approved_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "connected_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           }
-        }
+        },
+        "required": [
+          "name",
+          "architecture",
+          "runtime_version",
+          "agent_version",
+          "id",
+          "enrolled_at",
+          "approved_at",
+          "connected_at",
+          "last_seen_at"
+        ]
       }
     },
-    "parameters": {
-      "BrowserOrigin": {
-        "name": "Origin",
-        "in": "header",
-        "required": false,
-        "description": "For a session request, this must equal the configured public origin unless Sec-Fetch-Site is same-origin. Bearer requests do not require an origin proof.",
-        "schema": {
-          "type": "string",
-          "format": "uri"
-        }
-      },
-      "BrowserFetchSite": {
-        "name": "Sec-Fetch-Site",
-        "in": "header",
-        "required": false,
-        "description": "The value same-origin proves the origin of a session request. Otherwise a matching Origin is required.",
-        "schema": {
-          "type": "string"
-        }
-      }
-    },
-    "responses": {
-      "ActionUnauthorized": {
-        "description": "Authentication is required or the credential is invalid.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "description": "Request identity."
-          },
-          "Cache-Control": {
-            "schema": {
-              "type": "string",
-              "const": "no-store"
-            }
-          },
-          "WWW-Authenticate": {
-            "schema": {
-              "type": "string",
-              "const": "Bearer"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "ActionForbidden": {
-        "description": "Administrator access or browser origin proof is missing.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "description": "Request identity."
-          },
-          "Cache-Control": {
-            "schema": {
-              "type": "string",
-              "const": "no-store"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "ActionMethodNotAllowed": {
-        "description": "The method is not supported.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "description": "Request identity."
-          },
-          "Cache-Control": {
-            "schema": {
-              "type": "string",
-              "const": "no-store"
-            }
-          },
-          "Allow": {
-            "schema": {
-              "type": "string"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "ActionRevisionConflict": {
-        "description": "revision_conflict: the desired revision no longer matches If-Match.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "description": "Request identity."
-          },
-          "Cache-Control": {
-            "schema": {
-              "type": "string",
-              "const": "no-store"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "ActionTooLarge": {
-        "description": "The request body exceeds 64 KiB.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "description": "Request identity."
-          },
-          "Cache-Control": {
-            "schema": {
-              "type": "string",
-              "const": "no-store"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "ActionMediaType": {
-        "description": "Use application/json.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "description": "Request identity."
-          },
-          "Cache-Control": {
-            "schema": {
-              "type": "string",
-              "const": "no-store"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "ActionRateLimit": {
-        "description": "The request limit was reached.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "description": "Request identity."
-          },
-          "Cache-Control": {
-            "schema": {
-              "type": "string",
-              "const": "no-store"
-            }
-          },
-          "Retry-After": {
-            "schema": {
-              "type": "string",
-              "const": "1"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "ActionInternalError": {
-        "description": "An internal error prevented the request.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "description": "Request identity."
-          },
-          "Cache-Control": {
-            "schema": {
-              "type": "string",
-              "const": "no-store"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "ConnectionUnavailable": {
-        "description": "Metadata, audit commit, or credential decryption is unavailable. No plaintext is returned. An uncertain audit commit can exist without a delivered credential.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          "Cache-Control": {
-            "schema": {
-              "const": "no-store"
-            }
-          },
-          "X-Content-Type-Options": {
-            "schema": {
-              "const": "nosniff"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "NodePolicyBadRequest": {
-        "description": "Invalid node ID, policy, or revision header. Supply one nonnegative If-Match revision.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          "Cache-Control": {
-            "schema": {
-              "const": "no-store"
-            }
-          },
-          "X-Content-Type-Options": {
-            "schema": {
-              "const": "nosniff"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "NodePolicyNotFound": {
-        "description": "The node has not been enrolled in this installation.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          "Cache-Control": {
-            "schema": {
-              "const": "no-store"
-            }
-          },
-          "X-Content-Type-Options": {
-            "schema": {
-              "const": "nosniff"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      },
-      "NodePolicyUnsupported": {
-        "description": "An engine and version in the policy is not served by this controller.",
-        "headers": {
-          "X-Request-ID": {
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          "Cache-Control": {
-            "schema": {
-              "const": "no-store"
-            }
-          },
-          "X-Content-Type-Options": {
-            "schema": {
-              "const": "nosniff"
-            }
-          }
-        },
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      }
-    }
+    "parameters": {},
+    "responses": {}
   }
 }

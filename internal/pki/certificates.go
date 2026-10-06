@@ -146,7 +146,7 @@ func (ca *CA) Issue(csrDER []byte, identity Identity, serverNames []string, now 
 	if err != nil {
 		return nil, err
 	}
-	// Agents also serve tier 2 replication to other agents. Peers check the URI identity, not a server name.
+	// Agents can serve backup destinations. Peers check the URI identity.
 	template := &x509.Certificate{
 		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, URIs: []*url.URL{uri},
@@ -253,4 +253,12 @@ func (ca *CA) CertificatePEM() []byte {
 		return nil
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.certificate.Raw})
+}
+
+// InstallationID is the installation that this CA signs identities for.
+func (ca *CA) InstallationID() uuid.UUID {
+	if ca == nil {
+		return uuid.Nil
+	}
+	return ca.installationID
 }

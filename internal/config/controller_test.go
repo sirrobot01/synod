@@ -11,14 +11,14 @@ import (
 )
 
 func TestControllerConfigurationPrecedence(t *testing.T) {
-	for _, name := range []string{"SYNOD_ETCD_ENDPOINTS", "SYNOD_ETCD_PREFIX", "SYNOD_CONFIG", "SYNOD_INSTALLATION_ID", "SYNOD_LISTEN", "SYNOD_DATABASE_URL", "SYNOD_ADMIN_TOKEN_FILE", "SYNOD_ACTOR_ID", "SYNOD_TLS_CERT_FILE", "SYNOD_TLS_KEY_FILE", "SYNOD_LOG_LEVEL", "SYNOD_CA_CERT_FILE", "SYNOD_CA_KEY_FILE", "SYNOD_AGENT_LISTEN", "SYNOD_AGENT_TLS_CERT_FILE", "SYNOD_AGENT_TLS_KEY_FILE", "SYNOD_AGENT_CA_FILE", "SYNOD_ENGINE_ENDPOINT_FIRST_PORT", "SYNOD_ENGINE_ENDPOINT_LAST_PORT"} {
+	for _, name := range []string{"SYNOD_ETCD_ENDPOINTS", "SYNOD_ETCD_PREFIX", "SYNOD_CONFIG", "SYNOD_INSTALLATION_ID", "SYNOD_LISTEN", "SYNOD_DATABASE_PATH", "SYNOD_ADMIN_TOKEN_FILE", "SYNOD_ACTOR_ID", "SYNOD_TLS_CERT_FILE", "SYNOD_TLS_KEY_FILE", "SYNOD_LOG_LEVEL", "SYNOD_CA_CERT_FILE", "SYNOD_CA_KEY_FILE", "SYNOD_AGENT_LISTEN", "SYNOD_AGENT_TLS_CERT_FILE", "SYNOD_AGENT_TLS_KEY_FILE", "SYNOD_AGENT_CA_FILE"} {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
 		}
 	}
 	path := filepath.Join(t.TempDir(), "controller.json")
-	if err := os.WriteFile(path, []byte(`{"installation_id":"70c778bc-353c-4159-844b-882a493a1814","listen":"127.0.0.1:9443","database_url":"postgres://file.example/synod","admin_token_file":"token","tls_cert_file":"cert","tls_key_file":"key"}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"installation_id":"70c778bc-353c-4159-844b-882a493a1814","listen":"127.0.0.1:9443","database_path":"/var/lib/synod/file.db","admin_token_file":"token","tls_cert_file":"cert","tls_key_file":"key"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	config, err := parse([]string{"--config", path})
@@ -29,30 +29,30 @@ func TestControllerConfigurationPrecedence(t *testing.T) {
 		t.Fatalf("file/default precedence failed: listen=%q actor=%q log=%q", config.Listen, config.ActorID, config.LogLevel)
 	}
 	t.Setenv("SYNOD_CONFIG", path)
-	t.Setenv("SYNOD_DATABASE_URL", "postgres://environment.example/synod")
+	t.Setenv("SYNOD_DATABASE_PATH", "/var/lib/synod/environment.db")
 	t.Setenv("SYNOD_LISTEN", "127.0.0.1:10443")
 	config, err = parse(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Listen != "127.0.0.1:10443" || config.DatabaseURL != "postgres://environment.example/synod" {
+	if config.Listen != "127.0.0.1:10443" || config.DatabasePath != "/var/lib/synod/environment.db" {
 		t.Fatal("environment did not override file values")
 	}
-	config, err = parse([]string{"--listen", "127.0.0.1:11443", "--database-url", "postgres://flag.example/synod"})
+	config, err = parse([]string{"--listen", "127.0.0.1:11443", "--database-path", "/var/lib/synod/flag.db"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Listen != "127.0.0.1:11443" || config.DatabaseURL != "postgres://flag.example/synod" {
+	if config.Listen != "127.0.0.1:11443" || config.DatabasePath != "/var/lib/synod/flag.db" {
 		t.Fatal("flags did not override environment values")
 	}
-	t.Setenv("SYNOD_DATABASE_URL", "")
+	t.Setenv("SYNOD_DATABASE_PATH", "")
 	if _, err := parse(nil); err == nil {
 		t.Fatal("explicit empty environment value did not override the file")
 	}
 }
 
 func TestControllerRejectsInvalidInput(t *testing.T) {
-	for _, name := range []string{"SYNOD_ETCD_ENDPOINTS", "SYNOD_ETCD_PREFIX", "SYNOD_ETCD_CA_FILE", "SYNOD_ETCD_TLS_CERT_FILE", "SYNOD_ETCD_TLS_KEY_FILE", "SYNOD_ETCD_USERNAME", "SYNOD_ETCD_PASSWORD_FILE", "SYNOD_ETCD_ALLOW_PLAINTEXT", "SYNOD_CONFIG", "SYNOD_INSTALLATION_ID", "SYNOD_LISTEN", "SYNOD_DATABASE_URL", "SYNOD_ADMIN_TOKEN_FILE", "SYNOD_ACTOR_ID", "SYNOD_TLS_CERT_FILE", "SYNOD_TLS_KEY_FILE", "SYNOD_LOG_LEVEL", "SYNOD_CA_CERT_FILE", "SYNOD_CA_KEY_FILE", "SYNOD_AGENT_LISTEN", "SYNOD_AGENT_TLS_CERT_FILE", "SYNOD_AGENT_TLS_KEY_FILE", "SYNOD_AGENT_CA_FILE", "SYNOD_ENGINE_ENDPOINT_FIRST_PORT", "SYNOD_ENGINE_ENDPOINT_LAST_PORT"} {
+	for _, name := range []string{"SYNOD_CONFIG", "SYNOD_INSTALLATION_ID", "SYNOD_LISTEN", "SYNOD_DATABASE_PATH", "SYNOD_ADMIN_TOKEN_FILE", "SYNOD_ACTOR_ID", "SYNOD_TLS_CERT_FILE", "SYNOD_TLS_KEY_FILE", "SYNOD_LOG_LEVEL", "SYNOD_CA_CERT_FILE", "SYNOD_CA_KEY_FILE", "SYNOD_AGENT_LISTEN", "SYNOD_AGENT_TLS_CERT_FILE", "SYNOD_AGENT_TLS_KEY_FILE", "SYNOD_AGENT_CA_FILE"} {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -70,9 +70,8 @@ func TestControllerRejectsInvalidInput(t *testing.T) {
 		{name: "wrong type", data: `{"listen":123}`, want: "known fields"},
 		{name: "null object", data: `null`, want: "JSON object"},
 		{name: "oversized", data: strings.Repeat(" ", (1<<20)+1), want: "exceeds 1 MiB"},
-		{name: "missing settings", data: `{}`, want: "database_url"},
-		{name: "invalid database URL", args: []string{"--database-url", "https://user:private-value@example.com/db"}, want: "database_url"},
-		{name: "invalid URL escape", args: []string{"--database-url", "postgres://user:private-value@%zz/db"}, want: "database_url"},
+		{name: "missing settings", data: `{}`, want: "database_path"},
+		{name: "relative database path", args: []string{"--database-path", "private-value.db"}, want: "database_path"},
 		{name: "invalid port", args: []string{"--listen", "localhost:70000"}, want: "listen port"},
 		{name: "invalid log level", args: []string{"--log-level", "private-value"}, want: "log_level"},
 		{name: "missing installation", args: []string{"--installation-id", ""}, want: "installation_id"},
@@ -85,12 +84,9 @@ func TestControllerRejectsInvalidInput(t *testing.T) {
 		{name: "missing CA key", args: []string{"--ca-cert-file", "cert"}, want: "supplied together"},
 		{name: "missing CA certificate", args: []string{"--ca-key-file", "key"}, want: "supplied together"},
 		{name: "missing TLS key", args: []string{"--tls-key-file", ""}, want: "tls_key_file"},
-		{name: "endpoint port out of range", args: []string{"--engine-endpoint-last-port", "70000"}, want: "engine_endpoint_first_port"},
-		{name: "endpoint range inverted", args: []string{"--engine-endpoint-first-port", "6000", "--engine-endpoint-last-port", "5000"}, want: "engine_endpoint_first_port"},
-		{name: "endpoint port not a number", args: []string{"--engine-endpoint-first-port", "postgres"}, want: "invalid"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			args := []string{"--installation-id", "70c778bc-353c-4159-844b-882a493a1814", "--database-url", "postgres://localhost/synod", "--admin-token-file", "token", "--tls-cert-file", "cert", "--tls-key-file", "key"}
+			args := []string{"--installation-id", "70c778bc-353c-4159-844b-882a493a1814", "--database-path", "/var/lib/synod/synod.db", "--admin-token-file", "token", "--tls-cert-file", "cert", "--tls-key-file", "key"}
 			if test.name == "missing settings" {
 				args = nil
 			}
