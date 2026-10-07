@@ -34,6 +34,10 @@ type sourceRoot struct {
 // Tree confines reads to the selected roots and applies exclusions to overlapping paths.
 // Close it after both upload passes finish.
 type Tree struct {
+	live          bool
+	sqliteMu      sync.Mutex
+	sqliteErr     error
+	sqlite        map[string]*os.File
 	roots         []*sourceRoot
 	Paths         []backup.Path
 	excluded      map[string]string
@@ -126,6 +130,19 @@ func (t *Tree) Root(ctx context.Context, definitions map[string][]byte, dumps ..
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if root.path != "." {
+			sidecar, err := t.sqliteSidecar(root.root, root.path)
+			if err != nil {
+				return nil, err
+			}
+			if sidecar {
+				if err := t.exclude(root.source, "SQLite sidecars are excluded from live copies."); err != nil {
+					return nil, err
+				}
+				t.Paths = slices.DeleteFunc(t.Paths, func(path backup.Path) bool { return path.Archive == "paths/"+root.archive })
+				continue
+			}
+		}
 		info, err := root.root.Lstat(root.path)
 		if err != nil || info.Mode()&os.ModeSymlink != 0 {
 			return nil, ErrSource
@@ -148,6 +165,11 @@ type definitionFile struct{ kfs.StreamingFile }
 func (*definitionFile) Mode() os.FileMode { return 0600 }
 
 func (t *Tree) Close() {
+	t.sqliteMu.Lock()
+	defer t.sqliteMu.Unlock()
+	for _, file := range t.sqlite {
+		file.Close()
+	}
 	for _, root := range t.roots {
 		root.root.Close()
 	}
@@ -217,6 +239,9 @@ func newSourceEntry(tree *Tree, root *sourceRoot, path, absolute, name string, i
 	case info.IsDir():
 		return &sourceDirectory{entry}
 	case info.Mode().IsRegular():
+		if tree.live {
+			return &liveFile{entry}
+		}
 		return &sourceFile{entry}
 	default:
 		return &sourceLink{entry}
@@ -297,6 +322,13 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 				continue
 			}
 			reason := ""
+			sidecar, err := d.tree.sqliteSidecar(root, child.Name())
+			if err != nil {
+				return nil, err
+			}
+			if sidecar {
+				reason = "SQLite sidecars are excluded from live copies."
+			}
 			if discovery.Forbidden(absolute, d.source.volume) {
 				reason = "Host system paths are never copied."
 			}

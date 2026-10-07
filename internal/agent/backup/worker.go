@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -194,6 +195,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return w.finish(ctx, request, &state, r)
 	}
 	defer tree.Close()
+	tree.live = method == backup.Live || method == backup.Dump
 	if app.Kind == "compose" && !slices.ContainsFunc(tree.Paths, func(path backup.Path) bool { return path.Kind == "compose" }) {
 		state.FailureCode = "app_definition_excluded"
 		return w.finish(ctx, request, &state, r)
@@ -284,9 +286,19 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if err == nil && method == backup.Stop {
 		err = w.checkStopped(final, fileContainers)
 	}
+	tree.sqliteMu.Lock()
+	sqliteErr := tree.sqliteErr
+	sqliteFiles := slices.Sorted(maps.Keys(tree.sqlite))
+	tree.sqliteMu.Unlock()
 	if err != nil {
 		state.Prepared = nil
 		state.FailureCode = "final_copy_failed"
+		if sqliteErr != nil {
+			state.FailureCode = "sqlite_copy_failed"
+		}
+		if errors.Is(sqliteErr, ErrSQLitePlatform) {
+			state.FailureCode = "sqlite_copy_unavailable"
+		}
 		for _, stream := range streams {
 			if stream.failed.Load() {
 				state.FailureCode = "database_dump_failed"
@@ -294,6 +306,8 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		}
 	} else {
 		state.Metadata.Exclusions = tree.Exclusions()
+		state.Metadata.Paths = tree.Paths
+		state.Metadata.SQLite = sqliteFiles
 	}
 	durable, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	saveErr := w.save(durable, &state)

@@ -401,7 +401,14 @@ File containers that were stopped or paused before the backup keep that state.
 
 Live copies files while the containers run.
 Use it only when the app permits a live copy.
-SQLite backup API support is not available yet.
+On Linux agents, Live and Dump find SQLite files by their file header.
+They copy each database with the SQLite backup API.
+WAL writes can continue while Synod holds a read snapshot.
+Overlapping app paths use the same database copy.
+The encrypted manifest lists the copied SQLite files and the excluded sidecars.
+The copy uses an unlinked temporary file until the upload ends.
+One app can contain up to 256 SQLite files in a Live or Dump backup.
+Use Stop for SQLite apps on other agent platforms.
 Dump requires a detected database. Use Auto for other apps.
 Dump keeps the app running and replaces database data paths with native dumps.
 PostgreSQL uses `pg_dumpall`. MySQL and MariaDB use their native SQL dump tools.
@@ -538,3 +545,13 @@ The backup worker will use this journal in a later task.
 
 See [the API schema](api/openapi.json) for enrollment, device, app, and operation routes.
 It does not yet describe account and session routes.
+
+Run the SQLite source-path proof on Linux with a disposable container:
+
+```sh
+SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock ./scripts/test-sqlite.sh
+```
+
+The test uses a pinned Go image and a read-only module cache.
+It restores a live WAL database and compares committed writes.
+It also checks overlapping paths, sidecar links, corruption, and cancellation.

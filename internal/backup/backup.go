@@ -81,6 +81,7 @@ type Snapshot struct {
 	StartedAt      time.Time      `json:"started_at"`
 	CompletedAt    time.Time      `json:"completed_at"`
 	DowntimeMillis int64          `json:"downtime_ms"`
+	SQLite         []string       `json:"sqlite,omitempty"`
 	Dumps          []DatabaseDump `json:"dumps,omitempty"`
 	Paths          []Path         `json:"paths"`
 	Exclusions     []Exclusion    `json:"exclusions"`
@@ -163,7 +164,7 @@ func (e Event) Validate(request Request) error {
 			if result.SnapshotID != request.ID || !result.RepositoryOpened || result.FailureCode != "" {
 				return ErrInvalid
 			}
-		} else if result.SnapshotID != uuid.Nil || result.FileBytes != 0 || !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "repository_installation_conflict", "app_scan_failed", "database_dump_failed", "database_unavailable", "database_not_detected", "app_definition_incomplete", "app_state_unsafe", "app_definition_limit", "standalone_definition_unsupported", "source_unavailable", "app_definition_excluded", "first_copy_failed", "journal_save_failed", "app_stop_failed", "app_changed_during_backup", "final_copy_failed", "agent_interrupted", "snapshot_publish_failed"}, result.FailureCode) {
+		} else if result.SnapshotID != uuid.Nil || result.FileBytes != 0 || !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "repository_installation_conflict", "app_scan_failed", "database_dump_failed", "database_unavailable", "database_not_detected", "app_definition_incomplete", "app_state_unsafe", "app_definition_limit", "standalone_definition_unsupported", "source_unavailable", "app_definition_excluded", "first_copy_failed", "journal_save_failed", "app_stop_failed", "app_changed_during_backup", "final_copy_failed", "sqlite_copy_failed", "sqlite_copy_unavailable", "agent_interrupted", "snapshot_publish_failed"}, result.FailureCode) {
 			return ErrInvalid
 		}
 	default:
