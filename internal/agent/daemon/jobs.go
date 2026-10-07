@@ -45,7 +45,7 @@ func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agen
 			}
 			waiting.Store(nil)
 			var check proof.Request
-			if json.Unmarshal(record.Input, &check) == nil && (check.Kind == proof.Integrity || check.Kind == proof.Drill) {
+			if json.Unmarshal(record.Input, &check) == nil && check.Kind.Valid() {
 				if _, err := restorer.ExecuteProof(ctx, check); err != nil {
 					waiting.Store(new(record.ID))
 					logger.Warn("proof_recovery_pending", "operation_id", record.ID, "code", "inspect_drill_cleanup")
@@ -94,7 +94,7 @@ func reportJobs(ctx context.Context, cache *journal.Journal, stream *transport.C
 		}
 		for _, record := range records {
 			var check proof.Request
-			if json.Unmarshal(record.Input, &check) == nil && (check.Kind == proof.Integrity || check.Kind == proof.Drill) {
+			if json.Unmarshal(record.Input, &check) == nil && check.Kind.Valid() {
 				reportProof(stream, record, check, waiting, logger)
 				continue
 			}

@@ -119,7 +119,7 @@ func (j *Journal) AdmitScheduled(ctx context.Context, ring *secret.Keyring, now 
 		if err := tx.QueryRowContext(ctx, `SELECT
  EXISTS(SELECT 1 FROM records WHERE id=?) OR
  EXISTS(SELECT 1 FROM proof_history WHERE kind=? AND app_id=? AND destination_id=? AND last_success>=?) OR
- EXISTS(SELECT 1 FROM records WHERE state!='terminal' AND json_extract(CASE WHEN json_valid(CAST(input AS TEXT)) THEN CAST(input AS TEXT) ELSE '{}' END,'$.kind')=? AND (?='integrity_check' AND json_extract(CASE WHEN json_valid(CAST(input AS TEXT)) THEN CAST(input AS TEXT) ELSE '{}' END,'$.destination_id')=? OR ?='restore_drill' AND json_extract(CASE WHEN json_valid(CAST(input AS TEXT)) THEN CAST(input AS TEXT) ELSE '{}' END,'$.app_id')=?))`, job.ID, job.Kind, job.AppID, job.DestinationID, slot.UnixMilli(), job.Kind, job.Kind, job.DestinationID, job.Kind, job.AppID).Scan(&skip); err != nil {
+ EXISTS(SELECT 1 FROM records WHERE state!='terminal' AND json_extract(CASE WHEN json_valid(CAST(input AS TEXT)) THEN CAST(input AS TEXT) ELSE '{}' END,'$.kind')=? AND (?!='restore_drill' AND json_extract(CASE WHEN json_valid(CAST(input AS TEXT)) THEN CAST(input AS TEXT) ELSE '{}' END,'$.destination_id')=? OR ?='restore_drill' AND json_extract(CASE WHEN json_valid(CAST(input AS TEXT)) THEN CAST(input AS TEXT) ELSE '{}' END,'$.app_id')=?))`, job.ID, job.Kind, job.AppID, job.DestinationID, slot.UnixMilli(), job.Kind, job.Kind, job.DestinationID, job.Kind, job.AppID).Scan(&skip); err != nil {
 			return 0, err
 		}
 		if skip {

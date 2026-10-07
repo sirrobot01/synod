@@ -2,7 +2,7 @@ import type { AppPlan, ProtectionPlan, Destination, DestinationList, Node, Snaps
 
 export const node: Node = { id: "n1", name: "odin", architecture: "arm64", runtime_version: "29.0", agent_version: "dev", enrolled_at: "2026-10-06T00:00:00Z", approved_at: "2026-10-06T00:00:00Z", connected_at: "2026-10-07T08:00:00Z", last_seen_at: "2026-10-07T08:00:00Z" };
 export const destination: Destination = { id: "d1", name: "Backup disk", node_id: "n2", location: { kind: "device", path: "/srv/backups", device: { node_id: "n2", destination_id: "d1" } } };
-export const destinations: DestinationList = { revision: 3, destinations: [destination], delivery: [], space: [] };
+export const destinations: DestinationList = { revision: 3, destinations: [destination], delivery: [], space: [], maintenance: [] };
 export const app: AppPlan = {
   app: { id: "a1", node_id: "n1", node_name: "odin", observed_at: "2026-10-07T08:00:00Z", present: true,
     definition: { name: "notes", kind: "compose", containers: [], paths: [

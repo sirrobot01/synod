@@ -244,7 +244,7 @@ func (j *Journal) Complete(ctx context.Context, id uuid.UUID, result []byte) err
 		}
 	}
 	var check proof.Request
-	if json.Unmarshal(input, &check) == nil && (check.Kind == proof.Integrity || check.Kind == proof.Drill) {
+	if json.Unmarshal(input, &check) == nil && check.Kind.Valid() {
 		var saved proof.Result
 		if check.Validate() != nil || check.ID != id || check.InstallationID != j.installationID || check.NodeID != j.nodeID || json.Unmarshal(result, &saved) != nil {
 			return ErrConflict

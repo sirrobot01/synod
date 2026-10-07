@@ -99,6 +99,9 @@ func (s *Store) AddDestination(ctx context.Context, installationID uuid.UUID, ri
 		}
 		return destination.Destination{}, storeError(err)
 	}
+	if _, err := assignMaintenance(ctx, tx, s.now()); err != nil {
+		return destination.Destination{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
 		return destination.Destination{}, storeError(err)
 	}
@@ -126,7 +129,7 @@ func (s *Store) RemoveDestination(ctx context.Context, id uuid.UUID, actorID, re
 		return nil
 	}
 	var busy bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE status NOT IN ('succeeded','failed','cancelled') AND ((kind IN ('backup','integrity_check') AND json_extract(CAST(input AS TEXT),'$.destination_id')=?) OR (kind IN ('restore','restore_drill') AND (json_extract(CAST(input AS TEXT),'$.destination_id') IS NULL OR json_extract(CAST(input AS TEXT),'$.destination_id')=?))))`, id, id).Scan(&busy); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE status NOT IN ('succeeded','failed','cancelled') AND ((kind IN ('backup','integrity_check','repository_maintenance') AND json_extract(CAST(input AS TEXT),'$.destination_id')=?) OR (kind IN ('restore','restore_drill') AND (json_extract(CAST(input AS TEXT),'$.destination_id') IS NULL OR json_extract(CAST(input AS TEXT),'$.destination_id')=?))))`, id, id).Scan(&busy); err != nil {
 		return storeError(err)
 	}
 	if busy {
@@ -146,6 +149,60 @@ func (s *Store) RemoveDestination(ctx context.Context, id uuid.UUID, actorID, re
 	}
 	if err := audit(ctx, tx, actorID, requestID, "destination.removed", id, s.now()); err != nil {
 		return err
+	}
+	return storeCommit(tx)
+}
+
+// MaintenanceOwnerMissing is how long a remote destination's maintenance owner can be absent before another device takes over.
+const MaintenanceOwnerMissing = 7 * 24 * time.Hour
+
+// assignMaintenance gives each live destination one maintenance device. The caller changes the plan revision when it reports a change.
+// A local or device repository belongs to its device. A remote repository moves only when its device is gone or missing.
+func assignMaintenance(ctx context.Context, tx *sql.Tx, now time.Time) (bool, error) {
+	result, err := tx.ExecContext(ctx, `UPDATE destinations SET maintenance_node_id=node_id WHERE removed_at IS NULL AND node_id IS NOT NULL AND maintenance_node_id IS NOT node_id`)
+	if err != nil {
+		return false, storeError(err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, storeError(err)
+	}
+	// Prefer the earliest approved device that was seen recently. Without one, a destination with no owner takes any approved device.
+	cutoff := now.Add(-MaintenanceOwnerMissing).UnixMilli()
+	var owner uuid.UUID
+	err = tx.QueryRowContext(ctx, `SELECT id FROM nodes WHERE approved_at IS NOT NULL AND revoked_at IS NULL ORDER BY coalesce(last_seen_at,0)<?,approved_at,id LIMIT 1`, cutoff).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return changed > 0, nil
+	}
+	if err != nil {
+		return false, storeError(err)
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE destinations SET maintenance_node_id=? WHERE removed_at IS NULL AND node_id IS NULL AND maintenance_node_id IS NOT ?
+ AND (maintenance_node_id IS NULL OR EXISTS(SELECT 1 FROM nodes WHERE id=? AND last_seen_at>=?))
+ AND NOT EXISTS(SELECT 1 FROM nodes n WHERE n.id=maintenance_node_id AND n.approved_at IS NOT NULL AND n.revoked_at IS NULL AND n.last_seen_at>=?)`, owner, owner, owner, cutoff, cutoff)
+	if err != nil {
+		return false, storeError(err)
+	}
+	moved, err := result.RowsAffected()
+	if err != nil {
+		return false, storeError(err)
+	}
+	return changed+moved > 0, nil
+}
+
+// ReassignMaintenance moves remote repository maintenance away from a device that has been missing for MaintenanceOwnerMissing.
+func (s *Store) ReassignMaintenance(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storeError(err)
+	}
+	defer tx.Rollback()
+	changed, err := assignMaintenance(ctx, tx, s.now())
+	if err != nil || !changed {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
+		return storeError(err)
 	}
 	return storeCommit(tx)
 }
@@ -220,6 +277,42 @@ func (s *Store) ListDestinations(ctx context.Context) (destination.Listing, erro
 		return result, storeError(err)
 	}
 	if err := rows.Close(); err != nil {
+		return result, storeError(err)
+	}
+	rows, err = tx.QueryContext(ctx, `SELECT d.id,coalesce(d.maintenance_node_id,''),o.id,o.node_id,o.status,o.result FROM destinations d LEFT JOIN (
+ SELECT *,json_extract(CAST(input AS TEXT),'$.destination_id') AS destination_id,row_number() OVER (PARTITION BY json_extract(CAST(input AS TEXT),'$.destination_id') ORDER BY created_at DESC,id DESC) AS position
+ FROM operations WHERE kind='repository_maintenance') o ON o.destination_id=d.id AND o.position=1 WHERE d.removed_at IS NULL ORDER BY d.name,d.id`)
+	if err != nil {
+		return result, storeError(err)
+	}
+	defer rows.Close()
+	result.Maintenance = []destination.Maintenance{}
+	for rows.Next() {
+		var m destination.Maintenance
+		var owner string
+		var id, node, state sql.NullString
+		var raw []byte
+		if err := rows.Scan(&m.DestinationID, &owner, &id, &node, &state, &raw); err != nil {
+			return result, storeError(err)
+		}
+		if owner != "" {
+			if m.NodeID, err = uuid.Parse(owner); err != nil {
+				return result, &Error{Code: Unavailable}
+			}
+		}
+		if id.Valid {
+			m.Last = &proof.Status{DestinationID: m.DestinationID, State: state.String}
+			m.Last.ID, err = uuid.Parse(id.String)
+			if err == nil {
+				m.Last.NodeID, err = uuid.Parse(node.String)
+			}
+			if err != nil || (len(raw) > 0 && json.Unmarshal(raw, &m.Last.Result) != nil) {
+				return result, &Error{Code: Unavailable}
+			}
+		}
+		result.Maintenance = append(result.Maintenance, m)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return result, storeError(err)
 	}
 	rows, err = tx.QueryContext(ctx, `SELECT d.id,h.observed_at,coalesce(h.total_bytes,0),coalesce(h.available_bytes,0) FROM destinations d LEFT JOIN destination_health h ON h.destination_id=d.id WHERE d.removed_at IS NULL ORDER BY d.name,d.id`)
@@ -322,9 +415,28 @@ func (s *Store) DestinationPlan(ctx context.Context, installationID, nodeID, ses
 	for _, schedule := range result.Schedules {
 		result.Proofs = append(result.Proofs, proof.Schedule{ID: uuid.NewSHA1(schedule.ID, []byte("restore_drill")), Kind: proof.Drill, InstallationID: installationID, NodeID: nodeID, AppID: schedule.AppID, CreatedAt: schedule.CreatedAt})
 	}
+	owned := make(map[uuid.UUID]bool)
+	rows, err = tx.QueryContext(ctx, `SELECT id FROM destinations WHERE removed_at IS NULL AND maintenance_node_id=?`, nodeID)
+	if err != nil {
+		return result, storeError(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return result, storeError(err)
+		}
+		owned[id] = true
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return result, storeError(err)
+	}
 	for _, entry := range result.Destinations {
 		d := entry.Destination
 		result.Proofs = append(result.Proofs, proof.Schedule{ID: uuid.NewSHA1(d.ID, nodeID[:]), Kind: proof.Integrity, InstallationID: installationID, NodeID: nodeID, DestinationID: d.ID, CreatedAt: d.CreatedAt})
+		if owned[d.ID] {
+			result.Proofs = append(result.Proofs, proof.Schedule{ID: uuid.NewSHA1(d.ID, append([]byte(proof.Maintenance), nodeID[:]...)), Kind: proof.Maintenance, InstallationID: installationID, NodeID: nodeID, DestinationID: d.ID, CreatedAt: d.CreatedAt})
+		}
 	}
 	for _, schedule := range result.Proofs {
 		raw, _ := json.Marshal(schedule)

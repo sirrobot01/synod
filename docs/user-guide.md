@@ -241,6 +241,21 @@ A local destination is available only through its owner device.
 A Synod-device destination is available to approved peer agents.
 In the web UI, **Destinations → Add destination** accepts the same settings.
 
+### Space reclamation
+
+Retention removes expired snapshot records after each backup.
+Repository maintenance then removes the data that no kept snapshot uses.
+One device runs maintenance for each destination, once each day.
+For a local or Synod-device destination, this is the device that holds the repository.
+For an S3 or SFTP destination, this is the earliest approved device that connected in the last 7 days.
+If that device is missing for 7 days, the controller gives maintenance to another device.
+The new device waits six hours before its first full run, so two devices never run maintenance at the same time.
+Maintenance keeps all data that is less than 24 hours old, so backups that run at the same time stay complete.
+Space returns after approximately three daily runs.
+Data in small packs of less than 12 MiB can stay longer.
+`synod destination list` and **Destinations** show the maintenance device and its last run.
+A failed run sends a `maintenance_failed` alert.
+
 ## Review and protect apps
 
 Wait for discovery. It runs once a minute.
@@ -385,7 +400,7 @@ Keep the URL out of shell history and Git.
 Supported services include ntfy, Gotify, Discord, Slack, SMTP, and generic HTTP webhooks.
 See [Notification settings](../README.md#configure-notifications) for URL guidance and retry behavior.
 
-Synod alerts on failed backups, failed drills, overdue backups, almost-full destinations, and missing devices.
+Synod alerts on failed backups, failed drills, failed repository maintenance, overdue backups, almost-full destinations, and missing devices.
 An offline device does not produce overdue alerts.
 The default missing-device delay is seven days.
 S3 and SFTP free space remains unknown.
@@ -527,6 +542,8 @@ Interrupting `operation wait` does not cancel the operation.
 | `app_definition_incomplete` | Restore access to the Compose project files on the source host. Wait for discovery. |
 | `catalog_write_failed` | Fix repository access and run another backup. The current recovery settings were not saved. |
 | `retention_failed` | Fix repository access and run another backup. Older snapshot records were not expired. |
+| `maintenance_failed` | Fix repository access from the maintenance device. Check its clock. Maintenance stops when the device clock differs from the storage clock by more than 5 minutes. The next daily run tries again. |
+| `maintenance_not_owner` | Wait for current settings on the device. Another device owns maintenance for this destination. |
 | Architecture refusal | Select a compatible target or supply the required image for that architecture. |
 | Port or name conflict | Remove the conflict yourself, or review an explicit app replacement. |
 | `cleanup_pending` | Keep the target agent running. Read the operation result before you remove any resources. |
@@ -547,7 +564,6 @@ These gaps block the v0.1 release:
 
 - Large paths have no user inclusion control yet.
 - Init does not generate the promised recovery kit yet.
-- Snapshot expiry does not yet reclaim unused repository content.
 - Agent and controller transport certificates expire after 30 days. Automatic renewal is not implemented yet.
 
 Other current limits:
@@ -558,6 +574,8 @@ Other current limits:
 - Local-only images need to exist on the target with the correct architecture.
 - MongoDB and custom database connection settings have no native dump support.
 - Browser file downloads are limited to 64 MiB. Use the CLI for larger downloads.
+- A backup copy pass that runs for more than 24 hours can lose new data to concurrent maintenance. Synod checks every object before it saves a snapshot, so that backup fails and saves no damaged snapshot. The next backup copies the data again.
+- Maintenance runs in the agent's job queue. A long maintenance run delays other jobs on that device.
 - An isolated drill cannot prove app behavior that needs network access.
 
 See the [README](../README.md) for detailed behavior and developer checks.

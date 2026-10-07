@@ -182,6 +182,7 @@ export interface WorkResult {
   safety_snapshot_id?: string; target_app_id?: string; project_directory?: string;
   recovery_pending?: string[]; restart_pending?: string[]; warning_codes?: string[];
   contents?: number; read?: number; bytes_read?: number; containers?: number;
+  maintenance?: "completed" | "claimed" | "handing_over";
 }
 export interface ProofStatus { id: string; node_id: string; destination_id?: string; state: OperationStatus; result: WorkResult }
 export interface AppPlan {
@@ -208,6 +209,7 @@ export interface DestinationList {
   revision: number; destinations: Destination[];
   delivery: { node_id: string; node_name: string; current: boolean; acknowledged_at?: string }[];
   checks?: ProofStatus[];
+  maintenance: { destination_id: string; node_id?: string; last?: ProofStatus }[];
   space: { destination_id: string; known: boolean; observed_at?: string; total_bytes: number; available_bytes: number }[];
 }
 export interface Snapshot {

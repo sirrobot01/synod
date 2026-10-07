@@ -570,7 +570,7 @@ Use `--method live` only when the app permits a live copy.
 Use `--keep-daily`, `--keep-weekly`, and `--keep-monthly` to change retention.
 Retention always keeps the newest copy, the copy just made, and Kopia pins.
 It expires older snapshot records after a successful backup.
-Content space reclamation remains a later maintenance task.
+One device for each destination runs daily Kopia maintenance to reclaim the space of expired snapshots.
 
 A new plan runs at once, then once each day at the saved time.
 A part-time device takes one current backup when it returns.

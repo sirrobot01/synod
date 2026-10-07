@@ -20,6 +20,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("binary", type=Path)
 parser.add_argument("--evidence", type=Path)
 parser.add_argument("--notifications", action="store_true")
+parser.add_argument("--task", help="task name in the evidence")
 args = parser.parse_args()
 binary = args.binary.resolve()
 docker_host = os.environ["SYNOD_TEST_DOCKER_HOST"]
@@ -165,6 +166,11 @@ try:
     snapshot = operation["result"]["snapshot_id"]
     source_id = run(["docker", "ps", "-q", "--filter", "label=com.docker.compose.project=" + name]).stdout.strip()
     source_started = json.loads(run(["docker", "inspect", source_id]).stdout)[0]["State"]["StartedAt"]
+    phase = "claim scheduled maintenance"
+    upkeep = wait(lambda: next((m for m in cli("destination", "list")["destinations"]["maintenance"]
+                                if m.get("last") and m["last"]["state"] == "succeeded"), None))
+    assert upkeep["node_id"] == node and upkeep["last"]["result"]["maintenance"] == "claimed"
+    checks.append("The destination's one maintenance device claims the repository on its daily schedule and reports the claim")
     phase = "check repository content"
     checked = cli("destination", "check", "fixture", "--on", node)["operation"]
     assert checked["status"] == "succeeded" and checked["result"]["read"] >= 1
@@ -258,7 +264,7 @@ finally:
     for handle in logs:
         handle.close()
     shutil.rmtree(root)
-    evidence = {"passed": passed and not cleanup_errors, "task": "T19" if args.notifications else "T18", "phase": phase, "checks": checks, "cleanup_errors": cleanup_errors}
+    evidence = {"passed": passed and not cleanup_errors, "task": args.task or ("T19" if args.notifications else "T18"), "phase": phase, "checks": checks, "cleanup_errors": cleanup_errors}
     if args.evidence:
         args.evidence.write_text(json.dumps(evidence, indent=2) + "\n")
     print(json.dumps(evidence))

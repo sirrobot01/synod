@@ -401,6 +401,9 @@ func (s *Store) ApproveNode(ctx context.Context, nodeID uuid.UUID, actorID, requ
 	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET approved_at=?,approved_by=? WHERE id=?`, now.UnixMilli(), actorID, nodeID); err != nil {
 		return Node{}, storeError(err)
 	}
+	if _, err := assignMaintenance(ctx, tx, now); err != nil {
+		return Node{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
 		return Node{}, storeError(err)
 	}

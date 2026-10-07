@@ -79,9 +79,17 @@ type Delivery struct {
 	AcknowledgedAt *time.Time `json:"acknowledged_at,omitzero"`
 }
 
+// Maintenance names the one device that reclaims expired content of a destination, and its newest run.
+type Maintenance struct {
+	DestinationID uuid.UUID     `json:"destination_id"`
+	NodeID        uuid.UUID     `json:"node_id,omitzero"`
+	Last          *proof.Status `json:"last,omitzero"`
+}
+
 type Listing struct {
 	Space        []Space        `json:"space"`
 	Checks       []proof.Status `json:"checks,omitempty"`
+	Maintenance  []Maintenance  `json:"maintenance"`
 	Revision     int64          `json:"revision"`
 	Destinations []Destination  `json:"destinations"`
 	Delivery     []Delivery     `json:"delivery"`
@@ -146,7 +154,7 @@ func (p Plan) Validate(nodeID uuid.UUID) error {
 		}
 		apps[schedule.AppID] = true
 	}
-	if len(p.Proofs) > 576 {
+	if len(p.Proofs) > 512+2*MaxDestinations {
 		return ErrInvalid
 	}
 	proofIDs := make(map[uuid.UUID]bool)

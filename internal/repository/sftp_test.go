@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/pem"
 	"errors"
+	"github.com/google/uuid"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -146,6 +147,13 @@ func TestSFTPCatalogAndHostIdentity(t *testing.T) {
 	}
 	if err := r.Close(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+	node := uuid.New()
+	if state, err := ClaimMaintenanceAt(t.Context(), location, credentials, catalog.InstallationID, node, 1, -MaintenanceHandover-time.Minute); err != nil || state != MaintenanceClaimed {
+		t.Fatalf("claim SFTP maintenance: %s, %v", state, err)
+	}
+	if state, err := Maintain(t.Context(), location, credentials, catalog.InstallationID, node, 1); err != nil || state != MaintenanceCompleted {
+		t.Fatalf("SFTP maintenance: %s, %v", state, err)
 	}
 	wrongLocation := location
 	other := *location.SFTP

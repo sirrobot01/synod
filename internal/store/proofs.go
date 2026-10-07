@@ -70,7 +70,7 @@ func (s *Store) CreateProof(ctx context.Context, installationID uuid.UUID, input
 }
 
 func (s *Store) ProofRequests(ctx context.Context) ([]proof.Request, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT input FROM operations WHERE kind IN ('integrity_check','restore_drill') AND status IN ('pending','running','waiting') ORDER BY created_at,id LIMIT 512`)
+	rows, err := s.db.QueryContext(ctx, `SELECT input FROM operations WHERE kind IN ('integrity_check','restore_drill','repository_maintenance') AND status IN ('pending','running','waiting') ORDER BY created_at,id LIMIT 512`)
 	if err != nil {
 		return nil, storeError(err)
 	}
@@ -111,7 +111,7 @@ func (s *Store) RecordProofEvent(ctx context.Context, nodeID, sessionID uuid.UUI
 		return ErrStaleSession
 	}
 	var op operation.Operation
-	err = tx.QueryRowContext(ctx, `SELECT `+operationColumns+` FROM operations WHERE id=? AND node_id=? AND kind IN ('integrity_check','restore_drill')`, event.ID, nodeID).Scan(operationFields(&op)...)
+	err = tx.QueryRowContext(ctx, `SELECT `+operationColumns+` FROM operations WHERE id=? AND node_id=? AND kind IN ('integrity_check','restore_drill','repository_maintenance')`, event.ID, nodeID).Scan(operationFields(&op)...)
 	if errors.Is(err, sql.ErrNoRows) && event.Request != nil && event.Request.ScheduleID != uuid.Nil {
 		job := *event.Request
 		var raw []byte

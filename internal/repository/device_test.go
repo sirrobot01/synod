@@ -254,6 +254,34 @@ func TestDeviceRepositorySurvivesRestartAndKeepsLocalRecovery(t *testing.T) {
 	if err := r.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	// Full Kopia maintenance runs through the device protocol and keeps the published snapshot.
+	if state, err := repository.ClaimMaintenanceAt(t.Context(), location, credentials, installation, owner, 1, -repository.MaintenanceHandover-time.Minute); err != nil || state != repository.MaintenanceClaimed {
+		t.Fatalf("claim device maintenance: %s, %v", state, err)
+	}
+	ownerLocation, ownerCredentials, err := saved.Connection(id, identities[owner])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state, err := repository.Maintain(t.Context(), ownerLocation, ownerCredentials, installation, owner, 1); err != nil || state != repository.MaintenanceCompleted {
+		t.Fatalf("device maintenance: %s, %v", state, err)
+	}
+	if _, err := repository.Maintain(t.Context(), location, credentials, installation, source, 1); !errors.Is(err, repository.ErrMaintenanceNotOwner) {
+		t.Fatalf("second device ran maintenance: %v", err)
+	}
+	r, err = repository.Open(t.Context(), location, credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintained := filepath.Join(t.TempDir(), "maintained")
+	if err := r.RestoreFiles(t.Context(), savedSnapshot.ID, maintained); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := os.ReadFile(filepath.Join(maintained, "state")); err != nil || !bytes.Equal(restored, content) {
+		t.Fatalf("snapshot after device maintenance differs: %v", err)
+	}
+	if err := r.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	// Pin the fixture server for raw protocol failure tests. It has no DNS certificate name.
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificates[source]}, InsecureSkipVerify: true, VerifyConnection: func(state tls.ConnectionState) error {
 		if len(state.PeerCertificates) == 0 || !bytes.Equal(state.PeerCertificates[0].Raw, certificates[owner].Certificate[0]) {

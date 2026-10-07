@@ -61,7 +61,11 @@ func (w *Worker) ExecuteProof(ctx context.Context, request proof.Request) (proof
 		if err := b.Journal.SaveProgress(ctx, request.ID, raw); err != nil {
 			return proof.Result{}, err
 		}
-		run, cancel := context.WithTimeout(ctx, 2*time.Hour)
+		limit := 2 * time.Hour
+		if request.Kind == proof.Maintenance {
+			limit = repository.MaintenanceRunLimit
+		}
+		run, cancel := context.WithTimeout(ctx, limit)
 		err := w.runProof(run, request, &state.Result)
 		cancel()
 		if err != nil {
@@ -91,6 +95,32 @@ func (w *Worker) ExecuteProof(ctx context.Context, request proof.Request) (proof
 
 func (w *Worker) runProof(ctx context.Context, request proof.Request, result *proof.Result) error {
 	b := w.Backup
+	if request.Kind == proof.Maintenance {
+		plan, err := b.Journal.DestinationPlan(ctx, b.Keyring)
+		if err != nil {
+			return &failure{Code: "destination_unavailable", Cause: err}
+		}
+		// A newer plan can give the repository to another device after this job was admitted.
+		if !slices.ContainsFunc(plan.Proofs, func(s proof.Schedule) bool {
+			return s.Kind == proof.Maintenance && s.DestinationID == request.DestinationID && s.NodeID == b.NodeID
+		}) {
+			return &failure{Code: "maintenance_not_owner"}
+		}
+		location, credentials, err := plan.Connection(request.DestinationID, b.Identity)
+		if err != nil {
+			return &failure{Code: "destination_unavailable", Cause: err}
+		}
+		result.DestinationID = request.DestinationID
+		state, err := repository.Maintain(ctx, location, credentials, request.InstallationID, b.NodeID, plan.Revision)
+		if errors.Is(err, repository.ErrMaintenanceNotOwner) {
+			return &failure{Code: "maintenance_not_owner", Cause: err}
+		}
+		if err != nil {
+			return &failure{Code: "maintenance_failed", Cause: err}
+		}
+		result.Maintenance = string(state)
+		return nil
+	}
 	if request.Kind == proof.Integrity {
 		plan, err := b.Journal.DestinationPlan(ctx, b.Keyring)
 		if err != nil {

@@ -36,6 +36,7 @@
     {@const space = listing?.space.find(s => s.destination_id === destination.id)}
     {@const fresh = space?.known && space.observed_at && now - Date.parse(space.observed_at) <= 300000}
     {@const proof = listing?.checks?.find(p => p.destination_id === destination.id)}
+    {@const upkeep = listing?.maintenance?.find(m => m.destination_id === destination.id)}
     <Panel title={destination.name} note={destination.location.kind} stale={!!space?.known && !fresh}>
       {#snippet actions()}<button onclick={() => check = destination}>Check integrity</button><button class="quiet" onclick={() => { remove = destination; removalFailure = null; }}>Remove…</button>{/snippet}
       <div class="columns pad">
@@ -47,6 +48,13 @@
           {#if fresh && space}<div><span class="label">Filesystem space</span><p class="mono">{bytes(space.available_bytes)} free of {bytes(space.total_bytes)}</p><meter min="0" max={space.total_bytes} value={space.total_bytes - space.available_bytes} aria-label={`Used filesystem space on ${destination.name}`}></meter><p class="note">{timestamp(space.observed_at)} · shared with other files on this filesystem.</p></div>
           {:else}<div><span class="label">Space</span><p>Unknown</p><p class="note">{space?.observed_at ? `Last report: ${timestamp(space.observed_at)}` : "This destination has no current capacity report."}</p></div>{/if}
           <div><span class="label">Integrity check</span>{#if proof}<p><a href={path("operation", proof.id)} onclick={(e) => follow(e, () => onOperation(proof.id))}><Mark mark={operationMark(proof.state)} /></a></p><span class="note">{timestamp(proof.result.completed_at)}</span>{:else}<p>No check recorded.</p>{/if}</div>
+          <div><span class="label">Space reclamation</span>
+            {#if !upkeep?.node_id}<p>No device</p><p class="note">Approve a device to remove expired snapshots from this repository.</p>
+            {:else}<p>{nodes.find(n => n.id === upkeep.node_id)?.name ?? upkeep.node_id}</p>
+              {#if upkeep.last}<p><a href={path("operation", upkeep.last.id)} onclick={(e) => follow(e, () => onOperation(upkeep.last!.id))}><Mark mark={operationMark(upkeep.last.state)} /></a></p>
+                <span class="note">{timestamp(upkeep.last.result.completed_at)}{#if upkeep.last.result.maintenance && upkeep.last.result.maintenance !== "completed"} · The first full run on this device starts after a six-hour wait.{/if}</span>
+              {:else}<p class="note">No run recorded. This device runs maintenance each day.</p>{/if}
+            {/if}</div>
         </div>
       </div>
     </Panel>

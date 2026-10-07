@@ -131,6 +131,20 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 		for _, check := range listing.Checks {
 			fmt.Fprintf(&output, "Destination %s: integrity check %s  Read: %d of %d contents  Failure: %s\n", check.DestinationID, check.State, check.Result.Read, check.Result.Contents, check.Result.FailureCode)
 		}
+		for _, m := range listing.Maintenance {
+			if m.NodeID == uuid.Nil {
+				fmt.Fprintf(&output, "Destination %s: maintenance has no device. Approve a device.\n", m.DestinationID)
+				continue
+			}
+			last := "not run"
+			if m.Last != nil {
+				last = m.Last.State + " " + m.Last.Result.Maintenance + m.Last.Result.FailureCode
+				if !m.Last.Result.CompletedAt.IsZero() {
+					last += " at " + m.Last.Result.CompletedAt.Format(time.RFC3339)
+				}
+			}
+			fmt.Fprintf(&output, "Destination %s: maintenance by device %s  Last: %s\n", m.DestinationID, m.NodeID, last)
+		}
 		for _, d := range listing.Delivery {
 			state := "pending"
 			if d.Current {
@@ -220,13 +234,16 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 	}
 	if op := a.result.Operation; op != nil {
 		fmt.Fprintf(&output, "Operation: %s\nKind: %s\nStatus: %s\nFailure: %s\n", op.ID, op.Kind, op.Status, op.FailureCode)
-		if (op.Kind == string(proof.Integrity) || op.Kind == string(proof.Drill)) && len(op.Result) > 0 {
+		if proof.Kind(op.Kind).Valid() && len(op.Result) > 0 {
 			var result proof.Result
 			if json.Unmarshal(op.Result, &result) == nil {
 				fmt.Fprintf(&output, "Destination: %s\n", result.DestinationID)
-				if op.Kind == string(proof.Integrity) {
+				switch op.Kind {
+				case string(proof.Integrity):
 					fmt.Fprintf(&output, "Read: %d of %d contents (%d bytes)\n", result.Read, result.Contents, result.BytesRead)
-				} else {
+				case string(proof.Maintenance):
+					fmt.Fprintf(&output, "Maintenance: %s\n", result.Maintenance)
+				default:
 					fmt.Fprintf(&output, "Snapshot: %s\nContainers tested: %d\n", result.SnapshotID, result.Containers)
 				}
 				if result.Resource != "" {

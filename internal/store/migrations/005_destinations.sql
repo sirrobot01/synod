@@ -12,6 +12,8 @@ CREATE TABLE destinations (
     credentials BLOB,
     input_bytes INTEGER NOT NULL,
     initializer_id TEXT REFERENCES operations (id),
+    -- The one device that runs repository maintenance. The plan revision changes with it.
+    maintenance_node_id TEXT REFERENCES nodes (id),
     initialized_at INTEGER,
     removed_at INTEGER
 );

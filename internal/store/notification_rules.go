@@ -28,7 +28,7 @@ func (s *Store) RefreshNotifications(ctx context.Context, installationID uuid.UU
 		return nil
 	}
 	now := s.now()
-	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.kind,o.node_id,o.app_id,coalesce(json_extract(CAST(o.input AS TEXT),'$.destination_id'),?),o.failure_code FROM operations o WHERE o.status='failed' AND o.kind IN ('backup','restore_drill') AND o.finished_at>=? AND NOT EXISTS(SELECT 1 FROM notification_alerts a WHERE a.operation_id=o.id AND a.kind IN ('backup_failed','drill_failed')) ORDER BY o.finished_at,o.id LIMIT 64`, uuid.Nil, changed.UnixMilli())
+	rows, err := tx.QueryContext(ctx, `SELECT o.id,o.kind,o.node_id,o.app_id,coalesce(json_extract(CAST(o.input AS TEXT),'$.destination_id'),?),o.failure_code FROM operations o WHERE o.status='failed' AND o.kind IN ('backup','restore_drill','repository_maintenance') AND o.finished_at>=? AND NOT EXISTS(SELECT 1 FROM notification_alerts a WHERE a.operation_id=o.id AND a.kind IN ('backup_failed','drill_failed','maintenance_failed')) ORDER BY o.finished_at,o.id LIMIT 64`, uuid.Nil, changed.UnixMilli())
 	if err != nil {
 		return storeError(err)
 	}
@@ -48,6 +48,10 @@ func (s *Store) RefreshNotifications(ctx context.Context, installationID uuid.UU
 			label = "Restore drill"
 		}
 		a.Message = fmt.Sprintf("%s failed for app %s on device %s. Code: %s. Run synod operation get %s.", label, a.AppID, a.NodeID, code, a.OperationID)
+		if kind == "repository_maintenance" {
+			a.Kind = "maintenance_failed"
+			a.Message = fmt.Sprintf("Repository maintenance failed for destination %s on device %s. Expired backups still use space. Code: %s. Run synod operation get %s.", a.DestinationID, a.NodeID, code, a.OperationID)
+		}
 		failures = append(failures, a)
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {

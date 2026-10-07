@@ -1,4 +1,4 @@
-// Package proof defines repository checks and isolated restore drills.
+// Package proof defines repository checks, isolated restore drills, and repository maintenance.
 package proof
 
 import (
@@ -16,7 +16,11 @@ type Kind string
 const (
 	Integrity Kind = "integrity_check"
 	Drill     Kind = "restore_drill"
+	// Maintenance reclaims expired repository content. Only the repository's maintenance owner runs it.
+	Maintenance Kind = "repository_maintenance"
 )
+
+func (k Kind) Valid() bool { return k == Integrity || k == Drill || k == Maintenance }
 
 var ErrInvalid = errors.New("invalid proof request or result")
 
@@ -46,6 +50,11 @@ func (r Request) Validate() error {
 		if r.DestinationID == uuid.Nil || r.AppID != uuid.Nil || r.SnapshotID != uuid.Nil {
 			return ErrInvalid
 		}
+	case Maintenance:
+		// The controller cannot request maintenance. Only the owner's schedule admits it.
+		if r.DestinationID == uuid.Nil || r.AppID != uuid.Nil || r.SnapshotID != uuid.Nil || r.ScheduleID == uuid.Nil {
+			return ErrInvalid
+		}
 	case Drill:
 		if r.AppID == uuid.Nil {
 			return ErrInvalid
@@ -71,18 +80,21 @@ type Schedule struct {
 }
 
 func (s Schedule) Validate() error {
-	r := Request{Submission: Submission{ID: s.ID, Kind: s.Kind, NodeID: s.NodeID, AppID: s.AppID, DestinationID: s.DestinationID}, InstallationID: s.InstallationID, RequestedAt: s.CreatedAt}
+	r := Request{Submission: Submission{ID: s.ID, Kind: s.Kind, NodeID: s.NodeID, AppID: s.AppID, DestinationID: s.DestinationID}, InstallationID: s.InstallationID, RequestedAt: s.CreatedAt, ScheduleID: s.ID, ScheduledAt: s.CreatedAt}
 	return r.Validate()
 }
 
 // Due returns one current slot. The first slot is due when the schedule starts.
-// Later checks run each seven days. Later drills run at the start of each UTC month.
+// Later checks run each seven days, and maintenance runs each day. Later drills run at the start of each UTC month.
 func (s Schedule) Due(now time.Time) time.Time {
 	if s.Validate() != nil || now.Before(s.CreatedAt) {
 		return time.Time{}
 	}
-	if s.Kind == Integrity {
+	switch s.Kind {
+	case Integrity:
 		return s.CreatedAt.Add(now.Sub(s.CreatedAt) / (7 * 24 * time.Hour) * (7 * 24 * time.Hour))
+	case Maintenance:
+		return s.CreatedAt.Add(now.Sub(s.CreatedAt) / (24 * time.Hour) * (24 * time.Hour))
 	}
 	now = now.UTC()
 	month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
@@ -115,8 +127,10 @@ type Result struct {
 	Read          int64     `json:"read,omitzero"`
 	BytesRead     int64     `json:"bytes_read,omitzero"`
 	Containers    int       `json:"containers,omitzero"`
-	FailureCode   string    `json:"failure_code,omitempty"`
-	Resource      string    `json:"resource,omitempty"`
+	// Maintenance is completed, claimed, or handing_over. Space is reclaimed only after completed runs.
+	Maintenance string `json:"maintenance,omitempty"`
+	FailureCode string `json:"failure_code,omitempty"`
+	Resource    string `json:"resource,omitempty"`
 }
 
 type Event struct {
@@ -131,7 +145,7 @@ func (e Event) Validate(request Request) error {
 	if request.Validate() != nil || e.ID != request.ID || (e.Request != nil && *e.Request != request) || (request.ScheduleID != uuid.Nil && e.Request == nil) || r.Contents < 0 || r.Read < 0 || r.Read > r.Contents || r.BytesRead < 0 || r.Containers < 0 || r.Containers > 256 || len(r.Resource) > 2048 || strings.ContainsFunc(r.Resource, unicode.IsControl) {
 		return ErrInvalid
 	}
-	if (r.DestinationID != uuid.Nil && request.DestinationID != uuid.Nil && r.DestinationID != request.DestinationID) || (r.SnapshotID != uuid.Nil && request.SnapshotID != uuid.Nil && r.SnapshotID != request.SnapshotID) || (request.Kind == Integrity && (r.SnapshotID != uuid.Nil || r.Containers != 0)) || (request.Kind == Drill && (r.Contents != 0 || r.Read != 0 || r.BytesRead != 0)) {
+	if (r.DestinationID != uuid.Nil && request.DestinationID != uuid.Nil && r.DestinationID != request.DestinationID) || (r.SnapshotID != uuid.Nil && request.SnapshotID != uuid.Nil && r.SnapshotID != request.SnapshotID) || (request.Kind == Integrity && (r.SnapshotID != uuid.Nil || r.Containers != 0)) || (request.Kind == Drill && (r.Contents != 0 || r.Read != 0 || r.BytesRead != 0)) || (request.Kind == Maintenance && (r.SnapshotID != uuid.Nil || r.Containers != 0 || r.Contents != 0 || r.Read != 0 || r.BytesRead != 0)) || (r.Maintenance != "" && (request.Kind != Maintenance || !slices.Contains([]string{"completed", "claimed", "handing_over"}, r.Maintenance))) {
 		return ErrInvalid
 	}
 	switch e.Status {
@@ -140,7 +154,7 @@ func (e Event) Validate(request Request) error {
 			return ErrInvalid
 		}
 	case "running", "waiting":
-		if !r.CompletedAt.IsZero() || r.FailureCode != "" || r.Resource != "" {
+		if !r.CompletedAt.IsZero() || r.FailureCode != "" || r.Resource != "" || r.Maintenance != "" {
 			return ErrInvalid
 		}
 	case "succeeded", "failed":
@@ -148,10 +162,10 @@ func (e Event) Validate(request Request) error {
 			return ErrInvalid
 		}
 		if e.Status == "succeeded" {
-			if r.FailureCode != "" || r.Resource != "" || r.DestinationID == uuid.Nil || (request.Kind == Integrity && r.Read == 0) || (request.Kind == Drill && (r.SnapshotID == uuid.Nil || r.Containers == 0)) {
+			if r.FailureCode != "" || r.Resource != "" || r.DestinationID == uuid.Nil || (request.Kind == Integrity && r.Read == 0) || (request.Kind == Drill && (r.SnapshotID == uuid.Nil || r.Containers == 0)) || (request.Kind == Maintenance && r.Maintenance == "") {
 				return ErrInvalid
 			}
-		} else if !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "integrity_check_failed", "snapshot_not_found", "snapshot_invalid", "image_platform_unsupported", "image_unavailable", "compose_unavailable", "definition_unsupported", "app_conflict", "source_path_unavailable", "file_restore_failed", "volume_restore_failed", "database_restore_failed", "compose_start_failed", "drill_container_stopped", "drill_isolation_failed", "agent_interrupted"}, r.FailureCode) {
+		} else if !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "integrity_check_failed", "snapshot_not_found", "snapshot_invalid", "image_platform_unsupported", "image_unavailable", "compose_unavailable", "definition_unsupported", "app_conflict", "source_path_unavailable", "file_restore_failed", "volume_restore_failed", "database_restore_failed", "compose_start_failed", "drill_container_stopped", "drill_isolation_failed", "maintenance_not_owner", "maintenance_failed", "agent_interrupted"}, r.FailureCode) || r.Maintenance != "" {
 			return ErrInvalid
 		}
 	default:

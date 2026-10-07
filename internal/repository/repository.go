@@ -31,6 +31,7 @@ func (e *Error) Unwrap() error { return e.Cause }
 // Repository owns an open Kopia repository. Close it after its callers finish.
 type Repository struct {
 	repo  repo.Repository
+	dir   string
 	fatal atomic.Pointer[error]
 	write sync.Mutex
 }
@@ -47,7 +48,7 @@ func Create(ctx context.Context, location Location, credentials Credentials) (*R
 	if err := repo.Initialize(ctx, st, nil, credentials.Password); err != nil {
 		return nil, &Error{Action: "initialize", Cause: errors.Join(err, ctx.Err())}
 	}
-	return open(ctx, st, credentials.Password)
+	return open(ctx, st, credentials.Password, "synod", nil)
 }
 
 // Open requires only the location and credentials. It uses no saved controller state.
@@ -59,37 +60,43 @@ func Open(ctx context.Context, location Location, credentials Credentials) (*Rep
 		return nil, &Error{Action: "open storage", Cause: errors.Join(err, ctx.Err())}
 	}
 	defer st.Close(context.WithoutCancel(ctx))
-	return open(ctx, st, credentials.Password)
+	return open(ctx, st, credentials.Password, "synod", nil)
 }
 
 // open confines Kopia's connection file to a private temporary directory.
 // Kopia retains the open connection in memory. No credential file or cache remains.
-func open(ctx context.Context, st blob.Storage, password string) (*Repository, error) {
+// The empty directory stays until Close because Kopia puts its maintenance lock there.
+func open(ctx context.Context, st blob.Storage, password, host string, now func() time.Time) (*Repository, error) {
 	dir, err := os.MkdirTemp("", "synod-repository-")
 	if err != nil {
 		return nil, &Error{Action: "prepare connection", Cause: errors.Join(err, ctx.Err())}
 	}
-	defer os.RemoveAll(dir)
 	info := st.ConnectionInfo()
-	config := repo.LocalConfig{Storage: &info, ClientOptions: repo.ClientOptions{Hostname: "synod", Username: "synod", Description: "Synod repository", EnableActions: false}, Caching: &content.CachingOptions{}}
+	config := repo.LocalConfig{Storage: &info, ClientOptions: repo.ClientOptions{Hostname: host, Username: "synod", Description: "Synod repository", EnableActions: false}, Caching: &content.CachingOptions{}}
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		return nil, &Error{Action: "prepare connection", Cause: errors.Join(err, ctx.Err())}
 	}
 	file := filepath.Join(dir, "connection.json")
 	if err := os.WriteFile(file, encoded, 0600); err != nil {
+		os.RemoveAll(dir)
 		return nil, &Error{Action: "prepare connection", Cause: errors.Join(err, ctx.Err())}
 	}
-	r := new(Repository)
-	r.repo, err = repo.Open(ctx, file, password, &repo.Options{DisableRepositoryLog: true, DoNotWaitForUpgrade: true, OnFatalError: func(err error) { r.fatal.Store(&err) }})
+	r := &Repository{dir: dir}
+	r.repo, err = repo.Open(ctx, file, password, &repo.Options{DisableRepositoryLog: true, DoNotWaitForUpgrade: true, TimeNowFunc: now, OnFatalError: func(err error) { r.fatal.Store(&err) }})
+	if removeErr := os.Remove(file); err == nil && removeErr != nil {
+		r.repo.Close(ctx)
+		err = removeErr
+	}
 	if err != nil {
+		os.RemoveAll(dir)
 		return nil, &Error{Action: "open", Cause: errors.Join(err, ctx.Err())}
 	}
 	return r, nil
 }
 
 func (r *Repository) Close(ctx context.Context) error {
-	err := r.repo.Close(ctx)
+	err := errors.Join(r.repo.Close(ctx), os.RemoveAll(r.dir))
 	if fatal := r.fatal.Load(); fatal != nil {
 		err = errors.Join(err, *fatal)
 	}
@@ -123,7 +130,7 @@ func Connect(ctx context.Context, location Location, credentials Credentials, in
 			return nil, &Error{Action: "initialize", Cause: errors.Join(err, ctx.Err())}
 		}
 	}
-	return open(ctx, st, credentials.Password)
+	return open(ctx, st, credentials.Password, "synod", nil)
 }
 
 // CheckInstallation refuses to mix the recovery state of two Synod installations.

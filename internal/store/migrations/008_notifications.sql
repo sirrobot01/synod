@@ -16,7 +16,7 @@ CREATE TABLE notification_updates (
 
 CREATE TABLE notification_alerts (
     id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('backup_failed','backup_overdue','drill_failed','destination_full','device_missing','test')),
+    kind TEXT NOT NULL CHECK (kind IN ('backup_failed','backup_overdue','drill_failed','maintenance_failed','destination_full','device_missing','test')),
     node_id TEXT NOT NULL,
     app_id TEXT NOT NULL,
     destination_id TEXT NOT NULL,
@@ -30,7 +30,7 @@ CREATE TABLE notification_alerts (
     delivered_at INTEGER,
     failure_code TEXT NOT NULL DEFAULT ''
 );
-CREATE UNIQUE INDEX notification_operation ON notification_alerts(operation_id) WHERE kind IN ('backup_failed','drill_failed');
+CREATE UNIQUE INDEX notification_operation ON notification_alerts(operation_id) WHERE kind IN ('backup_failed','drill_failed','maintenance_failed');
 CREATE INDEX notification_pending ON notification_alerts (state,next_attempt_at);
 CREATE INDEX notification_recent ON notification_alerts (created_at DESC,id);
 

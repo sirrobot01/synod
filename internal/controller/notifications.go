@@ -23,6 +23,9 @@ func deliverNotifications(ctx context.Context, installationID uuid.UUID, metadat
 			if err := metadata.RefreshNotifications(ctx, installationID, ring); err != nil && ctx.Err() == nil {
 				logger.Warn("notification_scan_failed", "code", "notification_store_unavailable")
 			}
+			if err := metadata.ReassignMaintenance(ctx); err != nil && ctx.Err() == nil {
+				logger.Warn("maintenance_assignment_failed", "code", "metadata_store_unavailable")
+			}
 			refresh = time.Now().Add(15 * time.Second)
 		}
 		delivery, err := metadata.ClaimNotification(ctx, installationID, ring)
