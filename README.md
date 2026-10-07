@@ -716,6 +716,18 @@ SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock python3 scripts/proof-checks.
 The proof uses a local HTTP receiver and disposable Docker containers.
 It checks delivery after a controller restart and after a forced drill failure.
 
+Run the M4 proof on the approved Linux hosts:
+
+```sh
+python3 scripts/proof-alerts.py --binaries /path/to/linux-binaries --evidence /path/to/new-private-evidence
+```
+
+The binary directory must contain `synod-linux-amd64` and `synod-linux-arm64`.
+The proof uses the hosts and SSH settings in `scripts/proof-m1.py`.
+It starts only disposable projects and a loopback HTTP receiver.
+It checks database rows, drill isolation, alert delivery, cleanup, and existing container start times.
+Get host approval before you run it.
+
 ## Restore an app
 
 Select the app from `synod app list`.
