@@ -15,7 +15,8 @@ It requires no PostgreSQL server or etcd service.
 
 On-demand and scheduled Stop and Live backups are available for file-based apps.
 They use encrypted local, Synod-device, SFTP, or S3 repositories.
-App restore, repository recovery, and the recovery kit are not available yet.
+App restore to the same device or another device is available.
+File restore, repository recovery, and the recovery kit are not available yet.
 Synod does not place running apps or provide automatic failover.
 
 ## Build and checks
@@ -457,8 +458,81 @@ A lost stop response causes a confirmed stop before restart.
 A failed restart stays pending in the journal and is retried.
 An admitted backup continues through a controller outage.
 Its result survives an agent restart and remains until the controller acknowledges it.
-The repository library restores files into a new directory for the backup tests.
-File restore commands and complete app restore remain later tasks.
+File restore commands remain a later task.
+
+## Restore an app
+
+Select the app from `synod app list`.
+Select the target device from `synod node list`.
+
+```sh
+synod restore notes --to odin
+synod restore notes --to server --snapshot SNAPSHOT_ID
+synod restore notes --to server --replace
+synod restore APP_ID --to odin --destination peer --wait=false
+```
+
+The default snapshot is the newest snapshot in all destinations that the target can open.
+Use `--destination` to read one destination only.
+The target agent does all restore work. The snapshot data does not go through the controller.
+
+Synod checks these conditions before it changes the target:
+
+- Each image supports the target architecture. The failure names the image.
+- The target can pull each image by its saved digest. A cached image of the target architecture is also accepted.
+- No other container has an app container name or the Compose project name.
+- No running container publishes a port that the app publishes.
+- An existing network with a saved network name uses the saved driver.
+- The Docker Compose plugin is available.
+
+The agent writes the restore into a new private directory.
+The directory is `restores/OPERATION_ID` beside the agent enrollment directory.
+The default is `/var/lib/synod/agent/restores/OPERATION_ID`.
+The `project` directory holds the saved project files.
+The `data` directory holds the saved bind paths.
+Each saved volume becomes a new volume named `synod-OPERATION_ID-volumeN`.
+Synod applies the saved owners, modes, and times.
+A Large or Dumped bind path becomes an empty path with its saved owner and mode.
+A Never path keeps its original host path.
+
+Synod loads each database dump into the new data before the app starts.
+The load container has no network and no published ports.
+It ignores the image's initialization scripts.
+PostgreSQL loads the `pg_dumpall` output as the original administrator user.
+MySQL and MariaDB load the SQL dump as root.
+Redis loads the RDB file. Synod then enables the append-only file again if the app used it.
+
+Synod writes `compose.json` from the saved container settings.
+The file keeps the project name, the service names, the container names, and the published ports.
+It uses the image digest and the target platform.
+Docker Compose then starts the project without a build or a pull.
+Synod creates each missing network with its saved driver and options.
+It keeps a saved subnet only when a container uses a static address on that network.
+A container must run, or exit with code 0, three seconds after the start.
+A standalone container becomes the Compose project `synod-CONTAINER_ID_PREFIX`.
+The result shows the new app ID and the project directory.
+
+Synod does not overwrite an existing app unless you use `--replace`.
+With `--replace`, Synod first prepares the complete restore beside the running app.
+It then takes a safety snapshot of the existing app in the same destination.
+It stops and removes the existing containers only after the safety snapshot succeeds.
+The volumes and bind paths of the replaced app stay on the device.
+If the restored app does not start, Synod removes it.
+Synod then creates the replaced containers again from their saved settings and starts the containers that ran before.
+The result shows the safety snapshot ID.
+
+A failed restore removes its directory, its volumes, its networks, and its containers.
+The warning `cleanup_pending` means that some of these items remain.
+The agent journal saves each phase of the restore.
+After an agent restart, the agent recovers the replaced app before it takes more work.
+A recovery that cannot finish stays in the `waiting` state and is retried.
+
+Limits:
+
+- Host networking is not supported.
+- The port check reads Docker containers only. A host process that uses a port causes a start failure.
+- An image that was available only on the source device cannot be restored on another device.
+- The safety snapshot is reported in the restore result only. It is not a separate backup operation.
 
 ## Repository library
 

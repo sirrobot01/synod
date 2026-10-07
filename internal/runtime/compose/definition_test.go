@@ -1,4 +1,4 @@
-package backup
+package compose
 
 import (
 	"context"
@@ -47,7 +47,11 @@ func TestStandaloneComposeMatchesRealContainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := StandaloneCompose(inspected.Container)
+	definition, err := FromContainer(inspected.Container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := Encode(definition)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,12 +85,12 @@ func TestStandaloneComposeMatchesRealContainer(t *testing.T) {
 		t.Fatal("generated definition changed the container configuration")
 	}
 	inspected.Container.HostConfig.AutoRemove = true
-	if _, err := StandaloneCompose(inspected.Container); !errors.Is(err, ErrDefinition) {
+	if _, err := FromContainer(inspected.Container); !errors.Is(err, ErrDefinition) {
 		t.Fatalf("auto-remove accepted: %v", err)
 	}
 	inspected.Container.HostConfig.AutoRemove = false
 	inspected.Container.HostConfig.NetworkMode = "container:another"
-	if _, err := StandaloneCompose(inspected.Container); !errors.Is(err, ErrDefinition) {
+	if _, err := FromContainer(inspected.Container); !errors.Is(err, ErrDefinition) {
 		t.Fatalf("external namespace accepted: %v", err)
 	}
 }

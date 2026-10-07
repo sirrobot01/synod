@@ -25,11 +25,13 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/blobserver"
 	"github.com/sirrobot01/synod/internal/agent/enrollment"
 	"github.com/sirrobot01/synod/internal/agent/journal"
+	agentrestore "github.com/sirrobot01/synod/internal/agent/restore"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/repository"
+	"github.com/sirrobot01/synod/internal/restore"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
@@ -88,7 +90,7 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	hello := &agentv1.Hello{
 		InstallationId: config.InstallationID, NodeId: config.NodeID, DestinationAddress: destinationAddress,
 		Protocol:     &agentv1.VersionRange{Minimum: controlstream.ProtocolVersion, Maximum: controlstream.ProtocolVersion},
-		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
+		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec", "restore.exec"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
 		Hostname: hostname, AgentVersion: Version,
 	}
 	stream, err := transport.New(transport.Config{
@@ -99,6 +101,17 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 				var request backup.Request
 				if len(job.RequestJson) > 8192 || json.Unmarshal(job.RequestJson, &request) != nil || request.Validate() != nil || request.NodeID != identity.Identity.NodeID || request.InstallationID != identity.Identity.InstallationID {
 					return nil, backup.ErrInvalid
+				}
+				raw, _ := json.Marshal(request)
+				if _, err := cache.Admit(ctx, request.ID, raw); err != nil {
+					return nil, err
+				}
+				return nil, nil
+			}
+			if job := message.GetRestoreJob(); job != nil {
+				var request restore.Request
+				if len(job.RequestJson) > 8192 || json.Unmarshal(job.RequestJson, &request) != nil || request.Validate() != nil || request.NodeID != identity.Identity.NodeID || request.InstallationID != identity.Identity.InstallationID {
+					return nil, restore.ErrInvalid
 				}
 				raw, _ := json.Marshal(request)
 				if _, err := cache.Admit(ctx, request.ID, raw); err != nil {
@@ -152,9 +165,10 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 		return fmt.Errorf("%w: resolve enrollment directory", ErrConfiguration)
 	}
 	backupWorker := &agentbackup.Worker{Docker: api, Journal: cache, Keyring: ring, InstallationID: identity.Identity.InstallationID, NodeID: identity.Identity.NodeID, NodeName: hostname, Architecture: facts.architecture, Identity: deviceIdentity, PrivatePaths: []string{enrollmentPath, enrollmentPath + ".db", enrollmentPath + ".db-wal", enrollmentPath + ".db-shm"}}
+	restoreWorker := &agentrestore.Worker{Backup: backupWorker, Directory: filepath.Join(filepath.Dir(enrollmentPath), "restores")}
 	var waiting atomic.Pointer[uuid.UUID]
-	worker.Go(func() { executeBackups(workerCtx, backupWorker, &waiting, logger) })
-	worker.Go(func() { reportBackups(workerCtx, cache, stream, &waiting, logger) })
+	worker.Go(func() { executeJobs(workerCtx, backupWorker, restoreWorker, &waiting, logger) })
+	worker.Go(func() { reportJobs(workerCtx, cache, stream, &waiting, logger) })
 	worker.Go(func() { discover(workerCtx, api, stream, logger) })
 	defer func() { stopWorker(); worker.Wait() }()
 	logger.Info("agent_started", "node_id", config.NodeID, "architecture", facts.architecture, "runtime_version", facts.version)

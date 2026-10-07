@@ -11,13 +11,16 @@ import (
 	"github.com/google/uuid"
 	agentbackup "github.com/sirrobot01/synod/internal/agent/backup"
 	"github.com/sirrobot01/synod/internal/agent/journal"
+	agentrestore "github.com/sirrobot01/synod/internal/agent/restore"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/controlstream"
+	"github.com/sirrobot01/synod/internal/restore"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
-func executeBackups(ctx context.Context, worker *agentbackup.Worker, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
+// executeJobs runs backups and restores one at a time, so a restore never races a backup of the same app.
+func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agentrestore.Worker, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	for {
@@ -39,12 +42,21 @@ func executeBackups(ctx context.Context, worker *agentbackup.Worker, waiting *at
 			if record.State == journal.Terminal {
 				continue
 			}
+			waiting.Store(nil)
+			var job restore.Request
+			if json.Unmarshal(record.Input, &job) == nil && job.Kind == "restore" {
+				if _, err := restorer.Execute(ctx, job); err != nil {
+					waiting.Store(new(record.ID))
+					logger.Warn("restore_recovery_pending", "operation_id", record.ID, "code", "inspect_restore_recovery")
+					break
+				}
+				continue
+			}
 			var request backup.Request
 			if json.Unmarshal(record.Input, &request) != nil || request.Validate() != nil {
 				logger.Warn("backup_journal_failed", "code", "journal_request_invalid")
 				break
 			}
-			waiting.Store(nil)
 			if _, err := worker.Execute(ctx, request); err != nil {
 				waiting.Store(new(record.ID))
 				logger.Warn("backup_recovery_pending", "operation_id", record.ID, "code", "inspect_backup_recovery")
@@ -59,7 +71,7 @@ func executeBackups(ctx context.Context, worker *agentbackup.Worker, waiting *at
 	}
 }
 
-func reportBackups(ctx context.Context, cache *journal.Journal, stream *transport.Client, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
+func reportJobs(ctx context.Context, cache *journal.Journal, stream *transport.Client, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
@@ -71,8 +83,14 @@ func reportBackups(ctx context.Context, cache *journal.Journal, stream *transpor
 			logger.Warn("backup_report_failed", "code", "journal_read_failed")
 		}
 		for _, record := range records {
+			var job restore.Request
+			if json.Unmarshal(record.Input, &job) == nil && job.Kind == "restore" {
+				reportRestore(stream, record, job, waiting, logger)
+				continue
+			}
 			var request backup.Request
-			if json.Unmarshal(record.Input, &request) != nil || request.Validate() != nil {
+			// A safety snapshot reaches the controller in its restore result.
+			if json.Unmarshal(record.Input, &request) != nil || request.Validate() != nil || request.RestoreID != uuid.Nil {
 				continue
 			}
 			event := backup.Event{ID: record.ID, Result: backup.Result{DestinationID: request.DestinationID}}
@@ -119,5 +137,45 @@ func reportBackups(ctx context.Context, cache *journal.Journal, stream *transpor
 			return
 		case <-tick.C:
 		}
+	}
+}
+
+func reportRestore(stream *transport.Client, record journal.Record, request restore.Request, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
+	event := restore.Event{ID: record.ID}
+	switch record.State {
+	case journal.Queued:
+		event.Status = "queued"
+	case journal.Running:
+		event.Status = "running"
+		result, err := agentrestore.WaitingResult(record)
+		if err != nil {
+			return
+		}
+		event.Result = result
+		if id := waiting.Load(); id != nil && *id == record.ID {
+			event.Status = "waiting"
+		} else {
+			event.Result.RecoveryPending = nil
+		}
+	case journal.Terminal:
+		if json.Unmarshal(record.Result, &event.Result) != nil {
+			return
+		}
+		event.Status = "succeeded"
+		if event.Result.FailureCode != "" {
+			event.Status = "failed"
+		}
+	}
+	if event.Validate(request) != nil {
+		logger.Warn("restore_report_failed", "operation_id", record.ID, "code", "result_invalid")
+		return
+	}
+	raw, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	err = stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_RestoreEvent{RestoreEvent: &agentv1.RestoreEvent{EventJson: raw}}})
+	if err != nil && !errors.Is(err, controlstream.ErrDisconnected) && !errors.Is(err, controlstream.ErrBusy) {
+		logger.Warn("restore_report_failed", "code", "result_delivery_failed")
 	}
 }

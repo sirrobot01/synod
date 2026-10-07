@@ -38,10 +38,15 @@ type Request struct {
 	ScheduleID     uuid.UUID  `json:"schedule_id,omitzero"`
 	ScheduledAt    time.Time  `json:"scheduled_at,omitzero"`
 	Retention      *Retention `json:"retention,omitzero"`
+	// RestoreID marks a safety snapshot that a replace takes. The restore result reports it.
+	RestoreID uuid.UUID `json:"restore_id,omitzero"`
 }
 
 func (r Request) Validate() error {
 	if r.ID == uuid.Nil || r.InstallationID == uuid.Nil || r.AppID == uuid.Nil || r.NodeID == uuid.Nil || r.DestinationID == uuid.Nil || r.RequestedAt.IsZero() || (r.Method != Auto && r.Method != Stop && r.Method != Live && r.Method != Dump) || len(r.SourceKey) > 512 || !(strings.HasPrefix(r.SourceKey, "compose:") || strings.HasPrefix(r.SourceKey, "container:")) || uuid.NewSHA1(r.NodeID, []byte(r.SourceKey)) != r.AppID {
+		return ErrInvalid
+	}
+	if r.RestoreID != uuid.Nil && (r.ScheduleID != uuid.Nil || r.Initialize || r.Retention != nil || r.ID != SafetyID(r.RestoreID)) {
 		return ErrInvalid
 	}
 	if (r.ScheduleID == uuid.Nil) != r.ScheduledAt.IsZero() || (r.ScheduleID != uuid.Nil && (r.Initialize || !r.RequestedAt.Equal(r.ScheduledAt) || r.Retention == nil)) || (r.Retention != nil && r.Retention.Validate() != nil) {
@@ -49,6 +54,9 @@ func (r Request) Validate() error {
 	}
 	return nil
 }
+
+// SafetyID derives the one safety snapshot ID that a restore can take.
+func SafetyID(restoreID uuid.UUID) uuid.UUID { return uuid.NewSHA1(restoreID, []byte("safety")) }
 
 // Path maps an original path to its root in the snapshot.
 type Path struct {
@@ -78,6 +86,14 @@ type Image struct {
 	LocalOnly     bool     `json:"local_only,omitzero"`
 }
 
+// MountSource records the type and owner of a bind source, including skipped sources.
+type MountSource struct {
+	Source  string `json:"source"`
+	Mode    uint32 `json:"mode"`
+	UserID  uint32 `json:"uid"`
+	GroupID uint32 `json:"gid"`
+}
+
 // Snapshot is stored inside the encrypted repository beside its native Kopia snapshot.
 type Snapshot struct {
 	ID             uuid.UUID      `json:"id"`
@@ -87,6 +103,7 @@ type Snapshot struct {
 	Method         Method         `json:"method"`
 	Architecture   string         `json:"architecture"`
 	Images         []Image        `json:"images"`
+	MountSources   []MountSource  `json:"mount_sources,omitempty"`
 	StartedAt      time.Time      `json:"started_at"`
 	CompletedAt    time.Time      `json:"completed_at"`
 	DowntimeMillis int64          `json:"downtime_ms"`

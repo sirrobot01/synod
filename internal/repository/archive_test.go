@@ -63,7 +63,7 @@ func TestArchivePreservesContentOwnersAndLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	if err := r.Archive(t.Context(), saved.ID, "data", &output); err != nil {
+	if err := r.Archive(t.Context(), saved.ID, "data", "", &output); err != nil {
 		t.Fatal(err)
 	}
 	if host := os.Getenv("SYNOD_TEST_DOCKER_HOST"); host != "" {
@@ -133,17 +133,17 @@ func TestArchivePreservesContentOwnersAndLinks(t *testing.T) {
 		t.Fatal("missing restored entries")
 	}
 	for _, path := range []string{"../data", "/data", "data/../state", "data\\state", "data/link/child"} {
-		if err := r.Archive(t.Context(), saved.ID, path, io.Discard); !errors.Is(err, backup.ErrInvalid) {
+		if err := r.Archive(t.Context(), saved.ID, path, "", io.Discard); !errors.Is(err, backup.ErrInvalid) {
 			t.Fatalf("accepted unsafe source %q: %v", path, err)
 		}
 	}
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := r.Archive(cancelled, saved.ID, "data", io.Discard); err == nil {
+	if err := r.Archive(cancelled, saved.ID, "data", "", io.Discard); err == nil {
 		t.Fatal("ignored cancellation")
 	}
 	output.Reset()
-	if err := r.Archive(t.Context(), saved.ID, "data/state", &output); err != nil {
+	if err := r.Archive(t.Context(), saved.ID, "data/state", "", &output); err != nil {
 		t.Fatal(err)
 	}
 	header, err := tar.NewReader(&output).Next()

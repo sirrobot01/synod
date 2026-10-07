@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"os"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,6 +22,7 @@ import (
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/repository"
+	"github.com/sirrobot01/synod/internal/runtime/compose"
 	"github.com/sirrobot01/synod/internal/secret"
 )
 
@@ -206,12 +209,17 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return w.finish(ctx, request, &state, r)
 	}
 	if app.Kind == "container" {
-		compose, err := StandaloneCompose(inspected[0])
+		definition, err := compose.FromContainer(inspected[0])
 		if err != nil {
 			state.FailureCode = "standalone_definition_unsupported"
 			return w.finish(ctx, request, &state, r)
 		}
-		definitions["compose.json"] = compose
+		encoded, err := compose.Encode(definition)
+		if err != nil {
+			state.FailureCode = "standalone_definition_unsupported"
+			return w.finish(ctx, request, &state, r)
+		}
+		definitions["compose.json"] = encoded
 	}
 	excluded := make([]backup.Exclusion, 0, len(w.PrivatePaths)+1)
 	for _, path := range w.PrivatePaths {
@@ -248,6 +256,17 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		Images:       images,
 		StartedAt:    state.StartedAt,
 		Paths:        tree.Paths,
+	}
+	for _, path := range app.Paths {
+		if path.Kind != "bind" || path.Status == "Never" || slices.ContainsFunc(state.Metadata.MountSources, func(source backup.MountSource) bool { return source.Source == path.Source }) {
+			continue
+		}
+		info, err := os.Stat(path.Source)
+		if err != nil {
+			continue
+		} // An unavailable excluded source remains explicitly absent.
+		owner := info.Sys().(*syscall.Stat_t)
+		state.Metadata.MountSources = append(state.Metadata.MountSources, backup.MountSource{Source: path.Source, Mode: uint32(info.Mode()), UserID: owner.Uid, GroupID: owner.Gid})
 	}
 	source := snapshot.SourceInfo{Host: w.NodeID.String(), UserName: "synod", Path: request.AppID.String()}
 	if method == backup.Stop {

@@ -1,4 +1,5 @@
-package backup
+// Package compose builds portable definitions from observed Docker settings.
+package compose
 
 import (
 	"encoding/json"
@@ -13,79 +14,87 @@ import (
 	"github.com/moby/moby/api/types/mount"
 )
 
-var ErrDefinition = errors.New("container configuration cannot be represented safely in Compose; use a Compose project for this app")
+var ErrDefinition = errors.New("saved container settings cannot be represented safely in Compose")
 
-type composeDefinition struct {
-	Name     string                    `json:"name"`
-	Services map[string]composeService `json:"services"`
-	Volumes  map[string]composeVolume  `json:"volumes,omitempty"`
-	Networks map[string]composeNetwork `json:"networks,omitempty"`
+type Definition struct {
+	Name     string             `json:"name"`
+	Services map[string]Service `json:"services"`
+	Volumes  map[string]Volume  `json:"volumes,omitempty"`
+	Networks map[string]Network `json:"networks,omitempty"`
 }
 
-type composeService struct {
-	Image              string                       `json:"image"`
-	ContainerName      string                       `json:"container_name"`
-	Hostname           string                       `json:"hostname,omitempty"`
-	DomainName         string                       `json:"domainname,omitempty"`
-	User               string                       `json:"user,omitempty"`
-	WorkingDir         string                       `json:"working_dir,omitempty"`
-	Command            []string                     `json:"command"`
-	Entrypoint         []string                     `json:"entrypoint"`
-	Environment        []string                     `json:"environment,omitempty"`
-	Labels             map[string]string            `json:"labels,omitempty"`
-	TTY                bool                         `json:"tty,omitzero"`
-	StdinOpen          bool                         `json:"stdin_open,omitzero"`
-	Init               *bool                        `json:"init,omitempty"`
-	StopSignal         string                       `json:"stop_signal,omitempty"`
-	StopGracePeriod    string                       `json:"stop_grace_period,omitempty"`
-	Healthcheck        *composeHealth               `json:"healthcheck,omitempty"`
-	Restart            string                       `json:"restart,omitempty"`
-	ReadOnly           bool                         `json:"read_only,omitzero"`
-	Privileged         bool                         `json:"privileged,omitzero"`
-	NetworkMode        string                       `json:"network_mode,omitempty"`
-	Networks           map[string]composeAttachment `json:"networks,omitempty"`
-	Ports              []composePort                `json:"ports,omitempty"`
-	Expose             []string                     `json:"expose,omitempty"`
-	Volumes            []composeMount               `json:"volumes,omitempty"`
-	Tmpfs              []string                     `json:"tmpfs,omitempty"`
-	DNS                []string                     `json:"dns,omitempty"`
-	DNSOptions         []string                     `json:"dns_opt,omitempty"`
-	DNSSearch          []string                     `json:"dns_search,omitempty"`
-	ExtraHosts         []string                     `json:"extra_hosts,omitempty"`
-	GroupAdd           []string                     `json:"group_add,omitempty"`
-	CapAdd             []string                     `json:"cap_add,omitempty"`
-	CapDrop            []string                     `json:"cap_drop,omitempty"`
-	SecurityOpt        []string                     `json:"security_opt,omitempty"`
-	Sysctls            map[string]string            `json:"sysctls,omitempty"`
-	Devices            []string                     `json:"devices,omitempty"`
-	DeviceCgroupRules  []string                     `json:"device_cgroup_rules,omitempty"`
-	Ulimits            map[string]composeUlimit     `json:"ulimits,omitempty"`
-	Logging            *composeLogging              `json:"logging,omitempty"`
-	Runtime            string                       `json:"runtime,omitempty"`
-	IPC                string                       `json:"ipc,omitempty"`
-	PID                string                       `json:"pid,omitempty"`
-	UTS                string                       `json:"uts,omitempty"`
-	UserNS             string                       `json:"userns_mode,omitempty"`
-	Cgroup             string                       `json:"cgroup,omitempty"`
-	CgroupParent       string                       `json:"cgroup_parent,omitempty"`
-	ShmSize            int64                        `json:"shm_size,omitzero"`
-	CPUShares          int64                        `json:"cpu_shares,omitzero"`
-	CPUs               float64                      `json:"cpus,omitzero"`
-	CPUPeriod          int64                        `json:"cpu_period,omitzero"`
-	CPUQuota           int64                        `json:"cpu_quota,omitzero"`
-	CPURealtimePeriod  int64                        `json:"cpu_rt_period,omitzero"`
-	CPURealtimeRuntime int64                        `json:"cpu_rt_runtime,omitzero"`
-	CPUSet             string                       `json:"cpuset,omitempty"`
-	Memory             int64                        `json:"mem_limit,omitzero"`
-	MemoryReservation  int64                        `json:"mem_reservation,omitzero"`
-	MemorySwap         int64                        `json:"memswap_limit,omitzero"`
-	MemorySwappiness   *int64                       `json:"mem_swappiness,omitempty"`
-	OOMKillDisable     *bool                        `json:"oom_kill_disable,omitempty"`
-	OOMScoreAdj        int                          `json:"oom_score_adj,omitzero"`
-	PidsLimit          *int64                       `json:"pids_limit,omitempty"`
+type Service struct {
+	Platform           string                `json:"platform,omitempty"`
+	DependsOn          map[string]Dependency `json:"depends_on,omitempty"`
+	Image              string                `json:"image"`
+	ContainerName      string                `json:"container_name"`
+	Hostname           string                `json:"hostname,omitempty"`
+	DomainName         string                `json:"domainname,omitempty"`
+	User               string                `json:"user,omitempty"`
+	WorkingDir         string                `json:"working_dir,omitempty"`
+	Command            []string              `json:"command"`
+	Entrypoint         []string              `json:"entrypoint"`
+	Environment        []string              `json:"environment,omitempty"`
+	Labels             map[string]string     `json:"labels,omitempty"`
+	TTY                bool                  `json:"tty,omitzero"`
+	StdinOpen          bool                  `json:"stdin_open,omitzero"`
+	Init               *bool                 `json:"init,omitempty"`
+	StopSignal         string                `json:"stop_signal,omitempty"`
+	StopGracePeriod    string                `json:"stop_grace_period,omitempty"`
+	Healthcheck        *Health               `json:"healthcheck,omitempty"`
+	Restart            string                `json:"restart,omitempty"`
+	ReadOnly           bool                  `json:"read_only,omitzero"`
+	Privileged         bool                  `json:"privileged,omitzero"`
+	NetworkMode        string                `json:"network_mode,omitempty"`
+	Networks           map[string]Attachment `json:"networks,omitempty"`
+	Ports              []Port                `json:"ports,omitempty"`
+	Expose             []string              `json:"expose,omitempty"`
+	Volumes            []Mount               `json:"volumes,omitempty"`
+	Tmpfs              []string              `json:"tmpfs,omitempty"`
+	DNS                []string              `json:"dns,omitempty"`
+	DNSOptions         []string              `json:"dns_opt,omitempty"`
+	DNSSearch          []string              `json:"dns_search,omitempty"`
+	ExtraHosts         []string              `json:"extra_hosts,omitempty"`
+	GroupAdd           []string              `json:"group_add,omitempty"`
+	CapAdd             []string              `json:"cap_add,omitempty"`
+	CapDrop            []string              `json:"cap_drop,omitempty"`
+	SecurityOpt        []string              `json:"security_opt,omitempty"`
+	Sysctls            map[string]string     `json:"sysctls,omitempty"`
+	Devices            []string              `json:"devices,omitempty"`
+	DeviceCgroupRules  []string              `json:"device_cgroup_rules,omitempty"`
+	Ulimits            map[string]Ulimit     `json:"ulimits,omitempty"`
+	Logging            *Logging              `json:"logging,omitempty"`
+	Runtime            string                `json:"runtime,omitempty"`
+	IPC                string                `json:"ipc,omitempty"`
+	PID                string                `json:"pid,omitempty"`
+	UTS                string                `json:"uts,omitempty"`
+	UserNS             string                `json:"userns_mode,omitempty"`
+	Cgroup             string                `json:"cgroup,omitempty"`
+	CgroupParent       string                `json:"cgroup_parent,omitempty"`
+	ShmSize            int64                 `json:"shm_size,omitzero"`
+	CPUShares          int64                 `json:"cpu_shares,omitzero"`
+	CPUs               float64               `json:"cpus,omitzero"`
+	CPUPeriod          int64                 `json:"cpu_period,omitzero"`
+	CPUQuota           int64                 `json:"cpu_quota,omitzero"`
+	CPURealtimePeriod  int64                 `json:"cpu_rt_period,omitzero"`
+	CPURealtimeRuntime int64                 `json:"cpu_rt_runtime,omitzero"`
+	CPUSet             string                `json:"cpuset,omitempty"`
+	Memory             int64                 `json:"mem_limit,omitzero"`
+	MemoryReservation  int64                 `json:"mem_reservation,omitzero"`
+	MemorySwap         int64                 `json:"memswap_limit,omitzero"`
+	MemorySwappiness   *int64                `json:"mem_swappiness,omitempty"`
+	OOMKillDisable     *bool                 `json:"oom_kill_disable,omitempty"`
+	OOMScoreAdj        int                   `json:"oom_score_adj,omitzero"`
+	PidsLimit          *int64                `json:"pids_limit,omitempty"`
 }
 
-type composeHealth struct {
+type Dependency struct {
+	Condition string `json:"condition"`
+	Restart   bool   `json:"restart,omitzero"`
+	Required  bool   `json:"required"`
+}
+
+type Health struct {
 	Test          []string `json:"test"`
 	Interval      string   `json:"interval,omitempty"`
 	Timeout       string   `json:"timeout,omitempty"`
@@ -93,38 +102,39 @@ type composeHealth struct {
 	StartInterval string   `json:"start_interval,omitempty"`
 	Retries       int      `json:"retries,omitzero"`
 }
-type composePort struct {
+type Port struct {
 	Target    uint16 `json:"target"`
 	Published string `json:"published,omitempty"`
 	HostIP    string `json:"host_ip,omitempty"`
 	Protocol  string `json:"protocol"`
 }
-type composeMount struct {
-	Type     string                `json:"type"`
-	Source   string                `json:"source,omitempty"`
-	Target   string                `json:"target"`
-	ReadOnly bool                  `json:"read_only,omitzero"`
-	Bind     *composeBind          `json:"bind,omitempty"`
-	Volume   *composeVolumeOptions `json:"volume,omitempty"`
+type Mount struct {
+	Type     string         `json:"type"`
+	Source   string         `json:"source,omitempty"`
+	Target   string         `json:"target"`
+	ReadOnly bool           `json:"read_only,omitzero"`
+	Bind     *Bind          `json:"bind,omitempty"`
+	Volume   *VolumeOptions `json:"volume,omitempty"`
 }
-type composeBind struct {
+type Bind struct {
 	Propagation    string `json:"propagation,omitempty"`
 	SELinux        string `json:"selinux,omitempty"`
 	CreateHostPath bool   `json:"create_host_path"`
 }
-type composeVolumeOptions struct {
+type VolumeOptions struct {
 	NoCopy  bool   `json:"nocopy,omitzero"`
 	Subpath string `json:"subpath,omitempty"`
 }
-type composeVolume struct {
-	Name   string `json:"name"`
-	Driver string `json:"driver,omitempty"`
+type Volume struct {
+	External bool   `json:"external,omitzero"`
+	Name     string `json:"name"`
+	Driver   string `json:"driver,omitempty"`
 }
-type composeNetwork struct {
+type Network struct {
 	Name     string `json:"name"`
 	External bool   `json:"external"`
 }
-type composeAttachment struct {
+type Attachment struct {
 	Aliases         []string          `json:"aliases,omitempty"`
 	IPv4Address     string            `json:"ipv4_address,omitempty"`
 	IPv6Address     string            `json:"ipv6_address,omitempty"`
@@ -133,18 +143,17 @@ type composeAttachment struct {
 	DriverOpts      map[string]string `json:"driver_opts,omitempty"`
 	GatewayPriority int               `json:"gw_priority,omitzero"`
 }
-type composeUlimit struct {
+type Ulimit struct {
 	Soft int64 `json:"soft"`
 	Hard int64 `json:"hard"`
 }
-type composeLogging struct {
+type Logging struct {
 	Driver  string            `json:"driver"`
 	Options map[string]string `json:"options,omitempty"`
 }
 
-// StandaloneCompose preserves supported runtime settings and escapes Compose interpolation.
-// The full inspect response is also saved, inside the encrypted snapshot.
-func StandaloneCompose(c container.InspectResponse) ([]byte, error) {
+// FromContainer preserves the supported runtime settings of one observed container.
+func FromContainer(c container.InspectResponse) (*Definition, error) {
 	if c.Config == nil || c.HostConfig == nil || c.NetworkSettings == nil || len(c.ID) < 12 || c.Config.Image == "" {
 		return nil, ErrDefinition
 	}
@@ -158,7 +167,7 @@ func StandaloneCompose(c container.InspectResponse) ([]byte, error) {
 			return nil, ErrDefinition
 		}
 	}
-	service := composeService{
+	service := Service{
 		Image: config.Image,
 		ContainerName: strings.TrimPrefix(c.Name,
 			"/"),
@@ -222,7 +231,7 @@ func StandaloneCompose(c container.InspectResponse) ([]byte, error) {
 		service.StopGracePeriod = strconv.Itoa(*config.StopTimeout) + "s"
 	}
 	if health := config.Healthcheck; health != nil {
-		service.Healthcheck = &composeHealth{Test: health.Test, Retries: health.Retries}
+		service.Healthcheck = &Health{Test: health.Test, Retries: health.Retries}
 		if health.Interval > 0 {
 			service.Healthcheck.Interval = health.Interval.String()
 		}
@@ -256,28 +265,28 @@ func StandaloneCompose(c container.InspectResponse) ([]byte, error) {
 			if !binding.HostIP.IsValid() {
 				binding.HostIP = netip.IPv4Unspecified()
 			}
-			service.Ports = append(service.Ports, composePort{Target: port.Num(), Published: binding.HostPort, HostIP: binding.HostIP.String(), Protocol: string(port.Proto())})
+			service.Ports = append(service.Ports, Port{Target: port.Num(), Published: binding.HostPort, HostIP: binding.HostIP.String(), Protocol: string(port.Proto())})
 		}
 	}
-	slices.SortFunc(service.Ports, func(a, b composePort) int { return strings.Compare(fmt.Sprint(a), fmt.Sprint(b)) })
+	slices.SortFunc(service.Ports, func(a, b Port) int { return strings.Compare(fmt.Sprint(a), fmt.Sprint(b)) })
 	for _, device := range host.Devices {
 		service.Devices = append(service.Devices, device.PathOnHost+":"+device.PathInContainer+":"+device.CgroupPermissions)
 	}
 	if len(host.Ulimits) > 0 {
-		service.Ulimits = make(map[string]composeUlimit)
+		service.Ulimits = make(map[string]Ulimit)
 		for _, limit := range host.Ulimits {
-			service.Ulimits[limit.Name] = composeUlimit{Soft: limit.Soft, Hard: limit.Hard}
+			service.Ulimits[limit.Name] = Ulimit{Soft: limit.Soft, Hard: limit.Hard}
 		}
 	}
 	if host.LogConfig.Type != "" {
-		service.Logging = &composeLogging{Driver: host.LogConfig.Type, Options: host.LogConfig.Config}
+		service.Logging = &Logging{Driver: host.LogConfig.Type, Options: host.LogConfig.Config}
 	}
-	definition := composeDefinition{Name: "synod-" + c.ID[:12], Volumes: make(map[string]composeVolume), Networks: make(map[string]composeNetwork)}
+	definition := Definition{Name: "synod-" + c.ID[:12], Volumes: make(map[string]Volume), Networks: make(map[string]Network)}
 	for _, m := range c.Mounts {
-		item := composeMount{Type: string(m.Type), Source: m.Source, Target: m.Destination, ReadOnly: !m.RW}
+		item := Mount{Type: string(m.Type), Source: m.Source, Target: m.Destination, ReadOnly: !m.RW}
 		switch m.Type {
 		case mount.TypeBind:
-			item.Bind = &composeBind{Propagation: string(m.Propagation)}
+			item.Bind = &Bind{Propagation: string(m.Propagation)}
 			for option := range strings.SplitSeq(m.Mode, ",") {
 				if option == "z" || option == "Z" {
 					item.Bind.SELinux = option
@@ -285,9 +294,9 @@ func StandaloneCompose(c container.InspectResponse) ([]byte, error) {
 			}
 		case mount.TypeVolume:
 			key := fmt.Sprintf("volume%d", len(definition.Volumes))
-			definition.Volumes[key] = composeVolume{Name: m.Name, Driver: m.Driver}
+			definition.Volumes[key] = Volume{Name: m.Name, Driver: m.Driver}
 			item.Source = key
-			item.Volume = &composeVolumeOptions{NoCopy: slices.Contains(strings.Split(m.Mode, ","), "nocopy")}
+			item.Volume = &VolumeOptions{NoCopy: slices.Contains(strings.Split(m.Mode, ","), "nocopy")}
 		case mount.TypeTmpfs:
 			continue // HostConfig.Tmpfs below preserves the mount options.
 		default:
@@ -304,7 +313,7 @@ func StandaloneCompose(c container.InspectResponse) ([]byte, error) {
 				if original.VolumeOptions.DriverConfig != nil || len(original.VolumeOptions.Labels) > 0 {
 					return nil, ErrDefinition
 				}
-				item.Volume = &composeVolumeOptions{NoCopy: original.VolumeOptions.NoCopy, Subpath: original.VolumeOptions.Subpath}
+				item.Volume = &VolumeOptions{NoCopy: original.VolumeOptions.NoCopy, Subpath: original.VolumeOptions.Subpath}
 			}
 		}
 		service.Volumes = append(service.Volumes, item)
@@ -322,13 +331,13 @@ func StandaloneCompose(c container.InspectResponse) ([]byte, error) {
 		}
 	}
 	mode := string(host.NetworkMode)
-	if mode == "host" || mode == "none" || mode == "bridge" || mode == "default" || mode == "" {
+	if strings.HasPrefix(mode, "service:") || mode == "host" || mode == "none" || mode == "bridge" || mode == "default" || mode == "" {
 		if mode == "default" || mode == "" {
 			mode = "bridge"
 		}
 		service.NetworkMode = mode
 	} else {
-		service.Networks = make(map[string]composeAttachment)
+		service.Networks = make(map[string]Attachment)
 		names := make([]string, 0, len(c.NetworkSettings.Networks))
 		for name := range c.NetworkSettings.Networks {
 			names = append(names, name)
@@ -340,8 +349,8 @@ func StandaloneCompose(c container.InspectResponse) ([]byte, error) {
 				return nil, ErrDefinition
 			}
 			key := fmt.Sprintf("network%d", i)
-			definition.Networks[key] = composeNetwork{Name: name, External: true}
-			attachment := composeAttachment{Aliases: endpoint.Aliases, DriverOpts: endpoint.DriverOpts, GatewayPriority: endpoint.GwPriority, MACAddress: endpoint.MacAddress.String()}
+			definition.Networks[key] = Network{Name: name, External: true}
+			attachment := Attachment{Aliases: endpoint.Aliases, DriverOpts: endpoint.DriverOpts, GatewayPriority: endpoint.GwPriority, MACAddress: endpoint.MacAddress.String()}
 			if ipam := endpoint.IPAMConfig; ipam != nil {
 				if ipam.IPv4Address.IsValid() {
 					attachment.IPv4Address = ipam.IPv4Address.String()
@@ -357,7 +366,12 @@ func StandaloneCompose(c container.InspectResponse) ([]byte, error) {
 			service.Networks[key] = attachment
 		}
 	}
-	definition.Services = map[string]composeService{"app": service}
+	definition.Services = map[string]Service{"app": service}
+	return &definition, nil
+}
+
+// Encode escapes literal values so Compose does not expand environment references.
+func Encode(definition *Definition) ([]byte, error) {
 	raw, err := json.Marshal(definition)
 	if err != nil {
 		return nil, ErrDefinition
