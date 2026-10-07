@@ -1,7 +1,6 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -198,55 +197,11 @@ func (s *Store) RecordBackupEvent(ctx context.Context, nodeID, sessionID uuid.UU
 	if len(result) > 64<<10 {
 		return &Error{Code: InvalidRequest}
 	}
-	next := operation.Status(event.Status)
-	if event.Status == "queued" {
-		next = operation.Pending
+	changed, err := s.recordOperationEvent(ctx, tx, op, event.Status, result, event.Result.FailureCode)
+	if err != nil || !changed {
+		return err
 	}
-	if op.Status.Terminal() {
-		if next == op.Status && bytes.Equal(result, op.Result) {
-			return nil
-		}
-		if !next.Terminal() {
-			return nil
-		}
-		return &Error{Code: OperationConflict}
-	}
-	// A reconnect may deliver the terminal event before an intermediate event.
-	if op.Status == operation.Pending && next != operation.Pending {
-		if !op.Status.CanTransition(operation.Running) {
-			return &Error{Code: OperationConflict}
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE operations SET status='running' WHERE id=?`, op.ID); err != nil {
-			return storeError(err)
-		}
-		op.Status = operation.Running
-	}
-	if op.Status == operation.Waiting && next.Terminal() {
-		if !op.Status.CanTransition(operation.Running) {
-			return &Error{Code: OperationConflict}
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE operations SET status='running' WHERE id=?`, op.ID); err != nil {
-			return storeError(err)
-		}
-		op.Status = operation.Running
-	}
-	if next == operation.Pending && op.Status != operation.Pending {
-		return nil
-	}
-	if next != op.Status && !op.Status.CanTransition(next) {
-		return &Error{Code: OperationConflict}
-	}
-	if next == op.Status && bytes.Equal(result, op.Result) {
-		return nil
-	}
-	var finished any
 	now := s.now().UnixMilli()
-	if next.Terminal() {
-		finished = now
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE operations SET status=?,failure_code=?,result=?,updated_at=?,finished_at=? WHERE id=?`, next, event.Result.FailureCode, result, now, finished, op.ID); err != nil {
-		return storeError(err)
-	}
 	if event.Result.RepositoryOpened {
 		changed, err := tx.ExecContext(ctx, `UPDATE destinations SET initialized_at=? WHERE id=? AND initialized_at IS NULL AND initializer_id=?`, now, request.DestinationID, op.ID)
 		if err != nil {

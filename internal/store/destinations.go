@@ -124,7 +124,7 @@ func (s *Store) RemoveDestination(ctx context.Context, id uuid.UUID, actorID, re
 		return nil
 	}
 	var busy bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE kind='backup' AND status NOT IN ('succeeded','failed','cancelled') AND json_extract(CAST(input AS TEXT),'$.destination_id')=?)`, id).Scan(&busy); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE status NOT IN ('succeeded','failed','cancelled') AND ((kind='backup' AND json_extract(CAST(input AS TEXT),'$.destination_id')=?) OR (kind='restore' AND (json_extract(CAST(input AS TEXT),'$.destination_id') IS NULL OR json_extract(CAST(input AS TEXT),'$.destination_id')=?))))`, id, id).Scan(&busy); err != nil {
 		return storeError(err)
 	}
 	if busy {

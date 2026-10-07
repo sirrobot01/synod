@@ -106,7 +106,7 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 				}
 				return nil, nil
 			}
-			if ack := message.GetBackupAck(); ack != nil {
+			if ack := message.GetOperationAck(); ack != nil {
 				id, err := uuid.Parse(ack.OperationId)
 				if err != nil {
 					return nil, backup.ErrInvalid

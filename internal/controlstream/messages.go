@@ -10,6 +10,7 @@ import (
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/inventory"
+	"github.com/sirrobot01/synod/internal/restore"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
@@ -67,6 +68,15 @@ func NegotiateHello(hello *agentv1.Hello, supported []string) ([]string, error) 
 // CheckAgentMessage validates the wire shape of one agent message after Hello.
 func CheckAgentMessage(message *agentv1.AgentMessage) error {
 	switch value := message.GetMessage().(type) {
+	case *agentv1.AgentMessage_RestoreEvent:
+		if value.RestoreEvent == nil || len(value.RestoreEvent.EventJson) > 64<<10 {
+			return ErrMessage
+		}
+		var event restore.Event
+		if json.Unmarshal(value.RestoreEvent.EventJson, &event) != nil || event.ID == uuid.Nil || !slices.Contains([]string{"queued", "running", "waiting", "succeeded", "failed"}, event.Status) {
+			return ErrMessage
+		}
+		return nil
 	case *agentv1.AgentMessage_BackupEvent:
 		if value.BackupEvent == nil || len(value.BackupEvent.EventJson) > 64<<10 {
 			return ErrMessage
@@ -99,6 +109,15 @@ func CheckAgentMessage(message *agentv1.AgentMessage) error {
 // CheckControllerMessage validates the wire shape of one controller message.
 func CheckControllerMessage(message *agentv1.ControllerMessage) error {
 	switch value := message.GetMessage().(type) {
+	case *agentv1.ControllerMessage_RestoreJob:
+		if value.RestoreJob == nil || len(value.RestoreJob.RequestJson) > 8192 {
+			return ErrMessage
+		}
+		var request restore.Request
+		if json.Unmarshal(value.RestoreJob.RequestJson, &request) != nil || request.Validate() != nil {
+			return ErrMessage
+		}
+		return nil
 	case *agentv1.ControllerMessage_BackupJob:
 		if value.BackupJob == nil || len(value.BackupJob.RequestJson) > 8192 {
 			return ErrMessage
@@ -108,8 +127,8 @@ func CheckControllerMessage(message *agentv1.ControllerMessage) error {
 			return ErrMessage
 		}
 		return nil
-	case *agentv1.ControllerMessage_BackupAck:
-		if value.BackupAck == nil || !canonicalID(value.BackupAck.OperationId) {
+	case *agentv1.ControllerMessage_OperationAck:
+		if value.OperationAck == nil || !canonicalID(value.OperationAck.OperationId) {
 			return ErrMessage
 		}
 		return nil

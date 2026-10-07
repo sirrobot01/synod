@@ -50,6 +50,7 @@ message AgentMessage {
     AppInventory inventory = 3;
     DestinationAck destination_ack = 4;
     BackupEvent backup_event = 5;
+    RestoreEvent restore_event = 6;
   }
 }
 
@@ -59,7 +60,8 @@ message ControllerMessage {
     ProtocolError error = 2;
     DestinationPlan destination_plan = 3;
     BackupJob backup_job = 4;
-    BackupAck backup_ack = 5;
+    OperationAck operation_ack = 5;
+    RestoreJob restore_job = 6;
   }
 }
 
@@ -115,4 +117,8 @@ message DestinationAck { int64 revision = 1; }
 message BackupJob { bytes request_json = 1; }
 // The agent keeps a terminal event until the controller commits and acknowledges it.
 message BackupEvent { bytes event_json = 1; }
-message BackupAck { string operation_id = 1; }
+message OperationAck { string operation_id = 1; }
+
+// Restore work contains IDs and choices only. Private definitions stay in the repository.
+message RestoreJob { bytes request_json = 1; }
+message RestoreEvent { bytes event_json = 1; }

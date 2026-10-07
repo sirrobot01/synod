@@ -1498,6 +1498,104 @@
           }
         }
       }
+    },
+    "/v1/restores": {
+      "post": {
+        "operationId": "createRestore",
+        "description": "Save an immutable app restore request. The source app can be absent. The target device must be approved. With no snapshot ID, use the latest available snapshot. With no destination ID, check all destinations available to the target. Read /v1/operations/{id} for progress. A client disconnect does not cancel the restore.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreSubmission"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved operation. A repeated ID with the same input returns the same operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The app, approved target, or available destination was not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting input or a full operation queue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded. Retry after one second.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable. Retry with the same ID and input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1591,7 +1689,14 @@
             "format": "date-time"
           },
           "result": {
-            "$ref": "#/components/schemas/BackupResult"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupResult"
+              },
+              {
+                "$ref": "#/components/schemas/RestoreResult"
+              }
+            ]
           }
         },
         "required": [
@@ -2554,6 +2659,102 @@
           "defaults",
           "apps"
         ]
+      },
+      "RestoreSubmission": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "app_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snapshot_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "replace": {
+            "type": "boolean",
+            "default": false,
+            "description": "Save a safety snapshot before replacing a matching target app. Unrelated conflicts are refused."
+          }
+        },
+        "required": [
+          "id",
+          "app_id",
+          "node_id"
+        ]
+      },
+      "RestoreResult": {
+        "type": "object",
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "safety_snapshot_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target_app_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "project_directory": {
+            "type": "string"
+          },
+          "failure_code": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "recovery_pending": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "Original containers that need recovery before the operation can finish."
+          },
+          "warning_codes": {
+            "type": "array",
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "excluded_paths",
+                "destination_unavailable",
+                "cleanup_pending"
+              ]
+            }
+          }
+        }
       }
     },
     "parameters": {},

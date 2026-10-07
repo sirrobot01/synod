@@ -103,7 +103,7 @@ func (s *Store) TransitionOperation(ctx context.Context, id uuid.UUID, from, to 
 	if to.Terminal() {
 		finished = now
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE operations SET status=?,failure_code=?,updated_at=?,finished_at=? WHERE id=? AND status=? AND NOT (kind='backup' AND coalesce(json_extract(CAST(input AS TEXT),'$.id'),'')=id)`, to, failureCode, now, finished, id, from)
+	result, err := s.db.ExecContext(ctx, `UPDATE operations SET status=?,failure_code=?,updated_at=?,finished_at=? WHERE id=? AND status=? AND NOT (kind IN ('backup','restore') AND coalesce(json_extract(CAST(input AS TEXT),'$.id'),'')=id)`, to, failureCode, now, finished, id, from)
 	if err != nil {
 		return storeError(err)
 	}
@@ -132,4 +132,58 @@ func (r operationResult) Scan(value any) error {
 		return errors.New("invalid operation result storage type")
 	}
 	return nil
+}
+
+// recordOperationEvent preserves terminal results and accepts replay after a reconnect.
+func (s *Store) recordOperationEvent(ctx context.Context, tx *sql.Tx, op operation.Operation, status string, result []byte, failureCode string) (bool, error) {
+	next := operation.Status(status)
+	if status == "queued" {
+		next = operation.Pending
+	}
+	if op.Status.Terminal() {
+		if next == op.Status && bytes.Equal(result, op.Result) {
+			return false, nil
+		}
+		if !next.Terminal() {
+			return false, nil
+		}
+		return false, &Error{Code: OperationConflict}
+	}
+	// A reconnect may deliver the terminal event before an intermediate event.
+	if op.Status == operation.Pending && next != operation.Pending {
+		if !op.Status.CanTransition(operation.Running) {
+			return false, &Error{Code: OperationConflict}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE operations SET status='running' WHERE id=?`, op.ID); err != nil {
+			return false, storeError(err)
+		}
+		op.Status = operation.Running
+	}
+	if op.Status == operation.Waiting && next.Terminal() {
+		if !op.Status.CanTransition(operation.Running) {
+			return false, &Error{Code: OperationConflict}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE operations SET status='running' WHERE id=?`, op.ID); err != nil {
+			return false, storeError(err)
+		}
+		op.Status = operation.Running
+	}
+	if next == operation.Pending && op.Status != operation.Pending {
+		return false, nil
+	}
+	if next != op.Status && !op.Status.CanTransition(next) {
+		return false, &Error{Code: OperationConflict}
+	}
+	if next == op.Status && bytes.Equal(result, op.Result) {
+		return false, nil
+	}
+	var finished any
+	now := s.now().UnixMilli()
+	if next.Terminal() {
+		finished = now
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE operations SET status=?,failure_code=?,result=?,updated_at=?,finished_at=? WHERE id=?`, next, failureCode, result, now, finished, op.ID); err != nil {
+		return false, storeError(err)
+	}
+	return true, nil
 }

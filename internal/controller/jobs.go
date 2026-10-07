@@ -15,15 +15,15 @@ import (
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
-func deliverBackups(ctx context.Context, metadata *store.Store, stream *controlstream.Server, logger *slog.Logger) {
+func deliverJobs(ctx context.Context, metadata *store.Store, stream *controlstream.Server, logger *slog.Logger) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := sendBackupJobs(ctx, metadata, stream); err != nil && ctx.Err() == nil {
-			logger.Warn("backup_delivery_failed", "code", "backup_delivery_unavailable")
+		if err := sendJobs(ctx, metadata, stream); err != nil && ctx.Err() == nil {
+			logger.Warn("job_delivery_failed", "code", "job_delivery_unavailable")
 		}
 		select {
 		case <-ctx.Done():
@@ -33,8 +33,8 @@ func deliverBackups(ctx context.Context, metadata *store.Store, stream *controls
 	}
 }
 
-// sendBackupJobs waits for current credentials at the source and at a device destination.
-func sendBackupJobs(ctx context.Context, metadata *store.Store, stream *controlstream.Server) error {
+// sendJobs waits for current credentials at the worker and at an explicit device destination.
+func sendJobs(ctx context.Context, metadata *store.Store, stream *controlstream.Server) error {
 	listing, err := metadata.ListDestinations(ctx)
 	if err != nil {
 		return err
@@ -91,6 +91,30 @@ func sendBackupJobs(ctx context.Context, metadata *store.Store, stream *controls
 			return err
 		}
 		err = stream.Send(job.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_BackupJob{BackupJob: &agentv1.BackupJob{RequestJson: raw}}})
+		if err != nil && !errors.Is(err, controlstream.ErrDisconnected) && !errors.Is(err, controlstream.ErrBusy) {
+			failures = append(failures, err)
+		}
+	}
+	restores, err := metadata.RestoreRequests(ctx)
+	if err != nil {
+		return errors.Join(append(failures, err)...)
+	}
+	for _, job := range restores {
+		peer, online := stream.Session(job.NodeID)
+		if !online || current[job.NodeID] != peer.SessionID || !slices.Contains(peer.Capabilities, "restore.exec") {
+			continue
+		}
+		if job.DestinationID != uuid.Nil {
+			target, exists := destinations[job.DestinationID]
+			if !exists || (target.Location.Kind == "device" && current[target.NodeID] == "") {
+				continue
+			}
+		}
+		raw, err := json.Marshal(job)
+		if err != nil {
+			return err
+		}
+		err = stream.Send(job.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_RestoreJob{RestoreJob: &agentv1.RestoreJob{RequestJson: raw}}})
 		if err != nil && !errors.Is(err, controlstream.ErrDisconnected) && !errors.Is(err, controlstream.ErrBusy) {
 			failures = append(failures, err)
 		}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/backup"
+	"github.com/sirrobot01/synod/internal/restore"
 	_ "modernc.org/sqlite"
 )
 
@@ -222,6 +223,20 @@ func (j *Journal) Complete(ctx context.Context, id uuid.UUID, result []byte) err
 			if _, err := tx.ExecContext(ctx, `INSERT INTO backup_history (app_id,destination_id,last_success) VALUES (?,?,?) ON CONFLICT(app_id,destination_id) DO UPDATE SET last_success=max(last_success,excluded.last_success)`, job.AppID, job.DestinationID, saved.StartedAt.UnixMilli()); err != nil {
 				return fmt.Errorf("save backup history %s: %w", job.ID, err)
 			}
+		}
+	}
+	var restoreJob restore.Request
+	if json.Unmarshal(input, &restoreJob) == nil && restoreJob.Kind == "restore" {
+		var saved restore.Result
+		if restoreJob.Validate() != nil || restoreJob.ID != id || restoreJob.InstallationID != j.installationID || restoreJob.NodeID != j.nodeID || json.Unmarshal(result, &saved) != nil {
+			return ErrConflict
+		}
+		status := "succeeded"
+		if saved.FailureCode != "" {
+			status = "failed"
+		}
+		if (restore.Event{ID: id, Status: status, Result: saved}).Validate(restoreJob) != nil {
+			return ErrConflict
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE records SET state='terminal',result=?,progress=NULL WHERE id=?`, result, id); err != nil {
