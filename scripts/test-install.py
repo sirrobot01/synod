@@ -68,6 +68,70 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(binary.read_bytes(), original)
         self.assertEqual(list(self.target.glob(".synod-install.*")), [])
 
+    def test_upgrade_keeps_previous_binary_and_open_inode(self):
+        self.assertEqual(self.install().returncode, 0)
+        binary = self.target / "synod"
+        previous = self.target / "synod.previous"
+        original = binary.read_bytes()
+        (self.release / "synod-linux-amd64").write_bytes(b"upgraded-binary")
+        self.checksums()
+        with binary.open("rb") as running:
+            result = self.install("--upgrade")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(binary.read_bytes(), b"upgraded-binary")
+            self.assertEqual(previous.read_bytes(), original)
+            self.assertEqual(running.read(), original)
+        inode = binary.stat().st_ino
+        self.assertEqual(self.install("--upgrade").returncode, 0)
+        self.assertEqual(binary.stat().st_ino, inode)
+        self.assertEqual(previous.read_bytes(), original)
+        (self.release / "synod-linux-amd64").write_bytes(b"corrupt")
+        self.assertNotEqual(self.install("--upgrade").returncode, 0)
+        self.assertEqual(binary.read_bytes(), b"upgraded-binary")
+        self.assertEqual(previous.read_bytes(), original)
+        self.assertEqual(list(self.target.glob(".synod-install.*")), [])
+
+    def test_upgrade_failure_before_replace_keeps_old_binary(self):
+        self.assertEqual(self.install().returncode, 0)
+        binary = self.target / "synod"
+        original = binary.read_bytes()
+        (self.release / "synod-linux-amd64").write_bytes(b"upgraded-binary")
+        self.checksums()
+        command = self.commands / "mv"
+        command.write_text('#!/bin/sh\ncase "$2" in */synod-linux-*) exit 1 ;; esac\nexec /bin/mv "$@"\n')
+        command.chmod(0o755)
+        self.assertNotEqual(self.install("--upgrade").returncode, 0)
+        self.assertEqual(binary.read_bytes(), original)
+        self.assertEqual((self.target / "synod.previous").read_bytes(), original)
+        self.assertEqual(list(self.target.glob(".synod-install.*")), [])
+        command.unlink()
+        result = self.install("--upgrade")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(binary.read_bytes(), b"upgraded-binary")
+        self.assertEqual((self.target / "synod.previous").read_bytes(), original)
+
+    def test_upgrade_refuses_missing_binary_unsafe_backup_and_held_lock(self):
+        self.assertNotEqual(self.install("--upgrade").returncode, 0)
+        self.assertEqual(self.install().returncode, 0)
+        binary = self.target / "synod"
+        original = binary.read_bytes()
+        previous = self.target / "synod.previous"
+        outside = self.root / "outside"
+        outside.write_bytes(b"keep")
+        previous.symlink_to(outside)
+        self.assertNotEqual(self.install("--upgrade").returncode, 0)
+        self.assertEqual(outside.read_bytes(), b"keep")
+        previous.unlink()
+        previous.mkdir()
+        self.assertNotEqual(self.install("--upgrade").returncode, 0)
+        previous.rmdir()
+        lock = self.target / ".synod-install.lock"
+        lock.mkdir()
+        self.assertNotEqual(self.install("--upgrade").returncode, 0)
+        self.assertTrue(lock.is_dir())
+        self.assertEqual(binary.read_bytes(), original)
+        lock.rmdir()
+
     def test_rejects_different_binary_and_symlink(self):
         self.target.mkdir()
         binary = self.target / "synod"

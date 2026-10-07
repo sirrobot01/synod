@@ -117,6 +117,77 @@ Run the real-host proof only on the approved disposable proof paths:
 python3 scripts/proof-install.py --release dist/releases/v0.1.0-rc.1 --evidence /tmp/synod-install-proof.json
 ```
 
+## Upgrade the controller and agents
+
+Select the same release for every device.
+Read its release notes before the upgrade.
+Keep the repository password and recovery kit outside the devices.
+Keep the existing controller and agent state directories.
+Do not run `server init` or `agent join` again.
+Those commands create identities. An upgrade keeps the current identities and encrypted credentials.
+
+Wait for active backups, restores, and drills to finish in Activity.
+Stop the Synod agent on each device.
+Then stop the controller.
+For installations that use the generated systemd units:
+
+```sh
+sudo systemctl stop synod-agent
+# Run this next command on the controller device.
+sudo systemctl stop synod-server
+```
+
+Run the new release installer on each device.
+Use the directory that contains the executable in the service's `ExecStart` line.
+For an offline release in `/path/to/release`:
+
+```sh
+sudo sh /path/to/release/install.sh --version v0.1.0-rc.2 --from-dir /path/to/release --install-dir /usr/local/bin --upgrade
+/usr/local/bin/synod --version
+```
+
+The installer verifies the download before it changes the installed file.
+It saves the old executable as `synod.previous` in the same directory.
+It replaces `synod` with one filesystem rename.
+A repeat with identical bytes keeps both files.
+A failed checksum leaves both files unchanged.
+Only one installer can use an installation directory at a time.
+If a killed installer leaves `.synod-install.lock`, first confirm that no installer is running.
+Then remove that empty directory with `rmdir` and retry.
+
+Start the controller first.
+Then start the agents on each device:
+
+```sh
+sudo systemctl start synod-server
+sudo systemctl start synod-agent
+synod installation get
+synod --json node list
+synod destination list
+synod app status
+```
+
+Use the same API connection settings as before the upgrade.
+`installation get` reports the version of the running controller.
+The node list reports `agent_version` for each device.
+Check that each device reconnects and retains its approval.
+Wait until destination settings are current on each device.
+Run a backup and restore a file to check repository access.
+The installer does not restart services or change app containers.
+For a foreground installation, stop and start the same commands with the same configuration files.
+
+Development builds can change the database schema in place.
+An upgrade between such builds can fail the migration checksum check.
+This procedure does not convert an incompatible development database.
+The saved executable alone does not roll back a changed database.
+Use repository recovery when the release notes require a fresh controller.
+
+The upgrade proof uses two release directories and disposable Linux state:
+
+```sh
+python3 scripts/proof-upgrade.py --old-release /path/to/old-release --new-release /path/to/new-release --evidence /tmp/synod-upgrade-proof
+```
+
 ## Local development
 
 [Task](https://taskfile.dev) runs the commands in [Taskfile.yml](Taskfile.yml).

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
+	"github.com/sirrobot01/synod/internal/buildinfo"
 )
 
 // An administrator reads the installation ID.
@@ -54,8 +55,13 @@ func TestInstallationRead(t *testing.T) {
 	status, data := read(token)
 	var value struct {
 		InstallationID uuid.UUID `json:"installation_id"`
+		Version        string    `json:"version"`
+		Revision       string    `json:"revision"`
 	}
 	if status != http.StatusOK || json.Unmarshal(data, &value) != nil || value.InstallationID != installation {
 		t.Fatalf("installation read: %d %s", status, data)
+	}
+	if value.Version != buildinfo.Version || value.Revision != buildinfo.Revision {
+		t.Fatalf("controller build: %s", data)
 	}
 }

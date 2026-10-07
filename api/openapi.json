@@ -483,7 +483,7 @@
     "/v1/installation": {
       "get": {
         "operationId": "getInstallation",
-        "description": "Read the installation ID.",
+        "description": "Read the installation ID and running controller build.",
         "responses": {
           "200": {
             "description": "The installation identity.",
@@ -2523,12 +2523,20 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "installation_id"
+          "installation_id",
+          "version",
+          "revision"
         ],
         "properties": {
           "installation_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "version": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
           }
         }
       },

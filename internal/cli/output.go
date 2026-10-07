@@ -271,6 +271,7 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 	}
 	if a.result.Installation != nil {
 		fmt.Fprintf(&output, "Installation: %s\n", a.result.Installation.InstallationID)
+		fmt.Fprintf(&output, "Controller: %s (%s)\n", a.result.Installation.Version, a.result.Installation.Revision)
 	}
 	if a.result.User != nil {
 		fmt.Fprintf(&output, "User: %s\nUsername: %s\nRole: %s\n", a.result.User.ID, a.result.User.Username, a.result.User.Role)

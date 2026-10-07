@@ -7,6 +7,7 @@ version=
 install_dir=/usr/local/bin
 base_url=https://github.com/sirrobot01/synod/releases/download
 from_dir=
+upgrade=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --version|--install-dir|--base-url|--from-dir)
@@ -18,15 +19,17 @@ while [ "$#" -gt 0 ]; do
                 --from-dir) from_dir=$2 ;;
             esac
             shift 2 ;;
+        --upgrade) upgrade=true; shift ;;
         --help|-h)
             cat <<'HELP'
 Usage: sh install.sh --version v0.1.0 [--install-dir /usr/local/bin]
                      [--base-url https://host/releases/download]
-                     [--from-dir /path/to/release]
+                     [--from-dir /path/to/release] [--upgrade]
 
 Select a version. Synod supports Linux amd64 and arm64.
 The installer verifies SHA-256 checksums before it installs the binary.
-An existing different binary is not replaced.
+Use --upgrade to replace an existing binary and save it as synod.previous.
+Restart the controller and agents after an upgrade. Keep their state directories.
 Use --from-dir for a release copied to a device without Internet access.
 HELP
             exit 0 ;;
@@ -60,11 +63,20 @@ else
     case "$from_dir" in /*) ;; *) echo "Use an absolute --from-dir." >&2; exit 1 ;; esac
 fi
 mkdir -p "$install_dir" || { echo "Use a writable --install-dir, or run with sudo." >&2; exit 1; }
-[ ! -L "$install_dir/synod" ] || { echo "The target is a symbolic link. Select another --install-dir." >&2; exit 1; }
-[ ! -d "$install_dir/synod" ] || { echo "The target is a directory. Select another --install-dir." >&2; exit 1; }
-staging=$(mktemp -d "$install_dir/.synod-install.XXXXXX")
-trap 'rm -rf "$staging"' EXIT
+lock=$install_dir/.synod-install.lock
+mkdir "$lock" 2>/dev/null || { echo "Another installer holds $lock. Wait for it to finish. If it stopped, remove the empty lock directory and retry." >&2; exit 1; }
+staging=
+trap '[ -z "$staging" ] || rm -rf "$staging"; rmdir "$lock"' EXIT
 trap 'exit 1' HUP INT TERM
+[ ! -L "$install_dir/synod" ] || { echo "The target is a symbolic link. Select another --install-dir." >&2; exit 1; }
+[ ! -e "$install_dir/synod" ] || [ -f "$install_dir/synod" ] || { echo "The target is not a regular file. Select another --install-dir." >&2; exit 1; }
+if [ "$upgrade" = true ]; then
+    [ -f "$install_dir/synod" ] || { echo "No binary is installed. Omit --upgrade for a fresh install." >&2; exit 1; }
+    [ ! -L "$install_dir/synod.previous" ] && { [ ! -e "$install_dir/synod.previous" ] || [ -f "$install_dir/synod.previous" ]; } || {
+        echo "synod.previous is not a regular file. Move it before the upgrade." >&2; exit 1;
+    }
+fi
+staging=$(mktemp -d "$install_dir/.synod-install.XXXXXX")
 asset=synod-linux-$arch
 for file in SHA256SUMS release.json "$asset"; do
     if [ -n "$from_dir" ]; then
@@ -93,10 +105,19 @@ grep -Fqx "  \"version\": \"$version\"," "$staging/release.json" || {
 }
 chmod 755 "$staging/$asset"
 if [ -e "$install_dir/synod" ]; then
-    cmp -s "$staging/$asset" "$install_dir/synod" || {
-        echo "A different binary is installed. Use the Synod upgrade procedure." >&2; exit 1;
-    }
-    echo "Synod $version is already installed at $install_dir/synod."
+    if cmp -s "$staging/$asset" "$install_dir/synod"; then
+        echo "Synod $version is already installed at $install_dir/synod."
+        exit 0
+    fi
+    [ "$upgrade" = true ] || { echo "A different binary is installed. Follow the upgrade procedure and use --upgrade." >&2; exit 1; }
+    # Save the old inode before replacing it. Running processes keep that inode.
+    if ! cmp -s "$install_dir/synod" "$install_dir/synod.previous"; then
+        ln "$install_dir/synod" "$staging/previous"
+        mv -f "$staging/previous" "$install_dir/synod.previous"
+    fi
+    mv -f "$staging/$asset" "$install_dir/synod"
+    echo "Installed Synod $version at $install_dir/synod. Saved the old binary as synod.previous."
+    echo "Restart the Synod controller and agents. Keep their existing configuration and state."
     exit 0
 fi
 # A hard link publishes the verified file atomically and refuses a concurrent install.

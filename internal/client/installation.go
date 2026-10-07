@@ -7,9 +7,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// Installation holds the identity that a join token names.
+// Installation identifies the installation and its running controller build.
 type Installation struct {
 	InstallationID uuid.UUID `json:"installation_id"`
+	Version        string    `json:"version"`
+	Revision       string    `json:"revision"`
 }
 
 // GetInstallation reads the installation identity.

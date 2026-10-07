@@ -6,7 +6,7 @@ import (
 
 func newInstallationCommand(app *app) *cobra.Command {
 	group := &cobra.Command{Use: "installation", Short: "Inspect the installation", PersistentPreRunE: app.connect}
-	get := &cobra.Command{Use: "get", Short: "Read the installation ID", Args: cobra.NoArgs,
+	get := &cobra.Command{Use: "get", Short: "Read the installation ID and running controller version", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			value, err := app.api.GetInstallation(cmd.Context())
 			if err == nil {
