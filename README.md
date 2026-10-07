@@ -488,8 +488,8 @@ Dumps stream directly into the encrypted repository. Synod creates no plaintext 
 Each dump records its source container and format in the snapshot manifest.
 MySQL and MariaDB hold a read lock during the dump. Writes wait until the dump ends.
 PostgreSQL copies each database in its own transaction. The databases do not share one snapshot point.
-The native client and `timeout` must be available in the container.
-With BusyBox `timeout`, the container must also provide `setsid`.
+The native client, `sh`, `timeout`, and Linux `/proc` must be available in the container.
+Synod checks that the dump has its own process group before it starts the native client.
 SQL clients use the local socket and the official image's administrator environment variables.
 Password variables with a `_FILE` suffix are supported.
 Redis uses its local port, `REDISCLI_AUTH`, `REDIS_PASSWORD`, or `--requirepass`.
@@ -499,6 +499,8 @@ Data paths stored only in custom configuration files are not detected.
 A failed dump prevents snapshot publication. The result contains no tool error output.
 A stopped or paused database must be started before a backup.
 Each dump has a 30-minute deadline inside its container.
+Cancellation stops the dump and waits for its child processes.
+Other PostgreSQL connections stay open.
 
 Each snapshot holds the discovered app manifest, included paths, and private container definitions.
 It also holds network settings and image platform evidence.
@@ -783,3 +785,20 @@ The test restores a lost Compose project with a bind path, a named volume, a Pos
 It checks file content, owners, modes, and database rows.
 It also checks the conflict refusal, a replace with a safety snapshot, and recovery after an interrupted replace.
 On macOS, `go test` runs the same tests without the named volume.
+
+Run the database and disaster recovery proof on the approved Linux hosts:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/synod-proof-binaries/synod-linux-amd64 ./cmd/synod
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/synod-proof-binaries/synod-linux-arm64 ./cmd/synod
+python3 scripts/proof-recovery.py --binaries /tmp/synod-proof-binaries --evidence /tmp/synod-recovery-proof
+```
+
+The evidence directory must be new.
+The hosts need the pinned PostgreSQL and Alpine images named in the proof scripts.
+The proof writes to a disposable PostgreSQL app on server during backup.
+It deletes its controller, agent state, source project, and source volume.
+It rebuilds the controller from the repository on odin.
+It restores the amd64 app on arm64 and checks the saved rows, role, and files.
+It checks that existing running containers keep their start times.
+It removes its temporary processes, containers, volumes, and directories.

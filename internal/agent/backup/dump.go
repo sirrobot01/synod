@@ -24,6 +24,7 @@ type dumpFile struct {
 	api         *client.Client
 	containerID string
 	command     string
+	signal      string
 	env         []string
 	failed      atomic.Bool
 }
@@ -31,10 +32,11 @@ type dumpFile struct {
 func (*dumpFile) Mode() os.FileMode { return 0600 }
 
 func newDump(api *client.Client, c container.InspectResponse, database string) (*dumpFile, backup.DatabaseDump, error) {
-	d := &dumpFile{api: api, containerID: c.ID}
+	d := &dumpFile{api: api, containerID: c.ID, signal: "TERM"}
 	format := "sql"
 	switch database {
 	case "postgres":
+		d.signal = "INT"
 		d.command = `if [ -n "${POSTGRES_PASSWORD_FILE:-}" ]; then PGPASSWORD=$(cat "$POSTGRES_PASSWORD_FILE"); else PGPASSWORD=${POSTGRES_PASSWORD:-${PGPASSWORD:-}}; fi
 export PGPASSWORD
 exec pg_dumpall --no-password --host=/var/run/postgresql --port="${PGPORT:-5432}" --username="${POSTGRES_USER:-postgres}"`
@@ -79,22 +81,27 @@ exec redis-cli -h 127.0.0.1 -p "$SYNOD_REDIS_PORT" --rdb -`
 }
 
 // The stdin watcher ends the command when the agent closes its connection.
-// The independent deadline also bounds work after a lost network connection.
+// The independent deadline also ends stalled reads. The dump runs in the foreground
+// so the shell does not make it ignore SIGINT. Signal only this exec process group.
+// SIGINT lets pg_dumpall wait for pg_dump. Reap the watcher before exit too.
+// PostgreSQL as PID 1 treats a killed orphan as a server crash.
 const dumpSupervisor = `exec 3<&0
-if command -v setsid >/dev/null 2>&1; then
- setsid timeout -s KILL 1800 sh -ec "$1" </dev/null 3<&- &
-else
- timeout --signal=KILL 1800 sh -ec "$1" </dev/null 3<&- &
-fi
-command=$!
-(read -r unused || :; kill -KILL -"$command" 2>/dev/null || kill -KILL "$command" 2>/dev/null || :) <&3 &
+command -v timeout >/dev/null 2>&1 || exit 1
+read -r pid name state parent group rest < /proc/$$/stat
+[ "$group" = "$$" ] || exit 1
+trap ':' INT TERM
+timeout -s USR1 "$3" sh -c '
+trap "kill -$2 -$1 2>/dev/null || :; exit 0" USR1
+read -r unused || :
+kill "-$2" "-$1" 2>/dev/null || :
+' synod-dump-watch "$$" "$2" <&3 &
 watcher=$!
-trap 'kill "$watcher" 2>/dev/null || :' EXIT
-wait "$command"`
+trap 'kill "$watcher" 2>/dev/null || :; wait "$watcher" 2>/dev/null || :' EXIT
+sh -ec "$1" </dev/null 3<&-`
 
 func (d *dumpFile) GetReader(ctx context.Context) (io.ReadCloser, error) {
 	fail := func() (io.ReadCloser, error) { d.failed.Store(true); return nil, errDump }
-	created, err := d.api.ExecCreate(ctx, d.containerID, client.ExecCreateOptions{Cmd: []string{"sh", "-c", dumpSupervisor, "synod-dump", d.command}, Env: d.env, AttachStdin: true, AttachStdout: true, AttachStderr: true})
+	created, err := d.api.ExecCreate(ctx, d.containerID, client.ExecCreateOptions{Cmd: []string{"sh", "-c", dumpSupervisor, "synod-dump", d.command, d.signal, "1800"}, Env: d.env, AttachStdin: true, AttachStdout: true, AttachStderr: true})
 	if err != nil {
 		return fail()
 	}

@@ -124,6 +124,7 @@ func TestWorkerDumpsAndRestoresRunningDatabases(t *testing.T) {
 			var writes atomic.Int64
 			writerCtx, stopWrites := context.WithCancel(t.Context())
 			writerDone := make(chan struct{})
+			writerErrors := make(chan error, 1)
 			go func() {
 				defer close(writerDone)
 				for writerCtx.Err() == nil {
@@ -135,6 +136,9 @@ func TestWorkerDumpsAndRestoresRunningDatabases(t *testing.T) {
 						query = "INCR concurrent"
 					}
 					if _, err := dockerCommand(writerCtx, api, id, input(query)); err != nil {
+						if writerCtx.Err() == nil {
+							writerErrors <- err
+						}
 						return
 					}
 					writes.Add(1)
@@ -152,6 +156,11 @@ func TestWorkerDumpsAndRestoresRunningDatabases(t *testing.T) {
 			result, err := fixture.worker.Execute(t.Context(), fixture.request)
 			stopWrites()
 			<-writerDone
+			select {
+			case err := <-writerErrors:
+				t.Fatalf("backup interrupted the database writer: %v", err)
+			default:
+			}
 			// The deferred read also needs a closed channel, so this is safe.
 			if err != nil || result.FailureCode != "" || result.SnapshotID != fixture.request.ID {
 				t.Fatalf("backup: %+v %v", result, err)
@@ -308,7 +317,7 @@ func TestDumpRejectsPartialOutputAndCancels(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			d, _, err := newDump(fixture.worker.Docker, c.Container, "postgres")
+			d, _, err := newDump(fixture.worker.Docker, c.Container, "mysql")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -338,6 +347,174 @@ func TestDumpRejectsPartialOutputAndCancels(t *testing.T) {
 				time.Sleep(20 * time.Millisecond)
 			}
 		})
+	}
+}
+
+func TestDumpCancellationKeepsPostgresRunning(t *testing.T) {
+	fixture := newWorkerFixture(t, backup.Auto, ":")
+	api := fixture.worker.Docker
+	created, err := api.ContainerCreate(t.Context(), client.ContainerCreateOptions{Config: &container.Config{
+		Image: "postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0",
+		Env:   []string{"POSTGRES_USER=app_admin", "POSTGRES_PASSWORD=private-dump-password"},
+	}, HostConfig: &container.HostConfig{NetworkMode: "none"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		api.ContainerRemove(context.Background(), created.ID, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
+	})
+	if _, err := api.ContainerStart(t.Context(), created.ID, client.ContainerStartOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	const sql = "psql -v ON_ERROR_STOP=1 -U app_admin -d postgres -qAt -c "
+	for deadline := time.Now().Add(90 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		if _, err := dockerCommand(t.Context(), api, created.ID, `[ "$(cat /proc/1/comm)" = postgres ]; `+sql+`'SELECT 1'`); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("PostgreSQL did not start")
+		}
+	}
+	if _, err := dockerCommand(t.Context(), api, created.ID, sql+`'CREATE TABLE blocked(id integer)'`); err != nil {
+		t.Fatal(err)
+	}
+	lockCtx, unlock := context.WithCancel(t.Context())
+	lockDone := make(chan error, 1)
+	go func() {
+		_, err := dockerCommand(lockCtx, api, created.ID, sql+`'BEGIN; LOCK blocked IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(6); COMMIT'`)
+		lockDone <- err
+		close(lockDone)
+	}()
+	defer func() { unlock(); <-lockDone }()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		output, err := dockerCommand(t.Context(), api, created.ID, sql+`"SELECT count(*) FROM pg_locks WHERE relation='blocked'::regclass AND mode='AccessExclusiveLock' AND granted"`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(output)) == "1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the fixture did not lock its table")
+		}
+	}
+	inspected, err := api.ContainerInspect(t.Context(), created.ID, client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dump, _, err := newDump(api, inspected.Container, "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	reader, err := dump.GetReader(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	done := make(chan error, 1)
+	go func() { _, err := io.Copy(io.Discard, reader); done <- err }()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		output, err := dockerCommand(t.Context(), api, created.ID, sql+`"SELECT count(*) FROM pg_stat_activity WHERE application_name='pg_dump' AND wait_event_type='Lock'"`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(output)) == "1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pg_dump did not wait for the locked table")
+		}
+	}
+	cancel()
+	reader.Close()
+	if err := <-done; err == nil {
+		t.Fatal("cancelled dump succeeded")
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		output, err := dockerCommand(t.Context(), api, created.ID, sql+`"SELECT count(*) FROM pg_stat_activity WHERE application_name IN ('pg_dump','pg_dumpall')"`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(output)) == "0" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cancel did not release the database dump connections")
+		}
+	}
+	if err := <-lockDone; err != nil {
+		t.Fatalf("dump cancellation interrupted another database connection: %v", err)
+	}
+	if _, err := dockerCommand(t.Context(), api, created.ID, `for file in /proc/[0-9]*/comm; do read -r name < "$file" || continue; [ "$name" != pg_dump ] && [ "$name" != pg_dumpall ] || exit 1; done`); err != nil {
+		t.Fatalf("cancel left a dump process: %v", err)
+	}
+}
+
+func TestDumpDeadlineStopsTheCommandWithoutClosingStdin(t *testing.T) {
+	fixture := newWorkerFixture(t, backup.Live, ":")
+	for _, signal := range []string{"INT", "TERM"} {
+		t.Run(signal, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			started := time.Now()
+			created, err := fixture.worker.Docker.ExecCreate(ctx, fixture.id, client.ExecCreateOptions{Cmd: []string{"sh", "-c", dumpSupervisor, "synod-dump", "printf ready; exec sleep 300", signal, "1"}, AttachStdin: true, AttachStdout: true, AttachStderr: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			attached, err := fixture.worker.Docker.ExecAttach(ctx, created.ID, client.ExecAttachOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer attached.Close()
+			stop := context.AfterFunc(ctx, attached.Close)
+			defer stop()
+			var output bytes.Buffer
+			if _, err := stdcopy.StdCopy(&output, io.Discard, attached.Reader); err != nil || ctx.Err() != nil || output.String() != "ready" || time.Since(started) < 500*time.Millisecond {
+				t.Fatalf("deadline did not stop a started command: %v %v", err, ctx.Err())
+			}
+			for {
+				status, err := fixture.worker.Docker.ExecInspect(ctx, created.ID, client.ExecInspectOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !status.Running {
+					if status.ExitCode == 0 {
+						t.Fatal("deadline reported success")
+					}
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
+func TestDumpRefusesMissingTimeout(t *testing.T) {
+	fixture := newWorkerFixture(t, backup.Live, ":")
+	api := fixture.worker.Docker
+	if _, err := dockerCommand(t.Context(), api, fixture.id, "mkdir /tmp/only-shell; ln -s /bin/sh /tmp/only-shell/sh"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := api.ContainerInspect(t.Context(), fixture.id, client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dump, _, err := newDump(api, c.Container, "mysql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dump.env = []string{"PATH=/tmp/only-shell"}
+	dump.command = "printf should-not-run"
+	reader, err := dump.GetReader(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if !errors.Is(err, errDump) || len(data) != 0 || !dump.failed.Load() {
+		t.Fatalf("dump ran without its deadline tool: %q %v", data, err)
 	}
 }
 
