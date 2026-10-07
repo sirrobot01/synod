@@ -52,7 +52,7 @@ func Maintain(ctx context.Context, location Location, credentials Credentials, i
 	}
 	defer st.Close(context.WithoutCancel(ctx))
 	// Kopia records maintenance ownership as user@host. The node ID makes it unique to this device.
-	r, err := open(connect, st, credentials.Password, nodeID.String(), nil)
+	r, err := open(connect, st, credentials, nodeID.String(), nil)
 	cancel()
 	if err != nil {
 		return "", err

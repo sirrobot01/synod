@@ -133,5 +133,12 @@ func (j *Journal) AdmitScheduled(ctx context.Context, ring *secret.Keyring, now 
 		count++
 		admitted++
 	}
-	return admitted, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if admitted > 0 {
+		signal(j.queued)
+		signal(j.changed)
+	}
+	return admitted, nil
 }

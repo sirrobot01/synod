@@ -360,6 +360,15 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, root *os.Root, file
 			return
 		}
 	}
+	// Kopia commits packs through a later index blob. A pack becomes durable before any
+	// other blob is written, so an index never names a pack that a crash could lose.
+	pack := deferredSync && (strings.HasPrefix(file, "p/") || strings.HasPrefix(file, "q/"))
+	if deferredSync && !pack {
+		if err := syncFilesystem(root); err != nil {
+			s.fileError(w, r, err)
+			return
+		}
+	}
 	directory := path.Dir(file)
 	if err := root.MkdirAll(directory, 0700); err != nil {
 		s.fileError(w, r, err)
@@ -387,7 +396,10 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, root *os.Root, file
 			return
 		}
 	}
-	if err := errors.Join(f.Sync(), f.Close()); err != nil {
+	if !pack {
+		writeErr = f.Sync()
+	}
+	if err := errors.Join(writeErr, f.Close()); err != nil {
 		s.fileError(w, r, err)
 		return
 	}
@@ -395,14 +407,16 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, root *os.Root, file
 		s.fileError(w, r, err)
 		return
 	}
-	parent, err := root.Open(directory)
-	if err != nil {
-		s.fileError(w, r, err)
-		return
-	}
-	if err := errors.Join(parent.Sync(), parent.Close()); err != nil {
-		s.fileError(w, r, err)
-		return
+	if !pack {
+		parent, err := root.Open(directory)
+		if err != nil {
+			s.fileError(w, r, err)
+			return
+		}
+		if err := errors.Join(parent.Sync(), parent.Close()); err != nil {
+			s.fileError(w, r, err)
+			return
+		}
 	}
 	info, err := root.Stat(file)
 	if err != nil {

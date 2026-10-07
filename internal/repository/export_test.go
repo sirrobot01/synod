@@ -14,7 +14,7 @@ func ClaimMaintenanceAt(ctx context.Context, location Location, credentials Cred
 		return "", err
 	}
 	defer st.Close(context.WithoutCancel(ctx))
-	r, err := open(ctx, st, credentials.Password, nodeID.String(), func() time.Time { return time.Now().Add(offset) })
+	r, err := open(ctx, st, credentials, nodeID.String(), func() time.Time { return time.Now().Add(offset) })
 	if err != nil {
 		return "", err
 	}

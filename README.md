@@ -956,6 +956,14 @@ Limits:
 
 The repository library uses Kopia v0.23.1.
 It creates and opens encrypted repositories on a local path, a Synod device, SFTP, or S3.
+New repositories use ChaCha20-Poly1305 encryption and BLAKE2b content hashes.
+Devices without AES instructions, such as a Raspberry Pi 4, encrypt about seven times faster with ChaCha20 than with AES-GCM.
+A backup reads only changed files.
+A file with the same size, modification time, mode, and owner as in the previous snapshot is not read again, as with rsync.
+A live SQLite database also uses the time of its `-wal` file.
+Files larger than 128 MiB are hashed in parallel parts.
+The agent keeps encrypted repository metadata in `cache/` beside its state, at most about 576 MiB for each destination.
+It keeps a repository connection open for 10 minutes after a good backup.
 Destination commands save the connection settings.
 They do not create a repository or start a backup.
 

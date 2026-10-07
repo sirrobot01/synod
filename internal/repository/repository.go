@@ -45,10 +45,10 @@ func Create(ctx context.Context, location Location, credentials Credentials) (*R
 		return nil, &Error{Action: "create storage", Cause: errors.Join(err, ctx.Err())}
 	}
 	defer st.Close(context.WithoutCancel(ctx))
-	if err := repo.Initialize(ctx, st, nil, credentials.Password); err != nil {
+	if err := repo.Initialize(ctx, st, newRepositoryOptions(), credentials.Password); err != nil {
 		return nil, &Error{Action: "initialize", Cause: errors.Join(err, ctx.Err())}
 	}
-	return open(ctx, st, credentials.Password, "synod", nil)
+	return open(ctx, st, credentials, "synod", nil)
 }
 
 // Open requires only the location and credentials. It uses no saved controller state.
@@ -60,19 +60,27 @@ func Open(ctx context.Context, location Location, credentials Credentials) (*Rep
 		return nil, &Error{Action: "open storage", Cause: errors.Join(err, ctx.Err())}
 	}
 	defer st.Close(context.WithoutCancel(ctx))
-	return open(ctx, st, credentials.Password, "synod", nil)
+	return open(ctx, st, credentials, "synod", nil)
 }
 
 // open confines Kopia's connection file to a private temporary directory.
 // Kopia retains the open connection in memory. No credential file or cache remains.
 // The empty directory stays until Close because Kopia puts its maintenance lock there.
-func open(ctx context.Context, st blob.Storage, password, host string, now func() time.Time) (*Repository, error) {
+func open(ctx context.Context, st blob.Storage, credentials Credentials, host string, now func() time.Time) (*Repository, error) {
 	dir, err := os.MkdirTemp("", "synod-repository-")
 	if err != nil {
 		return nil, &Error{Action: "prepare connection", Cause: errors.Join(err, ctx.Err())}
 	}
 	info := st.ConnectionInfo()
 	config := repo.LocalConfig{Storage: &info, ClientOptions: repo.ClientOptions{Hostname: host, Username: "synod", Description: "Synod repository", EnableActions: false}, Caching: &content.CachingOptions{}}
+	if credentials.CacheDirectory != "" {
+		if err := os.MkdirAll(credentials.CacheDirectory, 0o700); err != nil {
+			os.RemoveAll(dir)
+			return nil, &Error{Action: "prepare cache", Cause: err}
+		}
+		// Kopia caches encrypted index and metadata blobs. File contents stay remote.
+		config.Caching = &content.CachingOptions{CacheDirectory: credentials.CacheDirectory, MetadataCacheSizeBytes: 512 << 20, ContentCacheSizeBytes: 64 << 20}
+	}
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		return nil, &Error{Action: "prepare connection", Cause: errors.Join(err, ctx.Err())}
@@ -83,7 +91,7 @@ func open(ctx context.Context, st blob.Storage, password, host string, now func(
 		return nil, &Error{Action: "prepare connection", Cause: errors.Join(err, ctx.Err())}
 	}
 	r := &Repository{dir: dir}
-	r.repo, err = repo.Open(ctx, file, password, &repo.Options{DisableRepositoryLog: true, DoNotWaitForUpgrade: true, TimeNowFunc: now, OnFatalError: func(err error) { r.fatal.Store(&err) }})
+	r.repo, err = repo.Open(ctx, file, credentials.Password, &repo.Options{DisableRepositoryLog: true, DoNotWaitForUpgrade: true, TimeNowFunc: now, OnFatalError: func(err error) { r.fatal.Store(&err) }})
 	if removeErr := os.Remove(file); err == nil && removeErr != nil {
 		r.repo.Close(ctx)
 		err = removeErr
@@ -108,6 +116,12 @@ func (r *Repository) Close(ctx context.Context) error {
 
 var ErrUninitialized = errors.New("repository is not initialized")
 
+// newRepositoryOptions selects ChaCha20-Poly1305. Arm devices without AES instructions encrypt
+// about seven times faster with it than with AES-GCM, and amd64 devices lose no speed.
+func newRepositoryOptions() *repo.NewRepositoryOptions {
+	return &repo.NewRepositoryOptions{BlockFormat: format.ContentFormat{Hash: "BLAKE2B-256-128", Encryption: "CHACHA20-POLY1305-HMAC-SHA256"}}
+}
+
 // Connect may create a repository only for its one designated initialization job.
 // The controller must not assign another initializer until that job is terminal.
 func Connect(ctx context.Context, location Location, credentials Credentials, initialize bool) (*Repository, error) {
@@ -126,11 +140,11 @@ func Connect(ctx context.Context, location Location, credentials Credentials, in
 		if !initialize {
 			return nil, ErrUninitialized
 		}
-		if err := repo.Initialize(ctx, st, nil, credentials.Password); err != nil {
+		if err := repo.Initialize(ctx, st, newRepositoryOptions(), credentials.Password); err != nil {
 			return nil, &Error{Action: "initialize", Cause: errors.Join(err, ctx.Err())}
 		}
 	}
-	return open(ctx, st, credentials.Password, "synod", nil)
+	return open(ctx, st, credentials, "synod", nil)
 }
 
 // CheckInstallation refuses to mix the recovery state of two Synod installations.

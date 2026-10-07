@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -29,7 +30,8 @@ var ErrSnapshotIncomplete = errors.New("backup snapshot is incomplete")
 
 // UploadFiles writes deduplicated content. It does not publish a restorable snapshot.
 // A live first pass may be incomplete. The final pass must be complete.
-func (r *Repository) UploadFiles(ctx context.Context, root kfs.Entry, source snapshot.SourceInfo, preCopy bool) (*snapshot.Manifest, error) {
+// Files whose size, time, mode, and owner match an entry in previous are not read again.
+func (r *Repository) UploadFiles(ctx context.Context, root kfs.Entry, source snapshot.SourceInfo, preCopy bool, previous ...*snapshot.Manifest) (*snapshot.Manifest, error) {
 	r.write.Lock()
 	defer r.write.Unlock()
 	var prepared *snapshot.Manifest
@@ -37,13 +39,14 @@ func (r *Repository) UploadFiles(ctx context.Context, root kfs.Entry, source sna
 		uploader := upload.NewUploader(w)
 		uploader.EnableActions = false
 		uploader.CheckpointInterval = 0
-		uploader.ForceHashPercentage = 100
 		uploader.DisableIgnoreRules = true
 		uploader.FailFast = !preCopy
-		uploader.ParallelUploads = 2
-		policyTree := policy.BuildTree(nil, &policy.Policy{ErrorHandlingPolicy: policy.ErrorHandlingPolicy{IgnoreFileErrors: new(policy.OptionalBool(false)), IgnoreDirectoryErrors: new(policy.OptionalBool(false)), IgnoreUnknownTypes: new(policy.OptionalBool(false))}})
+		// Writers wait for their pack uploads, so twice the CPU count keeps every core busy.
+		uploader.ParallelUploads = min(2*runtime.NumCPU(), 16)
+		// Large files are hashed in parallel parts at fixed offsets, so an append keeps earlier parts.
+		policyTree := policy.BuildTree(nil, &policy.Policy{ErrorHandlingPolicy: policy.ErrorHandlingPolicy{IgnoreFileErrors: new(policy.OptionalBool(false)), IgnoreDirectoryErrors: new(policy.OptionalBool(false)), IgnoreUnknownTypes: new(policy.OptionalBool(false))}, UploadPolicy: policy.UploadPolicy{ParallelUploadAboveSize: new(policy.OptionalInt64(128 << 20))}})
 		var err error
-		prepared, err = uploader.Upload(ctx, root, policyTree, source)
+		prepared, err = uploader.Upload(ctx, root, policyTree, source, slices.DeleteFunc(previous, func(m *snapshot.Manifest) bool { return m == nil || m.RootEntry == nil })...)
 		if err != nil {
 			return err
 		}
@@ -92,13 +95,20 @@ func (r *Repository) PublishSnapshot(ctx context.Context, prepared *snapshot.Man
 	if !errors.Is(err, ErrSnapshotMissing) {
 		return backup.Snapshot{}, err
 	}
-	// Recovery may resume after maintenance. Check every referenced object before publication.
-	root := snapshotfs.EntryFromDirEntry(r.repo, prepared.RootEntry)
-	defer root.Close()
-	verifier := snapshotfs.NewVerifier(ctx, r.repo, snapshotfs.VerifierOptions{Parallelism: 2, FileQueueLength: 64, MaxErrors: 1})
-	checked, verifyErr := verifier.InParallel(ctx, func(walker *snapshotfs.TreeWalker) error { return walker.Process(ctx, root, "app") })
-	if verifyErr != nil || checked.ErrorCount != 0 {
-		return backup.Snapshot{}, &Error{Action: "check snapshot objects", Cause: errors.Join(ErrSnapshotIncomplete, verifyErr, errors.Join(checked.Errors...))}
+	// Maintenance removes only content that no snapshot uses and that is older than 24 hours.
+	// Reused content belongs to the newest snapshot, which retention keeps. A backup that runs
+	// for more than an hour, for example after a restart, checks every referenced object.
+	if _, err := r.repo.VerifyObject(ctx, prepared.RootObjectID()); err != nil {
+		return backup.Snapshot{}, &Error{Action: "check snapshot root", Cause: errors.Join(ErrSnapshotIncomplete, err)}
+	}
+	if time.Since(metadata.StartedAt) > time.Hour {
+		root := snapshotfs.EntryFromDirEntry(r.repo, prepared.RootEntry)
+		defer root.Close()
+		verifier := snapshotfs.NewVerifier(ctx, r.repo, snapshotfs.VerifierOptions{Parallelism: 2, FileQueueLength: 64, MaxErrors: 1})
+		checked, verifyErr := verifier.InParallel(ctx, func(walker *snapshotfs.TreeWalker) error { return walker.Process(ctx, root, "app") })
+		if verifyErr != nil || checked.ErrorCount != 0 {
+			return backup.Snapshot{}, &Error{Action: "check snapshot objects", Cause: errors.Join(ErrSnapshotIncomplete, verifyErr, errors.Join(checked.Errors...))}
+		}
 	}
 	err = repo.WriteSession(ctx, r.repo, repo.WriteSessionOptions{Purpose: "publish app snapshot"}, func(ctx context.Context, w repo.RepositoryWriter) error {
 		prepared = prepared.Clone()

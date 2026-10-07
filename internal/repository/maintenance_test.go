@@ -72,7 +72,7 @@ func TestMaintenanceReclaimsExpiredContentWithOneOwner(t *testing.T) {
 	}
 	connect := func(host string) *Repository {
 		t.Helper()
-		r, err := open(t.Context(), st, password, host, now)
+		r, err := open(t.Context(), st, Credentials{Password: password}, host, now)
 		if err != nil {
 			t.Fatal(err)
 		}

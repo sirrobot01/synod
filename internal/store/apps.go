@@ -92,7 +92,7 @@ ON CONFLICT(node_id) DO UPDATE SET session_id=excluded.session_id,observed_at=ex
 				return &Error{Code: InvalidRequest, Cause: err}
 			}
 			id := uuid.NewSHA1(nodeID, []byte(app.Key))
-			if saved, ok := prior[id]; !ok || !saved.present || !bytes.Equal(saved.definition, definition) {
+			if saved, ok := prior[id]; !ok || !saved.present || !bytes.Equal(planShape(saved.definition), planShape(definition)) {
 				changed = true
 			}
 			delete(prior, id)
@@ -172,4 +172,24 @@ func (s *Store) ListApps(ctx context.Context) (inventory.Catalog, error) {
 		return catalog, storeError(err)
 	}
 	return catalog, storeCommit(tx)
+}
+
+// planShape drops the measurements that each scan refreshes: container run state and path sizes.
+// A change in them does not change the plan, so it must not start a new plan revision.
+func planShape(definition []byte) []byte {
+	app := new(agentv1.DiscoveredApp)
+	if proto.Unmarshal(definition, app) != nil {
+		return definition
+	}
+	for _, c := range app.Containers {
+		c.State = ""
+	}
+	for _, p := range app.Paths {
+		p.SizeBytes, p.SizeKnown, p.Reason = 0, false, ""
+	}
+	shape, err := proto.MarshalOptions{Deterministic: true}.Marshal(app)
+	if err != nil {
+		return definition
+	}
+	return shape
 }

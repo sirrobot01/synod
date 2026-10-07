@@ -39,12 +39,14 @@ type S3Location struct {
 
 // Credentials must be wrapped before persistent storage outside the repository.
 type Credentials struct {
-	DeviceIdentity  *DeviceIdentity `json:"-"`
-	Password        string          `json:"password"`
-	SSHKey          string          `json:"ssh_key,omitempty"`
-	AccessKeyID     string          `json:"access_key_id,omitempty"`
-	SecretAccessKey string          `json:"secret_access_key,omitempty"`
-	SessionToken    string          `json:"session_token,omitempty"`
+	DeviceIdentity *DeviceIdentity `json:"-"`
+	// CacheDirectory keeps encrypted repository metadata between connections on one device.
+	CacheDirectory  string `json:"-"`
+	Password        string `json:"password"`
+	SSHKey          string `json:"ssh_key,omitempty"`
+	AccessKeyID     string `json:"access_key_id,omitempty"`
+	SecretAccessKey string `json:"secret_access_key,omitempty"`
+	SessionToken    string `json:"session_token,omitempty"`
 }
 
 func (Credentials) String() string   { return "[repository credentials]" }

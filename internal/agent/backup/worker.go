@@ -2,12 +2,16 @@ package backup
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,6 +41,77 @@ type Worker struct {
 	NodeName, Architecture string
 	Identity               *repository.DeviceIdentity
 	PrivatePaths           []string
+	Logger                 *slog.Logger
+	// CacheDirectory holds one Kopia metadata cache for each destination. Empty disables caching.
+	CacheDirectory string
+	images         sync.Map
+	// catalogs maps a destination to the newest catalog generation known to be stored there.
+	catalogs sync.Map
+	// connections keeps one open repository for each destination between backups.
+	connectionsMu sync.Mutex
+	connections   map[uuid.UUID]connection
+}
+
+type connection struct {
+	key  [32]byte
+	r    *repository.Repository
+	used time.Time
+}
+
+// ConnectionIdle is how long an unused repository connection stays open.
+const ConnectionIdle = 10 * time.Minute
+
+// connect reuses an idle connection opened with the same settings, or opens a new one.
+func (w *Worker) connect(ctx context.Context, destinationID uuid.UUID, location repository.Location, credentials repository.Credentials, initialize bool) (*repository.Repository, [32]byte, error) {
+	settings, _ := json.Marshal(struct {
+		Location    repository.Location
+		Credentials repository.Credentials
+		Identity    *repository.DeviceIdentity
+		Cache       string
+	}{location, credentials, credentials.DeviceIdentity, credentials.CacheDirectory})
+	key := sha256.Sum256(settings)
+	clear(settings)
+	w.connectionsMu.Lock()
+	open, ok := w.connections[destinationID]
+	delete(w.connections, destinationID)
+	w.connectionsMu.Unlock()
+	if ok {
+		if open.key == key && time.Since(open.used) < ConnectionIdle {
+			return open.r, key, nil
+		}
+		open.r.Close(context.WithoutCancel(ctx))
+	}
+	r, err := repository.Connect(ctx, location, credentials, initialize)
+	return r, key, err
+}
+
+// release keeps a healthy connection for the next backup, or closes it.
+func (w *Worker) release(destinationID uuid.UUID, r *repository.Repository, key [32]byte, healthy bool) {
+	if !healthy {
+		r.Close(context.Background())
+		return
+	}
+	w.connectionsMu.Lock()
+	defer w.connectionsMu.Unlock()
+	if w.connections == nil {
+		w.connections = make(map[uuid.UUID]connection)
+	}
+	if open, ok := w.connections[destinationID]; ok {
+		open.r.Close(context.Background())
+	}
+	w.connections[destinationID] = connection{key: key, r: r, used: time.Now()}
+}
+
+// CloseIdle closes connections unused for at least idle. Zero closes all of them.
+func (w *Worker) CloseIdle(idle time.Duration) {
+	w.connectionsMu.Lock()
+	defer w.connectionsMu.Unlock()
+	for id, open := range w.connections {
+		if time.Since(open.used) >= idle {
+			open.r.Close(context.Background())
+			delete(w.connections, id)
+		}
+	}
 }
 
 type restartIntent struct {
@@ -55,6 +130,17 @@ type progress struct {
 	FailureCode      string             `json:"failure_code,omitempty"`
 	Prepared         *snapshot.Manifest `json:"prepared,omitempty"`
 	Metadata         backup.Snapshot    `json:"metadata"`
+	// phases holds the milliseconds of each backup step for the backup_timing log.
+	phases []any
+	mark   time.Time
+}
+
+func (p *progress) phase(name string) {
+	now := time.Now()
+	if !p.mark.IsZero() {
+		p.phases = append(p.phases, name, now.Sub(p.mark).Milliseconds())
+	}
+	p.mark = now
 }
 
 // Execute starts admitted work once. A running record is recovered without another copy.
@@ -95,6 +181,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if err := w.save(ctx, &state); err != nil {
 		return backup.Result{}, err
 	}
+	state.phase("")
 	plan, err := w.Journal.DestinationPlan(ctx, w.Keyring)
 	if err != nil {
 		state.FailureCode = "destination_unavailable"
@@ -105,12 +192,14 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		state.FailureCode = "destination_unavailable"
 		return w.finish(ctx, request, &state, nil)
 	}
-	r, err := repository.Connect(ctx, location, credentials, request.Initialize)
+	credentials.CacheDirectory = w.cache(request.DestinationID)
+	r, key, err := w.connect(ctx, request.DestinationID, location, credentials, request.Initialize)
 	if err != nil {
 		state.FailureCode = "repository_open_failed"
 		return w.finish(ctx, request, &state, nil)
 	}
-	defer r.Close(context.Background())
+	// A failed backup can leave a broken connection. Only a clean result keeps it open.
+	defer func() { w.release(request.DestinationID, r, key, state.FailureCode == "") }()
 	state.RepositoryOpened = true
 	if err := w.save(ctx, &state); err != nil {
 		return backup.Result{}, err
@@ -125,7 +214,9 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	} else {
 		filters.Add("id", strings.TrimPrefix(request.SourceKey, "container:"))
 	}
+	state.phase("open_repository")
 	report, err := discovery.Scan(ctx, w.Docker, filters)
+	state.phase("discover_app")
 	if err != nil || len(report.Apps) != 1 || report.Apps[0].Key != request.SourceKey || inventory.Validate(report) != nil {
 		state.FailureCode = "app_scan_failed"
 		return w.finish(ctx, request, &state, r)
@@ -203,10 +294,22 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return w.finish(ctx, request, &state, r)
 	}
 	definitions["networks.json"] = raw
-	images, err := w.imageEvidence(ctx, app)
-	if err != nil {
-		state.FailureCode = "image_inspection_failed"
-		return w.finish(ctx, request, &state, r)
+	state.phase("inspect_containers")
+	// A registry lookup can take seconds. It runs during the copy and joins before the app stops.
+	type imageResult struct {
+		images []backup.Image
+		err    error
+	}
+	resolved := make(chan imageResult, 1)
+	go func() {
+		images, err := w.imageEvidence(ctx, app)
+		resolved <- imageResult{images, err}
+	}()
+	joinImages := func() bool {
+		result := <-resolved
+		state.phase("wait_images")
+		state.Metadata.Images = result.images
+		return result.err == nil
 	}
 	if app.Kind == "container" {
 		definition, err := compose.FromContainer(inspected[0])
@@ -253,7 +356,6 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		},
 		Method:       method,
 		Architecture: w.Architecture,
-		Images:       images,
 		StartedAt:    state.StartedAt,
 		Paths:        tree.Paths,
 	}
@@ -268,11 +370,26 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		owner := info.Sys().(*syscall.Stat_t)
 		state.Metadata.MountSources = append(state.Metadata.MountSources, backup.MountSource{Source: path.Source, Mode: uint32(info.Mode()), UserID: owner.Uid, GroupID: owner.Gid})
 	}
+	state.phase("prepare_tree")
 	source := snapshot.SourceInfo{Host: w.NodeID.String(), UserName: "synod", Path: request.AppID.String()}
+	// Without a readable previous snapshot, the backup reads every file.
+	previous, err := r.LatestFiles(ctx, w.InstallationID, request.AppID, request.DestinationID)
+	if err != nil {
+		previous = nil
+	}
+	state.phase("read_previous")
 	if method == backup.Stop {
+		var copied *snapshot.Manifest
 		root, err := tree.Root(ctx, definitions)
 		if err == nil {
-			_, err = r.UploadFiles(ctx, root, source, true)
+			copied, err = r.UploadFiles(ctx, root, source, true, previous)
+		}
+		// The stopped pass reads only files that changed after the live pass.
+		previous = copied
+		state.phase("first_copy")
+		if !joinImages() {
+			state.FailureCode = "image_inspection_failed"
+			return w.finish(ctx, request, &state, r)
 		}
 		if err != nil {
 			state.FailureCode = "first_copy_failed"
@@ -309,6 +426,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		}
 	}
 	if method == backup.Stop {
+		state.phase("stop_app")
 		if err := w.checkStopped(ctx, fileContainers); err != nil {
 			state.FailureCode = "app_changed_during_backup"
 			return w.finish(ctx, request, &state, r)
@@ -332,10 +450,16 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	root, err := tree.Root(final, definitions, dumps...)
 	if err == nil {
-		state.Prepared, err = r.UploadFiles(final, root, source, false)
+		state.Prepared, err = r.UploadFiles(final, root, source, false, previous)
 	}
 	if err == nil && method == backup.Stop {
 		err = w.checkStopped(final, fileContainers)
+	}
+	state.phase("final_copy")
+	if method != backup.Stop && !joinImages() {
+		state.Prepared = nil
+		state.FailureCode = "image_inspection_failed"
+		return w.finish(ctx, request, &state, r)
 	}
 	tree.sqliteMu.Lock()
 	sqliteErr := tree.sqliteErr
@@ -368,6 +492,13 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		state.Prepared = nil
 	}
 	return w.finish(ctx, request, &state, r)
+}
+
+func (w *Worker) cache(destinationID uuid.UUID) string {
+	if w.CacheDirectory == "" {
+		return ""
+	}
+	return filepath.Join(w.CacheDirectory, destinationID.String())
 }
 
 func (w *Worker) save(ctx context.Context, state *progress) error {
@@ -409,6 +540,7 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 		}
 	}
 	state.Restart = pending
+	state.phase("restart_app")
 	if err := w.save(cleanup, state); err != nil {
 		return backup.Result{}, err
 	}
@@ -434,6 +566,7 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 			if err != nil {
 				return backup.Result{}, err
 			}
+			credentials.CacheDirectory = w.cache(request.DestinationID)
 			r, err = repository.Open(cleanup, location, credentials)
 			if err != nil {
 				return backup.Result{}, err
@@ -446,6 +579,7 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 		} else {
 			state.Metadata = saved
 		}
+		state.phase("publish")
 	}
 	if state.Prepared == nil && state.FailureCode == "" {
 		state.FailureCode = "agent_interrupted"
@@ -464,7 +598,9 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 		if catalogErr == nil && catalog.InstallationID != w.InstallationID {
 			catalogErr = repository.ErrCatalogConflict
 		}
-		if catalogErr == nil {
+		if stored, ok := w.catalogs.Load(request.DestinationID); catalogErr == nil && ok && stored.(uint64) >= catalog.Generation {
+			// This destination already holds this catalog or a newer one.
+		} else if catalogErr == nil {
 			previous, err := r.ReadCatalog(cleanup)
 			if err != nil && !errors.Is(err, repository.ErrCatalogMissing) {
 				catalogErr = err
@@ -483,12 +619,23 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 		}
 		if catalogErr != nil {
 			result.WarningCodes = append(result.WarningCodes, "catalog_write_failed")
+		} else if stored, ok := w.catalogs.Load(request.DestinationID); !ok || stored.(uint64) < catalog.Generation {
+			w.catalogs.Store(request.DestinationID, catalog.Generation)
 		}
+		state.phase("write_catalog")
 		if result.FailureCode == "" && request.Retention != nil {
 			if _, err := r.ApplyRetention(cleanup, w.InstallationID, request.AppID, request.DestinationID, *request.Retention, result.SnapshotID); err != nil {
 				result.WarningCodes = append(result.WarningCodes, "retention_failed")
 			}
+			state.phase("apply_retention")
 		}
+	}
+	if w.Logger != nil && len(state.phases) > 0 {
+		counts := []any{"operation_id", request.ID, "method", state.Metadata.Method}
+		if state.Prepared != nil {
+			counts = append(counts, "files_reused", state.Prepared.Stats.CachedFiles, "files_read", state.Prepared.Stats.NonCachedFiles)
+		}
+		w.Logger.Info("backup_timing", append(counts, state.phases...)...)
 	}
 	raw, _ := json.Marshal(result)
 	if err := w.Journal.Complete(cleanup, request.ID, raw); err != nil {

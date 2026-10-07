@@ -29,6 +29,7 @@ func deliverJobs(ctx context.Context, metadata *store.Store, stream *controlstre
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-metadata.JobsAdded():
 		}
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/kopia/kopia/repo/manifest"
+	"github.com/kopia/kopia/snapshot"
 	"github.com/sirrobot01/synod/internal/backup"
 )
 
@@ -50,4 +52,24 @@ func (r *Repository) Snapshots(ctx context.Context, installationID, appID uuid.U
 		return cmp.Compare(a.ID.String(), b.ID.String())
 	})
 	return result, nil
+}
+
+// LatestFiles returns the files of the newest snapshot of one app at one destination, or nil.
+// A backup passes it to UploadFiles so unchanged files are not read again.
+func (r *Repository) LatestFiles(ctx context.Context, installationID, appID, destinationID uuid.UUID) (*snapshot.Manifest, error) {
+	saved, err := r.Snapshots(ctx, installationID, appID)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range saved {
+		if s.DestinationID != destinationID {
+			continue
+		}
+		files, err := snapshot.LoadSnapshot(ctx, r.repo, manifest.ID(s.FilesID))
+		if err != nil {
+			return nil, &Error{Action: "read previous snapshot files", Cause: err}
+		}
+		return files, nil
+	}
+	return nil, nil
 }

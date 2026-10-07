@@ -107,6 +107,7 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 				if _, err := cache.Admit(ctx, request.ID, raw); err != nil {
 					return nil, err
 				}
+				logger.Info("backup_job_received", "operation_id", request.ID)
 				return nil, nil
 			}
 			if file := message.GetFileRequest(); file != nil {
@@ -188,7 +189,7 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("%w: resolve enrollment directory", ErrConfiguration)
 	}
-	backupWorker := &agentbackup.Worker{Docker: api, Journal: cache, Keyring: ring, InstallationID: identity.Identity.InstallationID, NodeID: identity.Identity.NodeID, NodeName: hostname, Architecture: facts.architecture, Identity: deviceIdentity, PrivatePaths: []string{enrollmentPath, enrollmentPath + ".db", enrollmentPath + ".db-wal", enrollmentPath + ".db-shm"}}
+	backupWorker := &agentbackup.Worker{Docker: api, Journal: cache, Keyring: ring, InstallationID: identity.Identity.InstallationID, NodeID: identity.Identity.NodeID, NodeName: hostname, Architecture: facts.architecture, Identity: deviceIdentity, PrivatePaths: []string{enrollmentPath, enrollmentPath + ".db", enrollmentPath + ".db-wal", enrollmentPath + ".db-shm"}, Logger: logger, CacheDirectory: filepath.Join(filepath.Dir(enrollmentPath), "cache")}
 	restoreWorker := &agentrestore.Worker{Backup: backupWorker, Directory: filepath.Join(filepath.Dir(enrollmentPath), "restores")}
 	var waiting atomic.Pointer[uuid.UUID]
 	worker.Go(func() { executeJobs(workerCtx, backupWorker, restoreWorker, &waiting, logger) })

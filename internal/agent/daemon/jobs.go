@@ -24,10 +24,12 @@ import (
 func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agentrestore.Worker, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
+	defer worker.CloseIdle(0)
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		worker.CloseIdle(agentbackup.ConnectionIdle)
 		if _, err := worker.Journal.AdmitScheduled(ctx, worker.Keyring, time.Now()); err != nil && !errors.Is(err, journal.ErrNotFound) {
 			logger.Warn("backup_schedule_failed", "code", "schedule_admission_failed")
 		}
@@ -77,6 +79,7 @@ func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agen
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-worker.Journal.Queued():
 		}
 	}
 }
@@ -151,6 +154,7 @@ func reportJobs(ctx context.Context, cache *journal.Journal, stream *transport.C
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-cache.Changed():
 		}
 	}
 }

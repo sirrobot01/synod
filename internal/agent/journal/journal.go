@@ -49,6 +49,20 @@ type Record struct {
 type Journal struct {
 	db                     *sql.DB
 	installationID, nodeID uuid.UUID
+	queued, changed        chan struct{}
+}
+
+// Queued receives a value after new work is saved.
+func (j *Journal) Queued() <-chan struct{} { return j.queued }
+
+// Changed receives a value after a record changes state, so its report can go at once.
+func (j *Journal) Changed() <-chan struct{} { return j.changed }
+
+func signal(c chan struct{}) {
+	select {
+	case c <- struct{}{}:
+	default:
+	}
 }
 
 // Open binds a journal file to one installation and device.
@@ -121,7 +135,7 @@ func Open(ctx context.Context, path string, installationID, nodeID uuid.UUID) (*
 		return nil, fmt.Errorf("commit journal initialization: %w", err)
 	}
 	ready = true
-	return &Journal{db: db, installationID: installationID, nodeID: nodeID}, nil
+	return &Journal{db: db, installationID: installationID, nodeID: nodeID, queued: make(chan struct{}, 1), changed: make(chan struct{}, 1)}, nil
 }
 
 func (j *Journal) Close() error { return j.db.Close() }
@@ -162,6 +176,8 @@ func (j *Journal) Admit(ctx context.Context, id uuid.UUID, input []byte) (Record
 	if err := tx.Commit(); err != nil {
 		return Record{}, fmt.Errorf("commit journal work %s: %w", id, err)
 	}
+	signal(j.queued)
+	signal(j.changed)
 	return Record{ID: id, State: Queued, Input: bytes.Clone(input)}, nil
 }
 
@@ -178,6 +194,7 @@ func (j *Journal) Start(ctx context.Context, id uuid.UUID) error {
 	if changed == 0 {
 		return ErrInspectionRequired
 	}
+	signal(j.changed)
 	return nil
 }
 
@@ -272,6 +289,7 @@ func (j *Journal) Complete(ctx context.Context, id uuid.UUID, result []byte) err
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit journal result %s: %w", id, err)
 	}
+	signal(j.changed)
 	return nil
 }
 

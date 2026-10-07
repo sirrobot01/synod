@@ -241,6 +241,15 @@ A local destination is available only through its owner device.
 A Synod-device destination is available to approved peer agents.
 In the web UI, **Destinations → Add destination** accepts the same settings.
 
+### Backup speed
+
+The first backup copies all included data.
+Later backups read only the files that changed.
+Synod treats a file as unchanged when its size, modification time, mode, and owner are the same as in the previous snapshot.
+rsync uses the same rule.
+The Stop method reads the data while the app runs, then reads again only the files that changed before the app stopped.
+The agent keeps encrypted repository metadata in the `cache` directory beside its state directory.
+
 ### Space reclamation
 
 Retention removes expired snapshot records after each backup.
@@ -576,6 +585,8 @@ Other current limits:
 - Browser file downloads are limited to 64 MiB. Use the CLI for larger downloads.
 - A backup copy pass that runs for more than 24 hours can lose new data to concurrent maintenance. Synod checks every object before it saves a snapshot, so that backup fails and saves no damaged snapshot. The next backup copies the data again.
 - Maintenance runs in the agent's job queue. A long maintenance run delays other jobs on that device.
+- A program that rewrites a file and keeps its old size and modification time defeats change detection. Synod copies that file again only after its size or time changes.
+- A local destination syncs each repository file to disk. On a slow disk, a Synod-device destination is faster, because it syncs once before each index write.
 - An isolated drill cannot prove app behavior that needs network access.
 
 See the [README](../README.md) for detailed behavior and developer checks.

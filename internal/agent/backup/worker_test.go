@@ -316,3 +316,58 @@ func TestWorkerRecoversStopAfterJournalRestart(t *testing.T) {
 		t.Fatalf("recovery did not commit its result: %v", err)
 	}
 }
+
+func TestWorkerReusesItsConnectionForTheNextBackup(t *testing.T) {
+	fixture := newWorkerFixture(t, backup.Live, ":")
+	first, err := fixture.worker.Execute(t.Context(), fixture.request)
+	if err != nil || first.FailureCode != "" {
+		t.Fatalf("first backup: %+v %v", first, err)
+	}
+	fixture.worker.connectionsMu.Lock()
+	kept := fixture.worker.connections[fixture.request.DestinationID].r
+	fixture.worker.connectionsMu.Unlock()
+	if kept == nil {
+		t.Fatal("a good backup closed its connection")
+	}
+	if err := os.WriteFile(filepath.Join(fixture.project, "state"), []byte("second-backup"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	next := fixture.request
+	next.ID, next.Initialize, next.RequestedAt = uuid.New(), false, time.Now().UTC()
+	second, err := fixture.worker.Execute(t.Context(), next)
+	if err != nil || second.FailureCode != "" {
+		t.Fatalf("second backup: %+v %v", second, err)
+	}
+	fixture.worker.connectionsMu.Lock()
+	reused := fixture.worker.connections[fixture.request.DestinationID].r
+	fixture.worker.connectionsMu.Unlock()
+	if reused != kept {
+		t.Fatal("the second backup opened another connection")
+	}
+	fixture.worker.CloseIdle(0)
+	if len(fixture.worker.connections) != 0 {
+		t.Fatal("CloseIdle kept a connection")
+	}
+	r, err := repository.Open(t.Context(), fixture.location, fixture.credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close(context.Background())
+	saved, err := r.Snapshot(t.Context(), second.SnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "restored")
+	if err := r.RestoreFiles(t.Context(), second.SnapshotID, target); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range saved.Paths {
+		if path.Kind == "project" {
+			if data, err := os.ReadFile(filepath.Join(target, path.Archive, "state")); err != nil || string(data) != "second-backup" {
+				t.Fatalf("second snapshot state is %q: %v", data, err)
+			}
+			return
+		}
+	}
+	t.Fatal("project path is absent from the manifest")
+}

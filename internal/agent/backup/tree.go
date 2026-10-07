@@ -31,6 +31,17 @@ type sourceRoot struct {
 	volume                bool
 }
 
+// nestedPath is an included path that its parent's walk copies. Each pass checks that it still exists.
+type nestedPath struct {
+	parent   *sourceRoot
+	relative string
+	mode     os.FileMode
+}
+
+var mediaNames = []string{"media", "movies", "tv", "music", "downloads", "videos", "photos", "pictures", "upload", "uploads", "originals"}
+
+const largeFileBytes = 20 << 30
+
 // Tree confines reads to the selected roots and applies exclusions to overlapping paths.
 // Close it after both upload passes finish.
 type Tree struct {
@@ -39,6 +50,7 @@ type Tree struct {
 	sqliteErr     error
 	sqlite        map[string]*os.File
 	roots         []*sourceRoot
+	nested        []nestedPath
 	Paths         []backup.Path
 	excluded      map[string]string
 	mu            sync.Mutex
@@ -119,8 +131,56 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 		tree.Paths = append(tree.Paths, backup.Path{Source: item.Source, Archive: "paths/" + archive, Kind: item.Kind})
 		seen[item.Source] = "paths/" + archive
 	}
+	tree.nest()
 	ready = true
 	return tree, nil
+}
+
+// nest copies an included path once when it lies inside another included directory.
+// A Compose project often mounts ./data, so the project walk already reads that data.
+// The path keeps its own mapping into the parent's archive. Restore and file browsing
+// resolve such mappings. A path stays separate when the parent walk would skip a part of it.
+func (t *Tree) nest() {
+	for i := 0; i < len(t.roots); i++ {
+		child := t.roots[i]
+		for _, parent := range t.roots {
+			if parent == child || parent.path != "." {
+				continue
+			}
+			relative, err := filepath.Rel(parent.source, child.source)
+			if err != nil || relative == "." || strings.HasPrefix(relative, "..") || child.volume != parent.volume {
+				continue
+			}
+			walked := true
+			current := parent.source
+			for _, part := range strings.Split(relative, string(filepath.Separator)) {
+				current = filepath.Join(current, part)
+				name := strings.ToLower(part)
+				if t.skip(current) || discovery.Forbidden(current, parent.volume) || slices.Contains(mediaNames, name) || strings.HasSuffix(name, "-wal") || strings.HasSuffix(name, "-shm") || strings.HasSuffix(name, "-journal") {
+					walked = false
+					break
+				}
+			}
+			info, err := child.root.Lstat(child.path)
+			if err != nil || (info.Mode().IsRegular() && info.Size() > largeFileBytes) {
+				walked = false
+			}
+			if !walked {
+				continue
+			}
+			t.nested = append(t.nested, nestedPath{parent: parent, relative: relative, mode: info.Mode().Type()})
+			archive := "paths/" + parent.archive + "/" + filepath.ToSlash(relative)
+			for j := range t.Paths {
+				if t.Paths[j].Archive == "paths/"+child.archive {
+					t.Paths[j].Archive = archive
+				}
+			}
+			child.root.Close()
+			t.roots = slices.Delete(t.roots, i, i+1)
+			i--
+			break
+		}
+	}
 }
 
 // Root refreshes source metadata for each pass. Definition files stay in memory.
@@ -147,7 +207,22 @@ func (t *Tree) Root(ctx context.Context, definitions map[string][]byte, dumps ..
 		if err != nil || info.Mode()&os.ModeSymlink != 0 {
 			return nil, ErrSource
 		}
-		entries = append(entries, newSourceEntry(t, root, root.path, root.source, root.archive, info))
+		var wal os.FileInfo
+		if t.live && info.Mode().IsRegular() {
+			if wal, err = root.root.Lstat(root.path + "-wal"); errors.Is(err, os.ErrNotExist) {
+				wal = nil
+			} else if err != nil {
+				return nil, ErrSource
+			}
+		}
+		entries = append(entries, newSourceEntry(t, root, root.path, root.source, root.archive, info, wal))
+	}
+	// A missing path would be absent from its parent's walk and from the snapshot.
+	for _, nested := range t.nested {
+		info, err := nested.parent.root.Lstat(nested.relative)
+		if err != nil || info.Mode().Type() != nested.mode {
+			return nil, ErrSource
+		}
 	}
 	var files []kfs.Entry
 	for name, data := range definitions {
@@ -233,14 +308,19 @@ func (e sourceEntry) Device() kfs.DeviceInfo {
 func (e sourceEntry) LocalFilesystemPath() string { return "" }
 func (e sourceEntry) Close()                      {}
 
-func newSourceEntry(tree *Tree, root *sourceRoot, path, absolute, name string, info os.FileInfo) kfs.Entry {
+// newSourceEntry takes the -wal sidecar of a live SQLite file, or nil.
+func newSourceEntry(tree *Tree, root *sourceRoot, path, absolute, name string, info, wal os.FileInfo) kfs.Entry {
 	entry := sourceEntry{FileInfo: info, tree: tree, source: root, path: path, absolute: absolute, name: name}
 	switch {
 	case info.IsDir():
 		return &sourceDirectory{entry}
 	case info.Mode().IsRegular():
 		if tree.live {
-			return &liveFile{entry}
+			// A WAL commit changes only the -wal file. Its time makes Kopia read the database again.
+			if wal != nil && wal.ModTime().After(info.ModTime()) {
+				return &liveFile{entry, wal.ModTime()}
+			}
+			return &liveFile{entry, info.ModTime()}
 		}
 		return &sourceFile{entry}
 	default:
@@ -299,8 +379,7 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 		return nil, err
 	}
 	defer file.Close()
-	var entries []kfs.Entry
-	count := 0
+	var children []os.DirEntry
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -312,47 +391,58 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 		if len(batch) == 0 {
 			break
 		}
-		count += len(batch)
-		if count > 100000 {
+		children = append(children, batch...)
+		if len(children) > 100000 {
 			return nil, ErrSourceLimit
 		}
-		for _, child := range batch {
-			absolute := filepath.Join(d.absolute, child.Name())
-			if d.tree.skip(absolute) {
-				continue
-			}
-			reason := ""
-			sidecar, err := d.tree.sqliteSidecar(root, child.Name())
-			if err != nil {
-				return nil, err
-			}
-			if sidecar {
-				reason = "SQLite sidecars are excluded from live copies."
-			}
-			if discovery.Forbidden(absolute, d.source.volume) {
-				reason = "Host system paths are never copied."
-			}
-			if slices.Contains([]string{"media", "movies", "tv", "music", "downloads", "videos", "photos", "pictures", "upload", "uploads", "originals"}, strings.ToLower(child.Name())) {
-				reason = "Media is skipped by default."
-			}
-			info, err := root.Lstat(child.Name())
-			if err != nil {
-				return nil, err
-			}
-			if !info.Mode().IsRegular() && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-				reason = "This path is not a regular file, directory, or link."
-			}
-			if info.Mode().IsRegular() && info.Size() > 20<<30 {
-				reason = "This file exceeds 20 GiB and is skipped by default."
-			}
-			if reason != "" {
-				if err := d.tree.exclude(absolute, reason); err != nil {
-					return nil, err
-				}
-				continue
-			}
-			entries = append(entries, newSourceEntry(d.tree, d.source, filepath.Join(d.path, child.Name()), absolute, child.Name(), info))
+	}
+	names := make(map[string]bool, len(children))
+	for _, child := range children {
+		names[child.Name()] = true
+	}
+	var entries []kfs.Entry
+	for _, child := range children {
+		absolute := filepath.Join(d.absolute, child.Name())
+		if d.tree.skip(absolute) {
+			continue
 		}
+		reason := ""
+		sidecar, err := d.tree.sqliteSidecar(root, child.Name())
+		if err != nil {
+			return nil, err
+		}
+		if sidecar {
+			reason = "SQLite sidecars are excluded from live copies."
+		}
+		if discovery.Forbidden(absolute, d.source.volume) {
+			reason = "Host system paths are never copied."
+		}
+		if slices.Contains(mediaNames, strings.ToLower(child.Name())) {
+			reason = "Media is skipped by default."
+		}
+		info, err := root.Lstat(child.Name())
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			reason = "This path is not a regular file, directory, or link."
+		}
+		if info.Mode().IsRegular() && info.Size() > largeFileBytes {
+			reason = "This file exceeds 20 GiB and is skipped by default."
+		}
+		if reason != "" {
+			if err := d.tree.exclude(absolute, reason); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		var wal os.FileInfo
+		if d.tree.live && info.Mode().IsRegular() && names[child.Name()+"-wal"] {
+			if wal, err = root.Lstat(child.Name() + "-wal"); err != nil {
+				return nil, err
+			}
+		}
+		entries = append(entries, newSourceEntry(d.tree, d.source, filepath.Join(d.path, child.Name()), absolute, child.Name(), info, wal))
 	}
 	kfs.Sort(entries)
 	return kfs.StaticIterator(entries, nil), nil

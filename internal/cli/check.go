@@ -52,7 +52,7 @@ func newCheckCommand(app *app) *cobra.Command {
 			select {
 			case <-cmd.Context().Done():
 				return cmd.Context().Err()
-			case <-time.After(time.Second):
+			case <-time.After(250 * time.Millisecond):
 			}
 			saved, err = app.api.GetOperation(cmd.Context(), saved.ID)
 			if err != nil {

@@ -214,3 +214,18 @@ func TestConnectRequiresInitializationPermissionAndKeepsExistingKeys(t *testing.
 		t.Fatalf("connect changed the repository keys: %v", err)
 	}
 }
+
+func TestNewRepositoryUsesChaCha20(t *testing.T) {
+	r, err := Create(t.Context(), Location{Kind: "local", Path: t.TempDir()}, Credentials{Password: "format-test-password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close(context.Background())
+	direct, ok := r.repo.(repo.DirectRepository)
+	if !ok {
+		t.Fatal("direct repository required")
+	}
+	if f := direct.ContentReader().ContentFormat(); f.GetEncryptionAlgorithm() != "CHACHA20-POLY1305-HMAC-SHA256" || f.GetHashFunction() != "BLAKE2B-256-128" {
+		t.Fatalf("repository format: %s %s", f.GetEncryptionAlgorithm(), f.GetHashFunction())
+	}
+}

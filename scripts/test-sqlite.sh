@@ -22,7 +22,7 @@ fixture_container=$(docker create --network none --label synod.test=sqlite \
     -v "$fixture_root:/src:ro" -v "$fixture_modules:/go/pkg/mod:ro" -v "$fixture_cache:/cache" \
     -w /src "$fixture_image" \
     go test -race -p 1 -count=1 -timeout=3m ./internal/agent/backup \
-    -run 'TestSQLite|TestTreeCopiesLiveSQLite' "$@")
+    -run 'TestSQLite|TestTreeCopiesLiveSQLite|TestIncrementalLive' "$@")
 docker start -a "$fixture_container"
 fixture_status=$(docker inspect --format '{{.State.ExitCode}}' "$fixture_container")
 exit "$fixture_status"

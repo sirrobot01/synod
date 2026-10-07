@@ -50,8 +50,22 @@ func (e *Error) Unwrap() error { return e.Cause }
 
 // Store owns one SQLite database. Close it when the controller stops.
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
+	db   *sql.DB
+	now  func() time.Time
+	jobs chan struct{}
+}
+
+// JobsAdded receives a value after a new backup, restore, or proof request commits.
+func (s *Store) JobsAdded() <-chan struct{} { return s.jobs }
+
+func (s *Store) jobAdded(err error) error {
+	if err == nil {
+		select {
+		case s.jobs <- struct{}{}:
+		default:
+		}
+	}
+	return err
 }
 
 // Open opens or creates the database file at path and applies pending migrations.
@@ -86,7 +100,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open metadata %s: %w", path, err)
 	}
-	s := &Store{db: db, now: time.Now}
+	s := &Store{db: db, now: time.Now, jobs: make(chan struct{}, 1)}
 	if err := s.migrate(ctx); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}

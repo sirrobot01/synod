@@ -34,13 +34,17 @@ func (w *Worker) imageEvidence(ctx context.Context, app *agentv1.DiscoveredApp) 
 				return nil, &image.Error{Code: image.InvalidManifest}
 			}
 			evidence = image.Resolution{Image: c.ImageId, Architectures: []string{architecture}, LocalOnly: true}
-			if len(c.RepoDigests) > 0 {
+			if remote, ok := w.images.Load(reference); ok {
+				evidence = remote.(image.Resolution)
+			} else if len(c.RepoDigests) > 0 {
 				remote, err := (image.Inspector{}).Resolve(ctx, reference)
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
 				if err == nil {
+					// A digest reference names immutable content, so its registry answer stays valid.
 					evidence = remote
+					w.images.Store(reference, remote)
 				} else if failure, ok := errors.AsType[*image.Error](err); !ok || failure.Code != image.Unavailable {
 					return nil, err
 				}

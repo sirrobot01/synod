@@ -66,7 +66,7 @@ func (s *Store) CreateRestore(ctx context.Context, installationID uuid.UUID, inp
 	if err := tx.QueryRowContext(ctx, `SELECT `+operationColumns+` FROM operations WHERE id=?`, job.ID).Scan(operationFields(&op)...); err != nil {
 		return operation.Operation{}, storeError(err)
 	}
-	return op, storeCommit(tx)
+	return op, s.jobAdded(storeCommit(tx))
 }
 
 func (s *Store) RestoreRequests(ctx context.Context) ([]restore.Request, error) {

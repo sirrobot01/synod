@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	kfs "github.com/kopia/kopia/fs"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -22,10 +23,26 @@ var errSQLite = errors.New("SQLite copy failed; check that the database is reada
 
 const sqliteHeader = "SQLite format 3\x00"
 
-// Live files use a stream so Kopia records the size of the finished SQLite copy.
-type liveFile struct{ sourceEntry }
+// A live file reads an SQLite database through its backup copy. Kopia records the bytes it
+// reads, so a copy with a different size than its source is read again in the next backup.
+// Kopia reuses an unchanged file from the previous snapshot when size and modified match.
+type liveFile struct {
+	sourceEntry
+	modified time.Time
+}
 
-func (f *liveFile) GetReader(ctx context.Context) (_ io.ReadCloser, retErr error) {
+func (f *liveFile) ModTime() time.Time { return f.modified }
+
+// copyReader serves one part of an SQLite copy. The tree closes the copy after the backup.
+type copyReader struct {
+	*io.SectionReader
+	entry *liveFile
+}
+
+func (r *copyReader) Close() error              { return nil }
+func (r *copyReader) Entry() (kfs.Entry, error) { return r.entry, nil }
+
+func (f *liveFile) Open(ctx context.Context) (_ kfs.Reader, retErr error) {
 	// Closing an unrelated descriptor can release this process's SQLite locks.
 	// Keep header reads and source backup connections separate from each other.
 	f.tree.sqliteMu.Lock()
@@ -35,7 +52,7 @@ func (f *liveFile) GetReader(ctx context.Context) (_ io.ReadCloser, retErr error
 		if err != nil {
 			return nil, errSQLite
 		}
-		return io.NopCloser(io.NewSectionReader(copy, 0, info.Size())), nil
+		return &copyReader{io.NewSectionReader(copy, 0, info.Size()), f}, nil
 	}
 	opened, err := (&sourceFile{f.sourceEntry}).Open(ctx)
 	if err != nil {
@@ -49,6 +66,10 @@ func (f *liveFile) GetReader(ctx context.Context) (_ io.ReadCloser, retErr error
 		return nil, ErrSource
 	}
 	if err != nil || string(header[:]) != sqliteHeader {
+		if _, err := source.Seek(0, io.SeekStart); err != nil {
+			source.Close()
+			return nil, ErrSource
+		}
 		return source, nil
 	}
 	defer source.Close()
@@ -91,7 +112,7 @@ func (f *liveFile) GetReader(ctx context.Context) (_ io.ReadCloser, retErr error
 	if err != nil {
 		return nil, errSQLite
 	}
-	return io.NopCloser(io.NewSectionReader(copy, 0, info.Size())), nil
+	return &copyReader{io.NewSectionReader(copy, 0, info.Size()), f}, nil
 }
 
 func copySQLite(ctx context.Context, uri string) (_ *os.File, retErr error) {

@@ -29,7 +29,7 @@ func (s *Store) CreateBackup(ctx context.Context, installationID uuid.UUID, inpu
 	if err != nil {
 		return operation.Operation{}, err
 	}
-	return op, storeCommit(tx)
+	return op, s.jobAdded(storeCommit(tx))
 }
 
 // createBackup keeps admission and the repository creation assignment under one write lock.
