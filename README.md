@@ -9,7 +9,7 @@ Some devices can be offline between backups.
 Synod is under development. v0.1 is not released.
 The current build creates an installation, joins devices, and approves them.
 It discovers Docker apps and their paths.
-It provides user accounts, API tokens, operation records, and a web shell.
+It provides user accounts, API tokens, operation records, and a web UI for backups and restores.
 The controller stores its metadata in SQLite through `modernc.org/sqlite`.
 It requires no PostgreSQL server or etcd service.
 
@@ -17,7 +17,7 @@ On-demand and scheduled backups are available.
 They can stop apps, copy live files, or make native database dumps.
 They use encrypted local, Synod-device, SFTP, or S3 repositories.
 App restore to the same device or another device is available.
-File restore is available through the CLI and API.
+File restore is available through the CLI, API, and web UI.
 Repository recovery and the recovery kit are available.
 Agents run weekly content checks and monthly isolated restore drills.
 Synod does not place running apps or provide automatic failover.
@@ -51,6 +51,71 @@ npm run build
 
 The build writes to `internal/web/dist`.
 Commit that output with a web change.
+
+## Build release files
+
+The release script builds static Linux binaries for amd64 and arm64.
+It uses the Go version in `go.mod` and the committed web assets.
+It records the version and source revision in both binaries.
+The agent reports the same version to the controller.
+
+Run the code and web checks above before you build a release.
+Commit the source and the web build.
+Then run:
+
+```sh
+sh scripts/build-release.sh v0.1.0-rc.1
+```
+
+The output is `dist/releases/v0.1.0-rc.1/`.
+It contains `synod-linux-amd64`, `synod-linux-arm64`, `install.sh`, `release.json`, and `SHA256SUMS`.
+The script refuses an existing output directory.
+A dirty tree requires the explicit `--allow-dirty` test option as the third argument.
+The revision of that build has a `-dirty` suffix.
+Do not publish a test build as a release.
+
+## Install a release binary
+
+No public v0.1 release exists yet.
+Build the release files above, then copy them to the Linux device.
+Run the installer from that directory:
+
+```sh
+sh install.sh --version v0.1.0-rc.1 --from-dir /path/to/release --install-dir "$HOME/.local/bin"
+"$HOME/.local/bin/synod" --version
+```
+
+Use `/usr/local/bin` and run the installer with `sudo` for a system installation.
+Add your selected directory to `PATH`.
+The device must run Linux on amd64 or arm64.
+It needs `sha256sum` or `shasum`.
+Docker and the Docker Compose plugin are required for app backup and restore.
+The installer does not change Docker, create installation state, or start a service.
+
+After release files are published, omit `--from-dir` to download them with `curl`.
+The default release base is `https://github.com/sirrobot01/synod/releases/download`.
+Use `--base-url https://host/releases/download` for another release server.
+Each server must put the files in a directory named for the version.
+Downloads and redirects must use HTTPS.
+The checksums detect changed or incomplete downloads.
+Trust the release source before you run its installer.
+
+The installer verifies the selected version and binary before it creates `synod`.
+It creates the executable atomically with mode `0755`.
+A repeated install of identical bytes keeps the existing file.
+A different existing binary or a symbolic link is refused.
+
+Test the installer without a system change:
+
+```sh
+python3 scripts/test-install.py
+```
+
+Run the real-host proof only on the approved disposable proof paths:
+
+```sh
+python3 scripts/proof-install.py --release dist/releases/v0.1.0-rc.1 --evidence /tmp/synod-install-proof.json
+```
 
 ## Local development
 

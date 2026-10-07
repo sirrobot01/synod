@@ -5,6 +5,9 @@ package cli
 import (
 	"context"
 	"io"
+	"runtime"
+
+	"github.com/sirrobot01/synod/internal/buildinfo"
 
 	agentcli "github.com/sirrobot01/synod/internal/agent/cli"
 	"github.com/sirrobot01/synod/internal/controller"
@@ -19,6 +22,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	agent := agentcli.Command()
 
 	root := &cobra.Command{Use: "synod", Short: "Back up the Docker apps of your devices and restore them anywhere", SilenceErrors: true, SilenceUsage: true,
+		Version:           buildinfo.Version + " (" + buildinfo.Revision + "; " + runtime.GOOS + "/" + runtime.GOARCH + ")",
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true}}
 	root.SetArgs(args)
 	root.SetOut(stdout)

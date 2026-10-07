@@ -28,6 +28,7 @@ import (
 	agentrestore "github.com/sirrobot01/synod/internal/agent/restore"
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/backup"
+	"github.com/sirrobot01/synod/internal/buildinfo"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/proof"
@@ -35,9 +36,6 @@ import (
 	"github.com/sirrobot01/synod/internal/restore"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
-
-// Version is the agent build version that Hello reports.
-var Version = "dev"
 
 // Run connects an enrolled agent to its controller and keeps the session until ctx ends.
 func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
@@ -92,7 +90,7 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 		InstallationId: config.InstallationID, NodeId: config.NodeID, DestinationAddress: destinationAddress,
 		Protocol:     &agentv1.VersionRange{Minimum: controlstream.ProtocolVersion, Maximum: controlstream.ProtocolVersion},
 		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "destination.health", "backup.exec", "restore.exec", "proof.exec", "files.read"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
-		Hostname: hostname, AgentVersion: Version,
+		Hostname: hostname, AgentVersion: buildinfo.Version,
 	}
 	// File requests wait in a bounded queue. A full queue refuses the request, and the controller times out.
 	fileRequests := make(chan restore.FileRequest, 8)

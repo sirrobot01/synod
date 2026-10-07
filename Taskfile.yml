@@ -26,6 +26,14 @@ tasks:
     desc: Build the synod binary into dist/
     cmds: ["go build -o dist/synod ./cmd/synod"]
 
+  release:
+    desc: Build versioned Linux amd64 and arm64 release files
+    cmds: ['sh scripts/build-release.sh {{.CLI_ARGS}}']
+
+  test:install:
+    desc: Test verified installation with disposable files
+    cmds: ['python3 scripts/test-install.py']
+
   build:web:
     desc: Build the browser application into internal/web/dist
     dir: web
