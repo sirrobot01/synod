@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	kfs "github.com/kopia/kopia/fs"
+	"github.com/kopia/kopia/fs/virtualfs"
 	"github.com/kopia/kopia/repo/manifest"
 	"github.com/kopia/kopia/snapshot"
 	"github.com/kopia/kopia/snapshot/snapshotfs"
@@ -29,9 +30,37 @@ func (r *Repository) Archive(ctx context.Context, id uuid.UUID, source, targetNa
 		return err
 	}
 	defer entry.Close()
+	return r.writeArchive(ctx, entry, source, targetName, output, nil)
+}
+
+// ArchivePath merges separately saved paths into a directory download.
+// Virtual parent directories and database dumps use the same names as List.
+func (r *Repository) ArchivePath(ctx context.Context, saved backup.Snapshot, source, targetName string, output io.Writer) error {
+	if source == "" {
+		source = "/"
+	}
+	archive, _, err := Locate(saved, source)
+	if err != nil {
+		return err
+	}
+	var entry kfs.Entry = virtualfs.NewStaticDirectory(path.Base(source), nil)
+	if archive != "" {
+		entry, err = r.savedEntry(ctx, saved.ID, archive)
+		if err != nil {
+			return err
+		}
+	}
+	defer entry.Close()
+	if targetName != "" && (!fs.ValidPath(targetName) || strings.ContainsAny(targetName, "\\\x00")) {
+		return backup.ErrInvalid
+	}
+	return r.writeArchive(ctx, entry, source, targetName, output, &saved)
+}
+
+func (r *Repository) writeArchive(ctx context.Context, entry kfs.Entry, source, targetName string, output io.Writer, saved *backup.Snapshot) error {
 	archive := tar.NewWriter(output)
-	var writeEntry func(kfs.Entry, string) error
-	writeEntry = func(entry kfs.Entry, name string) error {
+	var writeEntry func(kfs.Entry, string, string) error
+	writeEntry = func(entry kfs.Entry, name, original string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -55,13 +84,53 @@ func (r *Repository) Archive(ctx context.Context, id uuid.UUID, source, targetNa
 		}
 		switch item := entry.(type) {
 		case kfs.Directory:
-			return kfs.IterateEntries(ctx, item, func(_ context.Context, child kfs.Entry) error {
+			// Only path boundaries need extra state. Ordinary directories stream each child.
+			overrides := make(map[string]bool)
+			if saved != nil {
+				_, children, err := Locate(*saved, original)
+				if err != nil {
+					return err
+				}
+				for _, child := range children {
+					overrides[child] = true
+				}
+			}
+			err := kfs.IterateEntries(ctx, item, func(_ context.Context, child kfs.Entry) error {
 				defer child.Close()
 				if child.Name() == "" || child.Name() == "." || child.Name() == ".." || strings.ContainsAny(child.Name(), "/\\\x00") {
 					return backup.ErrInvalid
 				}
-				return writeEntry(child, path.Join(name, child.Name()))
+				if overrides[child.Name()] {
+					return nil
+				}
+				return writeEntry(child, path.Join(name, child.Name()), path.Join(original, child.Name()))
 			})
+			if err != nil {
+				return err
+			}
+			for child := range overrides {
+				originalChild := path.Join(original, child)
+				if original == "/" && child == DatabasesPath {
+					originalChild = DatabasesPath
+				}
+				archived, _, err := Locate(*saved, originalChild)
+				if err != nil {
+					return err
+				}
+				var nested kfs.Entry = virtualfs.NewStaticDirectory(child, nil)
+				if archived != "" {
+					nested, err = r.savedEntry(ctx, saved.ID, archived)
+					if err != nil {
+						return err
+					}
+				}
+				err = writeEntry(nested, path.Join(name, child), originalChild)
+				nested.Close()
+				if err != nil {
+					return err
+				}
+			}
+			return nil
 		case kfs.File:
 			reader, err := item.Open(ctx)
 			if err != nil {
@@ -85,7 +154,7 @@ func (r *Repository) Archive(ctx context.Context, id uuid.UUID, source, targetNa
 	if name == "." && !entry.IsDir() {
 		return backup.ErrInvalid
 	}
-	if err := writeEntry(entry, name); err != nil {
+	if err := writeEntry(entry, name, source); err != nil {
 		return &Error{Action: "stream saved path", Cause: err}
 	}
 	return archive.Close()
@@ -121,6 +190,9 @@ func (r *Repository) savedEntry(ctx context.Context, id uuid.UUID, source string
 				return nil, backup.ErrInvalid
 			}
 			next, err := directory.Child(ctx, part)
+			if errors.Is(err, kfs.ErrEntryNotFound) {
+				return nil, ErrPathMissing
+			}
 			if err != nil {
 				return nil, &Error{Action: "find saved path", Cause: err}
 			}

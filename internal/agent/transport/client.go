@@ -46,6 +46,7 @@ type Config struct {
 
 type connection struct {
 	ctx      context.Context
+	conn     *grpc.ClientConn
 	outgoing chan *agentv1.AgentMessage
 	maxBytes int
 }
@@ -158,6 +159,17 @@ func (c *Client) send(expected *connection, message *agentv1.AgentMessage) error
 	default:
 		return controlstream.ErrBusy
 	}
+}
+
+// OpenFile opens a file stream on the current connection to answer one controller file request.
+func (c *Client) OpenFile(ctx context.Context) (grpc.ClientStreamingClient[agentv1.FileChunk, agentv1.FileAck], error) {
+	c.mu.Lock()
+	active := c.active
+	c.mu.Unlock()
+	if active == nil || active.ctx.Err() != nil {
+		return nil, controlstream.ErrDisconnected
+	}
+	return agentv1.NewAgentServiceClient(active.conn).SendFile(ctx)
 }
 
 // Run reconnects until cancellation.
@@ -273,7 +285,7 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 		return false
 	}
 	sessionID = session.SessionId
-	active := &connection{ctx: ctx, outgoing: make(chan *agentv1.AgentMessage, min(c.config.QueueSize, int(session.MaxQueuedMessages))), maxBytes: int(session.MaxMessageBytes)}
+	active := &connection{ctx: ctx, conn: conn, outgoing: make(chan *agentv1.AgentMessage, min(c.config.QueueSize, int(session.MaxQueuedMessages))), maxBytes: int(session.MaxMessageBytes)}
 	c.mu.Lock()
 	c.active = active
 	c.mu.Unlock()

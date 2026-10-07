@@ -25,6 +25,7 @@ import (
 	"github.com/sirrobot01/synod/internal/controller/agentstream"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/pki"
+	"github.com/sirrobot01/synod/internal/restore"
 	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store"
 	"github.com/sirrobot01/synod/internal/web"
@@ -173,7 +174,6 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		ErrorLog:  slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 	stopped := make(chan error, 2)
-	go func() { stopped <- server.ServeTLS(listener, "", "") }()
 	logger.Info("controller API listening", "address", listener.Addr().String(), "installation_id", settings.InstallationID)
 	if agentTLS != nil {
 		receiver := agentstream.Receiver{Store: metadata}
@@ -182,7 +182,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 			Authorize: func(ctx context.Context, _, nodeID uuid.UUID, certificate *x509.Certificate) error {
 				return metadata.CheckAgentCertificate(ctx, nodeID, certificate)
 			},
-			Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec", "restore.exec"},
+			Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec", "restore.exec", "files.read"},
 			Handle: func(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
 				return receiver.Handle(ctx, peer, message)
 			},
@@ -191,6 +191,9 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 			return err
 		}
 		receiver.Send = agentServer.Send
+		handler.ReadFile = func(ctx context.Context, request restore.FileRequest) (restore.FileHeader, io.ReadCloser, error) {
+			return readSnapshotFile(ctx, metadata, agentServer, request)
+		}
 		defer agentServer.Stop()
 		deliveryCtx, stopDelivery := context.WithCancel(ctx)
 		var delivery sync.WaitGroup
@@ -208,6 +211,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		go func() { stopped <- agentServer.Serve(agentListener) }()
 		logger.Info("controller agent transport listening", "agent_address", agentListener.Addr().String(), "installation_id", settings.InstallationID)
 	}
+	go func() { stopped <- server.ServeTLS(listener, "", "") }()
 	failed := false
 	select {
 	case <-stopped:

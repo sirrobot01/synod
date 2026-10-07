@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AgentService_Connect_FullMethodName = "/synod.agent.v1.AgentService/Connect"
+	AgentService_Connect_FullMethodName  = "/synod.agent.v1.AgentService/Connect"
+	AgentService_SendFile_FullMethodName = "/synod.agent.v1.AgentService/SendFile"
 )
 
 // AgentServiceClient is the client API for AgentService service.
@@ -29,6 +30,8 @@ const (
 // The agent opens this stream over mTLS. Certificate identity binds its node ID.
 type AgentServiceClient interface {
 	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentMessage, ControllerMessage], error)
+	// The agent answers one FileRequest on its own stream: a header chunk, then content chunks.
+	SendFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[FileChunk, FileAck], error)
 }
 
 type agentServiceClient struct {
@@ -52,6 +55,19 @@ func (c *agentServiceClient) Connect(ctx context.Context, opts ...grpc.CallOptio
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentService_ConnectClient = grpc.BidiStreamingClient[AgentMessage, ControllerMessage]
 
+func (c *agentServiceClient) SendFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[FileChunk, FileAck], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &AgentService_ServiceDesc.Streams[1], AgentService_SendFile_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[FileChunk, FileAck]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentService_SendFileClient = grpc.ClientStreamingClient[FileChunk, FileAck]
+
 // AgentServiceServer is the server API for AgentService service.
 // All implementations must embed UnimplementedAgentServiceServer
 // for forward compatibility.
@@ -59,6 +75,8 @@ type AgentService_ConnectClient = grpc.BidiStreamingClient[AgentMessage, Control
 // The agent opens this stream over mTLS. Certificate identity binds its node ID.
 type AgentServiceServer interface {
 	Connect(grpc.BidiStreamingServer[AgentMessage, ControllerMessage]) error
+	// The agent answers one FileRequest on its own stream: a header chunk, then content chunks.
+	SendFile(grpc.ClientStreamingServer[FileChunk, FileAck]) error
 	mustEmbedUnimplementedAgentServiceServer()
 }
 
@@ -71,6 +89,9 @@ type UnimplementedAgentServiceServer struct{}
 
 func (UnimplementedAgentServiceServer) Connect(grpc.BidiStreamingServer[AgentMessage, ControllerMessage]) error {
 	return status.Error(codes.Unimplemented, "method Connect not implemented")
+}
+func (UnimplementedAgentServiceServer) SendFile(grpc.ClientStreamingServer[FileChunk, FileAck]) error {
+	return status.Error(codes.Unimplemented, "method SendFile not implemented")
 }
 func (UnimplementedAgentServiceServer) mustEmbedUnimplementedAgentServiceServer() {}
 func (UnimplementedAgentServiceServer) testEmbeddedByValue()                      {}
@@ -100,6 +121,13 @@ func _AgentService_Connect_Handler(srv interface{}, stream grpc.ServerStream) er
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentService_ConnectServer = grpc.BidiStreamingServer[AgentMessage, ControllerMessage]
 
+func _AgentService_SendFile_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(AgentServiceServer).SendFile(&grpc.GenericServerStream[FileChunk, FileAck]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentService_SendFileServer = grpc.ClientStreamingServer[FileChunk, FileAck]
+
 // AgentService_ServiceDesc is the grpc.ServiceDesc for AgentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -112,6 +140,11 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "Connect",
 			Handler:       _AgentService_Connect_Handler,
 			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "SendFile",
+			Handler:       _AgentService_SendFile_Handler,
 			ClientStreams: true,
 		},
 	},

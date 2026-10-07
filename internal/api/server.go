@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
 	"github.com/sirrobot01/synod/internal/pki"
+	"github.com/sirrobot01/synod/internal/restore"
 	"github.com/sirrobot01/synod/internal/secret"
 	"github.com/sirrobot01/synod/internal/store"
 	"golang.org/x/time/rate"
@@ -37,6 +39,8 @@ type identityKey struct{}
 
 // Server routes and authenticates the administrator HTTP API.
 type Server struct {
+	// ReadFile serves repository reads through approved agents. Set it before serving requests.
+	ReadFile func(context.Context, restore.FileRequest) (restore.FileHeader, io.ReadCloser, error)
 	// EnrollmentAuthority must be configured before serving requests. Nil disables new issuance.
 	EnrollmentAuthority *pki.CA
 	// CredentialKeyring wraps destination secrets. Set it before serving requests.
@@ -111,6 +115,9 @@ func NewServer(metadata *store.Store, admin *auth.AdminToken, installationID uui
 			signed.Group(func(admin chi.Router) {
 				admin.Use(server.requireAdmin)
 				admin.Get("/apps", server.listApps)
+				admin.Get("/apps/{id}/snapshots", server.listSnapshots)
+				admin.Get("/apps/{id}/files", server.listFiles)
+				admin.Get("/apps/{id}/files/content", server.downloadFile)
 				admin.Post("/destinations", server.addDestination)
 				admin.Get("/destinations", server.listDestinations)
 				admin.Delete("/destinations/{id}", server.removeDestination)
@@ -149,7 +156,11 @@ func (s *Server) begin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		timeout := 20 * time.Second
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/apps/") && strings.HasSuffix(r.URL.Path, "/files/content") {
+			timeout = 12 * time.Hour
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 		r = r.WithContext(ctx)
 		requestID, err := uuid.NewRandom()

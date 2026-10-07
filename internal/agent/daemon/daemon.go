@@ -90,9 +90,11 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	hello := &agentv1.Hello{
 		InstallationId: config.InstallationID, NodeId: config.NodeID, DestinationAddress: destinationAddress,
 		Protocol:     &agentv1.VersionRange{Minimum: controlstream.ProtocolVersion, Maximum: controlstream.ProtocolVersion},
-		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec", "restore.exec"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
+		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec", "restore.exec", "files.read"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
 		Hostname: hostname, AgentVersion: Version,
 	}
+	// File requests wait in a bounded queue. A full queue refuses the request, and the controller times out.
+	fileRequests := make(chan restore.FileRequest, 8)
 	stream, err := transport.New(transport.Config{
 		Endpoints: config.ControllerEndpoints, Logger: logger, Hello: hello,
 		TLS: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{identity.Certificate}},
@@ -105,6 +107,18 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 				raw, _ := json.Marshal(request)
 				if _, err := cache.Admit(ctx, request.ID, raw); err != nil {
 					return nil, err
+				}
+				return nil, nil
+			}
+			if file := message.GetFileRequest(); file != nil {
+				var request restore.FileRequest
+				if len(file.RequestJson) > 8192 || json.Unmarshal(file.RequestJson, &request) != nil || request.Validate() != nil || request.NodeID != identity.Identity.NodeID || request.InstallationID != identity.Identity.InstallationID {
+					return nil, restore.ErrInvalid
+				}
+				select {
+				case fileRequests <- request:
+				default:
+					logger.Warn("file_request_refused", "request_id", request.ID, "code", "file_queue_full")
 				}
 				return nil, nil
 			}
@@ -170,6 +184,9 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	worker.Go(func() { executeJobs(workerCtx, backupWorker, restoreWorker, &waiting, logger) })
 	worker.Go(func() { reportJobs(workerCtx, cache, stream, &waiting, logger) })
 	worker.Go(func() { discover(workerCtx, api, stream, logger) })
+	for range 4 {
+		worker.Go(func() { serveFiles(workerCtx, fileRequests, restoreWorker, stream, logger) })
+	}
 	defer func() { stopWorker(); worker.Wait() }()
 	logger.Info("agent_started", "node_id", config.NodeID, "architecture", facts.architecture, "runtime_version", facts.version)
 	blobHTTP := &http.Server{Handler: blobHandler, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{identity.Certificate}, ClientCAs: roots, ClientAuth: tls.RequireAndVerifyClientCert}, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn), BaseContext: func(net.Listener) context.Context { return workerCtx }}

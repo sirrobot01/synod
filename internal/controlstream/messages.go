@@ -109,6 +109,15 @@ func CheckAgentMessage(message *agentv1.AgentMessage) error {
 // CheckControllerMessage validates the wire shape of one controller message.
 func CheckControllerMessage(message *agentv1.ControllerMessage) error {
 	switch value := message.GetMessage().(type) {
+	case *agentv1.ControllerMessage_FileRequest:
+		if value.FileRequest == nil || len(value.FileRequest.RequestJson) > 8192 {
+			return ErrMessage
+		}
+		var request restore.FileRequest
+		if json.Unmarshal(value.FileRequest.RequestJson, &request) != nil || request.Validate() != nil {
+			return ErrMessage
+		}
+		return nil
 	case *agentv1.ControllerMessage_RestoreJob:
 		if value.RestoreJob == nil || len(value.RestoreJob.RequestJson) > 8192 {
 			return ErrMessage

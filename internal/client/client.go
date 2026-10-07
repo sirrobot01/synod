@@ -79,6 +79,7 @@ func New(config Config) (*Client, error) {
 		return nil, &Error{Code: "configuration_error", Message: "The token must contain 32 to 256 visible ASCII bytes."}
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = config.RequestTimeout
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	if config.CAFile != "" {
 		ca, err := os.OpenFile(config.CAFile, os.O_RDONLY|syscall.O_NONBLOCK, 0)

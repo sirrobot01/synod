@@ -102,6 +102,9 @@ var errListLimit = errors.New("listing limit reached")
 // List returns at most limit entries of one saved directory, sorted by name. It reports a truncated listing.
 // For a saved file, it returns that file.
 func (r *Repository) List(ctx context.Context, saved backup.Snapshot, name string, limit int) ([]Entry, bool, error) {
+	if name == "" {
+		name = "/"
+	}
 	if limit < 1 || limit > 10000 {
 		return nil, false, backup.ErrInvalid
 	}
@@ -131,6 +134,7 @@ func (r *Repository) List(ctx context.Context, saved backup.Snapshot, name strin
 				truncated = true
 				return errListLimit
 			}
+			defer child.Close()
 			described, err := describe(ctx, child)
 			entries[described.Name] = described
 			return err
@@ -140,10 +144,9 @@ func (r *Repository) List(ctx context.Context, saved backup.Snapshot, name strin
 		}
 	}
 	for _, child := range children {
-		if _, ok := entries[child]; ok {
-			continue
+		if _, ok := entries[child]; !ok {
+			entries[child] = Entry{Name: child, Type: "directory"}
 		}
-		entries[child] = Entry{Name: child, Type: "directory"}
 		// A deeper saved path can be a file, such as a separately saved .env file.
 		if nested, _, err := Locate(saved, path.Join(name, child)); err == nil && nested != "" {
 			entry, err := r.savedEntry(ctx, saved.ID, nested)

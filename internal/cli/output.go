@@ -15,11 +15,13 @@ import (
 	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/restore"
 	"github.com/spf13/cobra"
 )
 
 // Result is the single JSON document that the CLI writes to stdout.
 type Result struct {
+	Files            *restore.FileHeader      `json:"files,omitzero"`
 	Protection       *backup.ProtectionPlan   `json:"protection,omitzero"`
 	ProtectionUpdate *backup.ProtectionUpdate `json:"protection_update,omitzero"`
 	Destination      *destination.Destination `json:"destination,omitzero"`
@@ -77,6 +79,23 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 		return code
 	}
 	var output strings.Builder
+	if files := a.result.Files; files != nil {
+		if files.SnapshotID != uuid.Nil {
+			fmt.Fprintf(&output, "Snapshot: %s\nDestination: %s\n", files.SnapshotID, files.DestinationID)
+		}
+		for _, saved := range files.Snapshots {
+			fmt.Fprintf(&output, "%s  %s  %s  %d bytes\n", saved.ID, saved.CompletedAt.Format(time.RFC3339), saved.Method, saved.FileBytes)
+		}
+		for _, entry := range files.Entries {
+			fmt.Fprintf(&output, "%s  %d  %q\n", entry.Type, entry.Size, entry.Name)
+		}
+		for _, warning := range files.Warnings {
+			fmt.Fprintf(&output, "Warning: %s\n", warning)
+		}
+		if files.Truncated {
+			fmt.Fprintln(&output, "Warning: The listing is incomplete. Select a more specific path.")
+		}
+	}
 	if a.result.Message != "" {
 		fmt.Fprintln(&output, a.result.Message)
 	}

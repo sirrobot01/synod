@@ -9,6 +9,8 @@ import "google/protobuf/timestamp.proto";
 // The agent opens this stream over mTLS. Certificate identity binds its node ID.
 service AgentService {
   rpc Connect(stream AgentMessage) returns (stream ControllerMessage);
+  // The agent answers one FileRequest on its own stream: a header chunk, then content chunks.
+  rpc SendFile(stream FileChunk) returns (FileAck);
 }
 
 message VersionRange { uint32 minimum = 1; uint32 maximum = 2; }
@@ -62,6 +64,7 @@ message ControllerMessage {
     BackupJob backup_job = 4;
     OperationAck operation_ack = 5;
     RestoreJob restore_job = 6;
+    FileRequest file_request = 7;
   }
 }
 
@@ -122,3 +125,9 @@ message OperationAck { string operation_id = 1; }
 // Restore work contains IDs and choices only. Private definitions stay in the repository.
 message RestoreJob { bytes request_json = 1; }
 message RestoreEvent { bytes event_json = 1; }
+
+// A file request asks for a snapshot listing, a directory listing, or content. It holds IDs and a path only.
+message FileRequest { bytes request_json = 1; }
+// The first chunk names the request and holds the JSON header. Later chunks hold content only.
+message FileChunk { string request_id = 1; bytes header_json = 2; bytes data = 3; }
+message FileAck {}

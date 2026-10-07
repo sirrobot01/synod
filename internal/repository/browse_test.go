@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -22,7 +24,7 @@ func TestBrowseUsesOriginalPathsAndDumps(t *testing.T) {
 	}
 	root := virtualfs.NewStaticDirectory("root", []kfs.Entry{
 		virtualfs.NewStaticDirectory("paths", []kfs.Entry{
-			virtualfs.NewStaticDirectory("app", []kfs.Entry{file("config.yml", "private-config"), virtualfs.NewStaticDirectory("sub", []kfs.Entry{file("deep", "private-deep")})}),
+			virtualfs.NewStaticDirectory("app", []kfs.Entry{file("config.yml", "private-config"), file(".env", "stale-env"), virtualfs.NewStaticDirectory("sub", []kfs.Entry{file("deep", "private-deep")})}),
 			file("env", "SECRET=private-env"),
 		}),
 		virtualfs.NewStaticDirectory("databases", []kfs.Entry{file("web.sql", "private-dump")}),
@@ -83,7 +85,49 @@ func TestBrowseUsesOriginalPathsAndDumps(t *testing.T) {
 			t.Fatalf("read %s = %q (%d): %v", path, data, size, err)
 		}
 	}
-	for _, path := range []string{"/etc", "/srv/other", "@databases/other.sql", "relative", "/srv/../etc", "/srv/app/sub/../../x"} {
+	for _, source := range []string{"/", "/srv", "/srv/app", "@databases"} {
+		var output bytes.Buffer
+		if err := r.ArchivePath(t.Context(), saved, source, "download", &output); err != nil {
+			t.Fatal(err)
+		}
+		files := make(map[string]string)
+		reader := tar.NewReader(&output)
+		for {
+			header, err := reader.Next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if header.Typeflag == tar.TypeReg {
+				data, err := io.ReadAll(reader)
+				if err != nil {
+					t.Fatal(err)
+				}
+				files[header.Name] = string(data)
+			}
+		}
+		switch source {
+		case "/":
+			if files["download/srv/app/.env"] != "SECRET=private-env" || files["download/@databases/web.sql"] != "private-dump" {
+				t.Fatalf("root download omitted saved files: %v", files)
+			}
+		case "/srv":
+			if files["download/app/.env"] != "SECRET=private-env" {
+				t.Fatal("parent download omitted override")
+			}
+		case "/srv/app":
+			if files["download/.env"] != "SECRET=private-env" || files["download/sub/deep"] != "private-deep" {
+				t.Fatal("directory download omitted saved files")
+			}
+		case "@databases":
+			if files["download/web.sql"] != "private-dump" {
+				t.Fatal("dump directory omitted dump")
+			}
+		}
+	}
+	for _, path := range []string{"/etc", "/srv/other", "/srv/app/missing", "@databases/other.sql", "relative", "/srv/../etc", "/srv/app/sub/../../x"} {
 		if _, _, err := r.List(t.Context(), saved, path, 10); !errors.Is(err, ErrPathMissing) && !errors.Is(err, backup.ErrInvalid) {
 			t.Errorf("list %s: %v", path, err)
 		}

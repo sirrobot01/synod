@@ -84,6 +84,7 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[uuid.UUID]*session
 	hellos   map[uuid.UUID]*helloGuard
+	files    map[uuid.UUID]*fileTransfer
 }
 
 // New checks the server settings, applies defaults, and registers the gRPC service.
@@ -128,7 +129,7 @@ func New(config Config) (*Server, error) {
 		return nil, errors.New("invalid TLS versions")
 	}
 	config.Capabilities = append([]string(nil), config.Capabilities...)
-	server := &Server{config: config, slots: make(chan struct{}, 2*config.MaxSessions), sessions: make(map[uuid.UUID]*session), hellos: make(map[uuid.UUID]*helloGuard)}
+	server := &Server{config: config, slots: make(chan struct{}, 2*config.MaxSessions), sessions: make(map[uuid.UUID]*session), hellos: make(map[uuid.UUID]*helloGuard), files: make(map[uuid.UUID]*fileTransfer)}
 	server.grpc = grpc.NewServer(grpc.Creds(credentials.NewTLS(transportTLS)), grpc.MaxRecvMsgSize(config.MaxMessageBytes), grpc.MaxSendMsgSize(config.MaxMessageBytes), grpc.MaxConcurrentStreams(uint32(config.MaxSessions)), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second}), grpc.KeepaliveParams(keepalive.ServerParameters{Time: 20 * time.Second, Timeout: 10 * time.Second}))
 	agentv1.RegisterAgentServiceServer(server.grpc, server)
 	return server, nil
@@ -184,6 +185,24 @@ func (s *Server) authorize(ctx context.Context, identity pki.Identity, leaf *x50
 	return nil
 }
 
+// peerIdentity reads the verified agent certificate of one gRPC stream.
+func (s *Server) peerIdentity(ctx context.Context) (pki.Identity, *x509.Certificate, string, error) {
+	remote, ok := peer.FromContext(ctx)
+	if !ok {
+		return pki.Identity{}, nil, "", status.Error(codes.Unauthenticated, "verified agent TLS required")
+	}
+	info, ok := remote.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return pki.Identity{}, nil, "", status.Error(codes.Unauthenticated, "verified agent TLS required")
+	}
+	identity, err := pki.PeerIdentity(info.State, s.config.InstallationID, pki.Agent)
+	if err != nil {
+		s.config.Logger.Warn("agent identity refused", "peer", remote.Addr, "error", err)
+		return pki.Identity{}, nil, "", status.Error(codes.Unauthenticated, "invalid agent identity")
+	}
+	return identity, info.State.PeerCertificates[0], remote.Addr.String(), nil
+}
+
 // Connect runs one authenticated agent stream until it ends.
 func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, agentv1.ControllerMessage]) error {
 	select {
@@ -192,23 +211,13 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[agentv1.AgentMessage, a
 	default:
 		return status.Error(codes.ResourceExhausted, "session capacity reached")
 	}
-	remote, ok := peer.FromContext(stream.Context())
-	if !ok {
-		return status.Error(codes.Unauthenticated, "verified agent TLS required")
-	}
-	info, ok := remote.AuthInfo.(credentials.TLSInfo)
-	if !ok {
-		return status.Error(codes.Unauthenticated, "verified agent TLS required")
-	}
-	identity, err := pki.PeerIdentity(info.State, s.config.InstallationID, pki.Agent)
+	identity, leaf, remoteAddress, err := s.peerIdentity(stream.Context())
 	if err != nil {
-		s.config.Logger.Warn("agent identity refused", "peer", remote.Addr, "error", err)
-		return status.Error(codes.Unauthenticated, "invalid agent identity")
+		return err
 	}
-	leaf := info.State.PeerCertificates[0]
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
-	current := &session{peer: Peer{RemoteAddress: remote.Addr.String(), InstallationID: identity.InstallationID, NodeID: identity.SubjectID, SessionID: uuid.NewString()}, ctx: ctx, cancel: cancel, outgoing: make(chan *agentv1.ControllerMessage, s.config.QueueSize)}
+	current := &session{peer: Peer{RemoteAddress: remoteAddress, InstallationID: identity.InstallationID, NodeID: identity.SubjectID, SessionID: uuid.NewString()}, ctx: ctx, cancel: cancel, outgoing: make(chan *agentv1.ControllerMessage, s.config.QueueSize)}
 	defer func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()

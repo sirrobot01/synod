@@ -108,9 +108,13 @@ func (w *Worker) save(ctx context.Context, state *progress) error {
 // run changes the existing app only after every isolated step has passed.
 func (w *Worker) run(ctx context.Context, request restore.Request, state *progress) error {
 	api := w.Backup.Docker
-	r, saved, err := w.selectSnapshot(ctx, request, state)
+	r, saved, destinationID, unavailable, err := w.openSnapshot(ctx, request.AppID, request.SnapshotID, request.DestinationID)
 	if err != nil {
 		return err
+	}
+	state.SnapshotID, state.DestinationID = saved.ID, destinationID
+	if unavailable {
+		state.Warnings = append(state.Warnings, "destination_unavailable")
 	}
 	defer r.Close(context.Background())
 	if err := w.save(ctx, state); err != nil {
@@ -328,21 +332,23 @@ func WaitingResult(record journal.Record) (restore.Result, error) {
 	return result, nil
 }
 
-// selectSnapshot opens the requested snapshot, or the newest snapshot in every available destination.
-func (w *Worker) selectSnapshot(ctx context.Context, request restore.Request, state *progress) (*repository.Repository, backup.Snapshot, error) {
+// openSnapshot opens the requested snapshot, or the newest snapshot in every available destination.
+// It reports whether a destination could not be read.
+func (w *Worker) openSnapshot(ctx context.Context, appID, snapshotID, destinationID uuid.UUID) (*repository.Repository, backup.Snapshot, uuid.UUID, bool, error) {
 	b := w.Backup
 	plan, err := b.Journal.DestinationPlan(ctx, b.Keyring)
 	if err != nil {
-		return nil, backup.Snapshot{}, &failure{Code: "destination_unavailable", Cause: err}
+		return nil, backup.Snapshot{}, uuid.Nil, false, &failure{Code: "destination_unavailable", Cause: err}
 	}
 	var candidates []uuid.UUID
 	for _, entry := range plan.Destinations {
-		if request.DestinationID == uuid.Nil || entry.Destination.ID == request.DestinationID {
+		if destinationID == uuid.Nil || entry.Destination.ID == destinationID {
 			candidates = append(candidates, entry.Destination.ID)
 		}
 	}
 	var best *repository.Repository
 	var selected backup.Snapshot
+	var selectedDestination uuid.UUID
 	unavailable, opened := false, false
 	code := "destination_unavailable"
 	for _, id := range candidates {
@@ -358,22 +364,22 @@ func (w *Worker) selectSnapshot(ctx context.Context, request restore.Request, st
 		}
 		opened = true
 		var saved backup.Snapshot
-		if request.SnapshotID != uuid.Nil {
-			saved, err = r.Snapshot(ctx, request.SnapshotID)
+		if snapshotID != uuid.Nil {
+			saved, err = r.Snapshot(ctx, snapshotID)
 			if errors.Is(err, repository.ErrSnapshotMissing) {
 				r.Close(context.Background())
 				continue
 			}
-			if err == nil && (saved.InstallationID != request.InstallationID || saved.App.ID != request.AppID) {
+			if err == nil && (saved.InstallationID != b.InstallationID || saved.App.ID != appID) {
 				r.Close(context.Background())
 				if best != nil {
 					best.Close(context.Background())
 				}
-				return nil, backup.Snapshot{}, &failure{Code: "snapshot_invalid"}
+				return nil, backup.Snapshot{}, uuid.Nil, false, &failure{Code: "snapshot_invalid"}
 			}
 		} else {
 			var list []backup.Snapshot
-			list, err = r.Snapshots(ctx, request.InstallationID, request.AppID)
+			list, err = r.Snapshots(ctx, b.InstallationID, appID)
 			if err == nil && len(list) == 0 {
 				r.Close(context.Background())
 				continue
@@ -391,8 +397,7 @@ func (w *Worker) selectSnapshot(ctx context.Context, request restore.Request, st
 			if best != nil {
 				best.Close(context.Background())
 			}
-			best, selected = r, saved
-			state.DestinationID = id
+			best, selected, selectedDestination = r, saved, id
 			continue
 		}
 		r.Close(context.Background())
@@ -401,11 +406,7 @@ func (w *Worker) selectSnapshot(ctx context.Context, request restore.Request, st
 		if opened {
 			code = "snapshot_not_found"
 		}
-		return nil, backup.Snapshot{}, &failure{Code: code}
+		return nil, backup.Snapshot{}, uuid.Nil, false, &failure{Code: code}
 	}
-	if unavailable {
-		state.Warnings = append(state.Warnings, "destination_unavailable")
-	}
-	state.SnapshotID = selected.ID
-	return best, selected, nil
+	return best, selected, selectedDestination, unavailable, nil
 }

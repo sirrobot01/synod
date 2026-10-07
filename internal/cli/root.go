@@ -29,6 +29,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		newAppsCommand(app),
 		newBackupCommand(app),
 		newRestoreCommand(app),
+		newFileCommand(app),
+		newSnapshotCommand(app),
 		newProtectCommand(app),
 		newDestinationCommand(app),
 		newOperationCommand(app),

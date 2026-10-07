@@ -16,7 +16,8 @@ It requires no PostgreSQL server or etcd service.
 On-demand and scheduled Stop and Live backups are available for file-based apps.
 They use encrypted local, Synod-device, SFTP, or S3 repositories.
 App restore to the same device or another device is available.
-File restore, repository recovery, and the recovery kit are not available yet.
+File restore is available through the CLI and API.
+Repository recovery and the recovery kit are not available yet.
 Synod does not place running apps or provide automatic failover.
 
 ## Build and checks
@@ -458,7 +459,72 @@ A lost stop response causes a confirmed stop before restart.
 A failed restart stays pending in the journal and is retried.
 An admitted backup continues through a controller outage.
 Its result survives an agent restart and remains until the controller acknowledges it.
-File restore commands remain a later task.
+
+## Restore files
+
+List the snapshots of an app. Then list its saved paths.
+
+```sh
+synod snapshot list notes
+synod file list notes
+synod file list notes /srv/notes --snapshot SNAPSHOT_ID
+synod file get notes /srv/notes/config.yml --output ./config.yml
+synod file get notes /srv/notes --output ./notes.tar
+synod file list notes @databases
+synod file get notes @databases/notes-db.sql --output ./notes-db.sql
+```
+
+Use the original absolute path shown in the listing.
+Database dumps appear under `@databases`.
+A file download contains the saved file bytes.
+A directory download is a tar archive with saved owners, modes, times, and links.
+It includes separately saved paths below that directory.
+Extract an archive into a new empty directory.
+Synod does not follow saved symbolic links when you browse or download a file.
+
+Use `--snapshot` to select an older snapshot.
+Without this flag, Synod selects the newest available snapshot.
+Use `--destination` to select one destination by name or ID.
+Use `--device` to select the source device when app names repeat.
+Use `--via` to read through a specific online device.
+By default, Synod prefers the source device, then another approved online device.
+The selected device must have current destination settings.
+Each listing covers only destinations that this device can open.
+A local destination is accessible only through its own device.
+The response identifies the snapshot and destination that were read.
+It reports a warning if a destination could not be read.
+
+Downloads pass through the controller without temporary server files.
+The CLI writes a private temporary file beside the requested output file.
+It publishes the output only after the complete transfer.
+It refuses an existing output file.
+Cancellation or connection loss removes the partial download.
+A download can run for up to 12 hours.
+Snapshot and path listings are bounded.
+The response reports `truncated` when a listing exceeds 1,000 snapshots, 4,000 paths, or the metadata size limit.
+Use a more specific path or destination when the listing is incomplete.
+
+The administrator API provides these read endpoints:
+
+- `GET /v1/apps/APP_ID/snapshots`
+- `GET /v1/apps/APP_ID/files?path=/srv/notes`
+- `GET /v1/apps/APP_ID/files/content?path=/srv/notes/config.yml`
+
+The optional `snapshot`, `destination`, and `via` query values use IDs.
+The content endpoint returns file bytes or a tar archive.
+Its headers include `X-Synod-Snapshot-ID`, `X-Synod-Destination-ID`, and `X-Synod-Format`.
+Clients must check the final `X-Synod-Transfer: complete` trailer.
+Discard content if this trailer is absent.
+
+Run the file restore proof with a built binary:
+
+```sh
+SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock python3 scripts/proof-files.py ./dist/synod
+```
+
+The proof uses a disposable Compose project and temporary controller and agent processes.
+It removes its files and containers when it exits.
+
 
 ## Restore an app
 
