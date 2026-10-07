@@ -15,6 +15,7 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/transport"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/controlstream"
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/restore"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
@@ -43,6 +44,15 @@ func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agen
 				continue
 			}
 			waiting.Store(nil)
+			var check proof.Request
+			if json.Unmarshal(record.Input, &check) == nil && (check.Kind == proof.Integrity || check.Kind == proof.Drill) {
+				if _, err := restorer.ExecuteProof(ctx, check); err != nil {
+					waiting.Store(new(record.ID))
+					logger.Warn("proof_recovery_pending", "operation_id", record.ID, "code", "inspect_drill_cleanup")
+					break
+				}
+				continue
+			}
 			var job restore.Request
 			if json.Unmarshal(record.Input, &job) == nil && job.Kind == "restore" {
 				if _, err := restorer.Execute(ctx, job); err != nil {
@@ -83,6 +93,11 @@ func reportJobs(ctx context.Context, cache *journal.Journal, stream *transport.C
 			logger.Warn("backup_report_failed", "code", "journal_read_failed")
 		}
 		for _, record := range records {
+			var check proof.Request
+			if json.Unmarshal(record.Input, &check) == nil && (check.Kind == proof.Integrity || check.Kind == proof.Drill) {
+				reportProof(stream, record, check, waiting, logger)
+				continue
+			}
 			var job restore.Request
 			if json.Unmarshal(record.Input, &job) == nil && job.Kind == "restore" {
 				reportRestore(stream, record, job, waiting, logger)
@@ -177,5 +192,46 @@ func reportRestore(stream *transport.Client, record journal.Record, request rest
 	err = stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_RestoreEvent{RestoreEvent: &agentv1.RestoreEvent{EventJson: raw}}})
 	if err != nil && !errors.Is(err, controlstream.ErrDisconnected) && !errors.Is(err, controlstream.ErrBusy) {
 		logger.Warn("restore_report_failed", "code", "result_delivery_failed")
+	}
+}
+
+func reportProof(stream *transport.Client, record journal.Record, request proof.Request, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
+	event := proof.Event{ID: record.ID}
+	if request.ScheduleID != uuid.Nil {
+		event.Request = &request
+	}
+	switch record.State {
+	case journal.Queued:
+		event.Status = "queued"
+	case journal.Running:
+		event.Status = "running"
+		result, err := agentrestore.WaitingProofResult(record)
+		if err != nil {
+			return
+		}
+		event.Result = result
+		if id := waiting.Load(); id != nil && *id == record.ID {
+			event.Status = "waiting"
+		}
+	case journal.Terminal:
+		if json.Unmarshal(record.Result, &event.Result) != nil {
+			return
+		}
+		event.Status = "succeeded"
+		if event.Result.FailureCode != "" {
+			event.Status = "failed"
+		}
+	}
+	if event.Validate(request) != nil {
+		logger.Warn("proof_report_failed", "operation_id", record.ID, "code", "result_invalid")
+		return
+	}
+	raw, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	err = stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_ProofEvent{ProofEvent: &agentv1.ProofEvent{EventJson: raw}}})
+	if err != nil && !errors.Is(err, controlstream.ErrDisconnected) && !errors.Is(err, controlstream.ErrBusy) {
+		logger.Warn("proof_report_failed", "code", "result_delivery_failed")
 	}
 }

@@ -8,13 +8,14 @@ import (
 	"github.com/sirrobot01/synod/internal/client"
 	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/restore"
 	"github.com/spf13/cobra"
 )
 
 func newRestoreCommand(app *app) *cobra.Command {
 	var target, sourceDevice, selected, snapshot string
-	var replace, wait bool
+	var replace, wait, drill bool
 	command := &cobra.Command{Use: "restore APP --to DEVICE", Short: "Restore an app from its saved definition and data", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		app.ran = true
 		input := restore.Submission{ID: uuid.New(), Replace: replace}
@@ -76,7 +77,13 @@ func newRestoreCommand(app *app) *cobra.Command {
 			}
 		}
 		app.result.Message = "Restore request: " + input.ID.String()
-		saved, err := app.api.CreateRestore(cmd.Context(), input)
+		var saved operation.Operation
+		if drill {
+			saved, err = app.api.CreateProof(cmd.Context(), proof.Submission{ID: input.ID, Kind: proof.Drill, NodeID: input.NodeID, AppID: input.AppID, DestinationID: input.DestinationID, SnapshotID: input.SnapshotID})
+			app.result.Message = "Restore drill request: " + input.ID.String()
+		} else {
+			saved, err = app.api.CreateRestore(cmd.Context(), input)
+		}
 		if err != nil {
 			return err
 		}
@@ -107,7 +114,9 @@ func newRestoreCommand(app *app) *cobra.Command {
 	command.Flags().StringVar(&sourceDevice, "device", "", "Select the source device when app names repeat")
 	command.Flags().StringVar(&selected, "destination", "", "Read one destination; the default checks all available destinations")
 	command.Flags().StringVar(&snapshot, "snapshot", "", "Snapshot ID; the default uses the latest available snapshot")
+	command.Flags().BoolVar(&drill, "drill", false, "Test an isolated temporary restore, then remove it")
 	command.Flags().BoolVar(&replace, "replace", false, "Save a safety snapshot, then replace the matching target app")
 	command.Flags().BoolVar(&wait, "wait", true, "Wait for the saved result; interruption does not cancel the restore")
+	command.MarkFlagsMutuallyExclusive("replace", "drill")
 	return command
 }

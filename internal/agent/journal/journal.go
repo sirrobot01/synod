@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/backup"
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/restore"
 	_ "modernc.org/sqlite"
 )
@@ -96,6 +97,9 @@ func Open(ctx context.Context, path string, installationID, nodeID uuid.UUID) (*
  CREATE TABLE IF NOT EXISTS backup_history (
  app_id TEXT NOT NULL, destination_id TEXT NOT NULL, last_success INTEGER NOT NULL,
  PRIMARY KEY (app_id,destination_id));
+ CREATE TABLE IF NOT EXISTS proof_history (
+ kind TEXT NOT NULL, app_id TEXT NOT NULL, destination_id TEXT NOT NULL, last_success INTEGER NOT NULL,
+ PRIMARY KEY (kind,app_id,destination_id));
  CREATE TABLE IF NOT EXISTS records (
  id TEXT PRIMARY KEY, input_hash BLOB NOT NULL CHECK (length(input_hash)=32),
  state TEXT NOT NULL CHECK (state IN ('queued','running','terminal')),
@@ -237,6 +241,29 @@ func (j *Journal) Complete(ctx context.Context, id uuid.UUID, result []byte) err
 		}
 		if (restore.Event{ID: id, Status: status, Result: saved}).Validate(restoreJob) != nil {
 			return ErrConflict
+		}
+	}
+	var check proof.Request
+	if json.Unmarshal(input, &check) == nil && (check.Kind == proof.Integrity || check.Kind == proof.Drill) {
+		var saved proof.Result
+		if check.Validate() != nil || check.ID != id || check.InstallationID != j.installationID || check.NodeID != j.nodeID || json.Unmarshal(result, &saved) != nil {
+			return ErrConflict
+		}
+		status := "succeeded"
+		if saved.FailureCode != "" {
+			status = "failed"
+		}
+		if (proof.Event{ID: id, Status: status, Result: saved, Request: &check}).Validate(check) != nil {
+			return ErrConflict
+		}
+		if status == "succeeded" {
+			destinationID := check.DestinationID
+			if check.Kind == proof.Drill {
+				destinationID = uuid.Nil
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO proof_history (kind,app_id,destination_id,last_success) VALUES (?,?,?,?) ON CONFLICT(kind,app_id,destination_id) DO UPDATE SET last_success=max(last_success,excluded.last_success)`, check.Kind, check.AppID, destinationID, saved.StartedAt.UnixMilli()); err != nil {
+				return fmt.Errorf("save proof history %s: %w", check.ID, err)
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE records SET state='terminal',result=?,progress=NULL WHERE id=?`, result, id); err != nil {

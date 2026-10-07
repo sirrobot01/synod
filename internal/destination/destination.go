@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/backup"
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/repository"
 )
 
@@ -48,6 +49,7 @@ type Plan struct {
 	Peers          []Peer            `json:"peers,omitempty"`
 	Ready          []uuid.UUID       `json:"ready,omitempty"`
 	Schedules      []backup.Schedule `json:"schedules,omitempty"`
+	Proofs         []proof.Schedule  `json:"proofs,omitempty"`
 	Catalog        []byte            `json:"catalog,omitempty"`
 }
 
@@ -78,9 +80,10 @@ type Delivery struct {
 }
 
 type Listing struct {
-	Revision     int64         `json:"revision"`
-	Destinations []Destination `json:"destinations"`
-	Delivery     []Delivery    `json:"delivery"`
+	Checks       []proof.Status `json:"checks,omitempty"`
+	Revision     int64          `json:"revision"`
+	Destinations []Destination  `json:"destinations"`
+	Delivery     []Delivery     `json:"delivery"`
 }
 
 func (e Entry) Validate() error {
@@ -141,6 +144,16 @@ func (p Plan) Validate(nodeID uuid.UUID) error {
 			return ErrInvalid
 		}
 		apps[schedule.AppID] = true
+	}
+	if len(p.Proofs) > 576 {
+		return ErrInvalid
+	}
+	proofIDs := make(map[uuid.UUID]bool)
+	for _, schedule := range p.Proofs {
+		if schedule.Validate() != nil || schedule.NodeID != nodeID || schedule.InstallationID != p.InstallationID || proofIDs[schedule.ID] || (schedule.DestinationID != uuid.Nil && !ids[schedule.DestinationID]) {
+			return ErrInvalid
+		}
+		proofIDs[schedule.ID] = true
 	}
 	if len(p.Catalog) > 0 {
 		catalog, err := repository.DecodeCatalog(p.Catalog)

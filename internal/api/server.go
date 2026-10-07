@@ -123,6 +123,7 @@ func NewServer(metadata *store.Store, admin *auth.AdminToken, installationID uui
 				admin.Delete("/destinations/{id}", server.removeDestination)
 				admin.Post("/backups", server.createBackup)
 				admin.Post("/restores", server.createRestore)
+				admin.Post("/proofs", server.createProof)
 				admin.Get("/protection", server.getProtection)
 				admin.Put("/protection", server.updateProtection)
 				admin.Get("/operations", server.listOperations)

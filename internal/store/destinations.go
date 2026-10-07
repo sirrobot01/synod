@@ -12,6 +12,7 @@ import (
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/inventory"
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/secret"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
@@ -124,7 +125,7 @@ func (s *Store) RemoveDestination(ctx context.Context, id uuid.UUID, actorID, re
 		return nil
 	}
 	var busy bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE status NOT IN ('succeeded','failed','cancelled') AND ((kind='backup' AND json_extract(CAST(input AS TEXT),'$.destination_id')=?) OR (kind='restore' AND (json_extract(CAST(input AS TEXT),'$.destination_id') IS NULL OR json_extract(CAST(input AS TEXT),'$.destination_id')=?))))`, id, id).Scan(&busy); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE status NOT IN ('succeeded','failed','cancelled') AND ((kind IN ('backup','integrity_check') AND json_extract(CAST(input AS TEXT),'$.destination_id')=?) OR (kind IN ('restore','restore_drill') AND (json_extract(CAST(input AS TEXT),'$.destination_id') IS NULL OR json_extract(CAST(input AS TEXT),'$.destination_id')=?))))`, id, id).Scan(&busy); err != nil {
 		return storeError(err)
 	}
 	if busy {
@@ -189,6 +190,30 @@ func (s *Store) ListDestinations(ctx context.Context) (destination.Listing, erro
 			return result, storeError(err)
 		}
 		result.Delivery = append(result.Delivery, d)
+	}
+	if err := rows.Err(); err != nil {
+		return result, storeError(err)
+	}
+	if err := rows.Close(); err != nil {
+		return result, storeError(err)
+	}
+	rows, err = tx.QueryContext(ctx, `SELECT id,node_id,status,result,json_extract(CAST(input AS TEXT),'$.destination_id') FROM (
+ SELECT *,row_number() OVER (PARTITION BY json_extract(CAST(input AS TEXT),'$.destination_id') ORDER BY coalesce(unixepoch(json_extract(CAST(result AS TEXT),'$.started_at'),'subsec')*1000,created_at) DESC,created_at DESC,id DESC) AS position
+ FROM operations WHERE kind='integrity_check') WHERE position=1`)
+	if err != nil {
+		return result, storeError(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status proof.Status
+		var raw []byte
+		if err := rows.Scan(&status.ID, &status.NodeID, &status.State, &raw, &status.DestinationID); err != nil {
+			return result, storeError(err)
+		}
+		if len(raw) > 0 && json.Unmarshal(raw, &status.Result) != nil {
+			return result, &Error{Code: Unavailable}
+		}
+		result.Checks = append(result.Checks, status)
 	}
 	if err := rows.Err(); err != nil {
 		return result, storeError(err)
@@ -269,6 +294,22 @@ func (s *Store) DestinationPlan(ctx context.Context, installationID, nodeID, ses
 	}
 	if err := rows.Err(); err != nil {
 		return result, storeError(err)
+	}
+	if err := rows.Close(); err != nil {
+		return result, storeError(err)
+	}
+	for _, schedule := range result.Schedules {
+		result.Proofs = append(result.Proofs, proof.Schedule{ID: uuid.NewSHA1(schedule.ID, []byte("restore_drill")), Kind: proof.Drill, InstallationID: installationID, NodeID: nodeID, AppID: schedule.AppID, CreatedAt: schedule.CreatedAt})
+	}
+	for _, entry := range result.Destinations {
+		d := entry.Destination
+		result.Proofs = append(result.Proofs, proof.Schedule{ID: uuid.NewSHA1(d.ID, nodeID[:]), Kind: proof.Integrity, InstallationID: installationID, NodeID: nodeID, DestinationID: d.ID, CreatedAt: d.CreatedAt})
+	}
+	for _, schedule := range result.Proofs {
+		raw, _ := json.Marshal(schedule)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO proof_schedules (id,node_id,definition) VALUES (?,?,?) ON CONFLICT(id) DO NOTHING`, schedule.ID, nodeID, raw); err != nil {
+			return result, storeError(err)
+		}
 	}
 	if result.Validate(nodeID) != nil {
 		return destination.Plan{}, &Error{Code: Unavailable}

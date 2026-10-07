@@ -1596,6 +1596,104 @@
           }
         }
       }
+    },
+    "/v1/proofs": {
+      "post": {
+        "operationId": "createProof",
+        "description": "Save an immutable repository check or isolated restore drill. The target device must be approved. A drill requires an app ID. An integrity check requires a destination ID. Read /v1/operations/{id} for progress. A client disconnect does not cancel the work.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProofSubmission"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved operation. A repeated ID with the same input returns the same operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The app, approved target, or available destination was not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicting input or a full operation queue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded. Retry after one second.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable. Retry with the same ID and input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1695,6 +1793,9 @@
               },
               {
                 "$ref": "#/components/schemas/RestoreResult"
+              },
+              {
+                "$ref": "#/components/schemas/ProofResult"
               }
             ]
           }
@@ -2311,6 +2412,12 @@
                 }
               }
             }
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProofStatus"
+            }
           }
         }
       },
@@ -2621,6 +2728,14 @@
             "items": {
               "$ref": "#/components/schemas/ProtectionTarget"
             }
+          },
+          "restore_tested_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Completion time of the last successful isolated drill. Later failures do not erase this date."
+          },
+          "last_drill": {
+            "$ref": "#/components/schemas/ProofStatus"
           }
         },
         "required": [
@@ -2753,6 +2868,111 @@
                 "cleanup_pending"
               ]
             }
+          }
+        }
+      },
+      "ProofSubmission": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "app_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snapshot_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "integrity_check",
+              "restore_drill"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "node_id"
+        ],
+        "description": "Integrity checks require destination_id and forbid app_id and snapshot_id. Restore drills require app_id. A drill uses the latest snapshot unless snapshot_id is set."
+      },
+      "ProofResult": {
+        "type": "object",
+        "properties": {
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snapshot_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "failure_code": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "contents": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "read": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes_read": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "containers": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ProofStatus": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ProofResult"
           }
         }
       }

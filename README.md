@@ -13,11 +13,13 @@ It provides user accounts, API tokens, operation records, and a web shell.
 The controller stores its metadata in SQLite through `modernc.org/sqlite`.
 It requires no PostgreSQL server or etcd service.
 
-On-demand and scheduled Stop and Live backups are available for file-based apps.
+On-demand and scheduled backups are available.
+They can stop apps, copy live files, or make native database dumps.
 They use encrypted local, Synod-device, SFTP, or S3 repositories.
 App restore to the same device or another device is available.
 File restore is available through the CLI and API.
-Repository recovery and the recovery kit are not available yet.
+Repository recovery and the recovery kit are available.
+Agents run weekly content checks and monthly isolated restore drills.
 Synod does not place running apps or provide automatic failover.
 
 ## Build and checks
@@ -597,6 +599,51 @@ It removes its files and containers when it exits.
 Add `--recover` to delete the test controller, agent state, and source files.
 The proof then rebuilds from the repository, restores the app, and makes a new backup.
 
+
+## Test a restore and check a repository
+
+Synod saves proof schedules on each agent with its destination settings.
+Each available destination gets a content check every seven days.
+The first check waits until the repository is initialized.
+Each protected app gets a restore drill each month.
+The first drill waits until its agent has made a good backup.
+An agent runs only the latest missed slot when it returns.
+It keeps results until the controller saves them.
+
+Run a check or a drill now:
+
+```sh
+synod destination check peer --on server
+synod restore notes --to server --drill
+synod app status
+synod destination list
+```
+
+A content check reads a random one-percent sample, with at least one item.
+Kopia verifies the checksum and encryption of each item that it reads.
+A successful sample does not prove that all stored content is intact.
+
+A drill restores the latest available snapshot into a private scratch directory.
+It restores files and volumes and loads database dumps.
+It gives every container a new name.
+It starts containers with no network and no published ports.
+It checks that they stay up for 30 seconds.
+It then removes the temporary containers, volumes, and directory.
+Cleanup must finish before the agent reports a result.
+After an interruption, the agent removes the drill and reports a failure.
+
+Drills refuse privileged containers, host devices, shared host namespaces,
+added capabilities, custom security options, and mounts outside the copied data.
+An app that needs network access can fail this test.
+A drill does not prove that every app feature works.
+The source app keeps running during the drill.
+
+App status shows `Restore tested on DATE` after a successful drill.
+It also shows the latest drill result, including a later failure.
+Use `--wait=false` to return after the controller saves the request.
+Use `synod operation get ID` to read its result later.
+The API accepts these requests at `POST /v1/proofs`.
+Do not combine `--drill` with `--replace`.
 
 ## Restore an app
 

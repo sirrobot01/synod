@@ -15,6 +15,7 @@ import (
 	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/restore"
 	"github.com/spf13/cobra"
 )
@@ -112,6 +113,9 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 				fmt.Fprintf(&output, "  Device: %s  Path: %s\n  Warning: Copies on this device do not protect its apps from device loss.\n", d.NodeID, d.Location.Path)
 			}
 		}
+		for _, check := range listing.Checks {
+			fmt.Fprintf(&output, "Destination %s: integrity check %s  Read: %d of %d contents  Failure: %s\n", check.DestinationID, check.State, check.Result.Read, check.Result.Contents, check.Result.FailureCode)
+		}
 		for _, d := range listing.Delivery {
 			state := "pending"
 			if d.Current {
@@ -149,6 +153,14 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 				fmt.Fprintln(&output, "  Data-loss window: no good snapshot reported")
 			} else {
 				fmt.Fprintf(&output, "  Data-loss window: %s\n", (time.Duration(*entry.DataLossWindowSeconds) * time.Second).String())
+			}
+			if entry.RestoreTestedAt != nil {
+				fmt.Fprintf(&output, "  Restore tested on %s\n", entry.RestoreTestedAt.Format(time.RFC3339))
+			} else {
+				fmt.Fprintln(&output, "  Restore not tested yet")
+			}
+			if entry.LastDrill != nil {
+				fmt.Fprintf(&output, "  Last drill: %s  Failure: %s\n", entry.LastDrill.State, entry.LastDrill.Result.FailureCode)
 			}
 			if entry.OnlyOnSource {
 				fmt.Fprintln(&output, "  Warning: The only copies are on the app's own device. They do not protect against device loss.")
@@ -193,6 +205,20 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 	}
 	if op := a.result.Operation; op != nil {
 		fmt.Fprintf(&output, "Operation: %s\nKind: %s\nStatus: %s\nFailure: %s\n", op.ID, op.Kind, op.Status, op.FailureCode)
+		if (op.Kind == string(proof.Integrity) || op.Kind == string(proof.Drill)) && len(op.Result) > 0 {
+			var result proof.Result
+			if json.Unmarshal(op.Result, &result) == nil {
+				fmt.Fprintf(&output, "Destination: %s\n", result.DestinationID)
+				if op.Kind == string(proof.Integrity) {
+					fmt.Fprintf(&output, "Read: %d of %d contents (%d bytes)\n", result.Read, result.Contents, result.BytesRead)
+				} else {
+					fmt.Fprintf(&output, "Snapshot: %s\nContainers tested: %d\n", result.SnapshotID, result.Containers)
+				}
+				if result.Resource != "" {
+					fmt.Fprintf(&output, "Resource: %s\n", result.Resource)
+				}
+			}
+		}
 		if op.Kind == "backup" && len(op.Result) > 0 {
 			var result backup.Result
 			if json.Unmarshal(op.Result, &result) == nil {

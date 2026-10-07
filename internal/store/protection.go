@@ -13,6 +13,7 @@ import (
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/operation"
+	"github.com/sirrobot01/synod/internal/proof"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -311,9 +312,42 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 			return plan, storeError(err)
 		}
 	}
+	drills := make(map[uuid.UUID]*proof.Status)
+	tested := make(map[uuid.UUID]*time.Time)
+	for _, successful := range []bool{false, true} {
+		rows, err := tx.QueryContext(ctx, `SELECT id,app_id,node_id,status,result FROM (
+ SELECT *,row_number() OVER (PARTITION BY app_id ORDER BY coalesce(unixepoch(json_extract(CAST(result AS TEXT),'$.started_at'),'subsec')*1000,created_at) DESC,created_at DESC,id DESC) AS position
+ FROM operations WHERE kind='restore_drill' AND (?=0 OR status='succeeded')) WHERE position=1`, successful)
+		if err != nil {
+			return plan, storeError(err)
+		}
+		for rows.Next() {
+			status := new(proof.Status)
+			var appID uuid.UUID
+			var raw []byte
+			if err := rows.Scan(&status.ID, &appID, &status.NodeID, &status.State, &raw); err != nil {
+				rows.Close()
+				return plan, storeError(err)
+			}
+			if len(raw) > 0 && json.Unmarshal(raw, &status.Result) != nil {
+				rows.Close()
+				return plan, &Error{Code: Unavailable}
+			}
+			status.DestinationID = status.Result.DestinationID
+			if successful {
+				tested[appID] = new(status.Result.CompletedAt)
+			} else {
+				drills[appID] = status
+			}
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return plan, storeError(err)
+		}
+	}
 	now := s.now()
 	for i := range plan.Apps {
 		entry := &plan.Apps[i]
+		entry.LastDrill, entry.RestoreTestedAt = drills[entry.App.ID], tested[entry.App.ID]
 		entry.State = backup.Unprotected
 		if entry.Enabled {
 			entry.State = backup.Protected

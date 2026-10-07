@@ -103,7 +103,7 @@ func (s *Store) TransitionOperation(ctx context.Context, id uuid.UUID, from, to 
 	if to.Terminal() {
 		finished = now
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE operations SET status=?,failure_code=?,updated_at=?,finished_at=? WHERE id=? AND status=? AND NOT (kind IN ('backup','restore') AND coalesce(json_extract(CAST(input AS TEXT),'$.id'),'')=id)`, to, failureCode, now, finished, id, from)
+	result, err := s.db.ExecContext(ctx, `UPDATE operations SET status=?,failure_code=?,updated_at=?,finished_at=? WHERE id=? AND status=? AND NOT (kind IN ('backup','restore','restore_drill','integrity_check') AND coalesce(json_extract(CAST(input AS TEXT),'$.id'),'')=id)`, to, failureCode, now, finished, id, from)
 	if err != nil {
 		return storeError(err)
 	}

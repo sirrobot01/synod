@@ -53,6 +53,7 @@ message AgentMessage {
     DestinationAck destination_ack = 4;
     BackupEvent backup_event = 5;
     RestoreEvent restore_event = 6;
+    ProofEvent proof_event = 7;
   }
 }
 
@@ -65,6 +66,7 @@ message ControllerMessage {
     OperationAck operation_ack = 5;
     RestoreJob restore_job = 6;
     FileRequest file_request = 7;
+    ProofJob proof_job = 8;
   }
 }
 
@@ -131,3 +133,7 @@ message FileRequest { bytes request_json = 1; }
 // The first chunk names the request and holds the JSON header. Later chunks hold content only.
 message FileChunk { string request_id = 1; bytes header_json = 2; bytes data = 3; }
 message FileAck {}
+
+// Proof work checks repository content or runs an isolated restore drill.
+message ProofJob { bytes request_json = 1; }
+message ProofEvent { bytes event_json = 1; }

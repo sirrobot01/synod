@@ -390,6 +390,7 @@ type AgentMessage struct {
 	//	*AgentMessage_DestinationAck
 	//	*AgentMessage_BackupEvent
 	//	*AgentMessage_RestoreEvent
+	//	*AgentMessage_ProofEvent
 	Message       isAgentMessage_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -486,6 +487,15 @@ func (x *AgentMessage) GetRestoreEvent() *RestoreEvent {
 	return nil
 }
 
+func (x *AgentMessage) GetProofEvent() *ProofEvent {
+	if x != nil {
+		if x, ok := x.Message.(*AgentMessage_ProofEvent); ok {
+			return x.ProofEvent
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Message interface {
 	isAgentMessage_Message()
 }
@@ -514,6 +524,10 @@ type AgentMessage_RestoreEvent struct {
 	RestoreEvent *RestoreEvent `protobuf:"bytes,6,opt,name=restore_event,json=restoreEvent,proto3,oneof"`
 }
 
+type AgentMessage_ProofEvent struct {
+	ProofEvent *ProofEvent `protobuf:"bytes,7,opt,name=proof_event,json=proofEvent,proto3,oneof"`
+}
+
 func (*AgentMessage_Hello) isAgentMessage_Message() {}
 
 func (*AgentMessage_Heartbeat) isAgentMessage_Message() {}
@@ -526,6 +540,8 @@ func (*AgentMessage_BackupEvent) isAgentMessage_Message() {}
 
 func (*AgentMessage_RestoreEvent) isAgentMessage_Message() {}
 
+func (*AgentMessage_ProofEvent) isAgentMessage_Message() {}
+
 type ControllerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Message:
@@ -537,6 +553,7 @@ type ControllerMessage struct {
 	//	*ControllerMessage_OperationAck
 	//	*ControllerMessage_RestoreJob
 	//	*ControllerMessage_FileRequest
+	//	*ControllerMessage_ProofJob
 	Message       isControllerMessage_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -642,6 +659,15 @@ func (x *ControllerMessage) GetFileRequest() *FileRequest {
 	return nil
 }
 
+func (x *ControllerMessage) GetProofJob() *ProofJob {
+	if x != nil {
+		if x, ok := x.Message.(*ControllerMessage_ProofJob); ok {
+			return x.ProofJob
+		}
+	}
+	return nil
+}
+
 type isControllerMessage_Message interface {
 	isControllerMessage_Message()
 }
@@ -674,6 +700,10 @@ type ControllerMessage_FileRequest struct {
 	FileRequest *FileRequest `protobuf:"bytes,7,opt,name=file_request,json=fileRequest,proto3,oneof"`
 }
 
+type ControllerMessage_ProofJob struct {
+	ProofJob *ProofJob `protobuf:"bytes,8,opt,name=proof_job,json=proofJob,proto3,oneof"`
+}
+
 func (*ControllerMessage_Session) isControllerMessage_Message() {}
 
 func (*ControllerMessage_Error) isControllerMessage_Message() {}
@@ -687,6 +717,8 @@ func (*ControllerMessage_OperationAck) isControllerMessage_Message() {}
 func (*ControllerMessage_RestoreJob) isControllerMessage_Message() {}
 
 func (*ControllerMessage_FileRequest) isControllerMessage_Message() {}
+
+func (*ControllerMessage_ProofJob) isControllerMessage_Message() {}
 
 // An inventory is complete. A failed scan has a failure code and no apps.
 type AppInventory struct {
@@ -1521,6 +1553,95 @@ func (*FileAck) Descriptor() ([]byte, []int) {
 	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{20}
 }
 
+// Proof work checks repository content or runs an isolated restore drill.
+type ProofJob struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestJson   []byte                 `protobuf:"bytes,1,opt,name=request_json,json=requestJson,proto3" json:"request_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProofJob) Reset() {
+	*x = ProofJob{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProofJob) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProofJob) ProtoMessage() {}
+
+func (x *ProofJob) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProofJob.ProtoReflect.Descriptor instead.
+func (*ProofJob) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ProofJob) GetRequestJson() []byte {
+	if x != nil {
+		return x.RequestJson
+	}
+	return nil
+}
+
+type ProofEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventJson     []byte                 `protobuf:"bytes,1,opt,name=event_json,json=eventJson,proto3" json:"event_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProofEvent) Reset() {
+	*x = ProofEvent{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProofEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProofEvent) ProtoMessage() {}
+
+func (x *ProofEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProofEvent.ProtoReflect.Descriptor instead.
+func (*ProofEvent) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ProofEvent) GetEventJson() []byte {
+	if x != nil {
+		return x.EventJson
+	}
+	return nil
+}
+
 var File_proto_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_agent_proto_rawDesc = "" +
@@ -1555,15 +1676,17 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"observedAt\"=\n" +
 	"\rProtocolError\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\x93\x03\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xd2\x03\n" +
 	"\fAgentMessage\x12-\n" +
 	"\x05hello\x18\x01 \x01(\v2\x15.synod.agent.v1.HelloH\x00R\x05hello\x129\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x19.synod.agent.v1.HeartbeatH\x00R\theartbeat\x12<\n" +
 	"\tinventory\x18\x03 \x01(\v2\x1c.synod.agent.v1.AppInventoryH\x00R\tinventory\x12I\n" +
 	"\x0fdestination_ack\x18\x04 \x01(\v2\x1e.synod.agent.v1.DestinationAckH\x00R\x0edestinationAck\x12@\n" +
 	"\fbackup_event\x18\x05 \x01(\v2\x1b.synod.agent.v1.BackupEventH\x00R\vbackupEvent\x12C\n" +
-	"\rrestore_event\x18\x06 \x01(\v2\x1c.synod.agent.v1.RestoreEventH\x00R\frestoreEventB\t\n" +
-	"\amessage\"\xda\x03\n" +
+	"\rrestore_event\x18\x06 \x01(\v2\x1c.synod.agent.v1.RestoreEventH\x00R\frestoreEvent\x12=\n" +
+	"\vproof_event\x18\a \x01(\v2\x1a.synod.agent.v1.ProofEventH\x00R\n" +
+	"proofEventB\t\n" +
+	"\amessage\"\x93\x04\n" +
 	"\x11ControllerMessage\x123\n" +
 	"\asession\x18\x01 \x01(\v2\x17.synod.agent.v1.SessionH\x00R\asession\x125\n" +
 	"\x05error\x18\x02 \x01(\v2\x1d.synod.agent.v1.ProtocolErrorH\x00R\x05error\x12L\n" +
@@ -1573,7 +1696,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\roperation_ack\x18\x05 \x01(\v2\x1c.synod.agent.v1.OperationAckH\x00R\foperationAck\x12=\n" +
 	"\vrestore_job\x18\x06 \x01(\v2\x1a.synod.agent.v1.RestoreJobH\x00R\n" +
 	"restoreJob\x12@\n" +
-	"\ffile_request\x18\a \x01(\v2\x1b.synod.agent.v1.FileRequestH\x00R\vfileRequestB\t\n" +
+	"\ffile_request\x18\a \x01(\v2\x1b.synod.agent.v1.FileRequestH\x00R\vfileRequest\x127\n" +
+	"\tproof_job\x18\b \x01(\v2\x18.synod.agent.v1.ProofJobH\x00R\bproofJobB\t\n" +
 	"\amessage\"\xa1\x01\n" +
 	"\fAppInventory\x12;\n" +
 	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
@@ -1639,7 +1763,13 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\vheader_json\x18\x02 \x01(\fR\n" +
 	"headerJson\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\fR\x04data\"\t\n" +
-	"\aFileAck2\xa0\x01\n" +
+	"\aFileAck\"-\n" +
+	"\bProofJob\x12!\n" +
+	"\frequest_json\x18\x01 \x01(\fR\vrequestJson\"+\n" +
+	"\n" +
+	"ProofEvent\x12\x1d\n" +
+	"\n" +
+	"event_json\x18\x01 \x01(\fR\teventJson2\xa0\x01\n" +
 	"\fAgentService\x12N\n" +
 	"\aConnect\x12\x1c.synod.agent.v1.AgentMessage\x1a!.synod.agent.v1.ControllerMessage(\x010\x01\x12@\n" +
 	"\bSendFile\x12\x19.synod.agent.v1.FileChunk\x1a\x17.synod.agent.v1.FileAck(\x01B4Z2github.com/sirrobot01/synod/proto/agent/v1;agentv1b\x06proto3"
@@ -1656,7 +1786,7 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_proto_agent_v1_agent_proto_rawDescData
 }
 
-var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*VersionRange)(nil),          // 0: synod.agent.v1.VersionRange
 	(*Hello)(nil),                 // 1: synod.agent.v1.Hello
@@ -1679,40 +1809,44 @@ var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*FileRequest)(nil),           // 18: synod.agent.v1.FileRequest
 	(*FileChunk)(nil),             // 19: synod.agent.v1.FileChunk
 	(*FileAck)(nil),               // 20: synod.agent.v1.FileAck
-	(*durationpb.Duration)(nil),   // 21: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 22: google.protobuf.Timestamp
+	(*ProofJob)(nil),              // 21: synod.agent.v1.ProofJob
+	(*ProofEvent)(nil),            // 22: synod.agent.v1.ProofEvent
+	(*durationpb.Duration)(nil),   // 23: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 24: google.protobuf.Timestamp
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
 	0,  // 0: synod.agent.v1.Hello.protocol:type_name -> synod.agent.v1.VersionRange
-	21, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
-	21, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
-	22, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	23, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
+	23, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
+	24, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
 	1,  // 4: synod.agent.v1.AgentMessage.hello:type_name -> synod.agent.v1.Hello
 	3,  // 5: synod.agent.v1.AgentMessage.heartbeat:type_name -> synod.agent.v1.Heartbeat
 	7,  // 6: synod.agent.v1.AgentMessage.inventory:type_name -> synod.agent.v1.AppInventory
 	12, // 7: synod.agent.v1.AgentMessage.destination_ack:type_name -> synod.agent.v1.DestinationAck
 	14, // 8: synod.agent.v1.AgentMessage.backup_event:type_name -> synod.agent.v1.BackupEvent
 	17, // 9: synod.agent.v1.AgentMessage.restore_event:type_name -> synod.agent.v1.RestoreEvent
-	2,  // 10: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
-	4,  // 11: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
-	11, // 12: synod.agent.v1.ControllerMessage.destination_plan:type_name -> synod.agent.v1.DestinationPlan
-	13, // 13: synod.agent.v1.ControllerMessage.backup_job:type_name -> synod.agent.v1.BackupJob
-	15, // 14: synod.agent.v1.ControllerMessage.operation_ack:type_name -> synod.agent.v1.OperationAck
-	16, // 15: synod.agent.v1.ControllerMessage.restore_job:type_name -> synod.agent.v1.RestoreJob
-	18, // 16: synod.agent.v1.ControllerMessage.file_request:type_name -> synod.agent.v1.FileRequest
-	22, // 17: synod.agent.v1.AppInventory.observed_at:type_name -> google.protobuf.Timestamp
-	8,  // 18: synod.agent.v1.AppInventory.apps:type_name -> synod.agent.v1.DiscoveredApp
-	9,  // 19: synod.agent.v1.DiscoveredApp.containers:type_name -> synod.agent.v1.DiscoveredContainer
-	10, // 20: synod.agent.v1.DiscoveredApp.paths:type_name -> synod.agent.v1.DiscoveredPath
-	5,  // 21: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
-	19, // 22: synod.agent.v1.AgentService.SendFile:input_type -> synod.agent.v1.FileChunk
-	6,  // 23: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
-	20, // 24: synod.agent.v1.AgentService.SendFile:output_type -> synod.agent.v1.FileAck
-	23, // [23:25] is the sub-list for method output_type
-	21, // [21:23] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	22, // 10: synod.agent.v1.AgentMessage.proof_event:type_name -> synod.agent.v1.ProofEvent
+	2,  // 11: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
+	4,  // 12: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
+	11, // 13: synod.agent.v1.ControllerMessage.destination_plan:type_name -> synod.agent.v1.DestinationPlan
+	13, // 14: synod.agent.v1.ControllerMessage.backup_job:type_name -> synod.agent.v1.BackupJob
+	15, // 15: synod.agent.v1.ControllerMessage.operation_ack:type_name -> synod.agent.v1.OperationAck
+	16, // 16: synod.agent.v1.ControllerMessage.restore_job:type_name -> synod.agent.v1.RestoreJob
+	18, // 17: synod.agent.v1.ControllerMessage.file_request:type_name -> synod.agent.v1.FileRequest
+	21, // 18: synod.agent.v1.ControllerMessage.proof_job:type_name -> synod.agent.v1.ProofJob
+	24, // 19: synod.agent.v1.AppInventory.observed_at:type_name -> google.protobuf.Timestamp
+	8,  // 20: synod.agent.v1.AppInventory.apps:type_name -> synod.agent.v1.DiscoveredApp
+	9,  // 21: synod.agent.v1.DiscoveredApp.containers:type_name -> synod.agent.v1.DiscoveredContainer
+	10, // 22: synod.agent.v1.DiscoveredApp.paths:type_name -> synod.agent.v1.DiscoveredPath
+	5,  // 23: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
+	19, // 24: synod.agent.v1.AgentService.SendFile:input_type -> synod.agent.v1.FileChunk
+	6,  // 25: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
+	20, // 26: synod.agent.v1.AgentService.SendFile:output_type -> synod.agent.v1.FileAck
+	25, // [25:27] is the sub-list for method output_type
+	23, // [23:25] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -1727,6 +1861,7 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*AgentMessage_DestinationAck)(nil),
 		(*AgentMessage_BackupEvent)(nil),
 		(*AgentMessage_RestoreEvent)(nil),
+		(*AgentMessage_ProofEvent)(nil),
 	}
 	file_proto_agent_v1_agent_proto_msgTypes[6].OneofWrappers = []any{
 		(*ControllerMessage_Session)(nil),
@@ -1736,6 +1871,7 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*ControllerMessage_OperationAck)(nil),
 		(*ControllerMessage_RestoreJob)(nil),
 		(*ControllerMessage_FileRequest)(nil),
+		(*ControllerMessage_ProofJob)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1743,7 +1879,7 @@ func file_proto_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_agent_proto_rawDesc), len(file_proto_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   21,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

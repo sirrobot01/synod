@@ -30,6 +30,7 @@ import (
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/destination"
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/restore"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -90,7 +91,7 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	hello := &agentv1.Hello{
 		InstallationId: config.InstallationID, NodeId: config.NodeID, DestinationAddress: destinationAddress,
 		Protocol:     &agentv1.VersionRange{Minimum: controlstream.ProtocolVersion, Maximum: controlstream.ProtocolVersion},
-		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec", "restore.exec", "files.read"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
+		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec", "restore.exec", "proof.exec", "files.read"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
 		Hostname: hostname, AgentVersion: Version,
 	}
 	// File requests wait in a bounded queue. A full queue refuses the request, and the controller times out.
@@ -119,6 +120,17 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 				case fileRequests <- request:
 				default:
 					logger.Warn("file_request_refused", "request_id", request.ID, "code", "file_queue_full")
+				}
+				return nil, nil
+			}
+			if job := message.GetProofJob(); job != nil {
+				var request proof.Request
+				if len(job.RequestJson) > 8192 || json.Unmarshal(job.RequestJson, &request) != nil || request.Validate() != nil || request.NodeID != identity.Identity.NodeID || request.InstallationID != identity.Identity.InstallationID {
+					return nil, proof.ErrInvalid
+				}
+				raw, _ := json.Marshal(request)
+				if _, err := cache.Admit(ctx, request.ID, raw); err != nil {
+					return nil, err
 				}
 				return nil, nil
 			}

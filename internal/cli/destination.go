@@ -152,6 +152,6 @@ func newDestinationCommand(app *app) *cobra.Command {
 		app.result.Message = "Destination settings removed. Repository data was kept. Offline agents remove cached credentials when they reconnect."
 		return nil
 	}}
-	group.AddCommand(add, list, remove)
+	group.AddCommand(add, list, remove, newCheckCommand(app))
 	return group
 }

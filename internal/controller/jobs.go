@@ -119,5 +119,29 @@ func sendJobs(ctx context.Context, metadata *store.Store, stream *controlstream.
 			failures = append(failures, err)
 		}
 	}
+	proofs, err := metadata.ProofRequests(ctx)
+	if err != nil {
+		return errors.Join(append(failures, err)...)
+	}
+	for _, job := range proofs {
+		peer, online := stream.Session(job.NodeID)
+		if !online || current[job.NodeID] != peer.SessionID || !slices.Contains(peer.Capabilities, "proof.exec") {
+			continue
+		}
+		if job.DestinationID != uuid.Nil {
+			target, exists := destinations[job.DestinationID]
+			if !exists || (target.Location.Kind == "device" && current[target.NodeID] == "") {
+				continue
+			}
+		}
+		raw, err := json.Marshal(job)
+		if err != nil {
+			return err
+		}
+		err = stream.Send(job.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_ProofJob{ProofJob: &agentv1.ProofJob{RequestJson: raw}}})
+		if err != nil && !errors.Is(err, controlstream.ErrDisconnected) && !errors.Is(err, controlstream.ErrBusy) {
+			failures = append(failures, err)
+		}
+	}
 	return errors.Join(failures...)
 }

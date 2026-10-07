@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/inventory"
+	"github.com/sirrobot01/synod/internal/proof"
 )
 
 // ProtectionUpdate confirms the plan at ExpectedRevision. All also sets the default for new apps.
@@ -53,6 +54,8 @@ const (
 )
 
 type AppPlan struct {
+	LastDrill             *proof.Status   `json:"last_drill,omitzero"`
+	RestoreTestedAt       *time.Time      `json:"restore_tested_at,omitzero"`
 	App                   inventory.App   `json:"app"`
 	Enabled               bool            `json:"enabled"`
 	SettingsCurrent       bool            `json:"settings_current"`

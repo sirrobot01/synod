@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/controlstream"
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/restore"
 	"github.com/sirrobot01/synod/internal/store"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -36,6 +37,21 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 		return fmt.Errorf("%w: node %s carries an invalid session %q", ErrUnsupportedMessage, peer.NodeID, peer.SessionID)
 	}
 	switch value := message.Message.(type) {
+	case *agentv1.AgentMessage_ProofEvent:
+		if value.ProofEvent == nil || len(value.ProofEvent.EventJson) > 64<<10 {
+			return ErrUnsupportedMessage
+		}
+		var event proof.Event
+		if json.Unmarshal(value.ProofEvent.EventJson, &event) != nil {
+			return ErrUnsupportedMessage
+		}
+		if err := r.Store.RecordProofEvent(ctx, peer.NodeID, sessionID, event); err != nil {
+			return err
+		}
+		if (event.Status == "succeeded" || event.Status == "failed") && r.Send != nil {
+			return r.Send(peer.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_OperationAck{OperationAck: &agentv1.OperationAck{OperationId: event.ID.String()}}})
+		}
+		return nil
 	case *agentv1.AgentMessage_RestoreEvent:
 		if value.RestoreEvent == nil || len(value.RestoreEvent.EventJson) > 64<<10 {
 			return ErrUnsupportedMessage

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/secret"
 )
 
@@ -84,6 +85,53 @@ func (j *Journal) AdmitScheduled(ctx context.Context, ring *secret.Keyring, now 
 			count++
 			admitted++
 		}
+	}
+	for _, schedule := range plan.Proofs {
+		if count >= 64 {
+			break
+		}
+		slot := schedule.Due(now)
+		if slot.IsZero() {
+			continue
+		}
+		ready := false
+		if schedule.Kind == proof.Drill {
+			// A first drill waits until this agent has made a good snapshot.
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM backup_history WHERE app_id=?)`, schedule.AppID).Scan(&ready); err != nil {
+				return 0, err
+			}
+		} else {
+			ready = slices.Contains(plan.Ready, schedule.DestinationID)
+			if !ready {
+				if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM opened_destinations WHERE id=?)`, schedule.DestinationID).Scan(&ready); err != nil {
+					return 0, err
+				}
+			}
+		}
+		if !ready {
+			continue
+		}
+		job, err := schedule.Request(slot)
+		if err != nil {
+			return 0, ErrConflict
+		}
+		var skip bool
+		if err := tx.QueryRowContext(ctx, `SELECT
+ EXISTS(SELECT 1 FROM records WHERE id=?) OR
+ EXISTS(SELECT 1 FROM proof_history WHERE kind=? AND app_id=? AND destination_id=? AND last_success>=?) OR
+ EXISTS(SELECT 1 FROM records WHERE state!='terminal' AND json_extract(CASE WHEN json_valid(CAST(input AS TEXT)) THEN CAST(input AS TEXT) ELSE '{}' END,'$.kind')=? AND (?='integrity_check' AND json_extract(CASE WHEN json_valid(CAST(input AS TEXT)) THEN CAST(input AS TEXT) ELSE '{}' END,'$.destination_id')=? OR ?='restore_drill' AND json_extract(CASE WHEN json_valid(CAST(input AS TEXT)) THEN CAST(input AS TEXT) ELSE '{}' END,'$.app_id')=?))`, job.ID, job.Kind, job.AppID, job.DestinationID, slot.UnixMilli(), job.Kind, job.Kind, job.DestinationID, job.Kind, job.AppID).Scan(&skip); err != nil {
+			return 0, err
+		}
+		if skip {
+			continue
+		}
+		raw, _ := json.Marshal(job)
+		hash := sha256.Sum256(raw)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO records (id,input_hash,state,input) VALUES (?,?,'queued',?)`, job.ID, hash[:], raw); err != nil {
+			return 0, err
+		}
+		count++
+		admitted++
 	}
 	return admitted, tx.Commit()
 }

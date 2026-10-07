@@ -25,6 +25,9 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 	inventory := &agentv1.AppInventory{ObservedAt: timestamppb.Now()}
 	apps := make(map[string]*agentv1.DiscoveredApp)
 	for _, summary := range listed.Items {
+		if summary.Labels["io.synod.proof"] != "" || summary.Labels["io.synod.restore.role"] != "" {
+			continue
+		}
 		inspected, err := api.ContainerInspect(ctx, summary.ID, client.ContainerInspectOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("inspect container %s: %w", summary.ID, err)
