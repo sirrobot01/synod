@@ -19,6 +19,7 @@ const (
 	Auto Method = "auto"
 	Stop Method = "stop"
 	Live Method = "live"
+	Dump Method = "dump"
 )
 
 var ErrInvalid = errors.New("invalid backup request or snapshot")
@@ -40,7 +41,7 @@ type Request struct {
 }
 
 func (r Request) Validate() error {
-	if r.ID == uuid.Nil || r.InstallationID == uuid.Nil || r.AppID == uuid.Nil || r.NodeID == uuid.Nil || r.DestinationID == uuid.Nil || r.RequestedAt.IsZero() || (r.Method != Auto && r.Method != Stop && r.Method != Live) || len(r.SourceKey) > 512 || !(strings.HasPrefix(r.SourceKey, "compose:") || strings.HasPrefix(r.SourceKey, "container:")) || uuid.NewSHA1(r.NodeID, []byte(r.SourceKey)) != r.AppID {
+	if r.ID == uuid.Nil || r.InstallationID == uuid.Nil || r.AppID == uuid.Nil || r.NodeID == uuid.Nil || r.DestinationID == uuid.Nil || r.RequestedAt.IsZero() || (r.Method != Auto && r.Method != Stop && r.Method != Live && r.Method != Dump) || len(r.SourceKey) > 512 || !(strings.HasPrefix(r.SourceKey, "compose:") || strings.HasPrefix(r.SourceKey, "container:")) || uuid.NewSHA1(r.NodeID, []byte(r.SourceKey)) != r.AppID {
 		return ErrInvalid
 	}
 	if (r.ScheduleID == uuid.Nil) != r.ScheduledAt.IsZero() || (r.ScheduleID != uuid.Nil && (r.Initialize || !r.RequestedAt.Equal(r.ScheduledAt) || r.Retention == nil)) || (r.Retention != nil && r.Retention.Validate() != nil) {
@@ -61,22 +62,31 @@ type Exclusion struct {
 	Reason string `json:"reason"`
 }
 
+// DatabaseDump maps a native dump to the container that must load it at restore.
+type DatabaseDump struct {
+	ContainerID string `json:"container_id"`
+	Database    string `json:"database"`
+	Archive     string `json:"archive"`
+	Format      string `json:"format"`
+}
+
 // Snapshot is stored inside the encrypted repository beside its native Kopia snapshot.
 type Snapshot struct {
-	ID             uuid.UUID     `json:"id"`
-	InstallationID uuid.UUID     `json:"installation_id"`
-	DestinationID  uuid.UUID     `json:"destination_id"`
-	App            inventory.App `json:"app"`
-	Method         Method        `json:"method"`
-	Architecture   string        `json:"architecture"`
-	StartedAt      time.Time     `json:"started_at"`
-	CompletedAt    time.Time     `json:"completed_at"`
-	DowntimeMillis int64         `json:"downtime_ms"`
-	Paths          []Path        `json:"paths"`
-	Exclusions     []Exclusion   `json:"exclusions"`
-	FilesID        string        `json:"files_id"`
-	RootID         string        `json:"root_id"`
-	FileBytes      int64         `json:"file_bytes"`
+	ID             uuid.UUID      `json:"id"`
+	InstallationID uuid.UUID      `json:"installation_id"`
+	DestinationID  uuid.UUID      `json:"destination_id"`
+	App            inventory.App  `json:"app"`
+	Method         Method         `json:"method"`
+	Architecture   string         `json:"architecture"`
+	StartedAt      time.Time      `json:"started_at"`
+	CompletedAt    time.Time      `json:"completed_at"`
+	DowntimeMillis int64          `json:"downtime_ms"`
+	Dumps          []DatabaseDump `json:"dumps,omitempty"`
+	Paths          []Path         `json:"paths"`
+	Exclusions     []Exclusion    `json:"exclusions"`
+	FilesID        string         `json:"files_id"`
+	RootID         string         `json:"root_id"`
+	FileBytes      int64          `json:"file_bytes"`
 }
 
 // Result is safe for controller metadata. Definitions and file contents stay in the repository.
@@ -153,7 +163,7 @@ func (e Event) Validate(request Request) error {
 			if result.SnapshotID != request.ID || !result.RepositoryOpened || result.FailureCode != "" {
 				return ErrInvalid
 			}
-		} else if result.SnapshotID != uuid.Nil || result.FileBytes != 0 || !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "repository_installation_conflict", "app_scan_failed", "database_dump_unavailable", "app_definition_incomplete", "app_state_unsafe", "app_definition_limit", "standalone_definition_unsupported", "source_unavailable", "app_definition_excluded", "first_copy_failed", "journal_save_failed", "app_stop_failed", "app_changed_during_backup", "final_copy_failed", "agent_interrupted", "snapshot_publish_failed"}, result.FailureCode) {
+		} else if result.SnapshotID != uuid.Nil || result.FileBytes != 0 || !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "repository_installation_conflict", "app_scan_failed", "database_dump_failed", "database_unavailable", "database_not_detected", "app_definition_incomplete", "app_state_unsafe", "app_definition_limit", "standalone_definition_unsupported", "source_unavailable", "app_definition_excluded", "first_copy_failed", "journal_save_failed", "app_stop_failed", "app_changed_during_backup", "final_copy_failed", "agent_interrupted", "snapshot_publish_failed"}, result.FailureCode) {
 			return ErrInvalid
 		}
 	default:

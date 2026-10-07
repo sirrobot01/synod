@@ -2230,10 +2230,11 @@
             "type": "string",
             "enum": [
               "auto",
+              "dump",
               "stop",
               "live"
             ],
-            "default": "stop"
+            "default": "auto"
           }
         },
         "required": [
@@ -2351,6 +2352,7 @@
             "type": "string",
             "enum": [
               "auto",
+              "dump",
               "stop",
               "live"
             ]

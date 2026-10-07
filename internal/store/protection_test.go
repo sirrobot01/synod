@@ -85,17 +85,21 @@ func TestProtectionPersistsAutoProtectOptOutAndOfflineResults(t *testing.T) {
 		if !app.Enabled || !app.OnlyOnSource || app.ScheduleID == uuid.Nil {
 			t.Fatalf("unsaved app choices: %s", app.App.ID)
 		}
-		if app.App.Definition.Name == "database" && (app.State != "blocked" || app.BlockedCode != "database_dump_unavailable") {
-			t.Fatal("database claims protection before dump support")
+		if app.App.Definition.Name == "database" && (app.State == "blocked" || app.BlockedCode != "") {
+			t.Fatal("database cannot enter the protection schedule")
 		}
 	}
 	initializers, err := s.PendingInitializations(t.Context())
-	if err != nil || len(initializers) != 1 || initializers[0].Schedule.AppID != appID {
+	if err != nil || len(initializers) != 2 {
 		t.Fatalf("initializers: %d %v", len(initializers), err)
 	}
-	schedule := initializers[0].Schedule
+	index := slices.IndexFunc(initializers, func(item BackupInitialization) bool { return item.Schedule.AppID == appID })
+	if index < 0 {
+		t.Fatal("file app has no initializer")
+	}
+	schedule := initializers[index].Schedule
 	private, err := s.DestinationPlan(t.Context(), ca.InstallationID(), node, session, ring)
-	if err != nil || len(private.Schedules) != 1 || len(private.Ready) != 0 {
+	if err != nil || len(private.Schedules) != 2 || len(private.Ready) != 0 {
 		t.Fatalf("scheduled agent plan: %v %v", err, errors.Unwrap(err))
 	}
 	recovery, err := repository.DecodeCatalog(private.Catalog)
@@ -144,7 +148,7 @@ func TestProtectionPersistsAutoProtectOptOutAndOfflineResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err, errors.Unwrap(err))
 	}
-	index := slices.IndexFunc(plan.Apps, func(app backup.AppPlan) bool { return app.App.ID == appID })
+	index = slices.IndexFunc(plan.Apps, func(app backup.AppPlan) bool { return app.App.ID == appID })
 	app := plan.Apps[index]
 	if app.State != backup.Warning || app.DataLossWindowSeconds == nil || *app.DataLossWindowSeconds != 3600 || len(app.Targets) != 1 || app.Targets[0].LastGood.SnapshotID != request.ID {
 		t.Fatal("status does not show the saved snapshot and data-loss window")

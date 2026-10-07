@@ -85,10 +85,5 @@ func BlockedCode(app inventory.App) string {
 	if app.Definition == nil || len(app.Definition.Issues) > 0 {
 		return "app_definition_incomplete"
 	}
-	for _, c := range app.Definition.Containers {
-		if c.Database != "" {
-			return "database_dump_unavailable"
-		}
-	}
 	return ""
 }

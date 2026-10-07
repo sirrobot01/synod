@@ -39,7 +39,7 @@ func DefaultSettings() Settings {
 }
 
 func (s Settings) Validate() error {
-	if len(s.Destinations) == 0 || len(s.Destinations) > 64 || (s.Method != Auto && s.Method != Stop && s.Method != Live) || s.Retention.Validate() != nil || len(s.At) != 5 || len(s.TimeZone) == 0 || len(s.TimeZone) > 128 || s.TimeZone == "Local" {
+	if len(s.Destinations) == 0 || len(s.Destinations) > 64 || (s.Method != Auto && s.Method != Stop && s.Method != Live && s.Method != Dump) || s.Retention.Validate() != nil || len(s.At) != 5 || len(s.TimeZone) == 0 || len(s.TimeZone) > 128 || s.TimeZone == "Local" {
 		return ErrInvalid
 	}
 	if _, err := time.Parse("15:04", s.At); err != nil {

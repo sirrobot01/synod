@@ -74,6 +74,23 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 		case "redis":
 			item.Database, databasePath = "redis", "/data"
 		}
+		if databasePath != "" {
+			flag := map[string]string{"postgres": "-D", "mysql": "--datadir", "mariadb": "--datadir", "redis": "--dir"}[item.Database]
+			for i, arg := range c.Config.Cmd {
+				value, found := strings.CutPrefix(arg, flag+"=")
+				if arg == flag && i+1 < len(c.Config.Cmd) {
+					value, found = c.Config.Cmd[i+1], true
+				}
+				if !found {
+					continue
+				}
+				if !filepath.IsAbs(value) {
+					app.Issues = append(app.Issues, "database_path_unsupported:"+c.ID)
+					continue
+				}
+				databasePath = filepath.Clean(value)
+			}
+		}
 		app.Containers = append(app.Containers, item)
 		if project != "" {
 			working := labels["com.docker.compose.project.working_dir"]
@@ -115,8 +132,8 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 				path.Status, path.Reason = "Never", "This mount has no persistent host data."
 			} else if m.Type == mount.TypeVolume && m.Driver != "local" {
 				path.Status, path.Reason = "Never", "This volume needs a supported local mount."
-			} else if databasePath != "" && databasePath == m.Destination {
-				path.Status, path.Reason = "Dumped", "Database data needs a dump. Dump execution is not available yet."
+			} else if databasePath != "" && (databasePath == m.Destination || strings.HasPrefix(m.Destination, databasePath+"/")) {
+				path.Status, path.Reason = "Dumped", "A native database dump replaces this data."
 			}
 			if m.Type == mount.TypeVolume && path.Status != "Never" {
 				volume, err := api.VolumeInspect(ctx, m.Name, client.VolumeInspectOptions{})
@@ -133,7 +150,7 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 				data := proto.Clone(path).(*agentv1.DiscoveredPath)
 				data.Source = filepath.Join(m.Source, strings.TrimPrefix(databasePath, strings.TrimSuffix(m.Destination, "/")+"/"))
 				data.Target = databasePath
-				data.Status, data.Reason = "Dumped", "Database data needs a dump. Dump execution is not available yet."
+				data.Status, data.Reason = "Dumped", "A native database dump replaces this data."
 				app.Paths = append(app.Paths, data)
 			}
 		}

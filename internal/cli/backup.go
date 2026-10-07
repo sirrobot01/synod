@@ -18,8 +18,8 @@ func newBackupCommand(app *app) *cobra.Command {
 	var wait bool
 	command := &cobra.Command{Use: "backup APP", Short: "Back up an app and keep its result after disconnect", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		app.ran = true
-		if method != "auto" && method != "stop" && method != "live" {
-			return &client.Error{Code: "invalid_request", Message: "Use --method auto, stop, or live."}
+		if method != "auto" && method != "stop" && method != "live" && method != "dump" {
+			return &client.Error{Code: "invalid_request", Message: "Use --method auto, dump, stop, or live."}
 		}
 		if err := app.connect(cmd, nil); err != nil {
 			return err
@@ -101,7 +101,7 @@ func newBackupCommand(app *app) *cobra.Command {
 	}}
 	command.Flags().StringVar(&device, "device", "", "Select the source device when app names repeat")
 	command.Flags().StringVar(&selected, "destination", "", "Destination name or ID; optional when only one is available")
-	command.Flags().StringVar(&method, "method", "stop", "Copy method: auto, stop, or live")
+	command.Flags().StringVar(&method, "method", "auto", "Copy method: auto, dump, stop, or live")
 	command.Flags().BoolVar(&wait, "wait", true, "Wait for the saved result; interruption does not cancel the backup")
 	return command
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	kfs "github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/snapshot"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
@@ -58,9 +59,6 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return backup.Result{}, backup.ErrInvalid
 	}
 	method := request.Method
-	if method == backup.Auto {
-		method = backup.Stop
-	}
 	input, _ := json.Marshal(request)
 	record, err := w.Journal.Admit(ctx, request.ID, input)
 	if err != nil {
@@ -128,17 +126,27 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return w.finish(ctx, request, &state, r)
 	}
 	app := report.Apps[0]
+	databases := make(map[string]string)
 	for _, item := range app.Containers {
 		if item.Database != "" {
-			state.FailureCode = "database_dump_unavailable"
-			return w.finish(ctx, request, &state, r)
+			databases[item.Id] = item.Database
 		}
+	}
+	if method == backup.Auto {
+		method = backup.Stop
+		if len(databases) > 0 {
+			method = backup.Dump
+		}
+	}
+	if method == backup.Dump && len(databases) == 0 {
+		state.FailureCode = "database_not_detected"
+		return w.finish(ctx, request, &state, r)
 	}
 	if len(app.Issues) > 0 {
 		state.FailureCode = "app_definition_incomplete"
 		return w.finish(ctx, request, &state, r)
 	}
-	var inspected []container.InspectResponse
+	var inspected, fileContainers []container.InspectResponse
 	for _, item := range app.Containers {
 		response, err := w.Docker.ContainerInspect(ctx, item.Id, client.ContainerInspectOptions{})
 		if err != nil || response.Container.Config == nil || response.Container.HostConfig == nil || response.Container.State == nil {
@@ -146,11 +154,18 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			return w.finish(ctx, request, &state, r)
 		}
 		c := response.Container
+		if databases[c.ID] != "" && (!c.State.Running || c.State.Paused) {
+			state.FailureCode = "database_unavailable"
+			return w.finish(ctx, request, &state, r)
+		}
 		if c.State.Restarting || c.State.Dead || c.State.Status == "removing" || (method == backup.Stop && (c.HostConfig.AutoRemove || (c.Config.StopTimeout != nil && (*c.Config.StopTimeout < 0 || *c.Config.StopTimeout > 600)))) {
 			state.FailureCode = "app_state_unsafe"
 			return w.finish(ctx, request, &state, r)
 		}
 		inspected = append(inspected, c)
+		if databases[c.ID] == "" {
+			fileContainers = append(fileContainers, c)
+		}
 	}
 	raw, err := json.Marshal(inspected)
 	if err != nil || len(raw) > 4<<20 {
@@ -210,7 +225,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			state.FailureCode = "first_copy_failed"
 			return w.finish(ctx, request, &state, r)
 		}
-		for _, c := range inspected {
+		for _, c := range fileContainers {
 			if !c.State.Running || c.State.Paused {
 				continue
 			}
@@ -241,23 +256,42 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		}
 	}
 	if method == backup.Stop {
-		if err := w.checkStopped(ctx, inspected); err != nil {
+		if err := w.checkStopped(ctx, fileContainers); err != nil {
 			state.FailureCode = "app_changed_during_backup"
 			return w.finish(ctx, request, &state, r)
 		}
 	}
 	final, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	root, err := tree.Root(final, definitions)
+	var dumps []kfs.Entry
+	var streams []*dumpFile
+	for _, c := range inspected {
+		if database := databases[c.ID]; database != "" {
+			stream, metadata, err := newDump(w.Docker, c, database)
+			if err != nil {
+				state.FailureCode = "database_dump_failed"
+				return w.finish(ctx, request, &state, r)
+			}
+			dumps = append(dumps, stream)
+			streams = append(streams, stream)
+			state.Metadata.Dumps = append(state.Metadata.Dumps, metadata)
+		}
+	}
+	root, err := tree.Root(final, definitions, dumps...)
 	if err == nil {
 		state.Prepared, err = r.UploadFiles(final, root, source, false)
 	}
 	if err == nil && method == backup.Stop {
-		err = w.checkStopped(final, inspected)
+		err = w.checkStopped(final, fileContainers)
 	}
 	if err != nil {
 		state.Prepared = nil
 		state.FailureCode = "final_copy_failed"
+		for _, stream := range streams {
+			if stream.failed.Load() {
+				state.FailureCode = "database_dump_failed"
+			}
+		}
 	} else {
 		state.Metadata.Exclusions = tree.Exclusions()
 	}

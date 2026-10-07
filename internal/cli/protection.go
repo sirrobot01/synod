@@ -116,7 +116,7 @@ func newProtectCommand(app *app) *cobra.Command {
 				settings.Destinations = []uuid.UUID{available[0].ID}
 			}
 			if settings.Validate() != nil {
-				return &client.Error{Code: "invalid_request", Message: "Use distinct destinations, method auto/stop/live, HH:MM, an IANA time zone, and valid retention counts."}
+				return &client.Error{Code: "invalid_request", Message: "Use distinct destinations, method auto/dump/stop/live, HH:MM, an IANA time zone, and valid retention counts."}
 			}
 			for _, id := range settings.Destinations {
 				index := slices.IndexFunc(available, func(d destination.Destination) bool { return d.ID == id })
@@ -165,7 +165,7 @@ func newProtectCommand(app *app) *cobra.Command {
 	command.Flags().BoolVar(&off, "off", false, "Disable future backups; keep snapshots and admitted work")
 	command.Flags().StringVar(&device, "device", "", "Select the source device when app names repeat")
 	command.Flags().StringSliceVar(&selected, "destination", nil, "Destination names or IDs; repeat for more than one")
-	command.Flags().StringVar(&method, "method", "auto", "Copy method: auto, stop, or live; retain the saved choice by default")
+	command.Flags().StringVar(&method, "method", "auto", "Copy method: auto, dump, stop, or live; retain the saved choice by default")
 	command.Flags().StringVar(&at, "at", "03:00", "Daily time in HH:MM; retain the saved choice by default")
 	command.Flags().StringVar(&zone, "time-zone", "UTC", "IANA time zone, such as Africa/Lagos")
 	command.Flags().IntVar(&daily, "keep-daily", 7, "Daily snapshots to keep, from 0 to 366")

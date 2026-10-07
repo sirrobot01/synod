@@ -174,3 +174,41 @@ func TestScanRealDocker(t *testing.T) {
 		}
 	}
 }
+
+func TestScanClassifiesCustomDatabaseDirectories(t *testing.T) {
+	for _, database := range []struct{ image, flag string }{{"postgres", "-D"}, {"mysql", "--datadir"}, {"mariadb", "--datadir"}, {"redis", "--dir"}} {
+		t.Run(database.image, func(t *testing.T) {
+			parent, child := t.TempDir(), t.TempDir()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch strings.TrimPrefix(r.URL.Path, "/v1.56") {
+				case "/containers/json":
+					json.NewEncoder(w).Encode([]container.Summary{{ID: "database"}})
+				case "/containers/database/json":
+					json.NewEncoder(w).Encode(container.InspectResponse{ID: "database", Name: "/database", Image: "sha256:test", Config: &container.Config{Image: database.image, Cmd: []string{database.flag, "/state/database"}}, Mounts: []container.MountPoint{{Type: mount.TypeBind, Source: parent, Destination: "/state"}, {Type: mount.TypeBind, Source: child, Destination: "/state/database/child"}}})
+				case "/images/sha256:test/json":
+					w.Write([]byte(`{"Id":"sha256:test","Os":"linux","Architecture":"arm64"}`))
+				default:
+					t.Errorf("unexpected request: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			api, err := client.New(client.WithHost(server.URL), client.WithVersion("1.56"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer api.Close()
+			report, err := Scan(t.Context(), api, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			statuses := map[string]string{}
+			for _, p := range report.Apps[0].Paths {
+				statuses[p.Source] = p.Status
+			}
+			if statuses[parent] != "Included" || statuses[filepath.Join(parent, "database")] != "Dumped" || statuses[child] != "Dumped" {
+				t.Fatalf("raw database path classification: %v", statuses)
+			}
+		})
+	}
+}

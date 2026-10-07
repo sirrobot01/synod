@@ -120,7 +120,7 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 }
 
 // Root refreshes source metadata for each pass. Definition files stay in memory.
-func (t *Tree) Root(ctx context.Context, definitions map[string][]byte) (kfs.Directory, error) {
+func (t *Tree) Root(ctx context.Context, definitions map[string][]byte, dumps ...kfs.Entry) (kfs.Directory, error) {
 	var entries []kfs.Entry
 	for _, root := range t.roots {
 		if err := ctx.Err(); err != nil {
@@ -140,7 +140,7 @@ func (t *Tree) Root(ctx context.Context, definitions map[string][]byte) (kfs.Dir
 		files = append(files, &definitionFile{virtualfs.StreamingFileFromReader(name, io.NopCloser(bytes.NewReader(data)))})
 	}
 	kfs.Sort(files)
-	return virtualfs.NewStaticDirectory("app", []kfs.Entry{virtualfs.NewStaticDirectory("paths", entries), virtualfs.NewStaticDirectory("definition", files)}), nil
+	return virtualfs.NewStaticDirectory("app", []kfs.Entry{virtualfs.NewStaticDirectory("paths", entries), virtualfs.NewStaticDirectory("definition", files), virtualfs.NewStaticDirectory("databases", dumps)}), nil
 }
 
 type definitionFile struct{ kfs.StreamingFile }

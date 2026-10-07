@@ -352,7 +352,7 @@ Admitted work still finishes. Existing snapshots remain available.
 
 The defaults are Auto, 03:00 UTC, 7 daily, 4 weekly, and 6 monthly snapshots.
 Auto uses Stop for file apps.
-Database apps show a blocked state until dump support is available.
+Auto uses Dump for apps with a detected database.
 Use `--method live` only when the app permits a live copy.
 Use `--keep-daily`, `--keep-weekly`, and `--keep-monthly` to change retention.
 Retention always keeps the newest copy, the copy just made, and Kopia pins.
@@ -389,18 +389,39 @@ synod operation get OPERATION_ID
 synod operation wait OPERATION_ID
 ```
 
-The default method is Stop.
+The default method is Auto.
+Auto selects Dump for database apps and Stop for other apps.
+With Stop, Synod keeps database containers running for their native dumps.
 Synod first uploads the files while the app runs.
-It then stops the running containers and reads the final files again.
+It then stops the running file containers and reads the final files again.
 Kopia sends only new content blocks.
 Synod restarts the containers before it publishes the snapshot.
 The result shows the snapshot ID, file bytes, and measured downtime.
-Containers that were stopped or paused before the backup keep that state.
+File containers that were stopped or paused before the backup keep that state.
 
 Live copies files while the containers run.
 Use it only when the app permits a live copy.
 SQLite backup API support is not available yet.
-Detected PostgreSQL, MySQL, MariaDB, and Redis apps are refused until dump support is available.
+Dump requires a detected database. Use Auto for other apps.
+Dump keeps the app running and replaces database data paths with native dumps.
+PostgreSQL uses `pg_dumpall`. MySQL and MariaDB use their native SQL dump tools.
+Redis uses `redis-cli --rdb`.
+Synod waits for an existing Redis background save to end before it requests a dump.
+Dumps stream directly into the encrypted repository. Synod creates no plaintext dump files.
+Each dump records its source container and format in the snapshot manifest.
+MySQL and MariaDB hold a read lock during the dump. Writes wait until the dump ends.
+PostgreSQL copies each database in its own transaction. The databases do not share one snapshot point.
+The native client and `timeout` must be available in the container.
+With BusyBox `timeout`, the container must also provide `setsid`.
+SQL clients use the local socket and the official image's administrator environment variables.
+Password variables with a `_FILE` suffix are supported.
+Redis uses its local port, `REDISCLI_AUTH`, `REDIS_PASSWORD`, or `--requirepass`.
+Custom sockets, Redis ACL users, and credentials stored only in custom configuration files need more support.
+Discovery reads `PGDATA`, `-D`, `--datadir`, and `--dir` for data paths.
+Data paths stored only in custom configuration files are not detected.
+A failed dump prevents snapshot publication. The result contains no tool error output.
+A stopped or paused database must be started before a backup.
+Each dump has a 30-minute deadline inside its container.
 
 Each snapshot holds the discovered app manifest, included paths, and private container definitions.
 A standalone container also gets a generated Compose file.

@@ -12,7 +12,7 @@ func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Method == "" {
-		input.Method = backup.Stop
+		input.Method = backup.Auto
 	}
 	identity := r.Context().Value(identityKey{}).(requestIdentity)
 	result, err := s.store.CreateBackup(r.Context(), s.installationID, input, identity.actorID, identity.requestID)

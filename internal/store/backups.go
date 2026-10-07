@@ -18,7 +18,7 @@ const BackupInitializing ErrorCode = "backup_initializing"
 
 // CreateBackup commits an immutable request and assigns at most one repository initializer.
 func (s *Store) CreateBackup(ctx context.Context, installationID uuid.UUID, input backup.Submission, actorID, requestID string) (operation.Operation, error) {
-	if installationID == uuid.Nil || input.ID == uuid.Nil || input.AppID == uuid.Nil || input.DestinationID == uuid.Nil || (input.Method != backup.Auto && input.Method != backup.Stop && input.Method != backup.Live) || !printableWithin(actorID, 256) || !printableWithin(requestID, 128) {
+	if installationID == uuid.Nil || input.ID == uuid.Nil || input.AppID == uuid.Nil || input.DestinationID == uuid.Nil || (input.Method != backup.Auto && input.Method != backup.Stop && input.Method != backup.Live && input.Method != backup.Dump) || !printableWithin(actorID, 256) || !printableWithin(requestID, 128) {
 		return operation.Operation{}, &Error{Code: InvalidRequest}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

@@ -32,7 +32,7 @@ func TestBackupCLISelectsAppAndReportsSavedResult(t *testing.T) {
 				t.Error("invalid backup request")
 			}
 			submitted.Add(1)
-			if recorded.AppID != appID || recorded.DestinationID != destID || recorded.Method != backup.Stop || recorded.ID == uuid.Nil || r.Header.Get("Idempotency-Key") != recorded.ID.String() {
+			if recorded.AppID != appID || recorded.DestinationID != destID || recorded.Method != backup.Auto || recorded.ID == uuid.Nil || r.Header.Get("Idempotency-Key") != recorded.ID.String() {
 				t.Error("incorrect backup choice or retry key")
 			}
 			result, _ := json.Marshal(backup.Result{SnapshotID: recorded.ID, DestinationID: destID, FileBytes: 42, DowntimeMillis: 7, RepositoryOpened: true})
