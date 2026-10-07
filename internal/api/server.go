@@ -45,6 +45,7 @@ type Server struct {
 	EnrollmentAuthority *pki.CA
 	// CredentialKeyring wraps destination secrets. Set it before serving requests.
 	CredentialKeyring *secret.Keyring
+	verifiedDownloads chan struct{}
 	requestLimit      *rate.Limiter
 	enrollmentLimit   *rate.Limiter
 	signInLimit       *rate.Limiter
@@ -69,7 +70,7 @@ func NewServer(metadata *store.Store, admin *auth.AdminToken, installationID uui
 	if metadata == nil || admin == nil || installationID == uuid.Nil || logger == nil {
 		return nil, errors.New("API requires a Store, administrator verifier, installation ID, and logger")
 	}
-	server := &Server{requestLimit: rate.NewLimiter(100, 200), enrollmentLimit: rate.NewLimiter(10, 20), signInLimit: rate.NewLimiter(1, 10), signInAttempts: newAttemptLimiter(rate.Every(2*time.Second), 5, 4096), store: metadata, admin: admin, installationID: installationID, logger: logger}
+	server := &Server{verifiedDownloads: make(chan struct{}, 2), requestLimit: rate.NewLimiter(100, 200), enrollmentLimit: rate.NewLimiter(10, 20), signInLimit: rate.NewLimiter(1, 10), signInAttempts: newAttemptLimiter(rate.Every(2*time.Second), 5, 4096), store: metadata, admin: admin, installationID: installationID, logger: logger}
 	router := chi.NewRouter()
 	router.Use(server.begin)
 	router.NotFound(func(w http.ResponseWriter, r *http.Request) {

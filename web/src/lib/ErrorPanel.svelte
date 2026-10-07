@@ -26,7 +26,7 @@
         <span class="key">request_id</span><span>{view.requestID}</span>
       {/if}
       {#if view.operationID}
-        <span class="key">operation_id</span><span>{view.operationID}</span>
+        <span class="key">operation_id</span><a href={`/operations/${encodeURIComponent(view.operationID)}`}>{view.operationID}</a>
       {/if}
     </div>
   {/if}

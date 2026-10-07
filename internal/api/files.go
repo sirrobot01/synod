@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -13,6 +15,8 @@ import (
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/restore"
 )
+
+const verifiedDownloadLimit = 64 << 20
 
 func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) {
 	s.fileResponse(w, r, restore.FileSnapshots)
@@ -59,6 +63,17 @@ func (s *Server) fileResponse(w http.ResponseWriter, r *http.Request, action str
 			return
 		}
 	}
+	verified := action == restore.FileRead && r.URL.Query().Get("verified") == "1"
+	if verified {
+		// Bound plaintext in memory. Browsers cannot inspect HTTP trailers.
+		select {
+		case s.verifiedDownloads <- struct{}{}:
+			defer func() { <-s.verifiedDownloads }()
+		default:
+			s.writeError(w, r, 503, "download_busy", "Two browser downloads are active. Wait for one to finish, then retry.")
+			return
+		}
+	}
 	header, body, err := s.ReadFile(r.Context(), input)
 	if err != nil {
 		if errors.Is(err, controlstream.ErrDisconnected) || errors.Is(err, controlstream.ErrBusy) || r.Context().Err() != nil || errors.Is(err, context.DeadlineExceeded) {
@@ -88,6 +103,19 @@ func (s *Server) fileResponse(w http.ResponseWriter, r *http.Request, action str
 		s.writeJSON(w, r, header)
 		return
 	}
+	var content []byte
+	if verified {
+		content, err = io.ReadAll(io.LimitReader(body, verifiedDownloadLimit+1))
+		defer clear(content)
+		if err != nil {
+			s.writeError(w, r, 502, "file_transfer_incomplete", "The agent response was interrupted. Retry the request.")
+			return
+		}
+		if len(content) > verifiedDownloadLimit {
+			s.writeError(w, r, 413, "download_too_large", "Browser downloads are limited to 64 MiB. Use synod file get for larger files or directories.")
+			return
+		}
+	}
 	w.Header().Set("X-Synod-Snapshot-ID", header.SnapshotID.String())
 	w.Header().Set("X-Synod-Destination-ID", header.DestinationID.String())
 	w.Header().Set("X-Synod-Format", header.Format)
@@ -101,6 +129,14 @@ func (s *Server) fileResponse(w http.ResponseWriter, r *http.Request, action str
 		w.Header().Set("Content-Type", "application/x-tar")
 	}
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	if verified {
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		w.Header().Set("X-Synod-Transfer", "complete")
+		if _, err := io.Copy(w, bytes.NewReader(content)); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+		return
+	}
 	// This trailer proves that the agent reached a clean end, even for an empty file.
 	w.Header().Set("Trailer", "X-Synod-Transfer")
 	w.WriteHeader(http.StatusOK)

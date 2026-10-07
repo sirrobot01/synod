@@ -1,20 +1,26 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { follow, Router, path, type ScreenName } from "./router.svelte";
   import type { Session } from "./api";
   import Operations from "../routes/Operations.svelte";
   import Operation from "../routes/Operation.svelte";
   import Settings from "../routes/Settings.svelte";
-  import Fleet from "../routes/Fleet.svelte";
+  import Apps from "../routes/Apps.svelte";
+  import Destinations from "../routes/Destinations.svelte";
+  import Snapshots from "../routes/Snapshots.svelte";
   import Nodes from "../routes/Nodes.svelte";
 
   let { session, busy, onSignOut }: { session: Session; busy: boolean; onSignOut: () => void } = $props();
 
   const router = new Router();
+  onDestroy(() => router.destroy());
 
   const destinations: { screen: ScreenName; label: string }[] = [
-    { screen: "fleet", label: "Dashboard" },
-    { screen: "nodes", label: "Nodes" },
-    { screen: "operations", label: "Operations" },
+    { screen: "apps", label: "Apps" },
+    { screen: "destinations", label: "Destinations" },
+    { screen: "snapshots", label: "Snapshots & restore" },
+    { screen: "nodes", label: "Devices" },
+    { screen: "operations", label: "Activity" },
     { screen: "settings", label: "Settings" },
   ];
 
@@ -22,14 +28,18 @@
   // operation still sees which part of the product they are in.
   const sections: Partial<Record<ScreenName, ScreenName>> = {
     operation: "operations",
+    fleet: "apps",
   };
 
   let route = $derived(router.current);
   let section = $derived(sections[route.screen] ?? route.screen);
   let titles: Record<ScreenName, string> = {
-    fleet: "Dashboard",
-    nodes: "Nodes",
-    operations: "Operations",
+    fleet: "Apps",
+    apps: "Apps",
+    destinations: "Destinations",
+    snapshots: "Snapshots & restore",
+    nodes: "Devices",
+    operations: "Activity",
     operation: "Operation",
     settings: "Settings",
     unknown: "Not found",
@@ -41,7 +51,7 @@
     const steps: { label: string; screen: ScreenName; id: string }[] = [];
     switch (route.screen) {
       case "operation":
-        steps.push({ label: "Operations", screen: "operations", id: "" });
+        steps.push({ label: "Activity", screen: "operations", id: "" });
         break;
       default:
         break;
@@ -83,25 +93,30 @@
     <div class="bar">
       <nav class="trail" aria-label="Breadcrumb">
         <ol class="mono">
-          <li><a href={path("fleet")} onclick={(event) => navigate(event, "fleet")}>Dashboard</a></li>
+          <li><a href={path("fleet")} onclick={(event) => navigate(event, "fleet")}>Apps</a></li>
           {#each trail as step (step.screen + step.id)}
             <li>
               <a href={path(step.screen, step.id)} onclick={(event) => navigate(event, step.screen, step.id)}>{step.label}</a>
             </li>
           {/each}
-          {#if route.screen !== "fleet"}
+          {#if route.screen !== "fleet" && (route.screen !== "apps" || route.id !== "")}
             <li aria-current="page">
               {route.id === "" ? titles[route.screen] : route.id}
             </li>
           {/if}
         </ol>
       </nav>
-      <span class="cadence mono">an open operation is read every 5s</span>
+
     </div>
 
     <div class="screen">
-      {#if route.screen === "fleet"}
-        <Fleet go={(screen, id) => router.go(screen, id)} />
+      {#key route.screen + route.id}
+      {#if route.screen === "fleet" || route.screen === "apps"}
+        <Apps id={route.id} go={(screen, id) => router.go(screen, id)} />
+      {:else if route.screen === "destinations"}
+        <Destinations onOperation={(id) => router.go("operation", id)} />
+      {:else if route.screen === "snapshots"}
+        <Snapshots id={route.id} onApp={(id) => router.go("snapshots", id)} onOperation={(id) => router.go("operation", id)} />
       {:else if route.screen === "nodes"}
         <Nodes id={route.id} onOpen={(id) => router.go("nodes", id)} />
       {:else if route.screen === "operations"}
@@ -114,6 +129,7 @@
         <h1>Not found</h1>
         <p class="note">This address does not name a screen.</p>
       {/if}
+      {/key}
     </div>
   </main>
 </div>
@@ -233,14 +249,20 @@
   .trail a:hover {
     color: var(--ink);
   }
-  .cadence {
-    margin-left: auto;
-    font-size: 11px;
-    color: var(--ink-faint);
-  }
   .screen {
     flex: 1;
     min-width: 0;
     padding: 26px 24px 80px;
+  }
+  @media (max-width: 760px) {
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    nav[aria-label="Screens"] { border-right: 0; border-bottom: 1px solid var(--line); padding: 16px 0 0; }
+    .brand { padding-bottom: 12px; padding-right: 100px; }
+    nav ul { display: flex; flex-wrap: wrap; }
+    nav ul a { padding: 10px 14px; }
+    .foot { flex-direction: row; align-items: center; padding: 10px 16px; gap: 16px; }
+    .foot button { margin-left: auto; }
+    .screen { padding: 22px 16px 60px; }
+    .bar { padding: 12px 16px; }
   }
 </style>

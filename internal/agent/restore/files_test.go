@@ -47,10 +47,15 @@ func TestFileRestoreReadsRealBackupAndRefusesOtherApps(t *testing.T) {
 	}
 	request.Action, request.Path = restore.FileList, f.project
 	header, _ = read(request)
-	if header.FailureCode != "" || len(header.Entries) != 3 || header.SnapshotID != f.saved.ID {
+	if header.FailureCode != "" || len(header.Entries) != 3 || header.SnapshotID != f.saved.ID || header.PathType != "directory" {
 		t.Fatal("saved directory differs", header)
 	}
-	request.Action, request.Path = restore.FileRead, filepath.Join(f.project, "state")
+	request.Path = filepath.Join(f.project, "state")
+	header, _ = read(request)
+	if header.PathType != "file" || len(header.Entries) != 1 || header.Entries[0].Name != "state" {
+		t.Fatal("saved file listing is ambiguous", header)
+	}
+	request.Action = restore.FileRead
 	header, data := read(request)
 	if header.Format != "file" || string(data) != "private-restored-value" {
 		t.Fatal("saved file differs", header.FailureCode)

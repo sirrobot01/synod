@@ -2,6 +2,10 @@
 """Prove file restore with disposable local processes and one Docker project."""
 
 import argparse
+import io
+import ssl
+import urllib.parse
+import urllib.request
 import json
 import os
 from pathlib import Path
@@ -143,6 +147,22 @@ try:
         assert tar.extractfile("project/state").read() == original
         assert tar.extractfile("project/.env").read() == b"SECRET=private-file-env\n"
     checks.append("Directory tar contains saved data and the environment file")
+    phase = "verified browser download"
+    context = ssl.create_default_context(cafile=str(ctl / "api-ca.crt"))
+    for saved_path, expected in [(project / "state", original), (project / "empty", b""), (project, None)]:
+        query = urllib.parse.urlencode({"snapshot": snapshot, "path": str(saved_path), "verified": "1"})
+        request = urllib.request.Request(env["SYNOD_API_URL"] + "/v1/apps/" + app + "/files/content?" + query,
+                                        headers={"Authorization": "Bearer " + (ctl / "admin.token").read_text().strip()})
+        with urllib.request.urlopen(request, context=context, timeout=60) as response:
+            content = response.read()
+            assert response.headers["X-Synod-Transfer"] == "complete"
+            assert len(content) == int(response.headers["Content-Length"])
+            if expected is not None:
+                assert content == expected
+            else:
+                with tarfile.open(fileobj=io.BytesIO(content)) as tar:
+                    assert tar.extractfile("project/state").read() == original
+    checks.append("Verified browser mode returns complete binary files, empty files, and directory archives")
     phase = "refuse existing output and missing paths"
     assert cli("file", "get", app, project / "state", "--output", output, okay=False).get("error")
     missing = root / "missing-output"

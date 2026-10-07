@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/auth"
@@ -70,5 +72,42 @@ func TestFilesRequireAdminAndMarkOnlyCompleteStreams(t *testing.T) {
 		if err == nil || broken.Trailer.Get("X-Synod-Transfer") == "complete" {
 			t.Fatal("partial body was marked complete")
 		}
+	}
+}
+
+func TestBrowserDownloadVerifiesBeforeServing(t *testing.T) {
+	server, _, _ := identityServer(t)
+	endpoint := "/v1/apps/" + uuid.NewString() + "/files/content?verified=1"
+	for _, content := range []string{"", "saved content"} {
+		server.ReadFile = func(context.Context, restore.FileRequest) (restore.FileHeader, io.ReadCloser, error) {
+			return restore.FileHeader{Format: "file", Name: "saved"}, io.NopCloser(strings.NewReader(content)), nil
+		}
+		response := call(t, server, "GET", endpoint, "", withBootstrap)
+		if response.Code != 200 || response.Body.String() != content || response.Header().Get("X-Synod-Transfer") != "complete" || response.Header().Get("Content-Length") != strconv.Itoa(len(content)) {
+			t.Fatal("verified download did not preserve the complete body")
+		}
+	}
+	server.ReadFile = func(context.Context, restore.FileRequest) (restore.FileHeader, io.ReadCloser, error) {
+		return restore.FileHeader{Format: "tar", Name: "saved"}, io.NopCloser(io.MultiReader(strings.NewReader("private partial content"), iotest.ErrReader(io.ErrUnexpectedEOF))), nil
+	}
+	response := call(t, server, "GET", endpoint, "", withBootstrap)
+	if response.Code != 502 || response.Header().Get("X-Synod-Transfer") != "" || strings.Contains(response.Body.String(), "private partial content") {
+		t.Fatal("incomplete content was served")
+	}
+	server.ReadFile = func(context.Context, restore.FileRequest) (restore.FileHeader, io.ReadCloser, error) {
+		return restore.FileHeader{Format: "tar", Name: "large"}, io.NopCloser(strings.NewReader(strings.Repeat("x", verifiedDownloadLimit+1))), nil
+	}
+	if response := call(t, server, "GET", endpoint, "", withBootstrap); response.Code != 413 || response.Header().Get("X-Synod-Transfer") != "" {
+		t.Fatal("oversized browser download accepted")
+	}
+	// The slots are shared by all requests to this controller.
+	server.verifiedDownloads <- struct{}{}
+	server.verifiedDownloads <- struct{}{}
+	server.ReadFile = func(context.Context, restore.FileRequest) (restore.FileHeader, io.ReadCloser, error) {
+		t.Fatal("busy download dispatched to an agent")
+		return restore.FileHeader{}, nil, nil
+	}
+	if response := call(t, server, "GET", endpoint, "", withBootstrap); response.Code != 503 {
+		t.Fatal("browser download memory budget ignored")
 	}
 }

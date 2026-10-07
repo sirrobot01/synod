@@ -95,13 +95,6 @@ func (w *Worker) ServeFile(ctx context.Context, request restore.FileRequest, sen
 	if unavailable {
 		header.Warnings = []string{"destination_unavailable"}
 	}
-	if request.Action == restore.FileList {
-		header.Entries, header.Truncated, err = r.List(ctx, saved, request.Path, 4000)
-		if err != nil {
-			return fail(err)
-		}
-		return answer()
-	}
 	archive, _, err := repository.Locate(saved, request.Path)
 	if err != nil {
 		return fail(err)
@@ -112,6 +105,23 @@ func (w *Worker) ServeFile(ctx context.Context, request restore.FileRequest, sen
 		if err != nil {
 			return fail(err)
 		}
+	}
+	if request.Action == restore.FileList {
+		header.PathType = "directory"
+		if info != nil && !info.IsDir() {
+			header.PathType = "other"
+			if info.Mode().IsRegular() {
+				header.PathType = "file"
+			}
+			if info.Mode()&fs.ModeSymlink != 0 {
+				header.PathType = "symlink"
+			}
+		}
+		header.Entries, header.Truncated, err = r.List(ctx, saved, request.Path, 4000)
+		if err != nil {
+			return fail(err)
+		}
+		return answer()
 	}
 	header.Name = path.Base(request.Path)
 	if header.Name == "/" || header.Name == "." {

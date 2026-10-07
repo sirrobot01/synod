@@ -22,6 +22,10 @@ describe("routing", () => {
   it("round-trips every screen through its own address", () => {
     const cases: [ScreenName, string][] = [
       ["fleet", ""],
+      ["apps", ""],
+      ["apps", "a1"],
+      ["snapshots", "a1"],
+      ["destinations", ""],
       ["nodes", ""],
       ["nodes", "node-1"],
       ["operations", ""],
@@ -37,6 +41,12 @@ describe("routing", () => {
     expect(match("/nodes/node-1/")).toEqual({ screen: "nodes", id: "node-1" });
     expect(match(path("operation", "op 1/2"))).toEqual({ screen: "operation", id: "op 1/2" });
   });
+});
+
+it("rejects malformed and extra path segments", () => {
+  expect(match("/apps/%ZZ").screen).toBe("unknown");
+  expect(match("/apps/a1/more").screen).toBe("unknown");
+  expect(match("/settings/extra").screen).toBe("unknown");
 });
 
 describe("follow", () => {

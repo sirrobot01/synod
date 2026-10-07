@@ -2,6 +2,7 @@
   import { api, detail, type APIToken, type MintedToken, type Session } from "../lib/api";
   import { errorView, type APIError } from "../lib/state";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
+  import Notifications from "../lib/Notifications.svelte";
   import Panel from "../lib/ui/Panel.svelte";
 
   let { session }: { session: Session } = $props();
@@ -131,10 +132,12 @@
 <div class="screen">
   <header>
     <h1>Settings</h1>
-    <p class="note">Accounts and API access.</p>
+    <p class="note">Alerts, accounts, and API access.</p>
   </header>
 
-  <Panel title="Your account" note="this writes to the API">
+  <Notifications />
+
+  <Panel title="Your account">
     <div class="pad">
       <dl class="facts mono wide">
         <dt>signed_in_as</dt><dd>{session.actor_id}</dd>
@@ -156,7 +159,7 @@
     </div>
   </Panel>
 
-  <Panel title="API tokens" note="this reads and writes the API">
+  <Panel title="API tokens">
     <div class="pad">
       {#if tokenFailure}<ErrorPanel view={errorView(tokenFailure)} />{/if}
       {#if minted}
@@ -207,7 +210,7 @@
     </div>
   </Panel>
 
-  <Panel title="Operator accounts" note="creating and disabling write to the API">
+  <Panel title="Operator accounts">
     <div class="pad">
       {#if accountFailure}<ErrorPanel view={errorView(accountFailure)} />{/if}
       <form onsubmit={createAccount}>
@@ -331,4 +334,5 @@
     grid-column: 1 / -1;
     color: var(--ink-dim);
   }
+@media (max-width: 600px) { form { grid-template-columns: 1fr; } }
 </style>

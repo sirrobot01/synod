@@ -81,6 +81,7 @@ func Summarize(saved backup.Snapshot, destinationID uuid.UUID) SnapshotSummary {
 // FileHeader is the first answer to a FileRequest. Content chunks follow only for a successful read.
 // A read of a directory streams a tar archive. A read of a file streams the file.
 type FileHeader struct {
+	PathType      string             `json:"path_type,omitempty"`
 	FailureCode   string             `json:"failure_code,omitempty"`
 	SnapshotID    uuid.UUID          `json:"snapshot_id,omitzero"`
 	DestinationID uuid.UUID          `json:"destination_id,omitzero"`

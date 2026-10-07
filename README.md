@@ -588,6 +588,15 @@ Its headers include `X-Synod-Snapshot-ID`, `X-Synod-Destination-ID`, and `X-Syno
 Clients must check the final `X-Synod-Transfer: complete` trailer.
 Discard content if this trailer is absent.
 
+Browsers use `verified=1` on the content endpoint.
+This mode reads the complete agent response before it returns content.
+It limits each download to 64 MiB.
+It permits two such downloads at the same time.
+It keeps plaintext in memory and creates no server files.
+A successful response has `X-Synod-Transfer: complete` and `Content-Length` headers.
+The browser checks both before it offers the file to save.
+Use `synod file get` for larger files or directories.
+
 Run the file restore proof with a built binary:
 
 ```sh
@@ -932,3 +941,30 @@ It rebuilds the controller from the repository on odin.
 It restores the amd64 app on arm64 and checks the saved rows, role, and files.
 It checks that existing running containers keep their start times.
 It removes its temporary processes, containers, volumes, and directories.
+
+
+## Use the web UI
+
+Open the controller HTTPS address and sign in with an operator account.
+The web UI uses the same API as the CLI.
+
+1. Open **Devices** to approve joined devices.
+2. Open **Destinations** to add an encrypted repository.
+3. Keep the repository password with the recovery kit.
+4. Open **Apps** and select **Protect all**.
+5. Review the paths and copy settings before you confirm.
+6. Open an app to change its schedule or stop its scheduled backups.
+7. Open **Snapshots & restore** to choose a saved copy.
+8. Select a target device to restore the app.
+9. Type the app name to confirm a replacement.
+10. Open **Activity** to read the operation result.
+
+The app view shows the last good snapshot and the last successful restore test separately.
+A later failed drill does not erase the successful test date.
+A device without a recent report has unknown connectivity.
+The UI keeps the last known data when a refresh fails.
+
+Open **Settings** to configure a Shoutrrr notification URL.
+Select **Send test notification** to queue a test.
+Read its delivery result in **Activity**.
+The saved URL and repository credentials never appear in status responses or browser storage.

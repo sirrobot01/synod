@@ -69,7 +69,7 @@ export interface APIError {
 export function errorView(failure: APIError): { code: string; consequence: string; requestID: string; operationID?: string; mark: Mark } {
   const view: { code: string; consequence: string; requestID: string; operationID?: string; mark: Mark } = {
     code: failure.code,
-    consequence: consequences[failure.code] ?? failure.message,
+    consequence: failure.message || consequences[failure.code] || "The request could not be completed.",
     requestID: failure.requestID,
     mark: errorMarks[failure.code] ?? { glyph: "✕", shape: "diamond", tone: "fail", label: failure.code },
   };
@@ -82,6 +82,8 @@ export function errorView(failure: APIError): { code: string; consequence: strin
  * an attention mark, not a failure, and an uncertain outcome is neither.
  */
 const errorMarks: Record<string, Mark> = {
+  protect_plan_changed: { glyph: "!", shape: "square-half", tone: "attn", label: "plan changed" },
+  notification_settings_changed: { glyph: "!", shape: "square-half", tone: "attn", label: "settings changed" },
   idempotency_conflict: { glyph: "!", shape: "square-half", tone: "attn", label: "conflict" },
   name_conflict: { glyph: "!", shape: "square-half", tone: "attn", label: "conflict" },
   operation_conflict: { glyph: "!", shape: "square-half", tone: "attn", label: "conflict" },

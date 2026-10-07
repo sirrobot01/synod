@@ -12,6 +12,9 @@ vi.mock("./api", async () => {
       operation: () => new Promise(() => {}),
       operations: () => new Promise(() => {}),
       nodes: () => new Promise(() => {}),
+      protection: () => new Promise(() => {}),
+      destinations: () => new Promise(() => {}),
+      notifications: () => new Promise(() => {}),
       tokens: () => new Promise(() => {}),
     },
   };
@@ -37,27 +40,27 @@ describe("the shell", () => {
     at("/operations/abc");
     // The breadcrumb names Operations too, so the mark is read from the navigation.
     const navigation = within(screen.getByLabelText("Screens"));
-    const operations = navigation.getByRole("link", { name: "Operations" });
+    const operations = navigation.getByRole("link", { name: "Activity" });
     // The mark says which part of the product the reader is in. An operation
     // belongs to Operations, so the mark must not move to the dashboard.
     expect(operations.getAttribute("aria-current")).toBe("page");
-    expect(navigation.getByRole("link", { name: "Dashboard" }).getAttribute("aria-current")).toBe(null);
+    expect(navigation.getByRole("link", { name: "Apps" }).getAttribute("aria-current")).toBe(null);
   });
 
   it("names every step back to the dashboard in the breadcrumb", () => {
     at("/operations/abc");
     const trail = screen.getByLabelText("Breadcrumb");
-    expect(trail.textContent).toContain("Dashboard");
-    expect(trail.textContent).toContain("Operations");
+    expect(trail.textContent).toContain("Apps");
+    expect(trail.textContent).toContain("Activity");
     expect(trail.textContent).toContain("abc");
   });
 
   it("changes the address when a screen is opened, so a reload returns to it", async () => {
     at("/");
-    (within(screen.getByLabelText("Screens")).getByRole("link", { name: "Nodes" }) as HTMLAnchorElement).click();
+    (within(screen.getByLabelText("Screens")).getByRole("link", { name: "Devices" }) as HTMLAnchorElement).click();
     await Promise.resolve();
     expect(window.location.pathname).toBe("/nodes");
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Nodes");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Devices");
   });
 
   it("answers an address that names no screen without drawing a screen", () => {

@@ -6,6 +6,9 @@
 
 export type ScreenName =
   | "fleet"
+  | "apps"
+  | "destinations"
+  | "snapshots"
   | "nodes"
   | "operations"
   | "operation"
@@ -20,17 +23,26 @@ export interface Route {
 
 /** match reads one path into a screen and its resource. It never reads the network. */
 export function match(pathname: string): Route {
-  const parts = pathname.split("/").filter((part) => part.length > 0).map(decodeURIComponent);
+  let parts: string[];
+  try { parts = pathname.split("/").filter(Boolean).map(decodeURIComponent); }
+  catch { return { screen: "unknown", id: "" }; }
+  if (parts.length > 2) return { screen: "unknown", id: "" };
   const [first, second] = parts;
   if (first === undefined) return { screen: "fleet", id: "" };
   switch (first) {
+    case "apps": case "snapshots":
+      return { screen: first, id: second ?? "" };
+    case "destinations":
+      return { screen: second ? "unknown" : "destinations", id: "" };
+    case "devices":
     case "nodes":
       return { screen: "nodes", id: second ?? "" };
+    case "activity":
     case "operations":
       if (second === undefined) return { screen: "operations", id: "" };
       return { screen: "operation", id: second };
     case "settings":
-      return { screen: "settings", id: "" };
+      return { screen: second ? "unknown" : "settings", id: "" };
     default:
       return { screen: "unknown", id: "" };
   }
@@ -42,6 +54,9 @@ export function path(screen: ScreenName, id = ""): string {
   switch (screen) {
     case "fleet":
       return "/";
+    case "apps": case "snapshots":
+      return id === "" ? `/${screen}` : `/${screen}/${encoded}`;
+    case "destinations": return "/destinations";
     case "nodes":
       return id === "" ? "/nodes" : `/nodes/${encoded}`;
     case "operations":
@@ -61,10 +76,12 @@ export class Router {
 
   constructor() {
     this.current = match(window.location.pathname);
-    window.addEventListener("popstate", () => {
-      this.current = match(window.location.pathname);
-    });
+    window.addEventListener("popstate", this.onPopState);
   }
+
+  private onPopState = () => { this.current = match(window.location.pathname); };
+
+  destroy() { window.removeEventListener("popstate", this.onPopState); }
 
   /** go moves to one screen and records the move, so the back button works. */
   go(screen: ScreenName, id = "") {
