@@ -13,6 +13,7 @@ import (
 	kfs "github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/snapshot"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/agent/discovery"
 	"github.com/sirrobot01/synod/internal/agent/journal"
@@ -174,6 +175,36 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return w.finish(ctx, request, &state, r)
 	}
 	definitions := map[string][]byte{"inspect.json": raw}
+	networks := make(map[string]network.Network)
+	for _, c := range inspected {
+		if c.NetworkSettings == nil {
+			state.FailureCode = "app_scan_failed"
+			return w.finish(ctx, request, &state, r)
+		}
+		for name := range c.NetworkSettings.Networks {
+			if _, ok := networks[name]; ok || slices.Contains([]string{"bridge", "host", "none"}, name) {
+				continue
+			}
+			response, err := w.Docker.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
+			if err != nil {
+				state.FailureCode = "app_scan_failed"
+				return w.finish(ctx, request, &state, r)
+			}
+			// Container endpoints can describe other apps. Keep only network settings.
+			networks[name] = response.Network.Network
+		}
+	}
+	raw, err = json.Marshal(networks)
+	if err != nil || len(raw) > 4<<20 {
+		state.FailureCode = "app_definition_limit"
+		return w.finish(ctx, request, &state, r)
+	}
+	definitions["networks.json"] = raw
+	images, err := w.imageEvidence(ctx, app)
+	if err != nil {
+		state.FailureCode = "image_inspection_failed"
+		return w.finish(ctx, request, &state, r)
+	}
 	if app.Kind == "container" {
 		compose, err := StandaloneCompose(inspected[0])
 		if err != nil {
@@ -214,6 +245,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		},
 		Method:       method,
 		Architecture: w.Architecture,
+		Images:       images,
 		StartedAt:    state.StartedAt,
 		Paths:        tree.Paths,
 	}

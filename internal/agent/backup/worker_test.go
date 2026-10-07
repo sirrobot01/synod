@@ -159,6 +159,9 @@ func TestWorkerCopiesAndRestoresRealDockerApp(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if len(saved.Images) != 1 || saved.Images[0].ContainerID != fixture.id || !slices.Contains(saved.Images[0].Architectures, fixture.worker.Architecture) || saved.Images[0].Reference == "" {
+				t.Fatal("snapshot lost running image evidence")
+			}
 			if saved.Method == backup.Auto || (method == backup.Live && saved.Method != backup.Live) {
 				t.Fatal("snapshot did not record the resolved copy method")
 			}

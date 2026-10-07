@@ -15,7 +15,7 @@ It requires no PostgreSQL server or etcd service.
 
 On-demand and scheduled Stop and Live backups are available for file-based apps.
 They use encrypted local, Synod-device, SFTP, or S3 repositories.
-Schedules, database dumps, app restore, repository recovery, and the recovery kit are not available yet.
+App restore, repository recovery, and the recovery kit are not available yet.
 Synod does not place running apps or provide automatic failover.
 
 ## Build and checks
@@ -431,6 +431,9 @@ A stopped or paused database must be started before a backup.
 Each dump has a 30-minute deadline inside its container.
 
 Each snapshot holds the discovered app manifest, included paths, and private container definitions.
+It also holds network settings and image platform evidence.
+Synod checks the running image digest. It does not use the current value of an image tag.
+If the registry is unavailable, the snapshot records only the cached image and its architecture.
 A standalone container also gets a generated Compose file.
 An unsupported standalone setting causes a failure.
 The full Docker inspect data stays in the encrypted snapshot.
