@@ -18,9 +18,14 @@ They can stop apps, copy live files, or make native database dumps.
 They use encrypted local, Synod-device, SFTP, or S3 repositories.
 App restore to the same device or another device is available.
 File restore is available through the CLI, API, and web UI.
-Repository recovery and the recovery kit are available.
+Repository recovery is available.
+The generated recovery kit remains a release requirement.
+Until it is available, keep each repository password and storage credentials outside Synod.
 Agents run weekly content checks and monthly isolated restore drills.
 Synod does not place running apps or provide automatic failover.
+
+Start with the [user guide](docs/user-guide.md) for installation, protection, restore, and recovery.
+Its [current limits](docs/user-guide.md#current-limits) list the remaining release blockers.
 
 ## Build and checks
 
@@ -121,7 +126,7 @@ python3 scripts/proof-install.py --release dist/releases/v0.1.0-rc.1 --evidence 
 
 Select the same release for every device.
 Read its release notes before the upgrade.
-Keep the repository password and recovery kit outside the devices.
+Keep the repository password and storage access details outside the devices.
 Keep the existing controller and agent state directories.
 Do not run `server init` or `agent join` again.
 Those commands create identities. An upgrade keeps the current identities and encrypted credentials.
@@ -409,7 +414,7 @@ Each path has a proposed status:
 | --- | --- |
 | Included | App files or state selected for each backup. |
 | Large | Media or more than 20 GiB. Skipped by default. |
-| Dumped | A detected database data path. Dump execution is not available yet. |
+| Dumped | A detected database data path. A native dump replaces the live data copy. |
 | Never | A host system path or an unsupported mount. |
 
 Discovery checks host system exclusions before it scans files.
@@ -794,7 +799,7 @@ Do not combine `--drill` with `--replace`.
 
 Synod uses Shoutrrr v0.20.0 for notification delivery.
 It supports ntfy, Gotify, Discord, Slack, SMTP email, and generic HTTP webhooks.
-Use the [Shoutrrr URL guide](https://github.com/nicholas-fedor/shoutrrr/tree/v0.20.0/docs/services) for service credentials and URL syntax.
+Use the [Shoutrrr v0.20.0 URL guide](https://shoutrrr.nickfedor.com/v0.20.0/services/overview/) for service credentials and URL syntax.
 
 Put the URL in a private JSON file.
 Keep this file out of shell history and Git.
@@ -963,7 +968,7 @@ A new catalog generation keeps the previous generations.
 A repeated write with the same content has no effect.
 A stale generation or a conflicting generation fails.
 A repository cannot silently change to another installation.
-Controller recovery from this catalog remains a later task.
+Use `synod server init --from-repository` to recover the controller from this catalog.
 
 Opening a repository needs its location, access credentials, and repository password.
 It needs no saved controller state.
@@ -1028,10 +1033,10 @@ synod operation wait ID
 
 Interrupting `wait` does not cancel the work.
 A failed or cancelled operation gives `wait` a nonzero exit status.
-The current build has no backup worker that creates these records.
+Backups, app restores, restore drills, and content checks create operation records.
 The agent journal records input before execution and keeps results until acknowledgement.
-A running journal record requires inspection after a restart.
-The backup worker will use this journal in a later task.
+After a restart, workers recover interrupted work before they accept more work.
+Read the final result for any cleanup or recovery warning.
 
 See [the API schema](api/openapi.json) for enrollment, device, app, and operation routes.
 It does not yet describe account and session routes.
@@ -1086,7 +1091,7 @@ The web UI uses the same API as the CLI.
 
 1. Open **Devices** to approve joined devices.
 2. Open **Destinations** to add an encrypted repository.
-3. Keep the repository password with the recovery kit.
+3. Keep the repository password outside the devices.
 4. Open **Apps** and select **Protect all**.
 5. Review the paths and copy settings before you confirm.
 6. Open an app to change its schedule or stop its scheduled backups.
