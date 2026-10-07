@@ -14,6 +14,7 @@ import (
 	"github.com/sirrobot01/synod/internal/client"
 	"github.com/sirrobot01/synod/internal/destination"
 	"github.com/sirrobot01/synod/internal/inventory"
+	"github.com/sirrobot01/synod/internal/notification"
 	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/restore"
@@ -22,6 +23,7 @@ import (
 
 // Result is the single JSON document that the CLI writes to stdout.
 type Result struct {
+	Notifications    *notification.Status     `json:"notifications,omitzero"`
 	Files            *restore.FileHeader      `json:"files,omitzero"`
 	Protection       *backup.ProtectionPlan   `json:"protection,omitzero"`
 	ProtectionUpdate *backup.ProtectionUpdate `json:"protection_update,omitzero"`
@@ -80,6 +82,12 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 		return code
 	}
 	var output strings.Builder
+	if notifications := a.result.Notifications; notifications != nil {
+		fmt.Fprintf(&output, "Notifications configured: %t  Service: %s  Revision: %d\nOverdue grace: %dh  Missing device: %dh  Destination full: %d%%\n", notifications.Settings.Configured, notifications.Settings.Service, notifications.Revision, notifications.Settings.OverdueGraceHours, notifications.Settings.MissingAfterHours, notifications.Settings.FullPercent)
+		for _, alert := range notifications.Alerts {
+			fmt.Fprintf(&output, "%s  %s  %s  Attempts: %d  Failure: %s\n  %s\n", alert.ID, alert.Kind, alert.State, alert.Attempts, alert.FailureCode, alert.Message)
+		}
+	}
 	if files := a.result.Files; files != nil {
 		if files.SnapshotID != uuid.Nil {
 			fmt.Fprintf(&output, "Snapshot: %s\nDestination: %s\n", files.SnapshotID, files.DestinationID)
@@ -111,6 +119,13 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			fmt.Fprintf(&output, "%s  %s  %s\n", d.ID, d.Name, d.Location.Kind)
 			if d.Location.Kind == "local" || d.Location.Kind == "device" {
 				fmt.Fprintf(&output, "  Device: %s  Path: %s\n  Warning: Copies on this device do not protect its apps from device loss.\n", d.NodeID, d.Location.Path)
+			}
+		}
+		for _, space := range listing.Space {
+			if space.Known {
+				fmt.Fprintf(&output, "Destination %s: %d of %d bytes available (measured %s).\n", space.DestinationID, space.AvailableBytes, space.TotalBytes, space.ObservedAt.Format(time.RFC3339))
+			} else {
+				fmt.Fprintf(&output, "Destination %s: free space unknown.\n", space.DestinationID)
 			}
 		}
 		for _, check := range listing.Checks {

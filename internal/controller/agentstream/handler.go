@@ -37,6 +37,8 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 		return fmt.Errorf("%w: node %s carries an invalid session %q", ErrUnsupportedMessage, peer.NodeID, peer.SessionID)
 	}
 	switch value := message.Message.(type) {
+	case *agentv1.AgentMessage_DestinationHealth:
+		return r.Store.RecordDestinationHealth(ctx, peer.NodeID, sessionID, value.DestinationHealth)
 	case *agentv1.AgentMessage_ProofEvent:
 		if value.ProofEvent == nil || len(value.ProofEvent.EventJson) > 64<<10 {
 			return ErrUnsupportedMessage

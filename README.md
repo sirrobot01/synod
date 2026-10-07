@@ -645,6 +645,77 @@ Use `synod operation get ID` to read its result later.
 The API accepts these requests at `POST /v1/proofs`.
 Do not combine `--drill` with `--replace`.
 
+## Configure notifications
+
+Synod uses Shoutrrr v0.20.0 for notification delivery.
+It supports ntfy, Gotify, Discord, Slack, SMTP email, and generic HTTP webhooks.
+Use the [Shoutrrr URL guide](https://github.com/nicholas-fedor/shoutrrr/tree/v0.20.0/docs/services) for service credentials and URL syntax.
+
+Put the URL in a private JSON file.
+Keep this file out of shell history and Git.
+The CLI supplies these default thresholds when you omit them:
+
+```json
+{
+  "url": "ntfy://ntfy.example.com/private-topic",
+  "overdue_grace_hours": 24,
+  "missing_after_hours": 168,
+  "full_percent": 90
+}
+```
+
+```sh
+chmod 600 notification.json
+synod notification configure --file notification.json
+synod notification test
+synod notification status
+```
+
+The controller encrypts the URL in its database.
+It includes these settings in the encrypted recovery catalog.
+Status and logs never show the URL or provider error text.
+The administrator API uses `GET /v1/notifications`, `PUT /v1/notifications`, and `POST /v1/notifications/test`.
+A settings update needs an ID and the current `expected_revision`.
+Use the same ID and input for a retry.
+
+A failed backup or restore drill produces one alert for its operation ID.
+Only failures received since the current notification settings were saved are eligible.
+An overdue backup alert needs an online device and a missed slot older than the grace period.
+A device gets five minutes after reconnection to report saved results and start its catch-up backup.
+Recent unfinished backup work suppresses the overdue alert for up to two hours.
+Offline devices do not produce overdue alerts.
+A device missing for seven days produces one missing-device alert by default.
+A continuing condition produces no further alerts until it clears and returns.
+
+Agents report filesystem space for local and Synod-device directories once a minute.
+A report older than five minutes is unknown.
+The default almost-full threshold is 90 percent of filesystem capacity.
+`synod destination list` shows the measurement and its time.
+S3 and SFTP free space is unknown in this release.
+Backup failures still produce alerts for these destinations.
+Filesystem measurements do not include provider quotas.
+
+Each send has a ten-second limit.
+The durable queue holds at most 512 unfinished alerts.
+Delivery makes at most five attempts, with delays of 1, 10, 60, and 300 seconds.
+HTTP client errors other than timeouts and rate limits stop retries.
+A permanent SMTP rejection also stops retries.
+Status shows the state, attempt count, and safe failure code.
+A restart can repeat a send that finished before its result was saved.
+Each message includes its alert ID so you can identify that duplicate.
+A settings change cancels queued sends from the old configuration.
+A send already in progress can still finish.
+Run `synod notification disable` to stop new sends and cancel the queue.
+
+Run the local delivery proof with a built binary:
+
+```sh
+SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock python3 scripts/proof-checks.py ./dist/synod --notifications
+```
+
+The proof uses a local HTTP receiver and disposable Docker containers.
+It checks delivery after a controller restart and after a forced drill failure.
+
 ## Restore an app
 
 Select the app from `synod app list`.

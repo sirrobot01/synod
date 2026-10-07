@@ -16,7 +16,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 fixture_cache=${SYNOD_TEST_GO_CACHE:-$fixture_temporary/cache}
 mkdir -p "$fixture_cache"
-fixture_image=golang@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd
+fixture_image=golang@sha256:162be5298a40ed317005c8339c6de4d10d3eef336d66dc8e9259b03ab9d3a6d2
 fixture_container=$(docker create --network none --label synod.test=sqlite \
     -e GOMAXPROCS=4 -e GOTOOLCHAIN=local -e GOCACHE=/cache \
     -v "$fixture_root:/src:ro" -v "$fixture_modules:/go/pkg/mod:ro" -v "$fixture_cache:/cache" \

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/backup"
@@ -214,6 +215,26 @@ func (s *Store) ListDestinations(ctx context.Context) (destination.Listing, erro
 			return result, &Error{Code: Unavailable}
 		}
 		result.Checks = append(result.Checks, status)
+	}
+	if err := rows.Err(); err != nil {
+		return result, storeError(err)
+	}
+	if err := rows.Close(); err != nil {
+		return result, storeError(err)
+	}
+	rows, err = tx.QueryContext(ctx, `SELECT d.id,h.observed_at,coalesce(h.total_bytes,0),coalesce(h.available_bytes,0) FROM destinations d LEFT JOIN destination_health h ON h.destination_id=d.id WHERE d.removed_at IS NULL ORDER BY d.name,d.id`)
+	if err != nil {
+		return result, storeError(err)
+	}
+	defer rows.Close()
+	result.Space = []destination.Space{}
+	for rows.Next() {
+		var space destination.Space
+		if err := rows.Scan(&space.DestinationID, millis{&space.ObservedAt}, &space.TotalBytes, &space.AvailableBytes); err != nil {
+			return result, storeError(err)
+		}
+		space.Known = !space.ObservedAt.IsZero() && s.now().Sub(space.ObservedAt) <= 5*time.Minute
+		result.Space = append(result.Space, space)
 	}
 	if err := rows.Err(); err != nil {
 		return result, storeError(err)

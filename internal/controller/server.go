@@ -173,6 +173,12 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}},
 		ErrorLog:  slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
+	notificationCtx, stopNotifications := context.WithCancel(ctx)
+	var notifications sync.WaitGroup
+	notifications.Go(func() {
+		deliverNotifications(notificationCtx, uuid.MustParse(settings.InstallationID), metadata, keyring, logger)
+	})
+	defer func() { stopNotifications(); notifications.Wait() }()
 	stopped := make(chan error, 2)
 	logger.Info("controller API listening", "address", listener.Addr().String(), "installation_id", settings.InstallationID)
 	if agentTLS != nil {
@@ -182,7 +188,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 			Authorize: func(ctx context.Context, _, nodeID uuid.UUID, certificate *x509.Certificate) error {
 				return metadata.CheckAgentCertificate(ctx, nodeID, certificate)
 			},
-			Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec", "restore.exec", "proof.exec", "files.read"},
+			Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "destination.health", "backup.exec", "restore.exec", "proof.exec", "files.read"},
 			Handle: func(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
 				return receiver.Handle(ctx, peer, message)
 			},

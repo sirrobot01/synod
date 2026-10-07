@@ -80,6 +80,7 @@ type Delivery struct {
 }
 
 type Listing struct {
+	Space        []Space        `json:"space"`
 	Checks       []proof.Status `json:"checks,omitempty"`
 	Revision     int64          `json:"revision"`
 	Destinations []Destination  `json:"destinations"`

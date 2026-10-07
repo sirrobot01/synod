@@ -36,6 +36,22 @@ func (s *Store) ImportCatalog(ctx context.Context, catalog repository.Catalog, r
 		return &Error{Code: OperationConflict}
 	}
 	now := s.now().UTC().Truncate(time.Millisecond)
+	if catalog.Notifications != nil {
+		var sealed []byte
+		if catalog.Notifications.URL != "" {
+			raw, _ := json.Marshal(catalog.Notifications)
+			envelope, err := ring.Seal(secret.Binding{InstallationID: catalog.InstallationID, OwnerType: "notification", OwnerID: catalog.InstallationID, CredentialID: catalog.InstallationID, Version: 1}, raw)
+			clear(raw)
+			if err != nil {
+				return storeError(err)
+			}
+			sealed, _ = json.Marshal(envelope)
+		}
+		public, _ := json.Marshal(catalog.Notifications.Public())
+		if _, err := tx.ExecContext(ctx, `UPDATE notification_settings SET changed_at=?,public=?,credentials=?`, now.UnixMilli(), public, sealed); err != nil {
+			return storeError(err)
+		}
+	}
 	for _, device := range catalog.Devices {
 		if !printableWithin(device.Name, 253) {
 			return &Error{Code: InvalidRequest}

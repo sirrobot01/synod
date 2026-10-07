@@ -54,6 +54,7 @@ message AgentMessage {
     BackupEvent backup_event = 5;
     RestoreEvent restore_event = 6;
     ProofEvent proof_event = 7;
+    DestinationHealth destination_health = 8;
   }
 }
 
@@ -137,3 +138,14 @@ message FileAck {}
 // Proof work checks repository content or runs an isolated restore drill.
 message ProofJob { bytes request_json = 1; }
 message ProofEvent { bytes event_json = 1; }
+
+// Only the agent that owns a local or device directory reports its filesystem space.
+message DestinationHealth {
+ google.protobuf.Timestamp observed_at = 1;
+ repeated DestinationSpace destinations = 2;
+}
+message DestinationSpace {
+ string destination_id = 1;
+ int64 total_bytes = 2;
+ int64 available_bytes = 3;
+}

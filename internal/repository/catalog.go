@@ -16,6 +16,7 @@ import (
 	"github.com/kopia/kopia/repo"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/inventory"
+	"github.com/sirrobot01/synod/internal/notification"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -23,16 +24,17 @@ import (
 // Catalog is the recovery state stored inside the encrypted repository.
 // Increase Generation when the controller changes this state.
 type Catalog struct {
-	Version        int                  `json:"version"`
-	InstallationID uuid.UUID            `json:"installation_id"`
-	Generation     uint64               `json:"generation"`
-	WrittenAt      time.Time            `json:"written_at"`
-	Devices        []Device             `json:"devices"`
-	Apps           []inventory.App      `json:"apps"`
-	Destinations   []CatalogDestination `json:"destinations,omitempty"`
-	AutoProtect    bool                 `json:"auto_protect"`
-	Defaults       *backup.Settings     `json:"defaults,omitzero"`
-	Protection     []backup.Selection   `json:"protection,omitempty"`
+	Notifications  *notification.Settings `json:"notifications,omitzero"`
+	Version        int                    `json:"version"`
+	InstallationID uuid.UUID              `json:"installation_id"`
+	Generation     uint64                 `json:"generation"`
+	WrittenAt      time.Time              `json:"written_at"`
+	Devices        []Device               `json:"devices"`
+	Apps           []inventory.App        `json:"apps"`
+	Destinations   []CatalogDestination   `json:"destinations,omitempty"`
+	AutoProtect    bool                   `json:"auto_protect"`
+	Defaults       *backup.Settings       `json:"defaults,omitzero"`
+	Protection     []backup.Selection     `json:"protection,omitempty"`
 }
 
 func (Catalog) String() string   { return "[private recovery catalog]" }
@@ -215,6 +217,9 @@ func (r *Repository) ReadCatalog(ctx context.Context) (Catalog, error) {
 }
 
 func validateCatalog(catalog Catalog) error {
+	if catalog.Notifications != nil && catalog.Notifications.Validate() != nil {
+		return ErrCatalogInvalid
+	}
 	if len(catalog.Devices) > 256 || len(catalog.Apps) > 8192 || len(catalog.Destinations) > 64 || len(catalog.Protection) > 8192 {
 		return ErrCatalogInvalid
 	}

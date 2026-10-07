@@ -1694,6 +1694,228 @@
           }
         }
       }
+    },
+    "/v1/notifications": {
+      "get": {
+        "operationId": "notificationStatus",
+        "description": "Read public settings and the last 100 alerts. The URL is never returned.",
+        "responses": {
+          "200": {
+            "description": "Request completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or notifications disabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision changed or retry input differs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable or notification queue full.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "configureNotifications",
+        "description": "Replace settings at the expected revision. Repeat the same ID and input for a retry. Cancel old queued sends. A send in progress can finish.",
+        "responses": {
+          "200": {
+            "description": "Request completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationConfirmation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or notifications disabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision changed or retry input differs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable or notification queue full.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationUpdate"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/notifications/test": {
+      "post": {
+        "operationId": "testNotification",
+        "description": "Queue one test alert. This response confirms admission. Read notification status for delivery. Repeat the same ID and revision for a retry.",
+        "responses": {
+          "200": {
+            "description": "Request completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationConfirmation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or notifications disabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision changed or retry input differs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Metadata unavailable or notification queue full.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationTest"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2418,6 +2640,38 @@
             "items": {
               "$ref": "#/components/schemas/ProofStatus"
             }
+          },
+          "space": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "destination_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "known": {
+                  "type": "boolean",
+                  "description": "True for a filesystem report no more than five minutes old."
+                },
+                "observed_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "total_bytes": {
+                  "type": "integer"
+                },
+                "available_bytes": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "destination_id",
+                "known",
+                "total_bytes",
+                "available_bytes"
+              ]
+            }
           }
         }
       },
@@ -2975,6 +3229,234 @@
             "$ref": "#/components/schemas/ProofResult"
           }
         }
+      },
+      "NotificationSettings": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 8192,
+            "writeOnly": true,
+            "description": "Private Shoutrrr URL. An empty URL disables sends. Use ntfy, gotify, discord, slack, smtp, or generic."
+          },
+          "overdue_grace_hours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2160,
+            "default": 24
+          },
+          "missing_after_hours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2160,
+            "default": 168
+          },
+          "full_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 90
+          }
+        },
+        "required": [
+          "overdue_grace_hours",
+          "missing_after_hours",
+          "full_percent"
+        ]
+      },
+      "NotificationPublicSettings": {
+        "type": "object",
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "service": {
+            "type": "string"
+          },
+          "overdue_grace_hours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2160,
+            "default": 24
+          },
+          "missing_after_hours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2160,
+            "default": 168
+          },
+          "full_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 90
+          }
+        },
+        "required": [
+          "configured",
+          "overdue_grace_hours",
+          "missing_after_hours",
+          "full_percent"
+        ]
+      },
+      "NotificationUpdate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "settings": {
+            "$ref": "#/components/schemas/NotificationSettings"
+          }
+        },
+        "required": [
+          "id",
+          "expected_revision",
+          "settings"
+        ]
+      },
+      "NotificationConfirmation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "revision"
+        ]
+      },
+      "NotificationTest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "expected_revision"
+        ]
+      },
+      "NotificationAlert": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "app_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "operation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "backup_failed",
+              "backup_overdue",
+              "drill_failed",
+              "destination_full",
+              "device_missing",
+              "test"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "sending",
+              "sent",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "next_attempt_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "delivered_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "failure_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "message",
+          "state",
+          "attempts",
+          "created_at"
+        ]
+      },
+      "NotificationStatus": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "settings": {
+            "$ref": "#/components/schemas/NotificationPublicSettings"
+          },
+          "alerts": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/NotificationAlert"
+            }
+          }
+        },
+        "required": [
+          "revision",
+          "settings",
+          "alerts"
+        ]
       }
     },
     "parameters": {},

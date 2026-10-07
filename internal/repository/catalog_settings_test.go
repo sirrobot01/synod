@@ -11,10 +11,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/backup"
+	"github.com/sirrobot01/synod/internal/notification"
 )
 
 func TestRecoveryCatalogRestoresPrivateSettingsFromRepository(t *testing.T) {
 	catalog := testCatalog()
+	notifications := notification.DefaultSettings()
+	notifications.URL = "generic+http://127.0.0.1:1/private-notification-url"
+	catalog.Notifications = &notifications
 	target := CatalogDestination{ID: uuid.New(), Name: "other-copy", NodeID: catalog.Devices[0].ID, Location: Location{Kind: "local", Path: "/other-copy"}, Credentials: Credentials{Password: "private-other-repository-password"}}
 	catalog.Destinations = []CatalogDestination{target}
 	settings := backup.DefaultSettings()

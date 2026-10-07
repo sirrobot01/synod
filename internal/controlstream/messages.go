@@ -69,6 +69,11 @@ func NegotiateHello(hello *agentv1.Hello, supported []string) ([]string, error) 
 // CheckAgentMessage validates the wire shape of one agent message after Hello.
 func CheckAgentMessage(message *agentv1.AgentMessage) error {
 	switch value := message.GetMessage().(type) {
+	case *agentv1.AgentMessage_DestinationHealth:
+		if destination.ValidateHealth(value.DestinationHealth) != nil {
+			return ErrMessage
+		}
+		return nil
 	case *agentv1.AgentMessage_ProofEvent:
 		if value.ProofEvent == nil || len(value.ProofEvent.EventJson) > 64<<10 {
 			return ErrMessage

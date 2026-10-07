@@ -391,6 +391,7 @@ type AgentMessage struct {
 	//	*AgentMessage_BackupEvent
 	//	*AgentMessage_RestoreEvent
 	//	*AgentMessage_ProofEvent
+	//	*AgentMessage_DestinationHealth
 	Message       isAgentMessage_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -496,6 +497,15 @@ func (x *AgentMessage) GetProofEvent() *ProofEvent {
 	return nil
 }
 
+func (x *AgentMessage) GetDestinationHealth() *DestinationHealth {
+	if x != nil {
+		if x, ok := x.Message.(*AgentMessage_DestinationHealth); ok {
+			return x.DestinationHealth
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Message interface {
 	isAgentMessage_Message()
 }
@@ -528,6 +538,10 @@ type AgentMessage_ProofEvent struct {
 	ProofEvent *ProofEvent `protobuf:"bytes,7,opt,name=proof_event,json=proofEvent,proto3,oneof"`
 }
 
+type AgentMessage_DestinationHealth struct {
+	DestinationHealth *DestinationHealth `protobuf:"bytes,8,opt,name=destination_health,json=destinationHealth,proto3,oneof"`
+}
+
 func (*AgentMessage_Hello) isAgentMessage_Message() {}
 
 func (*AgentMessage_Heartbeat) isAgentMessage_Message() {}
@@ -541,6 +555,8 @@ func (*AgentMessage_BackupEvent) isAgentMessage_Message() {}
 func (*AgentMessage_RestoreEvent) isAgentMessage_Message() {}
 
 func (*AgentMessage_ProofEvent) isAgentMessage_Message() {}
+
+func (*AgentMessage_DestinationHealth) isAgentMessage_Message() {}
 
 type ControllerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1642,6 +1658,119 @@ func (x *ProofEvent) GetEventJson() []byte {
 	return nil
 }
 
+// Only the agent that owns a local or device directory reports its filesystem space.
+type DestinationHealth struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ObservedAt    *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Destinations  []*DestinationSpace    `protobuf:"bytes,2,rep,name=destinations,proto3" json:"destinations,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DestinationHealth) Reset() {
+	*x = DestinationHealth{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DestinationHealth) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DestinationHealth) ProtoMessage() {}
+
+func (x *DestinationHealth) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DestinationHealth.ProtoReflect.Descriptor instead.
+func (*DestinationHealth) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *DestinationHealth) GetObservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObservedAt
+	}
+	return nil
+}
+
+func (x *DestinationHealth) GetDestinations() []*DestinationSpace {
+	if x != nil {
+		return x.Destinations
+	}
+	return nil
+}
+
+type DestinationSpace struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	DestinationId  string                 `protobuf:"bytes,1,opt,name=destination_id,json=destinationId,proto3" json:"destination_id,omitempty"`
+	TotalBytes     int64                  `protobuf:"varint,2,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	AvailableBytes int64                  `protobuf:"varint,3,opt,name=available_bytes,json=availableBytes,proto3" json:"available_bytes,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *DestinationSpace) Reset() {
+	*x = DestinationSpace{}
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DestinationSpace) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DestinationSpace) ProtoMessage() {}
+
+func (x *DestinationSpace) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_v1_agent_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DestinationSpace.ProtoReflect.Descriptor instead.
+func (*DestinationSpace) Descriptor() ([]byte, []int) {
+	return file_proto_agent_v1_agent_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *DestinationSpace) GetDestinationId() string {
+	if x != nil {
+		return x.DestinationId
+	}
+	return ""
+}
+
+func (x *DestinationSpace) GetTotalBytes() int64 {
+	if x != nil {
+		return x.TotalBytes
+	}
+	return 0
+}
+
+func (x *DestinationSpace) GetAvailableBytes() int64 {
+	if x != nil {
+		return x.AvailableBytes
+	}
+	return 0
+}
+
 var File_proto_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_proto_agent_v1_agent_proto_rawDesc = "" +
@@ -1676,7 +1805,7 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"observedAt\"=\n" +
 	"\rProtocolError\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\xd2\x03\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xa6\x04\n" +
 	"\fAgentMessage\x12-\n" +
 	"\x05hello\x18\x01 \x01(\v2\x15.synod.agent.v1.HelloH\x00R\x05hello\x129\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x19.synod.agent.v1.HeartbeatH\x00R\theartbeat\x12<\n" +
@@ -1685,7 +1814,8 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\fbackup_event\x18\x05 \x01(\v2\x1b.synod.agent.v1.BackupEventH\x00R\vbackupEvent\x12C\n" +
 	"\rrestore_event\x18\x06 \x01(\v2\x1c.synod.agent.v1.RestoreEventH\x00R\frestoreEvent\x12=\n" +
 	"\vproof_event\x18\a \x01(\v2\x1a.synod.agent.v1.ProofEventH\x00R\n" +
-	"proofEventB\t\n" +
+	"proofEvent\x12R\n" +
+	"\x12destination_health\x18\b \x01(\v2!.synod.agent.v1.DestinationHealthH\x00R\x11destinationHealthB\t\n" +
 	"\amessage\"\x93\x04\n" +
 	"\x11ControllerMessage\x123\n" +
 	"\asession\x18\x01 \x01(\v2\x17.synod.agent.v1.SessionH\x00R\asession\x125\n" +
@@ -1769,7 +1899,16 @@ const file_proto_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"ProofEvent\x12\x1d\n" +
 	"\n" +
-	"event_json\x18\x01 \x01(\fR\teventJson2\xa0\x01\n" +
+	"event_json\x18\x01 \x01(\fR\teventJson\"\x96\x01\n" +
+	"\x11DestinationHealth\x12;\n" +
+	"\vobserved_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"observedAt\x12D\n" +
+	"\fdestinations\x18\x02 \x03(\v2 .synod.agent.v1.DestinationSpaceR\fdestinations\"\x83\x01\n" +
+	"\x10DestinationSpace\x12%\n" +
+	"\x0edestination_id\x18\x01 \x01(\tR\rdestinationId\x12\x1f\n" +
+	"\vtotal_bytes\x18\x02 \x01(\x03R\n" +
+	"totalBytes\x12'\n" +
+	"\x0favailable_bytes\x18\x03 \x01(\x03R\x0eavailableBytes2\xa0\x01\n" +
 	"\fAgentService\x12N\n" +
 	"\aConnect\x12\x1c.synod.agent.v1.AgentMessage\x1a!.synod.agent.v1.ControllerMessage(\x010\x01\x12@\n" +
 	"\bSendFile\x12\x19.synod.agent.v1.FileChunk\x1a\x17.synod.agent.v1.FileAck(\x01B4Z2github.com/sirrobot01/synod/proto/agent/v1;agentv1b\x06proto3"
@@ -1786,7 +1925,7 @@ func file_proto_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_proto_agent_v1_agent_proto_rawDescData
 }
 
-var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_proto_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*VersionRange)(nil),          // 0: synod.agent.v1.VersionRange
 	(*Hello)(nil),                 // 1: synod.agent.v1.Hello
@@ -1811,14 +1950,16 @@ var file_proto_agent_v1_agent_proto_goTypes = []any{
 	(*FileAck)(nil),               // 20: synod.agent.v1.FileAck
 	(*ProofJob)(nil),              // 21: synod.agent.v1.ProofJob
 	(*ProofEvent)(nil),            // 22: synod.agent.v1.ProofEvent
-	(*durationpb.Duration)(nil),   // 23: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 24: google.protobuf.Timestamp
+	(*DestinationHealth)(nil),     // 23: synod.agent.v1.DestinationHealth
+	(*DestinationSpace)(nil),      // 24: synod.agent.v1.DestinationSpace
+	(*durationpb.Duration)(nil),   // 25: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 26: google.protobuf.Timestamp
 }
 var file_proto_agent_v1_agent_proto_depIdxs = []int32{
 	0,  // 0: synod.agent.v1.Hello.protocol:type_name -> synod.agent.v1.VersionRange
-	23, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
-	23, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
-	24, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	25, // 1: synod.agent.v1.Session.heartbeat_interval:type_name -> google.protobuf.Duration
+	25, // 2: synod.agent.v1.Session.stale_after:type_name -> google.protobuf.Duration
+	26, // 3: synod.agent.v1.Heartbeat.observed_at:type_name -> google.protobuf.Timestamp
 	1,  // 4: synod.agent.v1.AgentMessage.hello:type_name -> synod.agent.v1.Hello
 	3,  // 5: synod.agent.v1.AgentMessage.heartbeat:type_name -> synod.agent.v1.Heartbeat
 	7,  // 6: synod.agent.v1.AgentMessage.inventory:type_name -> synod.agent.v1.AppInventory
@@ -1826,27 +1967,30 @@ var file_proto_agent_v1_agent_proto_depIdxs = []int32{
 	14, // 8: synod.agent.v1.AgentMessage.backup_event:type_name -> synod.agent.v1.BackupEvent
 	17, // 9: synod.agent.v1.AgentMessage.restore_event:type_name -> synod.agent.v1.RestoreEvent
 	22, // 10: synod.agent.v1.AgentMessage.proof_event:type_name -> synod.agent.v1.ProofEvent
-	2,  // 11: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
-	4,  // 12: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
-	11, // 13: synod.agent.v1.ControllerMessage.destination_plan:type_name -> synod.agent.v1.DestinationPlan
-	13, // 14: synod.agent.v1.ControllerMessage.backup_job:type_name -> synod.agent.v1.BackupJob
-	15, // 15: synod.agent.v1.ControllerMessage.operation_ack:type_name -> synod.agent.v1.OperationAck
-	16, // 16: synod.agent.v1.ControllerMessage.restore_job:type_name -> synod.agent.v1.RestoreJob
-	18, // 17: synod.agent.v1.ControllerMessage.file_request:type_name -> synod.agent.v1.FileRequest
-	21, // 18: synod.agent.v1.ControllerMessage.proof_job:type_name -> synod.agent.v1.ProofJob
-	24, // 19: synod.agent.v1.AppInventory.observed_at:type_name -> google.protobuf.Timestamp
-	8,  // 20: synod.agent.v1.AppInventory.apps:type_name -> synod.agent.v1.DiscoveredApp
-	9,  // 21: synod.agent.v1.DiscoveredApp.containers:type_name -> synod.agent.v1.DiscoveredContainer
-	10, // 22: synod.agent.v1.DiscoveredApp.paths:type_name -> synod.agent.v1.DiscoveredPath
-	5,  // 23: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
-	19, // 24: synod.agent.v1.AgentService.SendFile:input_type -> synod.agent.v1.FileChunk
-	6,  // 25: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
-	20, // 26: synod.agent.v1.AgentService.SendFile:output_type -> synod.agent.v1.FileAck
-	25, // [25:27] is the sub-list for method output_type
-	23, // [23:25] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	23, // 11: synod.agent.v1.AgentMessage.destination_health:type_name -> synod.agent.v1.DestinationHealth
+	2,  // 12: synod.agent.v1.ControllerMessage.session:type_name -> synod.agent.v1.Session
+	4,  // 13: synod.agent.v1.ControllerMessage.error:type_name -> synod.agent.v1.ProtocolError
+	11, // 14: synod.agent.v1.ControllerMessage.destination_plan:type_name -> synod.agent.v1.DestinationPlan
+	13, // 15: synod.agent.v1.ControllerMessage.backup_job:type_name -> synod.agent.v1.BackupJob
+	15, // 16: synod.agent.v1.ControllerMessage.operation_ack:type_name -> synod.agent.v1.OperationAck
+	16, // 17: synod.agent.v1.ControllerMessage.restore_job:type_name -> synod.agent.v1.RestoreJob
+	18, // 18: synod.agent.v1.ControllerMessage.file_request:type_name -> synod.agent.v1.FileRequest
+	21, // 19: synod.agent.v1.ControllerMessage.proof_job:type_name -> synod.agent.v1.ProofJob
+	26, // 20: synod.agent.v1.AppInventory.observed_at:type_name -> google.protobuf.Timestamp
+	8,  // 21: synod.agent.v1.AppInventory.apps:type_name -> synod.agent.v1.DiscoveredApp
+	9,  // 22: synod.agent.v1.DiscoveredApp.containers:type_name -> synod.agent.v1.DiscoveredContainer
+	10, // 23: synod.agent.v1.DiscoveredApp.paths:type_name -> synod.agent.v1.DiscoveredPath
+	26, // 24: synod.agent.v1.DestinationHealth.observed_at:type_name -> google.protobuf.Timestamp
+	24, // 25: synod.agent.v1.DestinationHealth.destinations:type_name -> synod.agent.v1.DestinationSpace
+	5,  // 26: synod.agent.v1.AgentService.Connect:input_type -> synod.agent.v1.AgentMessage
+	19, // 27: synod.agent.v1.AgentService.SendFile:input_type -> synod.agent.v1.FileChunk
+	6,  // 28: synod.agent.v1.AgentService.Connect:output_type -> synod.agent.v1.ControllerMessage
+	20, // 29: synod.agent.v1.AgentService.SendFile:output_type -> synod.agent.v1.FileAck
+	28, // [28:30] is the sub-list for method output_type
+	26, // [26:28] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_proto_agent_v1_agent_proto_init() }
@@ -1862,6 +2006,7 @@ func file_proto_agent_v1_agent_proto_init() {
 		(*AgentMessage_BackupEvent)(nil),
 		(*AgentMessage_RestoreEvent)(nil),
 		(*AgentMessage_ProofEvent)(nil),
+		(*AgentMessage_DestinationHealth)(nil),
 	}
 	file_proto_agent_v1_agent_proto_msgTypes[6].OneofWrappers = []any{
 		(*ControllerMessage_Session)(nil),
@@ -1879,7 +2024,7 @@ func file_proto_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_v1_agent_proto_rawDesc), len(file_proto_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   23,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

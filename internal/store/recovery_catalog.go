@@ -45,6 +45,11 @@ func (s *Store) recoveryCatalog(ctx context.Context, tx *sql.Tx, installationID 
 		return repository.Catalog{}, nil, &Error{Code: Unavailable, Cause: err}
 	}
 	catalog := repository.Catalog{Version: 1, InstallationID: installationID, Generation: uint64(revision), WrittenAt: s.now().UTC().Truncate(time.Millisecond)}
+	settings, _, _, err := notificationSettings(ctx, tx, installationID, ring)
+	if err != nil {
+		return catalog, nil, err
+	}
+	catalog.Notifications = &settings
 	rows, err := tx.QueryContext(ctx, `SELECT id,name,architecture FROM nodes WHERE architecture IN ('amd64','arm64') ORDER BY id`)
 	if err != nil {
 		return catalog, nil, storeError(err)

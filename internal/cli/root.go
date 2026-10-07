@@ -33,6 +33,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		newSnapshotCommand(app),
 		newProtectCommand(app),
 		newDestinationCommand(app),
+		newNotificationCommand(app),
 		newOperationCommand(app),
 		newInstallationCommand(app),
 		newUserCommand(app),

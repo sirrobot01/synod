@@ -124,6 +124,9 @@ func NewServer(metadata *store.Store, admin *auth.AdminToken, installationID uui
 				admin.Post("/backups", server.createBackup)
 				admin.Post("/restores", server.createRestore)
 				admin.Post("/proofs", server.createProof)
+				admin.Get("/notifications", server.getNotifications)
+				admin.Put("/notifications", server.configureNotifications)
+				admin.Post("/notifications/test", server.testNotification)
 				admin.Get("/protection", server.getProtection)
 				admin.Put("/protection", server.updateProtection)
 				admin.Get("/operations", server.listOperations)
@@ -213,6 +216,10 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 			status, message = http.StatusConflict, "More than one resource has this name. Use its ID."
 		case store.BackupInitializing:
 			status, message = http.StatusConflict, "A repository is being initialized. Wait for its agent to confirm the connection, then retry the backup."
+		case store.NotificationConflict:
+			status, message = http.StatusConflict, "Notification settings changed. Read notification status and use its current revision."
+		case store.NotificationQueueFull:
+			status, message = http.StatusServiceUnavailable, "The notification queue is full. Check notification delivery, then retry with the same ID."
 		case store.PlanConflict:
 			status, message = http.StatusConflict, "The protection plan changed. Read the plan and confirm its current revision."
 		case store.OperationConflict:

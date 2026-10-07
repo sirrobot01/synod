@@ -91,7 +91,7 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	hello := &agentv1.Hello{
 		InstallationId: config.InstallationID, NodeId: config.NodeID, DestinationAddress: destinationAddress,
 		Protocol:     &agentv1.VersionRange{Minimum: controlstream.ProtocolVersion, Maximum: controlstream.ProtocolVersion},
-		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "backup.exec", "restore.exec", "proof.exec", "files.read"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
+		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "destination.health", "backup.exec", "restore.exec", "proof.exec", "files.read"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
 		Hostname: hostname, AgentVersion: Version,
 	}
 	// File requests wait in a bounded queue. A full queue refuses the request, and the controller times out.
@@ -196,6 +196,7 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	worker.Go(func() { executeJobs(workerCtx, backupWorker, restoreWorker, &waiting, logger) })
 	worker.Go(func() { reportJobs(workerCtx, cache, stream, &waiting, logger) })
 	worker.Go(func() { discover(workerCtx, api, stream, logger) })
+	worker.Go(func() { reportDestinationHealth(workerCtx, cache, ring, identity.Identity.NodeID, stream, logger) })
 	for range 4 {
 		worker.Go(func() { serveFiles(workerCtx, fileRequests, restoreWorker, stream, logger) })
 	}

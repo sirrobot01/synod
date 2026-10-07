@@ -2,6 +2,8 @@
 """Prove checks and isolated drills through the CLI, controller, and agent."""
 
 import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,7 @@ import uuid
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("binary", type=Path)
 parser.add_argument("--evidence", type=Path)
+parser.add_argument("--notifications", action="store_true")
 args = parser.parse_args()
 binary = args.binary.resolve()
 docker_host = os.environ["SYNOD_TEST_DOCKER_HOST"]
@@ -30,6 +33,21 @@ processes, logs, checks = [], [], []
 phase = "init"
 proof_ids = []
 passed = False
+notification_server = None
+notification_thread = None
+notification_requests = []
+notification_ready = threading.Event()
+
+class NotificationHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        notification_requests.append(body)
+        self.send_response(204 if notification_ready.is_set() else 503)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
 
 
 def run(command, okay=True):
@@ -100,6 +118,26 @@ try:
     controller = start(server_args, "controller.log")
     phase = "wait for controller"
     wait(lambda: "installation" in cli("installation", "get", okay=False))
+    if args.notifications:
+        phase = "notification setup"
+        notification_server = ThreadingHTTPServer(("127.0.0.1", 0), NotificationHandler)
+        notification_thread = threading.Thread(target=notification_server.serve_forever)
+        notification_thread.start()
+        notification_file = root / "notification.json"
+        notification_file.write_text(json.dumps({"url": f"generic+http://127.0.0.1:{notification_server.server_port}/private-notification-token"}))
+        notification_file.chmod(0o600)
+        cli("notification", "configure", "--file", notification_file)
+        cli("notification", "test")
+        failed_send = wait(lambda: next((a for a in cli("notification", "status")["notifications"]["alerts"] if a["attempts"] > 0), None))
+        assert failed_send["state"] in ("pending", "sending")
+        controller.terminate()
+        controller.wait(timeout=20)
+        notification_ready.set()
+        controller = start(server_args, "controller-notification-restarted.log")
+        wait(lambda: "installation" in cli("installation", "get", okay=False))
+        delivered = wait(lambda: next((a for a in cli("notification", "status")["notifications"]["alerts"] if a["id"] == failed_send["id"] and a["state"] == "sent"), None))
+        assert delivered["attempts"] >= 2
+        checks.append("A failed Shoutrrr webhook retries after controller restart and records delivery")
     phase = "join"
     token = cli("node", "join-token")["join_token"]
     run([binary, "agent", "join", token, "--dir", agent, "--docker-socket",
@@ -170,9 +208,29 @@ try:
     assert status["restore_tested_at"] == tested_at and status["last_drill"]["state"] == "failed"
     assert json.loads(run(["docker", "inspect", source_id]).stdout)[0]["State"]["StartedAt"] == source_started
     checks.append("A forced container stop fails the drill, removes scratch resources, and keeps the prior tested date and source uptime")
+    if args.notifications:
+        phase = "deliver drill failure alert"
+        alert = wait(lambda: next((a for a in cli("notification", "status")["notifications"]["alerts"] if a.get("operation_id") == failed["id"] and a["state"] == "sent"), None))
+        assert alert["kind"] == "drill_failed" and any(failed["id"].encode() in body for body in notification_requests)
+        checks.append("A forced drill failure sends a Shoutrrr alert with the operation ID")
+        phase = "read destination free space"
+        space = wait(lambda: next((s for s in cli("destination", "list")["destinations"]["space"] if s["known"]), None))
+        assert space["total_bytes"] > 0 and 0 <= space["available_bytes"] <= space["total_bytes"]
+        checks.append("The agent reports real filesystem capacity over its authenticated stream")
+        phase = "disable notifications"
+        notification_ready.clear()
+        cli("notification", "test")
+        pending = wait(lambda: next((a for a in cli("notification", "status")["notifications"]["alerts"] if a["kind"] == "test" and a["state"] in ("pending", "sending") and a["attempts"] > 0), None))
+        cli("notification", "disable")
+        status = cli("notification", "status")["notifications"]
+        assert not status["settings"]["configured"]
+        assert next(a for a in status["alerts"] if a["id"] == pending["id"])["state"] == "cancelled"
+        for database in ctl.glob("*.db*"):
+            assert b"private-notification-token" not in database.read_bytes()
+        checks.append("Disabling notifications cancels retries and the database contains no plaintext notification URL")
     for path in root.glob("*.log"):
         content = path.read_bytes()
-        for secret in [original, b"private-file-env", b"private-t15-repository-password"]:
+        for secret in [original, b"private-file-env", b"private-t15-repository-password", b"private-notification-token"]:
             assert secret not in content
     checks.append("Logs contain no saved file data or repository password")
     passed = True
@@ -185,6 +243,10 @@ finally:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+    if notification_server is not None:
+        notification_server.shutdown()
+        notification_server.server_close()
+        notification_thread.join(timeout=5)
     cleanup_errors = []
     for label in ["com.docker.compose.project=" + name, *["io.synod.restore.operation=" + value for value in proof_ids]]:
         ids = run(["docker", "ps", "-aq", "--filter", "label=" + label]).stdout.split()
@@ -196,7 +258,7 @@ finally:
     for handle in logs:
         handle.close()
     shutil.rmtree(root)
-    evidence = {"passed": passed and not cleanup_errors, "task": "T18", "phase": phase, "checks": checks, "cleanup_errors": cleanup_errors}
+    evidence = {"passed": passed and not cleanup_errors, "task": "T19" if args.notifications else "T18", "phase": phase, "checks": checks, "cleanup_errors": cleanup_errors}
     if args.evidence:
         args.evidence.write_text(json.dumps(evidence, indent=2) + "\n")
     print(json.dumps(evidence))
