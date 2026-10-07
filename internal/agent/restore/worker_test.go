@@ -29,6 +29,7 @@ func removeFixture(api *client.Client, project string) {
 		}
 	}
 	api.VolumeRemove(ctx, project+"_pgdata", client.VolumeRemoveOptions{Force: true})
+	api.VolumeRemove(ctx, project+"_appdata", client.VolumeRemoveOptions{Force: true})
 	api.NetworkRemove(ctx, project+"_default", client.NetworkRemoveOptions{})
 }
 
@@ -83,6 +84,16 @@ func TestRestoreRebuildsLostAppAndReplacesOnRequest(t *testing.T) {
 		var output bytes.Buffer
 		if err := execCommand(t.Context(), api, f.name, []string{"cat", "/config/state"}, nil, &output); err != nil || output.String() != "private-restored-value" {
 			t.Fatal("restored file changed", err)
+		}
+		if f.volume {
+			output.Reset()
+			if err := execCommand(t.Context(), api, f.name, []string{"stat", "-c", "%u:%g:%a:", "/data/state"}, nil, &output); err != nil || output.String() != "1234:5678:640:\n" {
+				t.Fatalf("restored volume owner = %q: %v", output.String(), err)
+			}
+			output.Reset()
+			if err := execCommand(t.Context(), api, f.name, []string{"cat", "/data/state"}, nil, &output); err != nil || output.String() != "private-volume-value\n" {
+				t.Fatal("restored volume file changed", err)
+			}
 		}
 		if value := query(t, api, f.name+"-db", "SELECT value FROM proof WHERE id=1"); value != "private-db-value" {
 			t.Fatalf("restored row = %q", value)

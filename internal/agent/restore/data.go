@@ -22,6 +22,7 @@ const helperImage = "alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c87
 const helperPath = "/synod-restore"
 
 // prepareData writes only fresh bind paths and volumes labelled for this operation.
+// The helper has no configured user: Docker then keeps the saved tar owners.
 func prepareData(ctx context.Context, api *client.Client, r *repository.Repository, p *plan, id uuid.UUID, directory string) (string, error) {
 	labels := map[string]string{operationLabel: id.String(), "io.synod.restore.role": "data"}
 	mounts := []mount.Mount{{Type: mount.TypeBind, Source: directory, Target: helperPath}}
@@ -38,7 +39,7 @@ func prepareData(ctx context.Context, api *client.Client, r *repository.Reposito
 		}
 		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: root.Volume, Target: fmt.Sprintf("/synod-volume-%d", i), VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
 	}
-	helper, err := api.ContainerCreate(ctx, client.ContainerCreateOptions{Name: "synod-restore-" + id.String() + "-data", Config: &container.Config{Image: helperImage, Cmd: []string{"sleep", "1800"}, User: "0", Labels: labels}, HostConfig: &container.HostConfig{NetworkMode: "none", ReadonlyRootfs: true, Mounts: mounts, CapDrop: []string{"ALL"}, CapAdd: []string{"DAC_OVERRIDE", "FOWNER"}}})
+	helper, err := api.ContainerCreate(ctx, client.ContainerCreateOptions{Name: "synod-restore-" + id.String() + "-data", Config: &container.Config{Image: helperImage, Cmd: []string{"sleep", "1800"}, Labels: labels}, HostConfig: &container.HostConfig{NetworkMode: "none", ReadonlyRootfs: true, Mounts: mounts, CapDrop: []string{"ALL"}, CapAdd: []string{"DAC_OVERRIDE", "FOWNER"}}})
 	if err != nil {
 		return "", &failure{Code: "file_restore_failed", Cause: err}
 	}

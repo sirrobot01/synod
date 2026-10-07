@@ -632,3 +632,18 @@ SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock ./scripts/test-sqlite.sh
 The test uses a pinned Go image and a read-only module cache.
 It restores a live WAL database and compares committed writes.
 It also checks overlapping paths, sidecar links, corruption, and cancellation.
+
+Run the app restore tests on Linux with a disposable container:
+
+```sh
+SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock ./scripts/test-restore.sh
+SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock ./scripts/test-restore.sh -test.run TestRestoreRebuilds
+```
+
+The test container reads named volume data from `/var/lib/docker/volumes`, as a root agent does.
+It uses the Docker CLI and the Compose plugin from a pinned image.
+Its work directory is `/var/tmp` on the Docker host, so restored bind paths have the same path in both places.
+The test restores a lost Compose project with a bind path, a named volume, a PostgreSQL dump, a network, and a published port.
+It checks file content, owners, modes, and database rows.
+It also checks the conflict refusal, a replace with a safety snapshot, and recovery after an interrupted replace.
+On macOS, `go test` runs the same tests without the named volume.

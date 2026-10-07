@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ type fixture struct {
 	repo                          *repository.Repository
 	container, project, directory string
 	name, database, network       string
+	volume                        bool
 	app                           inventory.App
 	destinationID                 uuid.UUID
 	port                          string
@@ -84,6 +86,11 @@ func newFixture(t *testing.T, database bool) *fixture {
 		hostConfig.NetworkMode = container.NetworkMode(f.network)
 		hostConfig.PortBindings = network.PortMap{network.MustParsePort("80/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: f.port}}}
 		endpoints = map[string]*network.EndpointSettings{f.network: {Aliases: []string{"app"}}}
+		// Only a Linux agent can read volume data from the Docker data root.
+		if runtime.GOOS == "linux" {
+			f.volume = true
+			hostConfig.Mounts = append(hostConfig.Mounts, mount.Mount{Type: mount.TypeVolume, Source: project + "_appdata", Target: "/data"})
+		}
 	}
 	created, err := api.ContainerCreate(t.Context(), client.ContainerCreateOptions{Name: project, Config: &container.Config{Image: helperImage, Cmd: []string{"sleep", "3600"}, Env: []string{"SECRET=literal-$HOME-value"}, StopTimeout: new(1), Labels: labels("app")}, HostConfig: hostConfig, NetworkingConfig: &network.NetworkingConfig{EndpointsConfig: endpoints}})
 	if err != nil {
@@ -92,6 +99,11 @@ func newFixture(t *testing.T, database bool) *fixture {
 	f.container = created.ID
 	if _, err := api.ContainerStart(t.Context(), f.container, client.ContainerStartOptions{}); err != nil {
 		t.Fatal(err)
+	}
+	if f.volume {
+		if err := execCommand(t.Context(), api, f.container, []string{"sh", "-ec", "echo private-volume-value > /data/state; chown 1234:5678 /data/state; chmod 0640 /data/state"}, nil, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if database {
 		created, err := api.ContainerCreate(t.Context(), client.ContainerCreateOptions{Name: project + "-db", Config: &container.Config{Image: postgresImage, Env: []string{"POSTGRES_USER=app_admin", "POSTGRES_PASSWORD=private-db-password"}, StopTimeout: new(5), Labels: labels("db")}, HostConfig: &container.HostConfig{NetworkMode: container.NetworkMode(f.network), Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: project + "_pgdata", Target: "/var/lib/postgresql/data"}}}, NetworkingConfig: &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{f.network: {Aliases: []string{"db"}}}}})
