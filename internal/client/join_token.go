@@ -22,12 +22,11 @@ type enrollmentTokenRequest struct {
 	TTLSeconds int       `json:"ttl_seconds"`
 }
 
-// RegisterJoinToken registers the verifier of a token that binds no node. The joining
-// agent chooses its own node ID.
-func (c *Client) RegisterJoinToken(ctx context.Context, secret string, ttlSeconds int) (EnrollmentToken, error) {
+// RegisterJoinToken can bind a token to a recovered device ID.
+func (c *Client) RegisterJoinToken(ctx context.Context, nodeID uuid.UUID, secret string, ttlSeconds int) (EnrollmentToken, error) {
 	var result EnrollmentToken
-	err := c.request(ctx, http.MethodPost, "/v1/enrollment-tokens", enrollmentTokenRequest{Token: secret, TTLSeconds: ttlSeconds}, uuid.NewString(), http.StatusCreated, &result)
-	if err == nil && (result.ID == uuid.Nil || result.NodeID != uuid.Nil || result.ExpiresAt.IsZero()) {
+	err := c.request(ctx, http.MethodPost, "/v1/enrollment-tokens", enrollmentTokenRequest{NodeID: nodeID, Token: secret, TTLSeconds: ttlSeconds}, uuid.NewString(), http.StatusCreated, &result)
+	if err == nil && (result.ID == uuid.Nil || result.NodeID != nodeID || result.ExpiresAt.IsZero()) {
 		err = &Error{Code: "invalid_response", Message: "The API returned an incomplete join token registration."}
 	}
 	return result, err

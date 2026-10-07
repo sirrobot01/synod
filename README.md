@@ -137,6 +137,74 @@ Keep the database in a private directory on a local disk.
 Database files must belong to the current user and have owner-only permissions.
 SQLite uses WAL mode, full synchronous writes, and foreign key checks.
 
+## Recover after controller loss
+
+Keep the repository password outside Synod.
+Stop the old controller and agents before recovery.
+Use a new private directory for the recovered controller.
+For a local or Synod-device repository, run recovery on the host with the repository files:
+
+```sh
+synod server init --dir /private/path/recovered --address 192.168.0.20 \
+  --from-repository /mnt/backups/synod --password-file /private/path/password
+synod server --config /private/path/recovered/controller.json
+```
+
+The password file must have mode `0600`.
+Recovery opens an existing repository.
+It never creates a replacement repository.
+It restores the installation ID, devices, apps, destinations, and protection settings.
+It creates new controller keys and a new administrator token.
+It does not restore users, old API tokens, device approval, or activity records.
+The snapshot commands read the saved copies from the repository.
+
+The repository can move to another path.
+If the catalog has several destinations, use `--repository-destination NAME_OR_UUID` to identify the surviving copy.
+For a local repository, the printed join token uses the saved ID of its device.
+Run that join command on the host with the repository files.
+Use a new agent `--dir`.
+Start the agent and approve it.
+To join each other saved device, create a token with its saved name or ID:
+
+```sh
+synod node join-token --device DEVICE
+synod agent join TOKEN --dir /private/path/new-agent
+synod agent run --config /private/path/new-agent/agent.json
+synod node approve DEVICE
+synod snapshot list APP
+synod restore APP --to DEVICE
+```
+
+Run the agent commands on the device.
+Run the other commands with the new administrator settings that init printed.
+Saved apps stay missing until discovery finds them again.
+You can restore a missing app to an approved device.
+A recovered local destination is available only to its owner device.
+A recovered Synod-device destination becomes available when its owner joins and receives approval.
+
+For S3 or SFTP, pass a private connection JSON file to `--from-repository`.
+Use the `location` and `credentials` fields:
+
+```json
+{
+  "location": {
+    "kind": "s3",
+    "s3": {"endpoint": "https://s3.example.com", "bucket": "backups", "prefix": "synod"}
+  },
+  "credentials": {
+    "password": "REPOSITORY_PASSWORD",
+    "access_key_id": "ACCESS_KEY",
+    "secret_access_key": "SECRET_KEY"
+  }
+}
+```
+
+The connection file must have mode `0600`.
+You can omit its password and use `--password-file` instead.
+The fields use the same format as destination settings.
+For a Synod-device repository, use its directory and password directly.
+Old device certificates are not needed.
+
 ## Join and approve devices
 
 Run this command on a device that has Docker:
@@ -524,6 +592,8 @@ SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock python3 scripts/proof-files.p
 
 The proof uses a disposable Compose project and temporary controller and agent processes.
 It removes its files and containers when it exits.
+Add `--recover` to delete the test controller, agent state, and source files.
+The proof then rebuilds from the repository, restores the app, and makes a new backup.
 
 
 ## Restore an app

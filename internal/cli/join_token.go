@@ -16,6 +16,7 @@ import (
 
 func newJoinTokenCommand(app *app) *cobra.Command {
 	var ttl time.Duration
+	var device string
 	command := &cobra.Command{Use: "join-token", Short: "Create a one-use token that joins one agent node", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if ttl < time.Minute || ttl > 7*24*time.Hour {
@@ -42,7 +43,14 @@ func newJoinTokenCommand(app *app) *cobra.Command {
 				return err
 			}
 			token := jointoken.Token{Address: address, InstallationID: installation.InstallationID, Fingerprint: fingerprint, Secret: jointoken.NewSecret()}
-			registration, err := app.api.RegisterJoinToken(cmd.Context(), token.Secret, int(ttl/time.Second))
+			if device != "" {
+				node, err := app.api.ResolveNode(cmd.Context(), device)
+				if err != nil {
+					return err
+				}
+				token.NodeID = node.ID
+			}
+			registration, err := app.api.RegisterJoinToken(cmd.Context(), token.NodeID, token.Secret, int(ttl/time.Second))
 			if err != nil {
 				return err
 			}
@@ -51,6 +59,7 @@ func newJoinTokenCommand(app *app) *cobra.Command {
 			return nil
 		}}
 	command.Flags().DurationVar(&ttl, "ttl", 24*time.Hour, "How long the token stays valid (1m to 168h)")
+	command.Flags().StringVar(&device, "device", "", "Recovered device name or UUID to join again")
 	return command
 }
 

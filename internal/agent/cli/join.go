@@ -90,10 +90,16 @@ func join(ctx context.Context, encoded string, options joinOptions, stdout io.Wr
 
 	// The node ID is kept before enrollment, so that a rerun repeats the same request.
 	nodeID := uuid.New()
+	if token.NodeID != uuid.Nil {
+		nodeID = token.NodeID
+	}
 	nodePath := filepath.Join(dir, "node-id")
 	if saved, err := os.ReadFile(nodePath); err == nil {
 		if nodeID, err = uuid.Parse(strings.TrimSpace(string(saved))); err != nil || nodeID == uuid.Nil {
 			return fmt.Errorf("%w: %s does not hold a node UUID", enrollment.ErrState, nodePath)
+		}
+		if token.NodeID != uuid.Nil && token.NodeID != nodeID {
+			return fmt.Errorf("%w: the join token names a different device; use a new --dir", enrollment.ErrState)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("%w: read %s: %w", enrollment.ErrState, nodePath, err)

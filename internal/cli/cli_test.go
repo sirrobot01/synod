@@ -154,40 +154,53 @@ func TestNodeApproveResolvesAName(t *testing.T) {
 
 // A join token names the API the CLI used and pins the API CA the CLI trusts.
 func TestNodeJoinTokenPinsTheAPICA(t *testing.T) {
-	installation := client.Installation{InstallationID: uuid.New()}
-	var registered map[string]any
-	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method + " " + r.URL.Path {
-		case "GET /v1/installation":
-			json.NewEncoder(w).Encode(installation)
-		case "POST /v1/enrollment-tokens":
-			json.NewDecoder(r.Body).Decode(&registered)
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(client.EnrollmentToken{ID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)})
-		default:
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-		}
-	}))
-	var stdout, stderr bytes.Buffer
-	var result cli.Result
-	if code := cli.Run(t.Context(), append(flags, "node", "join-token", "--ttl", "1h"), &stdout, &stderr); code != 0 || json.Unmarshal(stdout.Bytes(), &result) != nil {
-		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-	}
-	joined, err := jointoken.Decode(result.JoinToken)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caData, err := os.ReadFile(flags[slices.Index(flags, "--ca-file")+1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	block, _ := pem.Decode(caData)
-	origin, _ := url.Parse(flags[slices.Index(flags, "--api-url")+1])
-	if joined.Address != origin.Host || joined.InstallationID != installation.InstallationID || joined.Fingerprint != jointoken.Fingerprint(block.Bytes) {
-		t.Fatalf("token=%+v, want the API origin, installation, and API CA pin", joined)
-	}
-	if registered["token"] != joined.Secret || registered["node_id"] != uuid.Nil.String() || registered["ttl_seconds"] != float64(3600) {
-		t.Fatalf("registration=%v, want the token secret with no node", registered)
+	for _, mode := range []string{"new", "recovered"} {
+		t.Run(mode, func(t *testing.T) {
+			node := client.Node{ID: uuid.Nil}
+			var extra []string
+			if mode == "recovered" {
+				node.ID = uuid.New()
+				node.Name = "saved"
+				extra = []string{"--device", node.Name}
+			}
+			installation := client.Installation{InstallationID: uuid.New()}
+			var registered map[string]any
+			flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "GET /v1/installation":
+					json.NewEncoder(w).Encode(installation)
+				case "GET /v1/nodes/by-name/saved":
+					json.NewEncoder(w).Encode(node)
+				case "POST /v1/enrollment-tokens":
+					json.NewDecoder(r.Body).Decode(&registered)
+					w.WriteHeader(http.StatusCreated)
+					json.NewEncoder(w).Encode(client.EnrollmentToken{ID: uuid.New(), NodeID: node.ID, ExpiresAt: time.Now().Add(time.Hour)})
+				default:
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+				}
+			}))
+			var stdout, stderr bytes.Buffer
+			var result cli.Result
+			if code := cli.Run(t.Context(), append(append(flags, "node", "join-token", "--ttl", "1h"), extra...), &stdout, &stderr); code != 0 || json.Unmarshal(stdout.Bytes(), &result) != nil {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			joined, err := jointoken.Decode(result.JoinToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			caData, err := os.ReadFile(flags[slices.Index(flags, "--ca-file")+1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			block, _ := pem.Decode(caData)
+			origin, _ := url.Parse(flags[slices.Index(flags, "--api-url")+1])
+			if joined.NodeID != node.ID || joined.Address != origin.Host || joined.InstallationID != installation.InstallationID || joined.Fingerprint != jointoken.Fingerprint(block.Bytes) {
+				t.Fatalf("token=%+v, want the API origin, installation, and API CA pin", joined)
+			}
+			if registered["token"] != joined.Secret || registered["node_id"] != node.ID.String() || registered["ttl_seconds"] != float64(3600) {
+				t.Fatalf("registration=%v, want the token secret with no node", registered)
+			}
+		})
 	}
 }
 

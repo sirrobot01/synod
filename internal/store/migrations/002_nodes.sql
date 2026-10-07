@@ -1,8 +1,9 @@
 -- A node is one enrolled device. Presence lives on the row, because one controller
 -- holds at most one live session for each node.
+-- A recovered device has no public key until it joins again.
 CREATE TABLE nodes (
     id TEXT PRIMARY KEY,
-    public_key_hash BLOB NOT NULL CHECK (length(public_key_hash) = 32),
+    public_key_hash BLOB CHECK (length(public_key_hash) = 32),
     enrolled_at INTEGER NOT NULL,
     approved_at INTEGER,
     approved_by TEXT,

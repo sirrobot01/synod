@@ -79,7 +79,7 @@ func (s *Store) RegisterEnrollmentToken(ctx context.Context, r TokenRegistration
 	}
 	if r.NodeID != uuid.Nil {
 		var enrolled bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE id=?)`, r.NodeID).Scan(&enrolled); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND (public_key_hash IS NOT NULL OR revoked_at IS NOT NULL))`, r.NodeID).Scan(&enrolled); err != nil {
 			return EnrollmentToken{}, storeError(err)
 		}
 		if enrolled {
@@ -168,11 +168,11 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
 	if !expiry.After(now) {
 		return EnrollmentResult{}, &Error{Code: EnrollmentUnauthorized}
 	}
-	var enrolled bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE id=?)`, r.NodeID).Scan(&enrolled); err != nil {
+	var exists, enrolled bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE id=?),EXISTS(SELECT 1 FROM nodes WHERE id=? AND (public_key_hash IS NOT NULL OR revoked_at IS NOT NULL))`, r.NodeID, r.NodeID).Scan(&exists, &enrolled); err != nil {
 		return EnrollmentResult{}, storeError(err)
 	}
-	if enrolled {
+	if enrolled || (exists && !tokenNode.Valid) {
 		return EnrollmentResult{}, &Error{Code: EnrollmentConflict}
 	}
 	// A controller with no CA issues nothing. A replay above still answers without one.
@@ -202,7 +202,7 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
 	keyHash := sha256.Sum256(publicKey)
 	derHash := sha256.Sum256(certificate.Raw)
 	id := uuid.New()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id,public_key_hash,enrolled_at) VALUES (?,?,?)`, r.NodeID, keyHash[:], now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id,public_key_hash,enrolled_at) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET public_key_hash=excluded.public_key_hash,enrolled_at=excluded.enrolled_at`, r.NodeID, keyHash[:], now.UnixMilli()); err != nil {
 		return EnrollmentResult{}, storeError(err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO node_certificates (id,node_id,serial,der_hash,certificate_pem,ca_certificate_pem,not_before,not_after) VALUES (?,?,?,?,?,?,?,?)`,
@@ -394,7 +394,7 @@ func (s *Store) ApproveNode(ctx context.Context, nodeID uuid.UUID, actorID, requ
 	if node.ApprovedAt != nil {
 		return node, nil
 	}
-	if node.Architecture == "" {
+	if node.Architecture == "" || node.ConnectedAt == nil {
 		return Node{}, &Error{Code: NodeFactsUnavailable}
 	}
 	now := s.now().Truncate(time.Millisecond).UTC()

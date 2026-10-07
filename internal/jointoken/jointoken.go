@@ -22,6 +22,8 @@ type Token struct {
 	// Address is the API host and port that serves POST /v1/enrollments.
 	Address        string    `json:"address"`
 	InstallationID uuid.UUID `json:"installation_id"`
+	// NodeID reclaims a device from a recovered catalog.
+	NodeID uuid.UUID `json:"node_id,omitzero"`
 	// Fingerprint is Fingerprint of the API CA certificate.
 	Fingerprint string `json:"fingerprint"`
 	// Secret is 43 characters of raw URL base64 over 32 random bytes.

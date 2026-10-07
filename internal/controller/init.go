@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/jointoken"
 	"github.com/sirrobot01/synod/internal/pki"
+	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -55,10 +56,13 @@ WantedBy=multi-user.target
 
 // InitOptions specifies settings for initializing a Synod controller.
 type InitOptions struct {
-	Address        string
-	Directory      string
-	InstallationID string
-	SystemdDir     string
+	Address               string
+	Directory             string
+	InstallationID        string
+	SystemdDir            string
+	FromRepository        string
+	PasswordFile          string
+	RepositoryDestination string
 }
 
 type materialResult struct {
@@ -100,6 +104,9 @@ func initCommand() *cobra.Command {
 	command.Flags().StringVar(&options.Directory, "dir", "", "Directory to write the installation material and configuration into (required)")
 	command.Flags().StringVar(&options.InstallationID, "installation-id", "", "Installation UUID; one is generated when absent")
 	command.Flags().StringVar(&options.SystemdDir, "systemd-dir", "/etc/systemd/system", "Systemd units directory to install the service into")
+	command.Flags().StringVar(&options.FromRepository, "from-repository", "", "Recover from a repository directory or private connection JSON file")
+	command.Flags().StringVar(&options.PasswordFile, "password-file", "", "Private file with the repository password")
+	command.Flags().StringVar(&options.RepositoryDestination, "repository-destination", "", "Saved destination name or UUID of the surviving repository")
 	return command
 }
 
@@ -111,6 +118,27 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 	address := options.Address
 	if address == "" {
 		address = "127.0.0.1"
+	}
+	var catalog repository.Catalog
+	var joinNode uuid.UUID
+	complete := false
+	if options.FromRepository != "" {
+		var err error
+		catalog, joinNode, err = readRecovery(ctx, options)
+		if err != nil {
+			return err
+		}
+		options.InstallationID = catalog.InstallationID.String()
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			return fmt.Errorf("create recovery directory: %w; use a new --dir", err)
+		}
+		defer func() {
+			if !complete {
+				os.RemoveAll(dir)
+			}
+		}()
+	} else if options.PasswordFile != "" || options.RepositoryDestination != "" {
+		return errors.New("--password-file and --repository-destination require --from-repository")
 	}
 	res, err := writeMaterialWithAddress(dir, options.InstallationID, address, output)
 	if err != nil {
@@ -158,6 +186,30 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		return fmt.Errorf("write service file: %w", err)
 	}
 
+	metadata, err := store.Open(ctx, cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer metadata.Close()
+	if options.FromRepository != "" {
+		ring, err := loadKeyring(cfg.SecretKeyFile, cfg.SecretKeyID)
+		if err != nil {
+			return err
+		}
+		if err := metadata.ImportCatalog(ctx, catalog, ring); err != nil {
+			return fmt.Errorf("import recovery catalog: %w", err)
+		}
+	}
+	encoded, err := registerJoinToken(ctx, metadata, res.id, joinNode, address, res.apiCACertPEM)
+	if err != nil {
+		return err
+	}
+	joinNote := fmt.Sprintf("Join token for one device (valid for 7 days):\n  %s\n\nTo join a device, run on that device:\n  synod agent join %s\n\nTo join more devices, run synod node join-token for each one.", encoded, encoded)
+
+	if err := metadata.Close(); err != nil {
+		return err
+	}
+	complete = true
 	installedService := false
 	systemdDir := options.SystemdDir
 	if systemdDir == "" {
@@ -170,17 +222,12 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		}
 	}
 
-	metadata, err := store.Open(ctx, cfg.DatabasePath)
-	if err != nil {
-		return err
+	if options.FromRepository != "" {
+		joinNote += fmt.Sprintf("\n\nRecovered %d devices, %d apps, and %d destinations.\nNew controller keys were created. Stop old agents before recovery.\nUse a new agent --dir, then approve each device.\nFor each other saved device, run synod node join-token --device DEVICE.\nOld activity records and approval are not restored.", len(catalog.Devices), len(catalog.Apps), len(catalog.Destinations))
+		if joinNode != uuid.Nil {
+			joinNote += fmt.Sprintf("\nThis join token reclaims device %s. Join it on the host with the repository directory.", joinNode)
+		}
 	}
-	defer metadata.Close()
-	encoded, err := registerJoinToken(ctx, metadata, res.id, address, res.apiCACertPEM)
-	if err != nil {
-		return err
-	}
-	joinNote := fmt.Sprintf("Join token for one device (valid for 7 days):\n  %s\n\nTo join a device, run on that device:\n  synod agent join %s\n\nTo join more devices, run synod node join-token for each one.", encoded, encoded)
-
 	serviceNote := fmt.Sprintf("Wrote systemd service to %s.", serviceLocalPath)
 	if installedService {
 		serviceNote = fmt.Sprintf("Installed systemd service to %s/synod-server.service.", systemdDir)
@@ -217,8 +264,8 @@ To administer this installation:
 	return err
 }
 
-// registerJoinToken stores the verifier of a one-use join token that binds no node yet.
-func registerJoinToken(ctx context.Context, metadata *store.Store, installationID uuid.UUID, address string, apiCACertPEM []byte) (string, error) {
+// registerJoinToken stores the verifier of a one-use join token.
+func registerJoinToken(ctx context.Context, metadata *store.Store, installationID, nodeID uuid.UUID, address string, apiCACertPEM []byte) (string, error) {
 	block, _ := pem.Decode(apiCACertPEM)
 	if block == nil {
 		return "", errors.New("decode the API CA certificate for the join token")
@@ -226,10 +273,12 @@ func registerJoinToken(ctx context.Context, metadata *store.Store, installationI
 	token := jointoken.Token{
 		Address:        net.JoinHostPort(address, "8443"),
 		InstallationID: installationID,
+		NodeID:         nodeID,
 		Fingerprint:    jointoken.Fingerprint(block.Bytes),
 		Secret:         jointoken.NewSecret(),
 	}
 	if _, err := metadata.RegisterEnrollmentToken(ctx, store.TokenRegistration{
+		NodeID:         nodeID,
 		RequestID:      uuid.NewString(),
 		ActorID:        "synod-server-init",
 		IdempotencyKey: uuid.NewString(),

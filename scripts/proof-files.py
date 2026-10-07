@@ -16,6 +16,7 @@ import uuid
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("binary", type=Path)
 parser.add_argument("--evidence", type=Path)
+parser.add_argument("--recover", action="store_true", help="Delete controller, agent, and source files before recovery")
 args = parser.parse_args()
 binary = args.binary.resolve()
 docker_host = os.environ["SYNOD_TEST_DOCKER_HOST"]
@@ -103,7 +104,7 @@ try:
          docker_host.removeprefix("unix://"), "--destination-listen", f"127.0.0.1:{port()}",
          "--systemd-dir", root / "absent"])
     run(["docker", "compose", "-p", name, "-f", project / "compose.yaml", "up", "-d"])
-    start([binary, "agent", "run", "--config", agent / "agent.json"], "agent.log")
+    agent_process = start([binary, "agent", "run", "--config", agent / "agent.json"], "agent.log")
     phase = "approve agent"
     node = wait(lambda: next((n for n in cli("node", "list").get("nodes", [])
                              if n.get("architecture")), None))["id"]
@@ -149,21 +150,82 @@ try:
     assert not missing.exists() and output.read_bytes() == original
     checks.append("Existing output is preserved; a missing path leaves no output")
     phase = "controller restart"
+    prior_connection = next(n["connected_at"] for n in cli("node", "list")["nodes"] if n["id"] == node)
     controller.terminate()
     controller.wait(timeout=20)
-    start(server_args, "controller-restarted.log")
+    controller = start(server_args, "controller-restarted.log")
     wait(lambda: "installation" in cli("installation", "get", okay=False))
+    wait(lambda: any(n["id"] == node and n["connected_at"] != prior_connection for n in cli("node", "list")["nodes"]))
     wait(lambda: any(d["current"] for d in cli("destination", "list")["destinations"]["delivery"]))
     assert cli("snapshot", "list", app)["files"]["snapshots"][0]["id"] == snapshot
     checks.append("Browsing resumes after controller restart and agent reconnection")
+    if args.recover:
+        phase = "lose controller, agent, and source files"
+        installation = cli("installation", "get")["installation"]["installation_id"]
+        old_ca = (ctl / "ca.crt").read_bytes()
+        run(["docker", "compose", "-p", name, "-f", project / "compose.yaml", "down", "--volumes"])
+        agent_process.terminate()
+        agent_process.wait(timeout=20)
+        controller.terminate()
+        controller.wait(timeout=20)
+        shutil.rmtree(ctl)
+        shutil.rmtree(agent)
+        shutil.rmtree(project)
+        surviving = root / "surviving-repository"
+        (root / "repository").rename(surviving)
+        password = root / "password"
+        password.write_text("private-t15-repository-password")
+        password.chmod(0o600)
+        phase = "recover controller from repository"
+        run([binary, "server", "init", "--dir", ctl, "--from-repository", surviving,
+             "--password-file", password, "--systemd-dir", root / "absent"])
+        assert (ctl / "ca.crt").read_bytes() != old_ca
+        controller = start(server_args, "controller-recovered.log")
+        wait(lambda: "installation" in cli("installation", "get", okay=False))
+        assert cli("installation", "get")["installation"]["installation_id"] == installation
+        recovered = cli("node", "list")["nodes"]
+        assert all(not n.get("approved_at") and not n.get("connected_at") for n in recovered)
+        assert cli("node", "approve", node, okay=False).get("error")
+        assert any(a["id"] == app and not a["present"] for a in cli("app", "list")["apps"])
+        checks.append("Repository and password rebuild the same installation with fresh keys and untrusted historical devices")
+        phase = "join recovered repository device"
+        token = cli("node", "join-token", "--device", node)["join_token"]
+        run([binary, "agent", "join", token, "--dir", agent, "--docker-socket",
+             docker_host.removeprefix("unix://"), "--destination-listen", f"127.0.0.1:{port()}",
+             "--systemd-dir", root / "absent"])
+        assert (agent / "node-id").read_text().strip() == node
+        start([binary, "agent", "run", "--config", agent / "agent.json"], "agent-recovered.log")
+        wait(lambda: any(n["id"] == node and n.get("connected_at") for n in cli("node", "list")["nodes"]))
+        cli("node", "approve", node)
+        wait(lambda: any(d["current"] for d in cli("destination", "list")["destinations"]["delivery"]))
+        phase = "read saved files after total controller loss"
+        recovered_file = root / "recovered-download"
+        cli("file", "get", app, project / "state", "--snapshot", snapshot, "--output", recovered_file)
+        assert recovered_file.read_bytes() == original
+        checks.append("A newly enrolled agent reads the original bytes through the recovered controller")
+        phase = "restore lost app"
+        restored = cli("restore", app, "--to", node, "--snapshot", snapshot)["operation"]
+        assert restored["status"] == "succeeded"
+        restored_compose = Path(restored["result"]["project_directory"]) / "compose.json"
+        result = subprocess.run(["docker", "compose", "-p", name, "-f", str(restored_compose),
+                                 "exec", "-T", "app", "cat", "/config/state"],
+                                env=env, capture_output=True, timeout=30)
+        assert result.returncode == 0 and result.stdout == original
+        checks.append("The recovered installation restores and starts the lost app with its original data")
+        phase = "back up after recovery"
+        wait(lambda: any(a["id"] == app and a["present"] and
+                         a["definition"].get("project_directory") == str(restored_compose.parent)
+                         for a in cli("app", "list")["apps"]))
+        assert cli("backup", app, "--destination", "fixture", "--method", "stop")["operation"]["status"] == "succeeded"
+        checks.append("A new backup succeeds with the recovered installation and a newer catalog")
     for path in root.glob("*.log"):
         content = path.read_bytes()
         for secret in [original, b"private-file-env", b"private-t15-repository-password"]:
             assert secret not in content
     checks.append("Controller and agent logs contain no file content or repository password")
 finally:
-    cleanup = run(["docker", "compose", "-p", name, "-f", root / "project/compose.yaml",
-                   "down", "--volumes"], okay=False)
+    fixture_ids = run(["docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=" + name]).stdout.split()
+    cleanup = run(["docker", "rm", "-f", *fixture_ids], okay=False) if fixture_ids else None
     for process in reversed(processes):
         if process.poll() is None:
             process.terminate()
@@ -176,8 +238,8 @@ finally:
         handle.close()
     shutil.rmtree(root)
 
-assert cleanup.returncode == 0, "Remove the disposable Compose project failed"
-evidence = {"passed": True, "task": "T15", "checks": checks, "cleanup_errors": []}
+assert cleanup is None or cleanup.returncode == 0, "Remove the disposable Compose project failed"
+evidence = {"passed": True, "task": "T16" if args.recover else "T15", "checks": checks, "cleanup_errors": []}
 if args.evidence:
     args.evidence.write_text(json.dumps(evidence, indent=2) + "\n")
 print(json.dumps(evidence))
