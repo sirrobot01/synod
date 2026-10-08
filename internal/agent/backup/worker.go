@@ -485,6 +485,12 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if err == nil && method == backup.Stop {
 		err = w.checkStopped(final, fileContainers)
 	}
+	if err == nil && snapshots != nil {
+		err = snapshots.Check(final)
+		if err != nil && w.Logger != nil {
+			w.Logger.Warn("backup_snapshot_invalid", "operation_id", request.ID, "error", err)
+		}
+	}
 	state.phase("final_copy")
 	if method != backup.Stop && !joinImages() {
 		state.Prepared = nil

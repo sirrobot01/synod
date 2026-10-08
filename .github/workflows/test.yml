@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       heavy:
-        description: Also run the Docker and MinIO tests
+        description: Also run the Docker, MinIO, and LVM tests
         type: boolean
         default: false
 
@@ -108,6 +108,19 @@ jobs:
             sleep 1
           done
           grep v0.0.0-macos-upgrade "$RUNNER_TEMP/version"
+
+  lvm:
+    if: github.event_name == 'workflow_dispatch' && inputs.heavy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install filesystem tools
+        run: sudo apt-get update && sudo apt-get install --yes lvm2 xfsprogs e2fsprogs
+      - name: Restore from disposable LVM snapshots
+        run: sudo env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" SYNOD_TEST_LVM=1 go test -race -p 1 -count=1 -timeout=15m -run '^TestLiveCopyReadsLVMSnapshot$' ./internal/agent/backup
 
   heavy:
     if: github.event_name == 'workflow_dispatch' && inputs.heavy

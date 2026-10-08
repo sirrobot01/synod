@@ -9,6 +9,7 @@ type fsSnapshots struct{}
 
 func (*Tree) useSnapshots(context.Context, string) (*fsSnapshots, error) { return nil, nil }
 func (*fsSnapshots) Close() error                                        { return nil }
+func (*fsSnapshots) Check(context.Context) error                         { return nil }
 
 // RemoveStaleSnapshots does nothing where Synod takes no filesystem snapshots.
 func RemoveStaleSnapshots(context.Context) error { return nil }

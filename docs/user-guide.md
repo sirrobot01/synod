@@ -123,11 +123,13 @@ synod protect --all --destination peer --confirm REVISION
 
 Synod backs up each app at once, then every day at 03:00 UTC.
 It keeps 7 daily, 4 weekly, and 6 monthly copies.
-Backups never stop or pause your apps.
+The default backup method never stops or pauses your apps.
 Databases (PostgreSQL, MySQL, MariaDB, Redis) are saved with native dumps while they run.
 Other data is copied while the app runs.
-On btrfs and ZFS, Synod copies from a snapshot, so all files come from the same moment.
+On supported btrfs, ZFS, and LVM filesystems, Synod copies from filesystem snapshots.
+Each filesystem has its own capture time.
 On other disks, Synod reads a file again when it changed during the copy.
+These methods do not guarantee agreement between all files and databases in an app.
 New apps are protected automatically.
 
 Check the status:

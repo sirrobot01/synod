@@ -82,17 +82,18 @@ func containing(all []mountEntry, path string) (mountEntry, bool, bool) {
 	return best, found, nested
 }
 
-// fsSnapshots holds the read-only snapshots of one backup. Each btrfs subvolume or ZFS
-// dataset gets at most one snapshot, so all its paths come from the same moment.
+// fsSnapshots holds the read-only snapshots of one backup. Each subvolume, dataset,
+// or logical volume gets one snapshot. Separate filesystems have separate capture times.
 type fsSnapshots struct {
 	name   string
 	mounts []mountEntry
 	// views maps a snapshotted directory to the same directory in its snapshot.
 	views   map[string]string
 	removes []func() error
+	lvm     []*lvmSnapshot
 }
 
-// useSnapshots moves each tree root that lies on btrfs or ZFS to a snapshot.
+// useSnapshots moves each supported tree root to a filesystem snapshot.
 // A root stays live when its filesystem cannot give a complete snapshot of it:
 // another filesystem or subvolume is mounted or nested below it, or the tools are absent.
 func (t *Tree) useSnapshots(ctx context.Context, operation string) (*fsSnapshots, error) {
@@ -186,6 +187,12 @@ func (s *fsSnapshots) view(ctx context.Context, directory string) (string, bool)
 		}
 		return filepath.Join(base, relative), true
 	}
+	if base, ok := s.lvmView(ctx, m); ok {
+		relative, err := filepath.Rel(m.point, directory)
+		if err == nil {
+			return filepath.Join(base, relative), true
+		}
+	}
 	return "", false
 }
 
@@ -245,9 +252,14 @@ func run(ctx context.Context, name string, arguments ...string) error {
 // Close removes the snapshots of this backup.
 func (s *fsSnapshots) Close() error {
 	var failures []error
+	var pending []func() error
 	for _, remove := range s.removes {
-		failures = append(failures, remove())
+		if err := remove(); err != nil {
+			failures = append(failures, err)
+			pending = append(pending, remove)
+		}
 	}
+	s.removes = pending
 	return errors.Join(failures...)
 }
 
@@ -259,6 +271,7 @@ func RemoveStaleSnapshots(ctx context.Context) error {
 		return err
 	}
 	var failures []error
+	failures = append(failures, removeStaleLVM(ctx))
 	if output, err := exec.CommandContext(ctx, "zfs", "list", "-H", "-t", "snapshot", "-o", "name").Output(); err == nil {
 		for line := range strings.Lines(string(output)) {
 			if name := strings.TrimSpace(line); strings.Contains(name, "@"+snapshotPrefix) {
