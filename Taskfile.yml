@@ -27,7 +27,7 @@ tasks:
     cmds: ["go build -o dist/synod ./cmd/synod"]
 
   release:snapshot:
-    desc: Build the Linux release files into dist/ without publishing
+    desc: Build the Linux and macOS release files into dist/ without publishing
     cmds: ['goreleaser release --snapshot --clean']
 
   build:web:
@@ -92,7 +92,7 @@ tasks:
     status:
       - test -s .dev/controller.json
     cmds:
-      - go run ./cmd/synod server init --dir .dev --address 127.0.0.1 --systemd-dir .dev/no-systemd
+      - go run ./cmd/synod server init --dir .dev --address 127.0.0.1 --{{if eq OS "darwin"}}launchd{{else}}systemd{{end}}-dir .dev/no-service
 
   dev:reset:
     desc: Delete the development installation

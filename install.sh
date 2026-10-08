@@ -26,10 +26,10 @@ Usage: sh install.sh [--version v0.1.0] [--install-dir /usr/local/bin]
                      [--from-dir /path/to/release]
 
 Without --version, the installer selects the latest GitHub release.
-Synod supports Linux amd64 and arm64.
+Synod supports Linux and macOS on amd64 and arm64. Agents require Linux.
 The installer verifies SHA-256 checksums before it installs the binary.
 A different installed binary is replaced and saved as synod.previous.
-After an upgrade, the installer restarts the running synod-server and synod-agent services.
+After an upgrade, the installer restarts loaded Synod services with systemd or launchd.
 Use --from-dir for a release copied to a device without Internet access.
 HELP
             exit 0 ;;
@@ -37,7 +37,11 @@ HELP
     esac
 done
 case "$install_dir" in /*) ;; *) echo "Use an absolute --install-dir." >&2; exit 1 ;; esac
-[ "$(uname -s)" = Linux ] || { echo "Synod releases support Linux only." >&2; exit 1; }
+case "$(uname -s)" in
+    Linux) os=linux ;;
+    Darwin) os=darwin ;;
+    *) echo "Synod releases support Linux and macOS only." >&2; exit 1 ;;
+esac
 case "$(uname -m)" in
     x86_64|amd64) arch=amd64 ;;
     aarch64|arm64) arch=arm64 ;;
@@ -85,7 +89,7 @@ trap 'exit 1' HUP INT TERM
     echo "synod.previous is not a regular file. Move it, then retry." >&2; exit 1;
 }
 staging=$(mktemp -d "$install_dir/.synod-install.XXXXXX")
-asset=synod-linux-$arch
+asset=synod-$os-$arch
 for file in SHA256SUMS "$asset"; do
     if [ -n "$from_dir" ]; then
         cp "$from_dir/$file" "$staging/$file"
@@ -108,7 +112,7 @@ for file in "$asset"; do
     [ "$actual" = "$expected" ] || { echo "The release checksum differs. The installed binary was not changed." >&2; exit 1; }
 done
 chmod 755 "$staging/$asset"
-# The binary reports "synod version VERSION (REVISION; linux/ARCH)". Run it only after verification.
+# The binary reports "synod version VERSION (REVISION; OS/ARCH)". Run it only after verification.
 [ "$("$staging/$asset" --version | cut -d ' ' -f 3)" = "$version" ] || {
     echo "The release version differs from --version. Select the matching release." >&2; exit 1;
 }
@@ -125,7 +129,16 @@ if [ -e "$install_dir/synod" ]; then
     mv -f "$staging/$asset" "$install_dir/synod"
     echo "Installed Synod $version at $install_dir/synod. Saved the old binary as synod.previous."
     # Running services keep the old binary until they restart. The controller restarts first.
-    if command -v systemctl >/dev/null 2>&1; then
+    if [ "$os" = darwin ]; then
+        service=system/dev.biodun.synod.server
+        if launchctl print "$service" >/dev/null 2>&1; then
+            if launchctl kickstart -k "$service"; then
+                echo "Restarted dev.biodun.synod.server."
+            else
+                echo "Restart the controller to use the new version: sudo launchctl kickstart -k $service" >&2
+            fi
+        fi
+    elif command -v systemctl >/dev/null 2>&1; then
         for unit in synod-server synod-agent; do
             systemctl is-active --quiet "$unit" 2>/dev/null || continue
             if systemctl restart "$unit"; then

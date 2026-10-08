@@ -8,7 +8,8 @@ For the full behaviour of each feature, read the [reference](reference.md).
 You need:
 
 - Linux devices (amd64 or arm64) with Docker Engine and the Docker Compose plugin.
-- One device for the controller. It can also run apps.
+- One Linux device or Mac for the controller. A Linux controller can also run apps.
+  A Mac controller needs no Docker. It manages agents on Linux devices.
 - A second device or storage service for your backups. A copy on the same device does not survive the loss of that device.
 
 Open these ports on your private network:
@@ -43,7 +44,9 @@ On the device that runs the controller:
 synod server init
 ```
 
-Init creates the installation in `/var/lib/synod/controller` and starts the `synod-server` service.
+On Linux, init creates `/var/lib/synod/controller` and starts the `synod-server` systemd service.
+On macOS, it creates `/Library/Application Support/Synod/controller` and starts the `dev.biodun.synod.server` launchd service.
+Both services start again after a reboot.
 It uses the address of the device's default network route. To select another address, add `--address 192.168.0.20`.
 
 Init prints a **recovery kit**. It holds the repository password.
@@ -55,7 +58,7 @@ Run `synod` commands on the controller as root. They find the controller setting
 
 ## 3. Join your devices
 
-Init also prints a join token. Run this on the first Docker device:
+Init also prints a join token. Run this on the first Linux Docker device:
 
 ```sh
 synod agent join 'TOKEN'
@@ -85,7 +88,7 @@ synod user create admin
 
 Open the address that init printed, such as `https://192.168.0.20:8443`, and sign in.
 The controller uses its own certificate authority.
-To remove the browser warning, trust `/var/lib/synod/controller/api-ca.crt` on your computer.
+To remove the browser warning, trust `api-ca.crt` from the controller directory on your computer.
 
 You can do the next steps in the web UI or with the CLI.
 
@@ -172,8 +175,8 @@ You need the recovery kit and one surviving destination.
 On the new controller device:
 
 ```sh
-umask 077; printf '%s' 'PASSWORD_FROM_THE_KIT' > /root/repository-password
-synod server init --from-repository /srv/synod-backups --password-file /root/repository-password
+umask 077; printf '%s' 'PASSWORD_FROM_THE_KIT' > "$HOME/repository-password"
+synod server init --from-repository /srv/synod-backups --password-file "$HOME/repository-password"
 ```
 
 Use the repository directory for `--from-repository`.
@@ -223,8 +226,19 @@ Renew stops the agent, gets a new certificate, and starts the agent again.
 synod app status
 synod operation list
 synod operation get OPERATION_ID
+```
+
+On Linux, read the service logs:
+
+```sh
 journalctl -u synod-agent -n 100 --no-pager
 journalctl -u synod-server -n 100 --no-pager
+```
+
+On macOS, read the controller log:
+
+```sh
+tail -n 100 "/Library/Application Support/Synod/controller/controller.log"
 ```
 
 | Problem | Action |
@@ -241,7 +255,8 @@ Do not send passwords, tokens, or private keys with a support report.
 
 ## Current limits
 
-- Linux only. Docker Desktop on macOS and Windows is not supported.
+- Agents require Linux. Docker Desktop on macOS and Windows is not supported.
+- Keep the Mac awake for access to its controller. Agents keep their saved backup schedules while it sleeps.
 - One controller per installation.
 - Apps with host networking cannot be restored.
 - An image that exists only on the lost device cannot be restored elsewhere.

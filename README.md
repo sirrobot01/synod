@@ -9,12 +9,13 @@ Synod backs up the Docker apps of your home lab and restores them on any of your
 - **Fast and encrypted.** Later backups read only changed files, like rsync. Backups go to another device, a local disk, SFTP, or S3.
 - **Needs only a password.** The recovery kit and one surviving backup rebuild everything.
 
-Synod runs on Linux (amd64 and arm64) with Docker Engine and the Compose plugin.
+Synod agents run on Linux (amd64 and arm64) with Docker Engine and the Compose plugin.
+The controller also runs on macOS, on Intel and Apple silicon Macs. It needs no Docker.
 v0.1 is not released yet.
 
 ## Quick start
 
-Run these commands as root on Linux.
+Run these commands as root (`sudo -i`).
 
 1. Install Synod on each device:
 
@@ -30,7 +31,7 @@ Run these commands as root on Linux.
 
    Init starts the controller. Save the recovery kit that it prints, away from your devices. Copy the join token.
 
-3. Join each Docker device, the controller device included:
+3. Join each Linux Docker device. Include the controller device if it runs Linux apps:
 
    ```sh
    synod agent join 'TOKEN'

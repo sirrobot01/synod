@@ -20,7 +20,7 @@ import (
 func TestInitRecoversMovedRepositoryWithoutOldControllerFiles(t *testing.T) {
 	root := t.TempDir()
 	old := filepath.Join(root, "lost-controller")
-	if err := runInit(t.Context(), InitOptions{Directory: old, SystemdDir: filepath.Join(root, "absent")}, io.Discard); err != nil {
+	if err := runInit(t.Context(), InitOptions{Directory: old, ServiceDir: filepath.Join(root, "absent")}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	installation := uuid.MustParse(strings.TrimSpace(readFile(t, old, "installation-id")))
@@ -51,7 +51,7 @@ func TestInitRecoversMovedRepositoryWithoutOldControllerFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(root, "recovered")
-	options := InitOptions{Directory: dir, FromRepository: moved, PasswordFile: password, SystemdDir: filepath.Join(root, "absent")}
+	options := InitOptions{Directory: dir, FromRepository: moved, PasswordFile: password, ServiceDir: filepath.Join(root, "absent")}
 	var out bytes.Buffer
 	if err := runInit(t.Context(), options, &out); err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestRecoverySelectsDestinationAndRollsBackInvalidImport(t *testing.T) {
 	if err := os.WriteFile(connection, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	options := InitOptions{Directory: filepath.Join(root, "new-controller"), FromRepository: connection, SystemdDir: filepath.Join(root, "systemd")}
+	options := InitOptions{Directory: filepath.Join(root, "new-controller"), FromRepository: connection, ServiceDir: filepath.Join(root, "systemd")}
 	if _, _, _, err := readRecovery(t.Context(), options); err == nil || !strings.Contains(err.Error(), "--repository-destination") {
 		t.Fatalf("ambiguous destination: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestRecoverySelectsDestinationAndRollsBackInvalidImport(t *testing.T) {
 	if err != nil || node == uuid.Nil || len(recovered.Devices) != 1 || recovered.Destinations[0].Location.Kind != "local" || recovered.Destinations[0].NodeID != node {
 		t.Fatalf("recovery from downloaded remote storage: %v", err)
 	}
-	if err := os.Mkdir(options.SystemdDir, 0o700); err != nil {
+	if err := os.Mkdir(options.ServiceDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := runInit(t.Context(), options, io.Discard); err == nil {
@@ -149,7 +149,7 @@ func TestRecoverySelectsDestinationAndRollsBackInvalidImport(t *testing.T) {
 	if _, err := os.Stat(options.Directory); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("failed import left a partial controller")
 	}
-	if files, err := os.ReadDir(options.SystemdDir); err != nil || len(files) != 0 {
+	if files, err := os.ReadDir(options.ServiceDir); err != nil || len(files) != 0 {
 		t.Fatal("failed import installed a service")
 	}
 	options.InstallationID = uuid.NewString()

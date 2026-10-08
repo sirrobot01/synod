@@ -88,7 +88,8 @@ GitHub Actions runs the checks in `.github/workflows/test.yml` on each push and 
 
 - `gofmt`, `go vet`, and the Go tests.
 - The web type check, tests, and build. The committed `internal/web/dist` must match the build.
-- A snapshot release and an install with `install.sh`.
+- A snapshot release and an install with `install.sh` on Linux and macOS.
+- macOS controller tests, launchd setup, and an upgrade of the running controller.
 
 Docker and MinIO tests are slow. They skip themselves unless you set their variables.
 Run them when you need them, usually before a release:
@@ -106,7 +107,8 @@ The SFTP test starts its own SSH server.
 ## Release
 
 GoReleaser builds the release from `.goreleaser.yaml`.
-It builds static Linux binaries for amd64 and arm64 from the committed web assets.
+It builds Linux and macOS binaries for amd64 and arm64 from the committed web assets.
+The builds do not require cgo.
 The binaries report the tag and commit in `synod --version`.
 
 Build the release files locally without publishing:
@@ -122,5 +124,5 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The **release** workflow runs the tests. Then it publishes `synod-linux-amd64`, `synod-linux-arm64`, `SHA256SUMS`, and `install.sh` to the GitHub release.
+The **release** workflow runs the tests. Then it publishes `synod-linux-amd64`, `synod-linux-arm64`, `synod-darwin-amd64`, `synod-darwin-arm64`, `SHA256SUMS`, and `install.sh` to the GitHub release.
 `install.sh` downloads these files and verifies their checksums.

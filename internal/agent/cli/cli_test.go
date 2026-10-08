@@ -4,9 +4,36 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestNonLinuxAgentRefusesBeforeEnrollment(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("agents run on Linux")
+	}
+	dir := filepath.Join(t.TempDir(), "agent")
+	for _, args := range [][]string{
+		{"join", "private-join-token", "--dir", dir},
+		{"renew", "private-join-token", "--dir", dir},
+		{"run", "--config", filepath.Join(dir, "agent.json")},
+	} {
+		var stdout, stderr bytes.Buffer
+		if run(t, args, &stdout, &stderr) != 1 || stdout.Len() != 0 {
+			t.Fatalf("agent command was not refused: %s", stdout.String())
+		}
+		var failure Failure
+		if json.Unmarshal(stderr.Bytes(), &failure) != nil || failure.Code != "unsupported_platform" || !strings.Contains(failure.Message, "require Linux") || strings.Contains(stderr.String(), "private-join-token") {
+			t.Fatalf("unsafe or unclear failure: %s", stderr.String())
+		}
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("agent command created state: %v", err)
+	}
+}
 
 func TestArgumentErrorsNeverEchoInputs(t *testing.T) {
 	secret := "private-value-do-not-print"

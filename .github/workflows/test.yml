@@ -48,7 +48,10 @@ jobs:
         run: git diff --exit-code -- ../internal/web/dist
 
   install:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -62,13 +65,49 @@ jobs:
         run: |
           release=$(mktemp -d)
           cp install.sh dist/SHA256SUMS "$release/"
-          cp dist/synod_linux_amd64_v1/synod "$release/synod-linux-amd64"
+          case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; esac
+          case "$(uname -m)" in x86_64) arch=amd64 ;; arm64|aarch64) arch=arm64 ;; esac
+          asset=synod-$os-$arch
+          binary=$(jq -r --arg name "$asset" '.[] | select(.name == $name) | .path' dist/artifacts.json)
+          cp "$binary" "$release/$asset"
           tag=$(jq -r .tag dist/metadata.json)
           sh install.sh --version "$tag" --from-dir "$release" --install-dir "$RUNNER_TEMP/bin"
           "$RUNNER_TEMP/bin/synod" --version
           sh install.sh --version "$tag" --from-dir "$release" --install-dir "$RUNNER_TEMP/bin"
-          echo corrupt >> "$release/synod-linux-amd64"
+          echo corrupt >> "$release/$asset"
           ! sh install.sh --version "$tag" --from-dir "$release" --install-dir "$RUNNER_TEMP/other"
+
+      - name: Check macOS controller and CLI
+        if: runner.os == 'macOS'
+        run: |
+          go test -race -p 1 -count=1 . ./internal/config ./internal/controller ./internal/cli ./internal/agent/cli
+          tag=$(jq -r .tag dist/metadata.json)
+          release=$(mktemp -d)
+          case "$(uname -m)" in x86_64) arch=amd64 ;; arm64) arch=arm64 ;; esac
+          asset=synod-darwin-$arch
+          binary=$(jq -r --arg name "$asset" '.[] | select(.name == $name) | .path' dist/artifacts.json)
+          cp dist/SHA256SUMS "$release/"
+          cp "$binary" "$release/$asset"
+          sudo sh install.sh --version "$tag" --from-dir "$release"
+          trap 'sudo launchctl bootout system/dev.biodun.synod.server || true; sudo rm -f /Library/LaunchDaemons/dev.biodun.synod.server.plist; sudo rm -rf "/Library/Application Support/Synod"' EXIT
+          sudo /usr/local/bin/synod server init --address 127.0.0.1 > "$RUNNER_TEMP/init.log"
+          sudo plutil -lint /Library/LaunchDaemons/dev.biodun.synod.server.plist
+          for i in $(seq 30); do
+            sudo /usr/local/bin/synod installation get && break
+            sleep 1
+          done
+          sudo /usr/local/bin/synod installation get
+          ! /usr/local/bin/synod agent join unused-token 2> "$RUNNER_TEMP/agent-error"
+          grep unsupported_platform "$RUNNER_TEMP/agent-error"
+          # A different verified build must restart the loaded controller.
+          go build -trimpath -ldflags "-X github.com/sirrobot01/synod/internal/buildinfo.Version=v0.0.0-macos-upgrade" -o "$release/$asset" ./cmd/synod
+          (cd "$release" && shasum -a 256 synod-darwin-* > SHA256SUMS)
+          sudo sh install.sh --version v0.0.0-macos-upgrade --from-dir "$release"
+          for i in $(seq 30); do
+            sudo /usr/local/bin/synod installation get > "$RUNNER_TEMP/version" && grep v0.0.0-macos-upgrade "$RUNNER_TEMP/version" && break
+            sleep 1
+          done
+          grep v0.0.0-macos-upgrade "$RUNNER_TEMP/version"
 
   heavy:
     if: github.event_name == 'workflow_dispatch' && inputs.heavy

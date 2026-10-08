@@ -20,11 +20,14 @@ Pass options after `sh -s --`:
 | `--from-dir DIR` | Install from release files copied to a device without Internet access. Needs `--version`. |
 | `--base-url URL` | Download from another HTTPS release server. Needs `--version`. |
 
-The device must run Linux on amd64 or arm64.
+The controller can run Linux or macOS on amd64 or arm64.
+Agents require Linux.
 It needs `curl` and `sha256sum` or `shasum`.
-Docker and the Docker Compose plugin are required for app backup and restore.
+Docker and the Docker Compose plugin are required on agent devices for app backup and restore.
+A Mac controller needs no Docker.
 The installer does not change Docker, create installation state, or start a service.
-It downloads `synod-linux-ARCH` and `SHA256SUMS` from the release.
+It downloads `synod-OS-ARCH` and `SHA256SUMS` from the release.
+`OS` is `linux` or `darwin`. `ARCH` is `amd64` or `arm64`.
 Downloads and redirects must use HTTPS.
 The checksums detect changed or incomplete downloads.
 Trust the release source before you run its installer.
@@ -32,7 +35,8 @@ Trust the release source before you run its installer.
 The installer verifies the selected version and binary before it creates `synod`.
 It creates the executable atomically with mode `0755`.
 A repeated install of identical bytes keeps the existing file.
-A different existing binary or a symbolic link is refused.
+A different existing binary is saved as `synod.previous` before replacement.
+A symbolic link is refused.
 
 ## Upgrade the controller and agents
 
@@ -45,7 +49,7 @@ Those commands create identities. An upgrade keeps the current identities and en
 
 Wait for active backups, restores, and drills to finish in Activity.
 Run the installer on each device, the controller device first.
-Use the directory that contains the executable in the service's `ExecStart` line.
+Use the directory that contains the executable in the service's `ExecStart` line or launchd `ProgramArguments`.
 It installs the latest release:
 
 ```sh
@@ -64,8 +68,9 @@ Only one installer can use an installation directory at a time.
 If a killed installer leaves `.synod-install.lock`, first confirm that no installer is running.
 Then remove that empty directory with `rmdir` and retry.
 
-After it replaces the binary, the installer restarts the `synod-server` and `synod-agent` services that are running on that device.
-A service that it cannot restart keeps the old version. Restart it with `systemctl restart`.
+On Linux, the installer restarts the running `synod-server` and `synod-agent` services after replacement.
+On macOS, it restarts the loaded `dev.biodun.synod.server` service.
+If a restart fails, the installer prints the command to retry it.
 Check the result on the controller:
 
 ```sh
@@ -98,7 +103,9 @@ One binary holds the CLI, the controller, and the agent.
 synod server init
 ```
 
-The default directory is `/var/lib/synod/controller`. Use `--dir` to select another.
+The default directory is `/var/lib/synod/controller` on Linux.
+On macOS, it is `/Library/Application Support/Synod/controller`.
+Use `--dir` to select another.
 The default address is the address of the device's default network route.
 Use `--address` to select an address or hostname that the other devices can reach.
 Init writes the certificates, keys, administrator token, SQLite database, and controller configuration.
@@ -115,13 +122,22 @@ On Linux, init also writes a systemd service file.
 It installs the file if it can write to the systemd directory.
 When it installs the file in `/etc/systemd/system` on a host that runs systemd, it enables and starts `synod-server`.
 Use `--systemd-dir /path/to/units` to install the file elsewhere. Init then does not start the service.
-Without systemd, start the controller yourself:
+On macOS, init writes `dev.biodun.synod.server.plist` to `/Library/LaunchDaemons`.
+Run init as root so it can install, enable, and start this daemon.
+The daemon starts again after a reboot, before login.
+Its log is `controller.log` in the controller directory.
+Use `--launchd-dir /path/to/plists` to write the file elsewhere without starting the daemon.
+A custom directory must already exist.
+To restart an installed daemon, run `sudo launchctl kickstart -k system/dev.biodun.synod.server`.
+For launchd details, see [Apple's service guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html).
+
+Without a service manager, start the controller yourself. This example uses the Linux path:
 
 ```sh
 synod server --config /var/lib/synod/controller/controller.json
 ```
 
-The CLI reads the API address, CA, and administrator token from `/var/lib/synod/controller/controller.json` when you run it as root.
+The CLI reads the API address, CA, and administrator token from `controller.json` in the default controller directory when you run it as root.
 It does this only when you give no API URL.
 For another directory or another device, set `SYNOD_API_URL`, `SYNOD_CA_FILE`, and `SYNOD_ADMIN_TOKEN_FILE`.
 
@@ -136,7 +152,7 @@ SQLite uses WAL mode, full synchronous writes, and foreign key checks.
 
 ## Join and approve devices
 
-Run this command on a device that has Docker:
+Run this command on a Linux device that has Docker:
 
 ```sh
 synod agent join TOKEN
@@ -182,7 +198,9 @@ It reads running and stopped containers.
 Compose project labels group services into one app.
 Each standalone container is one app.
 The agent must run on the Docker host to measure local paths.
-Docker Desktop stores named volumes inside its VM, so a Mac agent cannot measure them.
+Docker Desktop stores named volumes inside its VM. macOS agents are not supported.
+The Mac controller manages apps on its joined Linux devices.
+A Mac cannot serve a Synod-device destination. Use a joined Linux device, SFTP, or S3.
 
 ```sh
 synod app list
@@ -940,7 +958,7 @@ The token works only for that device and only with its existing key.
 
 ## Limits
 
-- Linux hosts only. Docker Desktop is a development environment.
+- Agents require Linux. Controllers can run Linux or macOS. Docker Desktop is a development environment.
 - One controller per installation.
 - Host-network apps cannot be restored.
 - Local-only images need to exist on the target with the correct architecture.

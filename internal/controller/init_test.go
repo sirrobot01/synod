@@ -12,6 +12,7 @@ import (
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/store"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -25,6 +26,24 @@ import (
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/spf13/pflag"
 )
+
+func TestAdminInstructionsKeepLiteralPaths(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "controller's $HOME `false` & files")
+	_, instructions, found := strings.Cut(adminNote(dir, "127.0.0.1"), "\n")
+	if !found {
+		t.Fatal("custom controller directory needs connection settings")
+	}
+	output, err := exec.CommandContext(t.Context(), "sh", "-c", instructions+`;
+printf '%s\n' "$SYNOD_API_URL" "$SYNOD_CA_FILE" "$SYNOD_ADMIN_TOKEN_FILE"
+`).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://127.0.0.1:8443\n" + filepath.Join(dir, "api-ca.crt") + "\n" + filepath.Join(dir, "admin.token") + "\n"
+	if string(output) != want {
+		t.Fatalf("connection settings = %q, want %q", output, want)
+	}
+}
 
 // A controller cannot serve an agent transport without this material, and nothing else
 // in the product creates it.
@@ -178,7 +197,7 @@ func TestServerInitCommand(t *testing.T) {
 	cmd.SetArgs([]string{
 		"--dir", dir,
 		"--address", "192.168.1.100",
-		"--systemd-dir", sysDir,
+		"--" + serviceDirFlag, sysDir,
 	})
 
 	if err := cmd.Execute(); err != nil {
@@ -233,11 +252,11 @@ func TestServerInitCommand(t *testing.T) {
 		t.Fatalf("api.crt not verified by api-ca.crt: %v", err)
 	}
 
-	// Verify systemd service.
-	svcFile := filepath.Join(sysDir, "synod-server.service")
-	svcContent := string(readFile(t, sysDir, "synod-server.service"))
-	if !strings.Contains(svcContent, "ExecStart=") || !strings.Contains(svcContent, filepath.Join(dir, "controller.json")) {
-		t.Errorf("systemd service file %s content incorrect: %s", svcFile, svcContent)
+	// Verify the native service file.
+	svcFile := filepath.Join(sysDir, serviceFileName)
+	svcContent := string(readFile(t, sysDir, serviceFileName))
+	if !strings.Contains(svcContent, "server") || !strings.Contains(svcContent, filepath.Join(dir, "controller.json")) {
+		t.Errorf("service file %s content incorrect: %s", svcFile, svcContent)
 	}
 
 	// Verify controller.json loads with BindController.
@@ -264,7 +283,7 @@ func TestServerInitRefusesReinitialization(t *testing.T) {
 	cmd1 := initCommand()
 	cmd1.SetOut(&out)
 	cmd1.SetErr(&out)
-	cmd1.SetArgs([]string{"--dir", dir, "--systemd-dir", filepath.Join(dir, "absent")})
+	cmd1.SetArgs([]string{"--dir", dir, "--" + serviceDirFlag, filepath.Join(dir, "absent")})
 	if err := cmd1.Execute(); err != nil {
 		t.Fatalf("first init failed: %v", err)
 	}
@@ -272,7 +291,7 @@ func TestServerInitRefusesReinitialization(t *testing.T) {
 	cmd2 := initCommand()
 	cmd2.SetOut(&out)
 	cmd2.SetErr(&out)
-	cmd2.SetArgs([]string{"--dir", dir, "--systemd-dir", filepath.Join(dir, "absent")})
+	cmd2.SetArgs([]string{"--dir", dir, "--" + serviceDirFlag, filepath.Join(dir, "absent")})
 	if err := cmd2.Execute(); err == nil {
 		t.Fatal("expected second init to fail, but it succeeded")
 	}
@@ -285,7 +304,7 @@ func TestServerInitCustomInstallationID(t *testing.T) {
 	cmd := initCommand()
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--dir", dir, "--installation-id", customID, "--systemd-dir", filepath.Join(dir, "absent")})
+	cmd.SetArgs([]string{"--dir", dir, "--installation-id", customID, "--" + serviceDirFlag, filepath.Join(dir, "absent")})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("init with custom id failed: %v", err)
 	}
@@ -312,7 +331,7 @@ func TestServerInitRegistersJoinToken(t *testing.T) {
 	cmd := initCommand()
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--dir", dir, "--address", "192.0.2.10", "--systemd-dir", filepath.Join(dir, "absent")})
+	cmd.SetArgs([]string{"--dir", dir, "--address", "192.0.2.10", "--" + serviceDirFlag, filepath.Join(dir, "absent")})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("init failed: %v\n%s", err, out.String())
 	}
@@ -348,7 +367,7 @@ func TestServerInitWritesRecoveryKitAndDefaultPassword(t *testing.T) {
 	cmd := initCommand()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetArgs([]string{"--dir", dir, "--address", "127.0.0.1", "--systemd-dir", filepath.Join(dir, "none")})
+	cmd.SetArgs([]string{"--dir", dir, "--address", "127.0.0.1", "--" + serviceDirFlag, filepath.Join(dir, "none")})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}

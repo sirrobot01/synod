@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 
 	"github.com/sirrobot01/synod/internal/agent/daemon"
 	"github.com/sirrobot01/synod/internal/agent/enrollment"
 	"github.com/spf13/cobra"
 )
+
+var errUnsupportedPlatform = errors.New("Synod agents require Linux. Run agent commands on a Linux Docker device. This device can run the controller with synod server init.")
 
 // Failure is the bounded error that the CLI prints for a failed command.
 type Failure struct {
@@ -23,7 +26,14 @@ type Failure struct {
 
 // Command returns the agent command tree. Report writes its failures.
 func Command() *cobra.Command {
-	root := &cobra.Command{Use: "agent", Short: "Join this device and run its agent", SilenceErrors: true, SilenceUsage: true}
+	root := &cobra.Command{Use: "agent", Short: "Join a Linux Docker device and run its agent", SilenceErrors: true, SilenceUsage: true,
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			if runtime.GOOS != "linux" {
+				return errUnsupportedPlatform
+			}
+			return nil
+		},
+	}
 	var configPath string
 	run := &cobra.Command{Use: "run", Short: "Run the agent of a joined device", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		config, err := daemon.Load(configPath)
@@ -60,6 +70,7 @@ func failureOf(err error) Failure {
 		err  error
 		code string
 	}{
+		{errUnsupportedPlatform, "unsupported_platform"},
 		{enrollment.ErrState, "state_recovery_required"}, {enrollment.ErrLocked, "state_locked"},
 		{enrollment.ErrCertificate, "invalid_certificate"}, {enrollment.ErrUnauthorized, "unauthorized"},
 		{enrollment.ErrConflict, "enrollment_conflict"}, {enrollment.ErrUnavailable, "outcome_unavailable"},

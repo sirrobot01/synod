@@ -18,7 +18,7 @@ import (
 
 func TestControllerRenewsItsCertificatesBeforeExpiry(t *testing.T) {
 	dir := t.TempDir()
-	if err := runInit(t.Context(), InitOptions{Directory: dir, Address: "192.168.0.20", SystemdDir: filepath.Join(dir, "none")}, io.Discard); err != nil {
+	if err := runInit(t.Context(), InitOptions{Directory: dir, Address: "192.168.0.20", ServiceDir: filepath.Join(dir, "none")}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	var cfg controllerJSON
