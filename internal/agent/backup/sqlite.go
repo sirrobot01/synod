@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	kfs "github.com/kopia/kopia/fs"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -23,50 +22,35 @@ var errSQLite = errors.New("SQLite copy failed; check that the database is reada
 
 const sqliteHeader = "SQLite format 3\x00"
 
-// A live file reads an SQLite database through its backup copy. Kopia records the bytes it
-// reads, so a copy with a different size than its source is read again in the next backup.
-// Kopia reuses an unchanged file from the previous snapshot when size and modified match.
-type liveFile struct {
-	sourceEntry
-	modified time.Time
-}
-
-func (f *liveFile) ModTime() time.Time { return f.modified }
-
-// copyReader serves one part of an SQLite copy. The tree closes the copy after the backup.
-type copyReader struct {
-	*io.SectionReader
-	entry *liveFile
-}
-
-func (r *copyReader) Close() error              { return nil }
-func (r *copyReader) Entry() (kfs.Entry, error) { return r.entry, nil }
-
-func (f *liveFile) Open(ctx context.Context) (_ kfs.Reader, retErr error) {
+func (f *liveFile) capture(ctx context.Context) (_ *fileCopy, retErr error) {
 	// Closing an unrelated descriptor can release this process's SQLite locks.
 	// Keep header reads and source backup connections separate from each other.
 	f.tree.sqliteMu.Lock()
-	defer f.tree.sqliteMu.Unlock()
 	if copy := f.tree.sqlite[f.absolute]; copy != nil {
 		info, err := copy.Stat()
+		f.tree.sqliteMu.Unlock()
 		if err != nil {
 			return nil, errSQLite
 		}
-		return &copyReader{io.NewSectionReader(copy, 0, info.Size()), f}, nil
+		return &fileCopy{ReaderAt: copy, size: info.Size()}, nil
 	}
 	source, err := (&sourceFile{f.sourceEntry}).open(ctx)
 	if err != nil {
+		f.tree.sqliteMu.Unlock()
 		return nil, err
 	}
 	var header [16]byte
 	_, err = source.ReadAt(header[:], 0)
 	if err != nil && !errors.Is(err, io.EOF) {
 		source.Close()
+		f.tree.sqliteMu.Unlock()
 		return nil, ErrSource
 	}
 	if err != nil || string(header[:]) != sqliteHeader {
-		return f.tree.stable(source)
+		f.tree.sqliteMu.Unlock()
+		return f.tree.stable(ctx, source)
 	}
+	defer f.tree.sqliteMu.Unlock()
 	defer source.Close()
 	defer func() {
 		if retErr != nil {
@@ -107,7 +91,7 @@ func (f *liveFile) Open(ctx context.Context) (_ kfs.Reader, retErr error) {
 	if err != nil {
 		return nil, errSQLite
 	}
-	return &copyReader{io.NewSectionReader(copy, 0, info.Size()), f}, nil
+	return &fileCopy{ReaderAt: copy, size: info.Size()}, nil
 }
 
 func copySQLite(ctx context.Context, uri string) (_ *os.File, retErr error) {

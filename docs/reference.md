@@ -433,7 +433,7 @@ Live and Dump copy files while the containers run:
 
 - On btrfs and ZFS, Synod takes a read-only snapshot of each subvolume or dataset at the start of the copy. It reads the files from the snapshot and removes the snapshot at the end. All files of a snapshot come from the same moment, as after a power cut. SQLite files and their `-wal` files are copied together from the snapshot.
 - Synod reads a path live when the snapshot cannot be complete: another filesystem is mounted below the path, a btrfs subvolume is nested below it, or the `btrfs` or `zfs` tool is absent. btrfs snapshots are in `.synod-snapshots` at the top of the mounted filesystem. The agent removes snapshots that an interrupted backup left when it starts.
-- On other filesystems, Synod reads a file of up to 8 MiB whole and checks its size and modification time. If the file changed during the read, Synod reads it again, up to 3 times. A larger file is checked at the end of its read.
+- On other filesystems, Synod checks each file before upload. If its size or modification time changes during the read, Synod reads it again, up to 3 times. Files up to 8 MiB use memory. Larger files use a private temporary file. All parallel upload parts read the same captured copy. Synod removes the temporary file after upload. The temporary disk must have space for the large files that Synod copies at the same time. A capture fails if this disk is full.
 - A file that still changed is saved as read. The snapshot lists it under `changing`, and the result has the warning `files_changed_during_copy`.
 - Two files that the app changes together can come from slightly different moments on a filesystem without snapshots. Databases are not affected, because Synod dumps them.
 
