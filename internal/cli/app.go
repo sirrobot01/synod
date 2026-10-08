@@ -2,12 +2,16 @@ package cli
 
 import (
 	"cmp"
+	"encoding/json"
 	"io"
+	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/client"
+	"github.com/sirrobot01/synod/internal/config"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -27,13 +31,39 @@ type app struct {
 func newApp(stdout, stderr io.Writer) *app {
 	return &app{
 		settings: client.Config{
-			Endpoint:  cmp.Or(os.Getenv("SYNOD_API_URL"), "https://localhost:8443"),
+			Endpoint:  os.Getenv("SYNOD_API_URL"),
 			TokenFile: os.Getenv("SYNOD_ADMIN_TOKEN_FILE"),
 			CAFile:    os.Getenv("SYNOD_CA_FILE"),
 		},
 		stdout: stdout,
 		stderr: stderr,
 	}
+}
+
+// localController reads the API settings of a controller on this device.
+// Only root can read the default directory, so other users get no settings.
+func localController(path string) client.Config {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return client.Config{}
+	}
+	var saved struct {
+		Listen         string `json:"listen"`
+		AdminTokenFile string `json:"admin_token_file"`
+		APICACertFile  string `json:"api_ca_cert_file"`
+	}
+	if json.Unmarshal(data, &saved) != nil {
+		return client.Config{}
+	}
+	host, port, err := net.SplitHostPort(saved.Listen)
+	if err != nil {
+		return client.Config{}
+	}
+	// The API certificate also names 127.0.0.1, so a wildcard listener is reached there.
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return client.Config{Endpoint: "https://" + net.JoinHostPort(host, port), TokenFile: saved.AdminTokenFile, CAFile: saved.APICACertFile}
 }
 
 // bindFlags registers the client flags on the root, so they can come before the command.
@@ -53,6 +83,13 @@ func (a *app) bindFlags(flags *pflag.FlagSet) {
 // connect opens the API client before a client command runs.
 func (a *app) connect(*cobra.Command, []string) error {
 	a.ran = true
+	// Without an API URL, use the controller on this device. Its token never goes to another URL.
+	if a.settings.Endpoint == "" {
+		local := localController(filepath.Join(config.DefaultControllerDir, "controller.json"))
+		a.settings.Endpoint = cmp.Or(local.Endpoint, "https://localhost:8443")
+		a.settings.TokenFile = cmp.Or(a.settings.TokenFile, local.TokenFile)
+		a.settings.CAFile = cmp.Or(a.settings.CAFile, local.CAFile)
+	}
 	var err error
 	a.api, err = client.New(a.settings)
 	return err

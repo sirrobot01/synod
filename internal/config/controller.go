@@ -17,6 +17,9 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// DefaultControllerDir is where server init writes the installation. The CLI reads its API settings there.
+const DefaultControllerDir = "/var/lib/synod/controller"
+
 // Controller holds the resolved controller settings.
 type Controller struct {
 	AgentListen      string `json:"agent_listen"`

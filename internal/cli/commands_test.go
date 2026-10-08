@@ -21,7 +21,7 @@ func TestServerAndAgentCommandsReportTheirOwnFailures(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := cli.Run(t.Context(), []string{"server", "init"}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "--dir") {
+	if code := cli.Run(t.Context(), []string{"server", "init", "--dir", ""}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "--dir") {
 		t.Fatalf("server init code=%d stderr=%q", code, stderr.String())
 	}
 }

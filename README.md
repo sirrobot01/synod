@@ -22,27 +22,21 @@ Run these commands as root on Linux.
    curl -fsSL https://synod.biodun.dev/install.sh | sh
    ```
 
-2. Create the controller on one device. Use an address that your other devices can reach:
+2. Create the controller on one device:
 
    ```sh
-   synod server init --dir /var/lib/synod/controller --address 192.168.0.20
-   systemctl enable --now synod-server
-   export SYNOD_API_URL=https://192.168.0.20:8443
-   export SYNOD_CA_FILE=/var/lib/synod/controller/api-ca.crt
-   export SYNOD_ADMIN_TOKEN_FILE=/var/lib/synod/controller/admin.token
+   synod server init
    ```
 
-   Save the recovery kit that init prints, away from your devices. Copy the join token.
-   Set the three variables again in each new shell on the controller.
+   Init starts the controller. Save the recovery kit that it prints, away from your devices. Copy the join token.
 
 3. Join each Docker device, the controller device included:
 
    ```sh
    synod agent join 'TOKEN'
-   systemctl enable --now synod-agent
    ```
 
-   Each token joins one device. On the controller, run `synod node join-token` for the next one.
+   Join starts the agent. Each token joins one device. On the controller, run `synod node join-token` for the next one.
 
 4. On the controller, create your account:
 
@@ -50,7 +44,7 @@ Run these commands as root on Linux.
    synod user create admin
    ```
 
-5. Open `https://192.168.0.20:8443` and sign in. Trust `api-ca.crt` in your browser.
+5. Open the web UI address that init printed, such as `https://192.168.0.20:8443`, and sign in.
    Approve your devices in **Devices**. Add a destination on another device in **Destinations**.
    Then select **Apps → Protect all**.
 

@@ -21,6 +21,7 @@ import (
 	"github.com/sirrobot01/synod/internal/agent/daemon"
 	"github.com/sirrobot01/synod/internal/agent/enrollment"
 	"github.com/sirrobot01/synod/internal/jointoken"
+	"github.com/sirrobot01/synod/internal/systemd"
 )
 
 const agentServiceTemplate = `[Unit]
@@ -135,12 +136,13 @@ func join(ctx context.Context, encoded string, options joinOptions, stdout io.Wr
 	if err := os.WriteFile(servicePath, []byte(service), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", servicePath, err)
 	}
+	installed := false
 	if info, err := os.Stat(options.systemdDir); err == nil && info.IsDir() {
-		installed := filepath.Join(options.systemdDir, "synod-agent.service")
-		if err := os.WriteFile(installed, []byte(service), 0o644); err != nil {
-			return fmt.Errorf("install %s: %w", installed, err)
+		unit := filepath.Join(options.systemdDir, "synod-agent.service")
+		if err := os.WriteFile(unit, []byte(service), 0o644); err != nil {
+			return fmt.Errorf("install %s: %w", unit, err)
 		}
-		servicePath = installed
+		servicePath, installed = unit, true
 	}
 
 	// The configuration is written last. Its presence marks a completed join.
@@ -151,17 +153,28 @@ func join(ctx context.Context, encoded string, options joinOptions, stdout io.Wr
 	if err := os.WriteFile(configPath, append(encodedConfig, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", configPath, err)
 	}
+	start := fmt.Sprintf("Start the agent on this device:\n  synod agent run --config %s", configPath)
+	if installed {
+		start = "Start the agent on this device:\n  systemctl daemon-reload && systemctl enable --now synod-agent"
+		// The configuration exists now, so the service can start.
+		if options.systemdDir == systemd.UnitDir && systemd.Running() {
+			if err := systemd.Start("synod-agent"); err != nil {
+				start = fmt.Sprintf("The synod-agent service did not start: %v\n%s", err, start)
+			} else {
+				start = "Started the synod-agent service. It starts again after a reboot."
+			}
+		}
+	}
 	_, err = fmt.Fprintf(stdout, `Device %s joined installation %s.
 
 Agent configuration: %s
 Service unit: %s
 
-Start the agent on this device:
-  systemctl daemon-reload && systemctl enable --now synod-agent
+%s
 
-Then approve the device from an administrator shell:
+Then approve the device on the controller:
   synod node approve %s
-`, nodeID, token.InstallationID, configPath, servicePath, nodeID)
+`, nodeID, token.InstallationID, configPath, servicePath, start, nodeID)
 	return err
 }
 
@@ -245,6 +258,18 @@ func renew(ctx context.Context, encoded, dir string, stdout io.Writer) error {
 	if err != nil || token.NodeID == uuid.Nil || token.NodeID != nodeID {
 		return fmt.Errorf("%w: renewal needs a token from synod node join-token --device %s", enrollment.ErrConfiguration, strings.TrimSpace(string(saved)))
 	}
+	// The agent holds its enrollment state open. Stop its service, and start it again at the end.
+	running := systemd.Serves("synod-agent", filepath.Join(dir, "agent.json"))
+	if running {
+		if err := systemd.Run("stop", "synod-agent"); err != nil {
+			return err
+		}
+		defer func() {
+			if err := systemd.Run("start", "synod-agent"); err != nil {
+				fmt.Fprintf(stdout, "The synod-agent service did not start: %v\n", err)
+			}
+		}()
+	}
 	state, err := enrollment.Open(filepath.Join(dir, "enrollment"), enrollment.Options{Identity: enrollment.Identity{InstallationID: token.InstallationID, NodeID: nodeID}})
 	if err != nil {
 		return err
@@ -266,6 +291,10 @@ func renew(ctx context.Context, encoded, dir string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "Device %s has a new certificate until %s.\nStart the agent again:\n  systemctl restart synod-agent\n", nodeID, notAfter.UTC().Format(time.RFC3339))
+	next := "Start the agent again:\n  systemctl restart synod-agent"
+	if running {
+		next = "The synod-agent service starts again with the new certificate."
+	}
+	_, err = fmt.Fprintf(stdout, "Device %s has a new certificate until %s.\n%s\n", nodeID, notAfter.UTC().Format(time.RFC3339), next)
 	return err
 }

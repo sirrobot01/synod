@@ -29,7 +29,7 @@ Without --version, the installer selects the latest GitHub release.
 Synod supports Linux amd64 and arm64.
 The installer verifies SHA-256 checksums before it installs the binary.
 A different installed binary is replaced and saved as synod.previous.
-Restart the controller and agents after an upgrade. Keep their state directories.
+After an upgrade, the installer restarts the running synod-server and synod-agent services.
 Use --from-dir for a release copied to a device without Internet access.
 HELP
             exit 0 ;;
@@ -124,7 +124,17 @@ if [ -e "$install_dir/synod" ]; then
     fi
     mv -f "$staging/$asset" "$install_dir/synod"
     echo "Installed Synod $version at $install_dir/synod. Saved the old binary as synod.previous."
-    echo "Restart the Synod controller and agents. Keep their existing configuration and state."
+    # Running services keep the old binary until they restart. The controller restarts first.
+    if command -v systemctl >/dev/null 2>&1; then
+        for unit in synod-server synod-agent; do
+            systemctl is-active --quiet "$unit" 2>/dev/null || continue
+            if systemctl restart "$unit"; then
+                echo "Restarted $unit."
+            else
+                echo "Restart $unit to use the new version: systemctl restart $unit" >&2
+            fi
+        done
+    fi
     exit 0
 fi
 # A hard link publishes the verified file atomically and refuses a concurrent install.

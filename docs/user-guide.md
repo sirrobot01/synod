@@ -37,23 +37,21 @@ To select a version, add `-s -- --version v0.1.0` after `sh`.
 
 ## 2. Create the controller
 
+On the device that runs the controller:
+
 ```sh
-synod server init --dir /var/lib/synod/controller --address 192.168.0.20
-systemctl enable --now synod-server
+synod server init
 ```
+
+Init creates the installation in `/var/lib/synod/controller` and starts the `synod-server` service.
+It uses the address of the device's default network route. To select another address, add `--address 192.168.0.20`.
 
 Init prints a **recovery kit**. It holds the repository password.
 Store the kit in a password manager or on paper, away from your devices.
 Then delete `recovery-kit.txt` from the controller directory.
 Without this password, nobody can read your backups.
 
-Set these variables in each shell where you run `synod` commands on the controller:
-
-```sh
-export SYNOD_API_URL=https://192.168.0.20:8443
-export SYNOD_CA_FILE=/var/lib/synod/controller/api-ca.crt
-export SYNOD_ADMIN_TOKEN_FILE=/var/lib/synod/controller/admin.token
-```
+Run `synod` commands on the controller as root. They find the controller settings by themselves.
 
 ## 3. Join your devices
 
@@ -61,9 +59,9 @@ Init also prints a join token. Run this on the first Docker device:
 
 ```sh
 synod agent join 'TOKEN'
-systemctl enable --now synod-agent
 ```
 
+Join starts the `synod-agent` service.
 For each other device, create a token on the controller and join with it:
 
 ```sh
@@ -85,7 +83,7 @@ A token joins one device and expires after seven days.
 synod user create admin
 ```
 
-Open `https://192.168.0.20:8443` and sign in.
+Open the address that init printed, such as `https://192.168.0.20:8443`, and sign in.
 The controller uses its own certificate authority.
 To remove the browser warning, trust `/var/lib/synod/controller/api-ca.crt` on your computer.
 
@@ -168,43 +166,40 @@ In the web UI, use **Snapshots & restore**.
 ### Recover after you lose the controller
 
 You need the recovery kit and one surviving destination.
-On a new controller device:
+On the new controller device:
 
 ```sh
 umask 077; printf '%s' 'PASSWORD_FROM_THE_KIT' > /root/repository-password
-synod server init --dir /var/lib/synod/recovered --address 192.168.0.20 \
-  --from-repository /srv/synod-backups --password-file /root/repository-password
-systemctl enable --now synod-server
+synod server init --from-repository /srv/synod-backups --password-file /root/repository-password
 ```
 
 Use the repository directory for `--from-repository`.
 For S3 or SFTP, see [Recover after controller loss](reference.md#recover-after-controller-loss).
 Init prints a join token for the device with the repository.
+For each other device, create a token on the controller:
+
+```sh
+synod node join-token --device DEVICE
+```
+
 Join each device again with a new agent directory. Do not reuse the old one:
 
 ```sh
-synod node join-token --device DEVICE          # on the controller, for each other device
 synod agent join 'TOKEN' --dir /var/lib/synod/recovered-agent
-systemctl enable --now synod-agent
 ```
 
 Approve each device. Then restore your apps.
 
 ## Upgrade
 
-Stop the agents, then the controller.
-Run the install command again on each device. It installs the latest release.
-Start the controller, then the agents.
+Run the install command again on each device:
 
 ```sh
-systemctl stop synod-agent
-systemctl stop synod-server        # controller device only
 curl -fsSL https://synod.biodun.dev/install.sh | sh
-systemctl start synod-server       # controller device only
-systemctl start synod-agent
 ```
 
-Stop the agents on all devices before you stop the controller.
+It installs the latest release and restarts the Synod services on that device.
+Upgrade the controller device first.
 Do not run `server init` or `agent join` again. Your devices keep their identities.
 
 ## Certificates
@@ -214,10 +209,10 @@ A device that was offline for more than 20 days can miss its renewal. Its agent 
 To fix it, run `synod node join-token --device DEVICE` on the controller. Then run this on the device:
 
 ```sh
-systemctl stop synod-agent
 synod agent renew 'TOKEN'
-systemctl start synod-agent
 ```
+
+Renew stops the agent, gets a new certificate, and starts the agent again.
 
 ## Troubleshoot
 

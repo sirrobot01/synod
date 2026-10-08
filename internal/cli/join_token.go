@@ -22,6 +22,10 @@ func newJoinTokenCommand(app *app) *cobra.Command {
 			if ttl < time.Minute || ttl > 7*24*time.Hour {
 				return &client.Error{Code: "invalid_request", Message: "Use a --ttl from 1m to 168h."}
 			}
+			// Connect first: it can fill the API settings from the controller on this device.
+			if err := app.connect(cmd, nil); err != nil {
+				return err
+			}
 			// The agent pins the API CA, so the token can only name a CA this command trusts.
 			fingerprint, err := apiCAFingerprint(app.settings.CAFile)
 			if err != nil {
@@ -34,9 +38,6 @@ func newJoinTokenCommand(app *app) *cobra.Command {
 			address := origin.Host
 			if origin.Port() == "" {
 				address = net.JoinHostPort(origin.Hostname(), "443")
-			}
-			if err := app.connect(cmd, nil); err != nil {
-				return err
 			}
 			installation, err := app.api.GetInstallation(cmd.Context())
 			if err != nil {

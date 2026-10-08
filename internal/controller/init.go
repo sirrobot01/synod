@@ -26,10 +26,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/config"
 	"github.com/sirrobot01/synod/internal/jointoken"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/store"
+	"github.com/sirrobot01/synod/internal/systemd"
 	"github.com/spf13/cobra"
 )
 
@@ -100,17 +102,31 @@ func initCommand() *cobra.Command {
 		Short: "Initialize a controller installation with its material and configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !cmd.Flags().Changed("address") {
+				options.Address = hostAddress()
+			}
 			return runInit(cmd.Context(), options, cmd.OutOrStdout())
 		},
 	}
-	command.Flags().StringVar(&options.Address, "address", "127.0.0.1", "Routable address or hostname for the controller")
-	command.Flags().StringVar(&options.Directory, "dir", "", "Directory to write the installation material and configuration into (required)")
+	command.Flags().StringVar(&options.Address, "address", "", "Routable address or hostname for the controller (default: this host's address on its default route)")
+	command.Flags().StringVar(&options.Directory, "dir", config.DefaultControllerDir, "Directory to write the installation material and configuration into")
 	command.Flags().StringVar(&options.InstallationID, "installation-id", "", "Installation UUID; one is generated when absent")
 	command.Flags().StringVar(&options.SystemdDir, "systemd-dir", "/etc/systemd/system", "Systemd units directory to install the service into")
 	command.Flags().StringVar(&options.FromRepository, "from-repository", "", "Recover from a repository directory or private connection JSON file")
 	command.Flags().StringVar(&options.PasswordFile, "password-file", "", "Private file with the repository password")
 	command.Flags().StringVar(&options.RepositoryDestination, "repository-destination", "", "Saved destination name or UUID of the surviving repository")
 	return command
+}
+
+// hostAddress returns the address that this host uses for its default route.
+// A UDP dial selects the route and sends no packet. It returns 127.0.0.1 without a route.
+func hostAddress() string {
+	connection, err := net.Dial("udp", "192.0.2.1:9")
+	if err != nil {
+		return "127.0.0.1"
+	}
+	defer connection.Close()
+	return connection.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
 func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
@@ -247,9 +263,16 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 			joinNote += fmt.Sprintf("\nThis join token reclaims device %s. Join it on the host with the repository directory.", joinNode)
 		}
 	}
-	serviceNote := fmt.Sprintf("Wrote systemd service to %s.", serviceLocalPath)
+	serviceNote := fmt.Sprintf("Wrote systemd service to %s.\nStart the controller with: synod server --config %s", serviceLocalPath, configPath)
 	if installedService {
-		serviceNote = fmt.Sprintf("Installed systemd service to %s/synod-server.service.", systemdDir)
+		serviceNote = fmt.Sprintf("Installed systemd service to %s/synod-server.service.\nStart it with: systemctl daemon-reload && systemctl enable --now synod-server", systemdDir)
+		if systemdDir == systemd.UnitDir && systemd.Running() {
+			if err := systemd.Start("synod-server"); err != nil {
+				serviceNote += fmt.Sprintf("\nThe service did not start: %v", err)
+			} else {
+				serviceNote = "Started the synod-server service. It starts again after a reboot."
+			}
+		}
 	}
 
 	kitNote := "No recovery kit was written. The recovered repository password is shorter than 16 characters.\nEach new destination needs its password in its credentials file."
@@ -274,10 +297,7 @@ Controller configuration written to:
 
 %s
 
-To administer this installation:
-  export SYNOD_API_URL=https://%s:8443
-  export SYNOD_CA_FILE=%s
-  export SYNOD_ADMIN_TOKEN_FILE=%s
+%s
 `,
 		res.id, absDir,
 		cfg.DatabasePath,
@@ -285,9 +305,7 @@ To administer this installation:
 		serviceNote,
 		kitNote,
 		joinNote,
-		address,
-		filepath.Join(absDir, "api-ca.crt"),
-		filepath.Join(absDir, "admin.token"),
+		adminNote(absDir, address),
 	)
 
 	_, err = fmt.Fprint(output, report)
@@ -610,4 +628,16 @@ To recover all apps after you lose the controller:
    REPOSITORY is the repository directory, or a private connection JSON file for S3 or SFTP.
 4. Join the devices again and restore each app with synod restore APP --to DEVICE.
 `, installationID, created.Format(time.RFC3339), password)
+}
+
+// adminNote tells the operator how to run synod commands. The CLI reads the default
+// directory by itself, so only another directory needs the settings.
+func adminNote(dir, address string) string {
+	if dir == config.DefaultControllerDir {
+		return fmt.Sprintf("Run synod commands as root on this device. Open the web UI at https://%s after synod user create NAME.", net.JoinHostPort(address, "8443"))
+	}
+	return fmt.Sprintf(`To administer this installation:
+  export SYNOD_API_URL=https://%s
+  export SYNOD_CA_FILE=%s
+  export SYNOD_ADMIN_TOKEN_FILE=%s`, net.JoinHostPort(address, "8443"), filepath.Join(dir, "api-ca.crt"), filepath.Join(dir, "admin.token"))
 }

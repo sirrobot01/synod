@@ -44,17 +44,7 @@ Do not run `server init` or `agent join` again.
 Those commands create identities. An upgrade keeps the current identities and encrypted credentials.
 
 Wait for active backups, restores, and drills to finish in Activity.
-Stop the Synod agent on each device.
-Then stop the controller.
-For installations that use the generated systemd units:
-
-```sh
-sudo systemctl stop synod-agent
-# Run this next command on the controller device.
-sudo systemctl stop synod-server
-```
-
-Run the installer on each device.
+Run the installer on each device, the controller device first.
 Use the directory that contains the executable in the service's `ExecStart` line.
 It installs the latest release:
 
@@ -74,12 +64,11 @@ Only one installer can use an installation directory at a time.
 If a killed installer leaves `.synod-install.lock`, first confirm that no installer is running.
 Then remove that empty directory with `rmdir` and retry.
 
-Start the controller first.
-Then start the agents on each device:
+After it replaces the binary, the installer restarts the `synod-server` and `synod-agent` services that are running on that device.
+A service that it cannot restart keeps the old version. Restart it with `systemctl restart`.
+Check the result on the controller:
 
 ```sh
-sudo systemctl start synod-server
-sudo systemctl start synod-agent
 synod installation get
 synod --json node list
 synod destination list
@@ -92,7 +81,7 @@ The node list reports `agent_version` for each device.
 Check that each device reconnects and retains its approval.
 Wait until destination settings are current on each device.
 Run a backup and restore a file to check repository access.
-The installer does not restart services or change app containers.
+The installer does not change app containers.
 For a foreground installation, stop and start the same commands with the same configuration files.
 
 Development builds can change the database schema in place.
@@ -104,15 +93,14 @@ Use repository recovery when the release notes require a fresh controller.
 ## Create an installation
 
 One binary holds the CLI, the controller, and the agent.
-Build it before you create service files.
-Use an address that the other devices can reach.
 
 ```sh
-./dist/synod server init --dir /private/path/synod --address 192.168.0.20
-./dist/synod server --config /private/path/synod/controller.json
+synod server init
 ```
 
-Replace the example path and address with your own values.
+The default directory is `/var/lib/synod/controller`. Use `--dir` to select another.
+The default address is the address of the device's default network route.
+Use `--address` to select an address or hostname that the other devices can reach.
 Init writes the certificates, keys, administrator token, SQLite database, and controller configuration.
 It prints a join token for one device.
 That token expires after seven days.
@@ -125,9 +113,17 @@ A join token must name the API address that the device can reach.
 
 On Linux, init also writes a systemd service file.
 It installs the file if it can write to the systemd directory.
-Use `--systemd-dir /path/to/units` to select another directory.
-Init does not start the service.
-Start it through systemd only after you check its paths.
+When it installs the file in `/etc/systemd/system` on a host that runs systemd, it enables and starts `synod-server`.
+Use `--systemd-dir /path/to/units` to install the file elsewhere. Init then does not start the service.
+Without systemd, start the controller yourself:
+
+```sh
+synod server --config /var/lib/synod/controller/controller.json
+```
+
+The CLI reads the API address, CA, and administrator token from `/var/lib/synod/controller/controller.json` when you run it as root.
+It does this only when you give no API URL.
+For another directory or another device, set `SYNOD_API_URL`, `SYNOD_CA_FILE`, and `SYNOD_ADMIN_TOKEN_FILE`.
 
 The controller accepts a JSON configuration file with `--config` or `SYNOD_CONFIG`.
 Environment variables override the file.
@@ -154,14 +150,14 @@ The default Docker socket is `/var/run/docker.sock`.
 Use `--docker-socket` to select another socket.
 The agent user must have access to that socket.
 
-Start the agent with its saved configuration:
+Join enables and starts the `synod-agent` service when it installs the unit in `/etc/systemd/system` on a host that runs systemd.
+Without systemd, start the agent yourself:
 
 ```sh
 synod agent run --config /var/lib/synod/agent/agent.json
 ```
 
-Set the administrator shell variables that init printed.
-Then list the devices and approve the new device by its name or ID:
+On the controller, list the devices and approve the new device by its name or ID:
 
 ```sh
 synod node list
@@ -736,10 +732,10 @@ Use a new private directory for the recovered controller.
 For a local or Synod-device repository, run recovery on the host with the repository files:
 
 ```sh
-synod server init --dir /private/path/recovered --address 192.168.0.20 \
-  --from-repository /mnt/backups/synod --password-file /private/path/password
-synod server --config /private/path/recovered/controller.json
+synod server init --from-repository /mnt/backups/synod --password-file /private/path/password
 ```
+
+Init starts the recovered controller as it does for a new installation.
 
 The password file must have mode `0600`.
 Recovery opens an existing repository.
@@ -753,21 +749,20 @@ The repository can move to another path.
 If the catalog has several destinations, use `--repository-destination NAME_OR_UUID` to identify the surviving copy.
 For a local repository, the printed join token uses the saved ID of its device.
 Run that join command on the host with the repository files.
-Use a new agent `--dir`.
-Start the agent and approve it.
+Use a new agent `--dir`. Join replaces the running agent service with the new configuration.
+Approve the device.
 To join each other saved device, create a token with its saved name or ID:
 
 ```sh
 synod node join-token --device DEVICE
-synod agent join TOKEN --dir /private/path/new-agent
-synod agent run --config /private/path/new-agent/agent.json
+synod agent join TOKEN --dir /var/lib/synod/recovered-agent
 synod node approve DEVICE
 synod snapshot list APP
 synod restore APP --to DEVICE
 ```
 
 Run the agent commands on the device.
-Run the other commands with the new administrator settings that init printed.
+Run the other commands on the new controller.
 Saved apps stay missing until discovery finds them again.
 You can restore a missing app to an approved device.
 A recovered local destination is available only to its owner device.
@@ -927,10 +922,10 @@ synod node join-token --device DEVICE
 Then run these commands on the device:
 
 ```sh
-systemctl stop synod-agent
-synod agent renew 'TOKEN' --dir /var/lib/synod/agent
-systemctl start synod-agent
+synod agent renew 'TOKEN'
 ```
+
+When the `synod-agent` service runs that agent directory, renew stops the service and starts it again after the renewal.
 
 The token works only for that device and only with its existing key.
 
