@@ -115,7 +115,7 @@ func (r *Repository) List(ctx context.Context, saved backup.Snapshot, name strin
 	entries := make(map[string]Entry)
 	truncated := false
 	if archive != "" {
-		entry, err := r.savedEntry(ctx, saved.ID, archive)
+		entry, err := r.SnapshotEntry(ctx, saved.ID, archive)
 		if err != nil {
 			return nil, false, err
 		}
@@ -149,7 +149,7 @@ func (r *Repository) List(ctx context.Context, saved backup.Snapshot, name strin
 		}
 		// A deeper saved path can be a file, such as a separately saved .env file.
 		if nested, _, err := Locate(saved, path.Join(name, child)); err == nil && nested != "" {
-			entry, err := r.savedEntry(ctx, saved.ID, nested)
+			entry, err := r.SnapshotEntry(ctx, saved.ID, nested)
 			if err != nil {
 				return nil, false, err
 			}
@@ -193,7 +193,7 @@ func describe(ctx context.Context, entry kfs.Entry) (Entry, error) {
 
 // OpenFile streams one saved regular file. The caller closes the reader.
 func (r *Repository) OpenFile(ctx context.Context, id uuid.UUID, archive string) (io.ReadCloser, int64, error) {
-	entry, err := r.savedEntry(ctx, id, archive)
+	entry, err := r.SnapshotEntry(ctx, id, archive)
 	if err != nil {
 		return nil, 0, err
 	}

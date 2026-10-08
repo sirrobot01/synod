@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/runtime/image"
@@ -20,8 +21,18 @@ func (w *Worker) imageEvidence(ctx context.Context, app *agentv1.DiscoveredApp) 
 			return nil, err
 		}
 		reference := c.ImageId
-		if len(c.RepoDigests) > 0 {
-			reference = c.RepoDigests[0]
+		for index, digest := range c.RepoDigests {
+			ref, err := name.NewDigest(digest)
+			if err != nil {
+				return nil, &image.Error{Code: image.InvalidReference}
+			}
+			if index == 0 {
+				reference = ref.Name()
+			}
+			if _, known := w.images.Load(ref.Name()); known {
+				reference = ref.Name()
+				break
+			}
 		}
 		evidence, ok := resolved[reference]
 		if !ok {
@@ -52,8 +63,11 @@ func (w *Worker) imageEvidence(ctx context.Context, app *agentv1.DiscoveredApp) 
 				// evidence then proves only the running image and its architecture.
 			}
 			resolved[reference] = evidence
+			if !evidence.LocalOnly {
+				w.images.Store(evidence.Image, evidence)
+			}
 		}
-		result = append(result, backup.Image{ContainerID: c.Id, Reference: evidence.Image, Architectures: evidence.Architectures, LocalOnly: evidence.LocalOnly})
+		result = append(result, backup.Image{ContainerID: c.Id, SourceID: c.ImageId, Reference: evidence.Image, Architectures: evidence.Architectures, LocalOnly: evidence.LocalOnly})
 	}
 	return result, nil
 }

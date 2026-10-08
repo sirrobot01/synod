@@ -91,7 +91,7 @@ func (e Event) Validate(request Request) error {
 			if r.SnapshotID == uuid.Nil || r.DestinationID == uuid.Nil || r.TargetAppID == uuid.Nil || r.ProjectDirectory == "" || r.FailureCode != "" {
 				return ErrInvalid
 			}
-		} else if r.TargetAppID != uuid.Nil || !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "snapshot_not_found", "snapshot_invalid", "image_platform_unsupported", "image_unavailable", "compose_unavailable", "definition_unsupported", "app_conflict", "port_conflict", "network_conflict", "source_path_unavailable", "file_restore_failed", "volume_restore_failed", "database_restore_failed", "safety_backup_failed", "app_changed_during_restore", "app_stop_failed", "compose_start_failed", "agent_interrupted"}, r.FailureCode) {
+		} else if r.TargetAppID != uuid.Nil || !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "snapshot_not_found", "snapshot_invalid", "image_platform_unsupported", "image_archive_missing", "image_archive_invalid", "image_load_failed", "compose_unavailable", "definition_unsupported", "app_conflict", "port_conflict", "network_conflict", "source_path_unavailable", "file_restore_failed", "volume_restore_failed", "database_restore_failed", "safety_backup_failed", "app_changed_during_restore", "app_stop_failed", "compose_start_failed", "agent_interrupted"}, r.FailureCode) {
 			return ErrInvalid
 		}
 	default:

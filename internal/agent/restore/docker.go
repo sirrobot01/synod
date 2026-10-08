@@ -15,35 +15,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
-
-// pullImages accepts a cached image of the target architecture when the registry is unavailable.
-func pullImages(ctx context.Context, api *client.Client, p *plan, architecture string) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	defer cancel()
-	done := make(map[string]bool)
-	for _, image := range p.Snapshot.Images {
-		if done[image.Reference] {
-			continue
-		}
-		done[image.Reference] = true
-		if !image.LocalOnly {
-			response, err := api.ImagePull(ctx, image.Reference, client.ImagePullOptions{Platforms: []ocispec.Platform{{OS: "linux", Architecture: architecture}}})
-			if err == nil {
-				err = response.Wait(ctx)
-			}
-			if err == nil {
-				continue
-			}
-		}
-		inspected, err := api.ImageInspect(ctx, image.Reference)
-		if err != nil || inspected.Architecture != architecture {
-			return &failure{Code: "image_unavailable", Resource: image.Reference, Cause: err}
-		}
-	}
-	return nil
-}
 
 // findConflicts returns the container IDs of the one existing app that a replace may remove.
 // It refuses a name, a published port, or a network that another app holds.

@@ -1,12 +1,15 @@
 package backup
 
 import (
+	"context"
+	"github.com/sirrobot01/synod/internal/runtime/image"
 	"io"
 	"log"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -68,6 +71,22 @@ func TestImageEvidenceUsesRunningDigestAfterTagMoves(t *testing.T) {
 		app.Containers[0].Platform = platform
 		if _, err := (&Worker{}).imageEvidence(t.Context(), app); err == nil {
 			t.Fatal("accepted unsupported local image")
+		}
+	}
+}
+
+func TestImageEvidenceReusesCanonicalRegistryNames(t *testing.T) {
+	worker := &Worker{}
+	digest := "sha256:" + strings.Repeat("b", 64)
+	canonical := "index.docker.io/library/alpine@" + digest
+	worker.images.Store(canonical, image.Resolution{Image: canonical, Architectures: []string{"amd64", "arm64"}})
+	// Docker reports shorthand names. A registry outage must not discard saved coverage.
+	for _, reference := range []string{"alpine@" + digest, "docker.io/library/alpine@" + digest, canonical} {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		evidence, err := worker.imageEvidence(ctx, &agentv1.DiscoveredApp{Containers: []*agentv1.DiscoveredContainer{{Id: "local", ImageId: "sha256:" + strings.Repeat("a", 64), Platform: "linux/arm64", RepoDigests: []string{"unavailable.invalid/alias@" + digest, reference}}}})
+		cancel()
+		if err != nil || len(evidence) != 1 || evidence[0].LocalOnly || evidence[0].Reference != canonical || len(evidence[0].Architectures) != 2 {
+			t.Fatalf("lost saved coverage for %s: %+v %v", reference, evidence, err)
 		}
 	}
 }

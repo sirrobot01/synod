@@ -25,7 +25,7 @@ func (r *Repository) Archive(ctx context.Context, id uuid.UUID, source, targetNa
 	if targetName != "" && (!fs.ValidPath(targetName) || strings.ContainsAny(targetName, "\\\x00")) {
 		return backup.ErrInvalid
 	}
-	entry, err := r.savedEntry(ctx, id, source)
+	entry, err := r.SnapshotEntry(ctx, id, source)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func (r *Repository) ArchivePath(ctx context.Context, saved backup.Snapshot, sou
 	}
 	var entry kfs.Entry = virtualfs.NewStaticDirectory(path.Base(source), nil)
 	if archive != "" {
-		entry, err = r.savedEntry(ctx, saved.ID, archive)
+		entry, err = r.SnapshotEntry(ctx, saved.ID, archive)
 		if err != nil {
 			return err
 		}
@@ -119,7 +119,7 @@ func (r *Repository) writeArchive(ctx context.Context, entry kfs.Entry, source, 
 				}
 				var nested kfs.Entry = virtualfs.NewStaticDirectory(child, nil)
 				if archived != "" {
-					nested, err = r.savedEntry(ctx, saved.ID, archived)
+					nested, err = r.SnapshotEntry(ctx, saved.ID, archived)
 					if err != nil {
 						return err
 					}
@@ -160,8 +160,9 @@ func (r *Repository) writeArchive(ctx context.Context, entry kfs.Entry, source, 
 	return archive.Close()
 }
 
-// savedEntry validates the saved root and never traverses a symlink.
-func (r *Repository) savedEntry(ctx context.Context, id uuid.UUID, source string) (kfs.Entry, error) {
+// SnapshotEntry reads an entry for reuse in a new snapshot. The caller closes it.
+// It validates the saved root and never traverses a symlink.
+func (r *Repository) SnapshotEntry(ctx context.Context, id uuid.UUID, source string) (kfs.Entry, error) {
 	if !fs.ValidPath(source) || strings.ContainsAny(source, "\\\x00") {
 		return nil, backup.ErrInvalid
 	}
@@ -209,7 +210,7 @@ func (r *Repository) ReadFile(ctx context.Context, id uuid.UUID, source string, 
 	if limit < 0 || limit > 16<<20 {
 		return nil, backup.ErrInvalid
 	}
-	entry, err := r.savedEntry(ctx, id, source)
+	entry, err := r.SnapshotEntry(ctx, id, source)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +233,7 @@ func (r *Repository) ReadFile(ctx context.Context, id uuid.UUID, source string, 
 
 // Stat reads path metadata without resolving a saved symlink.
 func (r *Repository) Stat(ctx context.Context, id uuid.UUID, source string) (fs.FileInfo, error) {
-	entry, err := r.savedEntry(ctx, id, source)
+	entry, err := r.SnapshotEntry(ctx, id, source)
 	if err != nil {
 		return nil, err
 	}

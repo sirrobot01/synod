@@ -195,7 +195,7 @@ func TestRestoreRecoversReplacedAppAfterInterruption(t *testing.T) {
 }
 
 func TestRestorePlacesAnIncludedLargeMount(t *testing.T) {
-	f := buildFixture(t, false, true)
+	f := buildFixture(t, false, true, helperImage)
 	if !slices.ContainsFunc(f.app.Definition.Paths, func(p *agentv1.DiscoveredPath) bool { return p.Source == f.media && p.Status == "Large" }) {
 		t.Fatal("discovery did not mark the media mount Large")
 	}

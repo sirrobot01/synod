@@ -48,6 +48,7 @@ type Inspector struct {
 type Resolution struct {
 	Image         string
 	Architectures []string
+	Manifests     map[string]string
 	LocalOnly     bool
 }
 
@@ -86,6 +87,7 @@ func (i Inspector) Resolve(ctx context.Context, image string) (Resolution, error
 	}
 	pinned := ref.Context().Digest(descriptor.Digest.String()).Name()
 	architectures := map[string]struct{}{}
+	manifests := make(map[string]string)
 	// A bounded queue supports nested OCI indexes without recursive registry walks.
 	queue := []*remote.Descriptor{descriptor}
 	seen := map[string]bool{}
@@ -150,6 +152,9 @@ func (i Inspector) Resolve(ctx context.Context, image string) (Resolution, error
 			if config.OS == "linux" && (config.Architecture == "amd64" || config.Architecture == "arm64") {
 				if config.Variant == "" || (config.Architecture == "arm64" && config.Variant == "v8") || (config.Architecture == "amd64" && config.Variant == "v1") {
 					architectures[config.Architecture] = struct{}{}
+					if manifests[config.Architecture] == "" {
+						manifests[config.Architecture] = ref.Context().Digest(current.Digest.String()).Name()
+					}
 				}
 			}
 		default:
@@ -159,5 +164,5 @@ func (i Inspector) Resolve(ctx context.Context, image string) (Resolution, error
 	if len(architectures) == 0 {
 		return Resolution{}, &Error{Code: UnsupportedPlatform}
 	}
-	return Resolution{Image: pinned, Architectures: slices.Sorted(maps.Keys(architectures))}, nil
+	return Resolution{Image: pinned, Manifests: manifests, Architectures: slices.Sorted(maps.Keys(architectures))}, nil
 }

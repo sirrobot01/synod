@@ -81,8 +81,9 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 		return nil, &failure{Code: "definition_unsupported", Resource: project, Cause: err}
 	}
 	images := make(map[string]backup.Image)
+	variants := make(map[string]backup.ImageVariant)
 	for _, image := range saved.Images {
-		if images[image.ContainerID].Reference != "" || p.Services[image.ContainerID] == "" {
+		if image.Validate() != nil || images[image.ContainerID].Reference != "" || p.Services[image.ContainerID] == "" {
 			return nil, &failure{Code: "snapshot_invalid"}
 		}
 		if !slices.Contains(image.Architectures, architecture) {
@@ -94,6 +95,12 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 			}
 		} else if _, err := name.NewDigest(image.Reference); err != nil {
 			return nil, &failure{Code: "snapshot_invalid", Cause: err}
+		}
+		for _, variant := range image.Variants {
+			if previous, ok := variants[variant.ID]; ok && previous != variant {
+				return nil, &failure{Code: "snapshot_invalid"}
+			}
+			variants[variant.ID] = variant
 		}
 		images[image.ContainerID] = image
 	}
@@ -109,14 +116,19 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 	}
 	for _, c := range p.Containers {
 		image := images[c.ID]
-		if image.Reference == "" || !slices.ContainsFunc(saved.App.Definition.Containers, func(item *agentv1.DiscoveredContainer) bool { return item.Id == c.ID && item.ImageId == c.Image }) {
+		if image.Reference == "" || image.SourceID != c.Image || !slices.ContainsFunc(saved.App.Definition.Containers, func(item *agentv1.DiscoveredContainer) bool { return item.Id == c.ID && item.ImageId == c.Image }) {
 			return nil, &failure{Code: "snapshot_invalid"}
 		}
 		service := p.Definition.Services[p.Services[c.ID]]
 		if service.NetworkMode == "host" {
 			return nil, &failure{Code: "definition_unsupported", Resource: service.ContainerName + ": host networking"}
 		}
-		service.Image, service.Platform = image.Reference, "linux/"+architecture
+		for _, variant := range image.Variants {
+			if variant.Architecture == architecture {
+				service.Image = variant.ID
+			}
+		}
+		service.Platform = "linux/" + architecture
 		if service.Labels == nil {
 			service.Labels = make(map[string]string)
 		}

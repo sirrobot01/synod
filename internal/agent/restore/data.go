@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -18,7 +20,6 @@ import (
 	"github.com/sirrobot01/synod/internal/repository"
 )
 
-const helperImage = "alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8"
 const helperPath = "/synod-restore"
 
 // prepareData writes only fresh bind paths and volumes labelled for this operation.
@@ -39,7 +40,9 @@ func prepareData(ctx context.Context, api *client.Client, r *repository.Reposito
 		}
 		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: root.Volume, Target: fmt.Sprintf("/synod-volume-%d", i), VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
 	}
-	helper, err := api.ContainerCreate(ctx, client.ContainerCreateOptions{Name: "synod-restore-" + id.String() + "-data", Config: &container.Config{Image: helperImage, Cmd: []string{"sleep", "1800"}, Labels: labels}, HostConfig: &container.HostConfig{NetworkMode: "none", ReadonlyRootfs: true, Mounts: mounts, CapDrop: []string{"ALL"}, CapAdd: []string{"DAC_OVERRIDE", "FOWNER"}}})
+	// Docker copies into this stopped container. It never runs the app image.
+	image := p.Definition.Services[slices.Sorted(maps.Keys(p.Definition.Services))[0]].Image
+	helper, err := api.ContainerCreate(ctx, client.ContainerCreateOptions{Name: "synod-restore-" + id.String() + "-data", Config: &container.Config{Image: image, Entrypoint: []string{"/synod-unused"}, Cmd: []string{"/synod-unused"}, Labels: labels}, HostConfig: &container.HostConfig{NetworkMode: "none", ReadonlyRootfs: true, Mounts: mounts, CapDrop: []string{"ALL"}, CapAdd: []string{"DAC_OVERRIDE", "FOWNER"}}})
 	if err != nil {
 		return "", &failure{Code: "file_restore_failed", Cause: err}
 	}

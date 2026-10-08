@@ -306,22 +306,22 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	definitions["networks.json"] = raw
 	state.phase("inspect_containers")
-	// A registry lookup can take seconds. It runs during the copy and joins before the app stops.
-	type imageResult struct {
-		images []backup.Image
-		err    error
+	var prior *backup.Snapshot
+	if saved, err := r.Snapshots(ctx, w.InstallationID, request.AppID); err == nil {
+		for _, saved := range saved {
+			if saved.DestinationID == request.DestinationID {
+				prior = new(saved)
+				break
+			}
+		}
 	}
-	resolved := make(chan imageResult, 1)
-	go func() {
-		images, err := w.imageEvidence(ctx, app)
-		resolved <- imageResult{images, err}
-	}()
-	joinImages := func() bool {
-		result := <-resolved
-		state.phase("wait_images")
-		state.Metadata.Images = result.images
-		return result.err == nil
+	archives, err := w.captureImages(ctx, r, app, prior)
+	if err != nil {
+		state.FailureCode = "image_capture_failed"
+		return w.finish(ctx, request, &state, r)
 	}
+	defer archives.Close()
+	state.phase("capture_images")
 	if app.Kind == "container" {
 		definition, err := compose.FromContainer(inspected[0])
 		if err != nil {
@@ -385,6 +385,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			Definition: app,
 		},
 		Method:       method,
+		Images:       archives.images,
 		Architecture: w.Architecture,
 		StartedAt:    state.StartedAt,
 		Paths:        tree.Paths,
@@ -417,10 +418,6 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		// The stopped pass reads only files that changed after the live pass.
 		previous = copied
 		state.phase("first_copy")
-		if !joinImages() {
-			state.FailureCode = "image_inspection_failed"
-			return w.finish(ctx, request, &state, r)
-		}
 		if err != nil {
 			state.FailureCode = "first_copy_failed"
 			return w.finish(ctx, request, &state, r)
@@ -478,6 +475,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			state.Metadata.Dumps = append(state.Metadata.Dumps, metadata)
 		}
 	}
+	tree.images = archives.entries
 	root, err := tree.Root(final, definitions, dumps...)
 	if err == nil {
 		state.Prepared, err = r.UploadFiles(final, root, source, false, previous)
@@ -492,11 +490,6 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		}
 	}
 	state.phase("final_copy")
-	if method != backup.Stop && !joinImages() {
-		state.Prepared = nil
-		state.FailureCode = "image_inspection_failed"
-		return w.finish(ctx, request, &state, r)
-	}
 	tree.sqliteMu.Lock()
 	sqliteErr := tree.sqliteErr
 	sqliteFiles := slices.Sorted(maps.Keys(tree.sqlite))

@@ -50,6 +50,7 @@ const largeFileBytes = 20 << 30
 // Tree confines reads to the selected roots and applies exclusions to overlapping paths.
 // Close it after both upload passes finish.
 type Tree struct {
+	images        []kfs.Entry
 	live          bool
 	sqliteMu      sync.Mutex
 	sqliteErr     error
@@ -261,7 +262,7 @@ func (t *Tree) Root(ctx context.Context, definitions map[string][]byte, dumps ..
 		files = append(files, &definitionFile{virtualfs.StreamingFileFromReader(name, io.NopCloser(bytes.NewReader(data)))})
 	}
 	kfs.Sort(files)
-	return virtualfs.NewStaticDirectory("app", []kfs.Entry{virtualfs.NewStaticDirectory("paths", entries), virtualfs.NewStaticDirectory("definition", files), virtualfs.NewStaticDirectory("databases", dumps)}), nil
+	return virtualfs.NewStaticDirectory("app", []kfs.Entry{virtualfs.NewStaticDirectory("paths", entries), virtualfs.NewStaticDirectory("definition", files), virtualfs.NewStaticDirectory("databases", dumps), virtualfs.NewStaticDirectory("images", t.images)}), nil
 }
 
 type definitionFile struct{ kfs.StreamingFile }

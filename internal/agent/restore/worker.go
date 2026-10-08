@@ -134,11 +134,11 @@ func (w *Worker) run(ctx context.Context, request restore.Request, state *progre
 	if err := dockerCLI(ctx, api, "compose", "version"); err != nil {
 		return &failure{Code: "compose_unavailable", Cause: err}
 	}
-	if err := pullImages(ctx, api, p, w.Backup.Architecture); err != nil {
-		return err
-	}
 	replaced, key, err := findConflicts(ctx, api, p, request.Replace)
 	if err != nil {
+		return err
+	}
+	if err := loadImages(ctx, api, r, p, w.Backup.Architecture); err != nil {
 		return err
 	}
 	if err := createNetworks(ctx, api, p, request.ID); err != nil {
@@ -155,7 +155,7 @@ func (w *Worker) run(ctx context.Context, request restore.Request, state *progre
 	}
 	helper, err := prepareData(ctx, api, r, p, request.ID, directory)
 	if helper != "" {
-		if _, removeErr := api.ContainerRemove(context.WithoutCancel(ctx), helper, client.ContainerRemoveOptions{Force: true}); removeErr != nil && err == nil {
+		if _, removeErr := api.ContainerRemove(context.WithoutCancel(ctx), helper, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true}); removeErr != nil && err == nil {
 			err = &failure{Code: "file_restore_failed", Cause: removeErr}
 		}
 	}

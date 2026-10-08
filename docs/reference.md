@@ -490,9 +490,16 @@ Cancellation stops the dump and waits for its child processes.
 Other PostgreSQL connections stay open.
 
 Each snapshot holds the discovered app manifest, included paths, and private container definitions.
-It also holds network settings and image platform evidence.
+It also holds network settings and complete image archives.
 Synod checks the running image digest. It does not use the current value of an image tag.
-If the registry is unavailable, the snapshot records only the cached image and its architecture.
+Synod saves supported Linux amd64 and arm64 variants from the pinned registry image.
+It checks that the source variant matches the running image.
+A local-only image supplies its source architecture only.
+If the registry is unavailable during the first backup, Synod saves the local image and reports that architecture only.
+An unchanged image reuses the archive from the previous snapshot in that destination.
+Each snapshot references its own image content. Retention can remove an older snapshot without removing images that a kept snapshot needs.
+New image archives use private unlinked temporary files before upload.
+The temporary directory must have space for all new image archives in the app.
 A standalone container also gets a generated Compose file.
 An unsupported standalone setting causes a failure.
 The full Docker inspect data stays in the encrypted snapshot.
@@ -601,11 +608,19 @@ The target agent does all restore work. The snapshot data does not go through th
 Synod checks these conditions before it changes the target:
 
 - Each image supports the target architecture. The failure names the image.
-- The target can pull each image by its saved digest. A cached image of the target architecture is also accepted.
+- The repository has a complete image archive for each target platform.
+- Each archive has the saved size and checksum. Its image ID, platform, and layer checks pass.
 - No other container has an app container name or the Compose project name.
 - No running container publishes a port that the app publishes.
 - An existing network with a saved network name uses the saved driver.
 - The Docker Compose plugin is available.
+
+The agent loads images from the repository. Restore does not contact a registry.
+It checks all target image archives before it loads any image into Docker.
+It loads no saved image tags, so it cannot replace a tag on the target.
+The temporary directory must have space for the target image archives.
+The file-copy container uses one of these images. This container stays stopped.
+No separate helper image is required.
 
 The agent writes the restore into a new private directory.
 The directory is `restores/OPERATION_ID` beside the agent enrollment directory.
@@ -626,7 +641,7 @@ Redis loads the RDB file. Synod then enables the append-only file again if the a
 
 Synod writes `compose.json` from the saved container settings.
 The file keeps the project name, the service names, the container names, and the published ports.
-It uses the image digest and the target platform.
+It uses the saved image ID and the target platform.
 Docker Compose then starts the project without a build or a pull.
 Synod creates each missing network with its saved driver and options.
 It keeps a saved subnet only when a container uses a static address on that network.

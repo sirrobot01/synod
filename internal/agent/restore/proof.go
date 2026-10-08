@@ -157,7 +157,7 @@ func (w *Worker) runProof(ctx context.Context, request proof.Request, result *pr
 	if err := dockerCLI(ctx, b.Docker, "compose", "version"); err != nil {
 		return &failure{Code: "compose_unavailable", Cause: err}
 	}
-	if err := pullImages(ctx, b.Docker, p, b.Architecture); err != nil {
+	if err := loadImages(ctx, b.Docker, r, p, b.Architecture); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(w.Directory, 0o700); err != nil {
@@ -171,7 +171,7 @@ func (w *Worker) runProof(ctx context.Context, request proof.Request, result *pr
 	}
 	helper, err := prepareData(ctx, b.Docker, r, p, request.ID, directory)
 	if helper != "" {
-		_, removeErr := b.Docker.ContainerRemove(context.WithoutCancel(ctx), helper, client.ContainerRemoveOptions{Force: true})
+		_, removeErr := b.Docker.ContainerRemove(context.WithoutCancel(ctx), helper, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
 		err = errors.Join(err, removeErr)
 	}
 	if err != nil {

@@ -39,17 +39,19 @@ type fixture struct {
 	port, media                   string
 }
 
+const helperImage = "alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8"
+
 const postgresImage = "postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0"
 
 // newFixture backs up one Compose project. With a database, the project also has a
 // PostgreSQL service with a named volume, a user network, and a published port.
 func newFixture(t *testing.T, database bool) *fixture {
 	t.Helper()
-	return buildFixture(t, database, false)
+	return buildFixture(t, database, false, helperImage)
 }
 
 // buildFixture can also mount a media directory. Discovery marks it Large, and the backup includes it.
-func buildFixture(t *testing.T, database, media bool) *fixture {
+func buildFixture(t *testing.T, database, media bool, sourceImage string) *fixture {
 	t.Helper()
 	host := os.Getenv("SYNOD_TEST_DOCKER_HOST")
 	if host == "" {
@@ -108,7 +110,7 @@ func buildFixture(t *testing.T, database, media bool) *fixture {
 			hostConfig.Mounts = append(hostConfig.Mounts, mount.Mount{Type: mount.TypeVolume, Source: project + "_appdata", Target: "/data"})
 		}
 	}
-	created, err := api.ContainerCreate(t.Context(), client.ContainerCreateOptions{Name: project, Config: &container.Config{Image: helperImage, Cmd: []string{"sleep", "3600"}, Env: []string{"SECRET=literal-$HOME-value"}, StopTimeout: new(1), Labels: labels("app")}, HostConfig: hostConfig, NetworkingConfig: &network.NetworkingConfig{EndpointsConfig: endpoints}})
+	created, err := api.ContainerCreate(t.Context(), client.ContainerCreateOptions{Name: project, Config: &container.Config{Image: sourceImage, Cmd: []string{"sleep", "3600"}, Env: []string{"SECRET=literal-$HOME-value"}, StopTimeout: new(1), Labels: labels("app")}, HostConfig: hostConfig, NetworkingConfig: &network.NetworkingConfig{EndpointsConfig: endpoints}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -169,6 +169,7 @@ synod restore APP --to DEVICE
 ```
 
 Synod restores the newest copy. It checks images, names, and ports before it changes anything.
+Saved images come from the repository. A restore does not need the registry or an existing image cache.
 To overwrite an existing app, add `--replace`. Synod first takes a safety backup of that app.
 
 In the web UI, use **Snapshots & restore**.
