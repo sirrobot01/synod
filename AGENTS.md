@@ -94,15 +94,21 @@ This section ends at the v0.1 release.
 Test meaningful success and failure behaviour at the appropriate boundary.
 Use real dependencies for critical transaction and orchestration tests.
 
+Keep feature work fast. The owner decides when heavy checks run.
+
+- During feature work, run `go build ./...`, `gofmt`, `go vet`, and the fast tests of the changed packages.
+- Fast tests are the tests that run without `SYNOD_TEST_DOCKER_HOST` and without MinIO. Docker and MinIO tests skip themselves when these are not set.
+- Write tests for new behaviour. You do not need to run the heavy tests for each feature.
+- Run Docker tests, MinIO tests, the full suite, and real-host proofs only when the owner asks for them. The owner usually asks before a release.
+- A task is done when its code builds and its fast checks pass. Record "heavy checks not run" in the done log.
 - Run tests with `-race -p 1`. Without `-p 1`, packages compete for Docker and fail on timing.
-- Before a commit, run only the affected packages. Run the full suite only after a major change.
 - Controller tests use SQLite files in temporary directories. Run `go test -race -p 1 -count=1 <packages>`.
 - For a Docker test, set `SYNOD_TEST_DOCKER_HOST=unix://<docker socket>`. Use disposable containers and free ports. Use `-run` to select heavy tests.
 - Never change the tree while a `go test` run is in flight. Never use `git stash` to get a baseline. Use a separate worktree at the base revision.
 - A failure that also happens on the base revision is not yours. Record it in the task note in `TASKS.md`.
 - Enrollment tests in `internal/api` can fail on timing under heavy load. Run a failed timing test again alone before you draw a conclusion.
 - For web changes, run `npx svelte-check`, `npx vitest run`, and `npm run build` in `web/`. The `dist` output is committed.
-- Some behaviour needs real Linux hosts: host networking, `/proc`, and mTLS between machines. Read `HOSTS.md` before you use them.
+- Some behaviour needs real Linux hosts: host networking, `/proc`, and mTLS between machines. Read `HOSTS.md` before you use them. Run a real-host proof only when the owner asks.
 
 ## Records
 
