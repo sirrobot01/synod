@@ -175,10 +175,11 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		}
 		return w.finish(ctx, request, &state, nil)
 	}
-	if err := w.Journal.Start(ctx, request.ID); err != nil {
-		return backup.Result{}, err
+	initial, err := json.Marshal(state)
+	if err != nil {
+		return backup.Result{}, journal.ErrConflict
 	}
-	if err := w.save(ctx, &state); err != nil {
+	if err := w.Journal.StartWithProgress(ctx, request.ID, initial); err != nil {
 		return backup.Result{}, err
 	}
 	state.phase("")
@@ -200,10 +201,8 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	// A failed backup can leave a broken connection. Only a clean result keeps it open.
 	defer func() { w.release(request.DestinationID, r, key, state.FailureCode == "") }()
+	// The next save records this. A crash before it only repeats the repository check.
 	state.RepositoryOpened = true
-	if err := w.save(ctx, &state); err != nil {
-		return backup.Result{}, err
-	}
 	if err := r.CheckInstallation(ctx, w.InstallationID); err != nil {
 		state.FailureCode = "repository_installation_conflict"
 		return w.finish(ctx, request, &state, r)
@@ -541,13 +540,8 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 	}
 	state.Restart = pending
 	state.phase("restart_app")
-	if err := w.save(cleanup, state); err != nil {
-		return backup.Result{}, err
-	}
-	if len(pending) > 0 {
-		return backup.Result{}, ErrRestartPending
-	}
-	if state.Metadata.CompletedAt.IsZero() {
+	// One commit records the restarts and the completion time.
+	if len(pending) == 0 && state.Metadata.CompletedAt.IsZero() {
 		state.Metadata.CompletedAt = time.Now().UTC()
 		if !state.StoppingAt.IsZero() {
 			state.Metadata.DowntimeMillis = max(0, time.Since(state.StoppingAt).Milliseconds())
@@ -555,6 +549,9 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 	}
 	if err := w.save(cleanup, state); err != nil {
 		return backup.Result{}, err
+	}
+	if len(pending) > 0 {
+		return backup.Result{}, ErrRestartPending
 	}
 	if state.Prepared != nil && state.FailureCode == "" {
 		if r == nil {

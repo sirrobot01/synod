@@ -70,6 +70,9 @@ def main():
                         help="odin directory: tmpfs, or the SD card")
     parser.add_argument("--server-storage", choices=["disk", "ram"], default="disk",
                         help="server directory: its disk, or /dev/shm")
+    parser.add_argument("--destination", choices=["device", "local"], default="device",
+                        help="Synod destination: a directory on the other host, or a local path on the source")
+    parser.add_argument("--skip-baseline", action="store_true", help="skip the rsync and tar cases")
     parser.add_argument("--small", type=int, default=20000)
     parser.add_argument("--large", type=int, default=2, help="number of 512 MiB files")
     parser.add_argument("--repeat", type=int, default=3, help="runs of each incremental case")
@@ -82,7 +85,7 @@ def main():
     source, target = (SERVER, ODIN) if options.source == "server" else (ODIN, SERVER)
     privileged = lambda host: host == ODIN
     src, dst = base[source], base[target]
-    result = {"run": run_id, "source": options.source, "odin_storage": options.odin_storage, "server_storage": options.server_storage, "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "cases": [], "cleanup_errors": []}
+    result = {"run": run_id, "source": options.source, "odin_storage": options.odin_storage, "server_storage": options.server_storage, "destination": options.destination, "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "cases": [], "cleanup_errors": []}
     container = None
     for host in (SERVER, ODIN):
         running, _ = ssh(host, "pgrep -x synod || true", sudo=privileged(host))
@@ -113,21 +116,24 @@ def main():
             return entry
 
         # tar over SSH is the ceiling for a full copy through one encrypted stream.
-        if source == SERVER:
+        if options.skip_baseline:
+            pass
+        elif source == SERVER:
             case("tar+ssh", "full", f"tar -C {src}/project -cf - data | {remote_shell} {ODIN} 'mkdir -p {dst}/tar && tar -C {dst}/tar -xf -'")
             rsync = f"rsync -a --delete -e {shlex.quote(remote_shell)} {src}/project/data/ {ODIN}:{dst}/rsync/"
         else:
             case("tar+ssh", "full", f"mkdir -p {dst}/tar && {remote_shell} {ODIN} 'tar -C {src}/project -cf - data' | tar -C {dst}/tar -xf -")
             rsync = f"rsync -a --delete -e {shlex.quote(remote_shell)} {ODIN}:{src}/project/data/ {dst}/rsync/"
-        ssh(target, f"rm -rf {dst}/tar", sudo=privileged(target))
-        case("rsync+ssh", "full", rsync)
-        ssh(source, f"cp -a {src}/project/data {src}/pristine")
-        for _ in range(options.repeat):
-            case("rsync+ssh", "unchanged", rsync)
-            ssh(source, f"python3 -c {shlex.quote(CHANGE)} {src}/project/data")
-            case("rsync+ssh", "small change", rsync)
-        ssh(target, f"rm -rf {dst}/rsync", sudo=privileged(target))
-        ssh(source, f"rm -rf {src}/project/data && mv {src}/pristine {src}/project/data")
+        if not options.skip_baseline:
+            ssh(target, f"rm -rf {dst}/tar", sudo=privileged(target))
+            case("rsync+ssh", "full", rsync)
+            ssh(source, f"cp -a {src}/project/data {src}/pristine")
+            for _ in range(options.repeat):
+                case("rsync+ssh", "unchanged", rsync)
+                ssh(source, f"python3 -c {shlex.quote(CHANGE)} {src}/project/data")
+                case("rsync+ssh", "small change", rsync)
+            ssh(target, f"rm -rf {dst}/rsync", sudo=privileged(target))
+            ssh(source, f"rm -rf {src}/project/data && mv {src}/pristine {src}/project/data")
 
         # Synod: the controller runs on server. Each host runs an agent. The target holds the repository.
         synod = {host: base[host] + "/synod" for host in (SERVER, ODIN)}
@@ -180,7 +186,11 @@ def main():
         if large:
             raise RuntimeError(f"benchmark data is not fully included: {large}")
         ssh(SERVER, f"umask 077; cat > {base[SERVER]}/password.json", data=json.dumps({"password": secrets.token_hex(24)}).encode())
-        api("destination", "add", "bench", "--type", "device", "--device", ids[target], "--path", f"{dst}/repository", "--credentials-file", f"{base[SERVER]}/password.json")
+        if options.destination == "device":
+            api("destination", "add", "bench", "--type", "device", "--device", ids[target], "--path", f"{dst}/repository", "--credentials-file", f"{base[SERVER]}/password.json")
+        else:
+            target, dst = source, src
+            api("destination", "add", "bench", "--type", "local", "--device", ids[source], "--path", f"{src}/repository", "--credentials-file", f"{base[SERVER]}/password.json")
         wait(lambda: all(d["current"] for d in api("destination", "list")["destinations"]["delivery"]), "settings were not delivered")
 
         def backup(name, method):

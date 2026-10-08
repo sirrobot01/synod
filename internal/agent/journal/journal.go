@@ -183,7 +183,16 @@ func (j *Journal) Admit(ctx context.Context, id uuid.UUID, input []byte) (Record
 
 // Start grants execution once. A running record must be inspected after a restart.
 func (j *Journal) Start(ctx context.Context, id uuid.UUID) error {
-	result, err := j.db.ExecContext(ctx, `UPDATE records SET state='running' WHERE id=? AND state='queued'`, id)
+	return j.StartWithProgress(ctx, id, nil)
+}
+
+// StartWithProgress grants execution once and saves the first progress in the same commit.
+// One commit matters on slow storage, such as an SD card, where a sync can take seconds.
+func (j *Journal) StartWithProgress(ctx context.Context, id uuid.UUID, progress []byte) error {
+	if len(progress) > 4<<20 {
+		return ErrConflict
+	}
+	result, err := j.db.ExecContext(ctx, `UPDATE records SET state='running',progress=coalesce(?,progress) WHERE id=? AND state='queued'`, progress, id)
 	if err != nil {
 		return fmt.Errorf("start journal work %s: %w", id, err)
 	}

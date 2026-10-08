@@ -180,22 +180,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		s.put(w, r, root, file)
 	case http.MethodDelete:
-		err := root.Remove(file)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := repository.RemoveBlobFile(root, file); err != nil {
 			s.fileError(w, r, err)
 			return
-		}
-		parent, err := root.Open(path.Dir(file))
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			s.fileError(w, r, err)
-			return
-		}
-		if err == nil {
-			err = errors.Join(parent.Sync(), parent.Close())
-			if err != nil {
-				s.fileError(w, r, err)
-				return
-			}
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
@@ -360,65 +347,11 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, root *os.Root, file
 			return
 		}
 	}
-	// Kopia commits packs through a later index blob. A pack becomes durable before any
-	// other blob is written, so an index never names a pack that a crash could lose.
-	pack := deferredSync && (strings.HasPrefix(file, "p/") || strings.HasPrefix(file, "q/"))
-	if deferredSync && !pack {
-		if err := syncFilesystem(root); err != nil {
-			s.fileError(w, r, err)
-			return
-		}
-	}
-	directory := path.Dir(file)
-	if err := root.MkdirAll(directory, 0700); err != nil {
-		s.fileError(w, r, err)
-		return
-	}
-	temporary := path.Join(directory, ".synod-"+uuid.NewString()+".tmp")
-	f, err := root.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
-	if err != nil {
-		s.fileError(w, r, err)
-		return
-	}
-	defer root.Remove(temporary)
-	written, writeErr := io.Copy(f, http.MaxBytesReader(w, r.Body, 64<<20))
-	if writeErr != nil || written != r.ContentLength || r.Context().Err() != nil {
-		f.Close()
+	info, err := repository.WriteBlobFile(root, file, http.MaxBytesReader(w, r.Body, 64<<20), r.ContentLength, modified)
+	if errors.Is(err, repository.ErrBlobIncomplete) || r.Context().Err() != nil {
 		http.Error(w, "blob upload incomplete", http.StatusBadRequest)
 		return
 	}
-	if !modified.IsZero() {
-		timestamp := syscall.NsecToTimeval(int64(modified.Nanosecond()))
-		timestamp.Sec = modified.Unix()
-		if err := syscall.Futimes(int(f.Fd()), []syscall.Timeval{timestamp, timestamp}); err != nil {
-			f.Close()
-			s.fileError(w, r, err)
-			return
-		}
-	}
-	if !pack {
-		writeErr = f.Sync()
-	}
-	if err := errors.Join(writeErr, f.Close()); err != nil {
-		s.fileError(w, r, err)
-		return
-	}
-	if err := root.Rename(temporary, file); err != nil {
-		s.fileError(w, r, err)
-		return
-	}
-	if !pack {
-		parent, err := root.Open(directory)
-		if err != nil {
-			s.fileError(w, r, err)
-			return
-		}
-		if err := errors.Join(parent.Sync(), parent.Close()); err != nil {
-			s.fileError(w, r, err)
-			return
-		}
-	}
-	info, err := root.Stat(file)
 	if err != nil {
 		s.fileError(w, r, err)
 		return

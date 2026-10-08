@@ -54,11 +54,8 @@ func (w *Worker) ExecuteProof(ctx context.Context, request proof.Request) (proof
 		}
 		state.Result.FailureCode = "agent_interrupted"
 	} else {
-		if err := b.Journal.Start(ctx, request.ID); err != nil {
-			return proof.Result{}, err
-		}
 		raw, _ := json.Marshal(state)
-		if err := b.Journal.SaveProgress(ctx, request.ID, raw); err != nil {
+		if err := b.Journal.StartWithProgress(ctx, request.ID, raw); err != nil {
 			return proof.Result{}, err
 		}
 		limit := 2 * time.Hour

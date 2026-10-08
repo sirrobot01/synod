@@ -1,6 +1,6 @@
 //go:build !linux
 
-package blobserver
+package repository
 
 import "os"
 

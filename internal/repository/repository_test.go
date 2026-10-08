@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kopia/kopia/repo/blob/filesystem"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -227,5 +228,42 @@ func TestNewRepositoryUsesChaCha20(t *testing.T) {
 	}
 	if f := direct.ContentReader().ContentFormat(); f.GetEncryptionAlgorithm() != "CHACHA20-POLY1305-HMAC-SHA256" || f.GetHashFunction() != "BLAKE2B-256-128" {
 		t.Fatalf("repository format: %s %s", f.GetEncryptionAlgorithm(), f.GetHashFunction())
+	}
+}
+
+func TestLocalStorageOpensKopiaFilesystemRepositories(t *testing.T) {
+	directory := t.TempDir()
+	st, err := filesystem.New(t.Context(), &filesystem.Options{Path: directory, FileMode: 0600, DirectoryMode: 0700}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Initialize(t.Context(), st, nil, "kopia-layout-password"); err != nil {
+		t.Fatal(err)
+	}
+	st.Close(t.Context())
+	credentials := Credentials{Password: "kopia-layout-password"}
+	r, err := Open(t.Context(), Location{Kind: "local", Path: directory}, credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := testCatalog()
+	if err := r.WriteCatalog(t.Context(), catalog); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	st, err = filesystem.New(t.Context(), &filesystem.Options{Path: directory}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close(context.Background())
+	native, err := open(t.Context(), st, credentials, "synod", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer native.Close(context.Background())
+	if got, err := native.ReadCatalog(t.Context()); err != nil || got.InstallationID != catalog.InstallationID {
+		t.Fatalf("Kopia filesystem storage cannot read a catalog written through local storage: %v", err)
 	}
 }

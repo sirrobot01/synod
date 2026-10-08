@@ -198,3 +198,26 @@ func TestProgressSurvivesRestartUntilCompletion(t *testing.T) {
 		t.Fatalf("completed progress not released: %v", err)
 	}
 }
+
+func TestStartWithProgressSavesOneCommit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.db")
+	installation, node, id := uuid.New(), uuid.New(), uuid.New()
+	j, err := Open(t.Context(), path, installation, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { j.Close() })
+	if _, err := j.Admit(t.Context(), id, []byte(`{"app":"test"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.StartWithProgress(t.Context(), id, []byte(`{"step":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.StartWithProgress(t.Context(), id, []byte(`{"step":2}`)); !errors.Is(err, ErrInspectionRequired) {
+		t.Fatalf("second start: %v", err)
+	}
+	records, err := j.Pending(t.Context())
+	if err != nil || len(records) != 1 || records[0].State != Running || string(records[0].Progress) != `{"step":1}` {
+		t.Fatalf("started record: %+v %v", records, err)
+	}
+}

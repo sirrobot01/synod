@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/kopia/kopia/repo/blob"
-	"github.com/kopia/kopia/repo/blob/filesystem"
 	"github.com/kopia/kopia/repo/blob/s3"
 )
 
@@ -115,7 +114,7 @@ func storage(ctx context.Context, location Location, credentials Credentials, cr
 		}
 		return newDevice(ctx, &deviceOptions{NodeID: location.Device.NodeID, DestinationID: location.Device.DestinationID, Endpoint: location.Device.Endpoint, CertificateSHA256: location.Device.CertificateSHA256, Identity: *credentials.DeviceIdentity}, create)
 	case "local":
-		return filesystem.New(ctx, &filesystem.Options{Path: location.Path, FileMode: 0600, DirectoryMode: 0700}, create)
+		return newLocal(ctx, &localOptions{Path: location.Path}, create)
 	case "sftp":
 		remote := location.SFTP
 		return newSFTP(ctx, &sftpOptions{Path: location.Path, Host: remote.Host, Port: remote.Port, User: remote.User, KnownHosts: remote.KnownHosts, Key: credentials.SSHKey}, create)

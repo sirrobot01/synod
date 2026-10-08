@@ -1,4 +1,4 @@
-package blobserver
+package repository
 
 import (
 	"os"

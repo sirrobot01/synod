@@ -88,10 +88,11 @@ func (w *Worker) Execute(ctx context.Context, request restore.Request) (restore.
 		}
 		return w.finish(ctx, request, &state, &failure{Code: "agent_interrupted"})
 	}
-	if err := b.Journal.Start(ctx, request.ID); err != nil {
-		return restore.Result{}, err
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return restore.Result{}, journal.ErrConflict
 	}
-	if err := w.save(ctx, &state); err != nil {
+	if err := b.Journal.StartWithProgress(ctx, request.ID, raw); err != nil {
 		return restore.Result{}, err
 	}
 	return w.finish(ctx, request, &state, w.run(ctx, request, &state))
