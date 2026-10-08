@@ -77,12 +77,13 @@ func (s *Store) RegisterEnrollmentToken(ctx context.Context, r TokenRegistration
 	if !errors.Is(err, sql.ErrNoRows) {
 		return EnrollmentToken{}, storeError(err)
 	}
+	// A device-bound token joins a recovered device, or renews an enrolled device that kept its key.
 	if r.NodeID != uuid.Nil {
-		var enrolled bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND (public_key_hash IS NOT NULL OR revoked_at IS NOT NULL))`, r.NodeID).Scan(&enrolled); err != nil {
+		var revoked bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND revoked_at IS NOT NULL)`, r.NodeID).Scan(&revoked); err != nil {
 			return EnrollmentToken{}, storeError(err)
 		}
-		if enrolled {
+		if revoked {
 			return EnrollmentToken{}, &Error{Code: EnrollmentConflict}
 		}
 	}
@@ -169,10 +170,19 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
 		return EnrollmentResult{}, &Error{Code: EnrollmentUnauthorized}
 	}
 	var exists, enrolled bool
+	var enrolledKey []byte
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE id=?),EXISTS(SELECT 1 FROM nodes WHERE id=? AND (public_key_hash IS NOT NULL OR revoked_at IS NOT NULL))`, r.NodeID, r.NodeID).Scan(&exists, &enrolled); err != nil {
 		return EnrollmentResult{}, storeError(err)
 	}
-	if enrolled || (exists && !tokenNode.Valid) {
+	if enrolled && tokenNode.Valid {
+		// A device-bound token renews an expired device that kept its key. Its approval stays.
+		if err := tx.QueryRowContext(ctx, `SELECT public_key_hash FROM nodes WHERE id=? AND revoked_at IS NULL`, r.NodeID).Scan(&enrolledKey); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return EnrollmentResult{}, storeError(err)
+		}
+		if key, err := csrKeyHash(r.CSRDER); err != nil || enrolledKey == nil || !bytes.Equal(key[:], enrolledKey) {
+			return EnrollmentResult{}, &Error{Code: EnrollmentConflict}
+		}
+	} else if enrolled || (exists && !tokenNode.Valid) {
 		return EnrollmentResult{}, &Error{Code: EnrollmentConflict}
 	}
 	// A controller with no CA issues nothing. A replay above still answers without one.
@@ -205,6 +215,12 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
 	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id,public_key_hash,enrolled_at) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET public_key_hash=excluded.public_key_hash,enrolled_at=excluded.enrolled_at`, r.NodeID, keyHash[:], now.UnixMilli()); err != nil {
 		return EnrollmentResult{}, storeError(err)
 	}
+	if enrolledKey != nil {
+		// Peers pin certificate fingerprints. The plan revision delivers the new one.
+		if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
+			return EnrollmentResult{}, storeError(err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO node_certificates (id,node_id,serial,der_hash,certificate_pem,ca_certificate_pem,not_before,not_after) VALUES (?,?,?,?,?,?,?,?)`,
 		id, r.NodeID, certificate.SerialNumber.Text(16), derHash[:], string(certificatePEM), string(ca.CertificatePEM()), certificate.NotBefore.UnixMilli(), certificate.NotAfter.UnixMilli()); err != nil {
 		return EnrollmentResult{}, storeError(err)
@@ -219,6 +235,94 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
 		return EnrollmentResult{}, err
 	}
 	return EnrollmentResult{NodeID: r.NodeID, CertificateID: id, CertificatePEM: string(certificatePEM), CACertificatePEM: string(ca.CertificatePEM()), AcceptedAt: now}, nil
+}
+
+func csrKeyHash(csrDER []byte) ([32]byte, error) {
+	request, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	if err := request.CheckSignature(); err != nil {
+		return [32]byte{}, err
+	}
+	key, err := x509.MarshalPKIXPublicKey(request.PublicKey)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(key), nil
+}
+
+// RenewalResult is a certificate that the current agent session can install.
+type RenewalResult struct {
+	CertificateID    uuid.UUID
+	CertificatePEM   string
+	CACertificatePEM string
+}
+
+// RenewAgentCertificate issues a new certificate for the key that the device enrolled with.
+// Only the device's current approved session can ask. A certificate issued at most
+// 30 days minus RenewalWindow ago is returned again, so a lost reply does not issue another.
+func (s *Store) RenewAgentCertificate(ctx context.Context, nodeID, sessionID uuid.UUID, csrDER []byte, ca *pki.CA) (RenewalResult, error) {
+	if nodeID == uuid.Nil || sessionID == uuid.Nil || len(csrDER) == 0 || len(csrDER) > 64<<10 {
+		return RenewalResult{}, &Error{Code: InvalidRequest}
+	}
+	key, err := csrKeyHash(csrDER)
+	if err != nil {
+		return RenewalResult{}, &Error{Code: InvalidRequest, Cause: err}
+	}
+	if ca == nil {
+		return RenewalResult{}, &Error{Code: Unavailable}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RenewalResult{}, storeError(err)
+	}
+	defer tx.Rollback()
+	var enrolledKey []byte
+	if err := tx.QueryRowContext(ctx, `SELECT public_key_hash FROM nodes WHERE id=? AND session_id=? AND approved_at IS NOT NULL AND revoked_at IS NULL`, nodeID, sessionID).Scan(&enrolledKey); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RenewalResult{}, ErrStaleSession
+		}
+		return RenewalResult{}, storeError(err)
+	}
+	if !bytes.Equal(key[:], enrolledKey) {
+		return RenewalResult{}, &Error{Code: EnrollmentUnauthorized}
+	}
+	now := s.now().Truncate(time.Millisecond).UTC()
+	var result RenewalResult
+	err = tx.QueryRowContext(ctx, `SELECT id,certificate_pem,ca_certificate_pem FROM node_certificates WHERE node_id=? AND revoked_at IS NULL AND not_after>? ORDER BY not_after DESC LIMIT 1`, nodeID, now.Add(pki.RenewalWindow).UnixMilli()).Scan(&result.CertificateID, &result.CertificatePEM, &result.CACertificatePEM)
+	if err == nil {
+		return result, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return RenewalResult{}, storeError(err)
+	}
+	certificatePEM, err := ca.Issue(csrDER, pki.Identity{InstallationID: ca.InstallationID(), Role: pki.Agent, SubjectID: nodeID}, nil, now, AgentCertificateLifetime)
+	if err != nil {
+		return RenewalResult{}, &Error{Code: InvalidRequest, Cause: err}
+	}
+	block, _ := pem.Decode(certificatePEM)
+	if block == nil {
+		return RenewalResult{}, &Error{Code: InvalidRequest}
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return RenewalResult{}, &Error{Code: InvalidRequest, Cause: err}
+	}
+	derHash := sha256.Sum256(certificate.Raw)
+	result = RenewalResult{CertificateID: uuid.New(), CertificatePEM: string(certificatePEM), CACertificatePEM: string(ca.CertificatePEM())}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO node_certificates (id,node_id,serial,der_hash,certificate_pem,ca_certificate_pem,not_before,not_after) VALUES (?,?,?,?,?,?,?,?)`,
+		result.CertificateID, nodeID, certificate.SerialNumber.Text(16), derHash[:], result.CertificatePEM, result.CACertificatePEM, certificate.NotBefore.UnixMilli(), certificate.NotAfter.UnixMilli()); err != nil {
+		return RenewalResult{}, storeError(err)
+	}
+	// Peers pin certificate fingerprints. The plan revision delivers the new one.
+	if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
+		return RenewalResult{}, storeError(err)
+	}
+	if err := audit(ctx, tx, "node:"+nodeID.String(), sessionID.String(), "node.certificate.renewed", result.CertificateID, now); err != nil {
+		return RenewalResult{}, err
+	}
+	return result, storeCommit(tx)
 }
 
 // CheckAgentCertificate authorizes a verified peer certificate against current state.

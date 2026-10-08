@@ -38,7 +38,7 @@ func Command() *cobra.Command {
 		}{Event: "agent_stopped"})
 	}}
 	run.Flags().StringVar(&configPath, "config", "", "Private agent JSON configuration file (required)")
-	root.AddCommand(joinCommand(), run)
+	root.AddCommand(joinCommand(), renewCommand(), run)
 	return root
 }
 

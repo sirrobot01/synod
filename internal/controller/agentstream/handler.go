@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/controlstream"
+	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/restore"
 	"github.com/sirrobot01/synod/internal/store"
@@ -25,6 +26,8 @@ var ErrUnsupportedMessage = errors.New("unsupported agent message")
 type Receiver struct {
 	Store *store.Store
 	Send  func(uuid.UUID, string, *agentv1.ControllerMessage) error
+	// Authority issues renewed agent certificates. Without it, renewal requests fail.
+	Authority *pki.CA
 }
 
 // Handle records one message. It returns nil only after the record commits.
@@ -110,6 +113,15 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 		return r.Store.RecordInventory(ctx, peer.NodeID, sessionID, value.Inventory)
 	case *agentv1.AgentMessage_Heartbeat:
 		return r.Store.RecordAgentHeartbeat(ctx, peer.NodeID, sessionID, value.Heartbeat)
+	case *agentv1.AgentMessage_CertificateRequest:
+		if value.CertificateRequest == nil || r.Send == nil {
+			return ErrUnsupportedMessage
+		}
+		issued, err := r.Store.RenewAgentCertificate(ctx, peer.NodeID, sessionID, value.CertificateRequest.CsrDer, r.Authority)
+		if err != nil {
+			return err
+		}
+		return r.Send(peer.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_CertificateIssued{CertificateIssued: &agentv1.CertificateIssued{CertificateId: issued.CertificateID.String(), CertificatePem: issued.CertificatePEM, CaCertificatePem: issued.CACertificatePEM}}})
 	default:
 		return fmt.Errorf("%w: node %s sent %T", ErrUnsupportedMessage, peer.NodeID, message.Message)
 	}

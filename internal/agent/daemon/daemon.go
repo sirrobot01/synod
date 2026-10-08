@@ -31,14 +31,31 @@ import (
 	"github.com/sirrobot01/synod/internal/buildinfo"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/destination"
+	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/restore"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
+// errRenewed asks Run to start again with the renewed certificate.
+var errRenewed = errors.New("agent certificate renewed")
+
+// renewalSettle gives peers time to receive the new certificate fingerprint in a plan
+// before the agent presents the new certificate.
+var renewalSettle = 2 * time.Minute
+
 // Run connects an enrolled agent to its controller and keeps the session until ctx ends.
+// After a certificate renewal, it starts again with the new certificate.
 func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
+	for {
+		if err := run(ctx, config, diagnostics); !errors.Is(err, errRenewed) {
+			return err
+		}
+	}
+}
+
+func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	if diagnostics == nil {
 		return fmt.Errorf("%w: a diagnostics writer is required", ErrConfiguration)
 	}
@@ -52,6 +69,9 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	}
 	defer state.Close()
 	identity, err := state.Credentials()
+	if notAfter, expiryErr := state.NotAfter(); err != nil && expiryErr == nil && !time.Now().Before(notAfter) {
+		return fmt.Errorf("%w: the device certificate expired at %s. Stop this agent, run synod node join-token --device %s on the controller, then run synod agent renew TOKEN on this device", ErrEnrollment, notAfter.UTC().Format(time.RFC3339), config.NodeID)
+	}
 	if err != nil {
 		return fmt.Errorf("%w: read enrollment credentials: %w", ErrEnrollment, err)
 	}
@@ -89,9 +109,11 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	hello := &agentv1.Hello{
 		InstallationId: config.InstallationID, NodeId: config.NodeID, DestinationAddress: destinationAddress,
 		Protocol:     &agentv1.VersionRange{Minimum: controlstream.ProtocolVersion, Maximum: controlstream.ProtocolVersion},
-		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "destination.health", "backup.exec", "restore.exec", "proof.exec", "files.read"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
+		Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "destination.health", "backup.exec", "restore.exec", "proof.exec", "files.read", "certificate.renew"}, RuntimeVersion: facts.version, Architecture: facts.architecture,
 		Hostname: hostname, AgentVersion: buildinfo.Version,
 	}
+	// renewed holds the time of a saved renewal. The agent starts again when it is idle.
+	var renewed atomic.Pointer[time.Time]
 	// File requests wait in a bounded queue. A full queue refuses the request, and the controller times out.
 	fileRequests := make(chan restore.FileRequest, 8)
 	stream, err := transport.New(transport.Config{
@@ -159,6 +181,19 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 				}
 				return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_DestinationAck{DestinationAck: &agentv1.DestinationAck{Revision: plan.Revision}}}, nil
 			}
+			if issued := message.GetCertificateIssued(); issued != nil {
+				id, err := uuid.Parse(issued.CertificateId)
+				if err == nil {
+					err = state.Renew(id, issued.CertificatePem, issued.CaCertificatePem)
+				}
+				if err != nil {
+					logger.Warn("certificate_renewal_failed", "code", "certificate_invalid")
+					return nil, nil
+				}
+				renewed.CompareAndSwap(nil, new(time.Now()))
+				logger.Info("certificate_renewed", "certificate_id", id)
+				return nil, nil
+			}
 			if failure := message.GetError(); failure != nil {
 				logger.Warn("controller_error", "code", failure.Code, "message", failure.Message)
 			}
@@ -192,7 +227,19 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	backupWorker := &agentbackup.Worker{Docker: api, Journal: cache, Keyring: ring, InstallationID: identity.Identity.InstallationID, NodeID: identity.Identity.NodeID, NodeName: hostname, Architecture: facts.architecture, Identity: deviceIdentity, PrivatePaths: []string{enrollmentPath, enrollmentPath + ".db", enrollmentPath + ".db-wal", enrollmentPath + ".db-shm"}, Logger: logger, CacheDirectory: filepath.Join(filepath.Dir(enrollmentPath), "cache")}
 	restoreWorker := &agentrestore.Worker{Backup: backupWorker, Directory: filepath.Join(filepath.Dir(enrollmentPath), "restores")}
 	var waiting atomic.Pointer[uuid.UUID]
-	worker.Go(func() { executeJobs(workerCtx, backupWorker, restoreWorker, &waiting, logger) })
+	reload := make(chan struct{})
+	worker.Go(func() {
+		executeJobs(workerCtx, backupWorker, restoreWorker, &waiting, logger, func() bool {
+			// Peers receive the new certificate fingerprint in a plan before the agent uses it.
+			at := renewed.Load()
+			if at == nil || time.Since(*at) < renewalSettle {
+				return false
+			}
+			close(reload)
+			return true
+		})
+	})
+	worker.Go(func() { requestRenewal(workerCtx, state, stream, &renewed, logger) })
 	worker.Go(func() { reportJobs(workerCtx, cache, stream, &waiting, logger) })
 	worker.Go(func() { discover(workerCtx, api, stream, logger) })
 	worker.Go(func() { reportDestinationHealth(workerCtx, cache, ring, identity.Identity.NodeID, stream, logger) })
@@ -207,6 +254,8 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	worker.Go(func() { stopped <- blobHTTP.ServeTLS(blobListener, "", "") })
 	select {
 	case err = <-stopped:
+	case <-reload:
+		err = errRenewed
 	case <-ctx.Done():
 		err = ctx.Err()
 	}
@@ -216,7 +265,7 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	if stopErr := blobHTTP.Shutdown(shutdown); stopErr != nil {
 		err = errors.Join(err, stopErr, blobHTTP.Close())
 	}
-	if ctx.Err() == nil {
+	if ctx.Err() == nil && !errors.Is(err, errRenewed) {
 		return fmt.Errorf("%w: %w", ErrExecution, err)
 	}
 	// Keep the enrollment lock until restart recovery has finished.
@@ -224,7 +273,38 @@ func Run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	if err := state.Close(); err != nil {
 		return fmt.Errorf("%w: close enrollment state: %w", ErrEnrollment, err)
 	}
+	if errors.Is(err, errRenewed) {
+		logger.Info("agent_restarting", "code", "certificate_renewed")
+		return errRenewed
+	}
 	return nil
+}
+
+// requestRenewal asks for a new certificate once the current one is within the renewal window.
+// An unsent request repeats after 15 seconds, and a lost reply after an hour.
+// The controller returns a recent certificate again instead of issuing another.
+func requestRenewal(ctx context.Context, state *enrollment.State, stream *transport.Client, renewed *atomic.Pointer[time.Time], logger *slog.Logger) {
+	for {
+		wait := time.Hour
+		notAfter, err := state.NotAfter()
+		if err == nil && renewed.Load() == nil && time.Until(notAfter) < pki.RenewalWindow {
+			csr, err := state.RenewalRequest()
+			if err == nil {
+				err = stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_CertificateRequest{CertificateRequest: &agentv1.CertificateRequest{CsrDer: csr}}})
+			}
+			if err != nil {
+				wait = 15 * time.Second
+				if !errors.Is(err, controlstream.ErrDisconnected) {
+					logger.Warn("certificate_renewal_failed", "code", "renewal_request_failed")
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
 }
 
 type hostFacts struct {

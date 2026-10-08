@@ -375,7 +375,7 @@ func (s *Store) DestinationPlan(ctx context.Context, installationID, nodeID, ses
 			result.Ready = append(result.Ready, target.ID)
 		}
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT n.id,n.destination_address,c.der_hash FROM nodes n JOIN node_certificates c ON c.node_id=n.id WHERE n.approved_at IS NOT NULL AND n.revoked_at IS NULL AND c.revoked_at IS NULL ORDER BY n.id,c.id`)
+	rows, err := tx.QueryContext(ctx, `SELECT n.id,n.destination_address,c.der_hash FROM nodes n JOIN node_certificates c ON c.node_id=n.id WHERE n.approved_at IS NOT NULL AND n.revoked_at IS NULL AND c.revoked_at IS NULL AND c.not_after>? ORDER BY n.id,c.id`, s.now().UnixMilli())
 	if err != nil {
 		return result, storeError(err)
 	}

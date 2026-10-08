@@ -210,3 +210,62 @@ func pinnedAPICA(ctx context.Context, token jointoken.Token) (*x509.CertPool, er
 	}
 	return nil, fmt.Errorf("%w: %s serves no CA certificate that matches the join token fingerprint", enrollment.ErrCertificate, token.Address)
 }
+
+func renewCommand() *cobra.Command {
+	var dir string
+	command := &cobra.Command{
+		Use:   "renew TOKEN",
+		Short: "Get a new certificate for this device with a device-bound join token",
+		Long: `Renew recovers a device whose certificate expired while it was offline.
+Create the token with synod node join-token --device DEVICE. The device keeps its key,
+identity, approval, and encrypted cache. Stop the agent, renew, and start it again.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return renew(cmd.Context(), args[0], dir, cmd.OutOrStdout())
+		},
+	}
+	command.Flags().StringVar(&dir, "dir", "/var/lib/synod/agent", "Private directory with the agent state")
+	return command
+}
+
+func renew(ctx context.Context, encoded, dir string, stdout io.Writer) error {
+	token, err := jointoken.Decode(encoded)
+	if err != nil {
+		return fmt.Errorf("%w: %w", enrollment.ErrConfiguration, err)
+	}
+	dir, err = filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("%w: resolve --dir: %w", enrollment.ErrConfiguration, err)
+	}
+	saved, err := os.ReadFile(filepath.Join(dir, "node-id"))
+	if err != nil {
+		return fmt.Errorf("%w: read the device identity in %s: %w", enrollment.ErrState, dir, err)
+	}
+	nodeID, err := uuid.Parse(strings.TrimSpace(string(saved)))
+	if err != nil || token.NodeID == uuid.Nil || token.NodeID != nodeID {
+		return fmt.Errorf("%w: renewal needs a token from synod node join-token --device %s", enrollment.ErrConfiguration, strings.TrimSpace(string(saved)))
+	}
+	state, err := enrollment.Open(filepath.Join(dir, "enrollment"), enrollment.Options{Identity: enrollment.Identity{InstallationID: token.InstallationID, NodeID: nodeID}})
+	if err != nil {
+		return err
+	}
+	defer state.Close()
+	roots, err := pinnedAPICA(ctx, token)
+	if err != nil {
+		return err
+	}
+	tokenPath := filepath.Join(dir, "renew.token")
+	if err := os.WriteFile(tokenPath, []byte(token.Secret+"\n"), 0o600); err != nil {
+		return fmt.Errorf("%w: write %s: %w", enrollment.ErrState, tokenPath, err)
+	}
+	defer os.Remove(tokenPath)
+	if _, err := state.RenewWithToken(ctx, enrollment.Config{Endpoint: "https://" + token.Address, TokenFile: tokenPath, RootCAs: roots}); err != nil {
+		return err
+	}
+	notAfter, err := state.NotAfter()
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "Device %s has a new certificate until %s.\nStart the agent again:\n  systemctl restart synod-agent\n", nodeID, notAfter.UTC().Format(time.RFC3339))
+	return err
+}

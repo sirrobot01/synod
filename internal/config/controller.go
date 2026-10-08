@@ -32,8 +32,11 @@ type Controller struct {
 	TLSKeyFile       string `json:"tls_key_file"`
 	CACertFile       string `json:"ca_cert_file"`
 	CAKeyFile        string `json:"ca_key_file"`
-	PublicOrigin     string `json:"public_origin"`
-	LogLevel         string `json:"log_level"`
+	// APICACertFile and APICAKeyFile let the controller renew its API certificate.
+	APICACertFile string `json:"api_ca_cert_file"`
+	APICAKeyFile  string `json:"api_ca_key_file"`
+	PublicOrigin  string `json:"public_origin"`
+	LogLevel      string `json:"log_level"`
 	// SecretKeyFile holds the base64 of one 32-byte wrapping key, and SecretKeyID
 	// names it. Destination credentials are sealed with it.
 	SecretKeyFile string `json:"secret_key_file"`
@@ -117,6 +120,8 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 		{"SYNOD_TLS_KEY_FILE", &config.TLSKeyFile},
 		{"SYNOD_CA_CERT_FILE", &config.CACertFile},
 		{"SYNOD_CA_KEY_FILE", &config.CAKeyFile},
+		{"SYNOD_API_CA_CERT_FILE", &config.APICACertFile},
+		{"SYNOD_API_CA_KEY_FILE", &config.APICAKeyFile},
 		{"SYNOD_PUBLIC_ORIGIN", &config.PublicOrigin},
 		{"SYNOD_LOG_LEVEL", &config.LogLevel},
 		{"SYNOD_SECRET_KEY_FILE", &config.SecretKeyFile},
@@ -183,6 +188,9 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 	}
 	if (config.CACertFile == "") != (config.CAKeyFile == "") {
 		return Controller{}, errors.New("ca_cert_file and ca_key_file must be supplied together")
+	}
+	if (config.APICACertFile == "") != (config.APICAKeyFile == "") {
+		return Controller{}, errors.New("api_ca_cert_file and api_ca_key_file must be supplied together")
 	}
 	if (config.SecretKeyFile == "") != (config.SecretKeyID == "") {
 		return Controller{}, errors.New("secret_key_file and secret_key_id must be supplied together")

@@ -492,6 +492,10 @@ Each request checks the cached list of approved certificate fingerprints.
 The client checks the destination certificate and its exact device identity.
 Access changes take effect when an agent receives the new plan.
 Expired certificates are always refused.
+Agents renew their certificates with the same key when less than 10 days remain.
+The controller adds the new fingerprint to the plan. The agent uses the new certificate two minutes later.
+The controller renews its own transport and API certificates the same way.
+A device that missed its renewal recovers with `synod node join-token --device DEVICE` and `synod agent renew TOKEN`.
 The service accepts at most eight requests at once.
 Each blob is limited to 64 MiB.
 Each directory listing is limited to 20,000 entries.

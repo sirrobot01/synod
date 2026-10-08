@@ -93,6 +93,8 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	if err != nil {
 		return fmt.Errorf("load the API TLS certificate and key: %w", err)
 	}
+	var apiCertificate liveCertificate
+	apiCertificate.current.Store(&certificate)
 	var authority *pki.CA
 	if settings.CACertFile != "" {
 		caCertificate, err := readStartupFile(settings.CACertFile, 64<<10, false)
@@ -128,6 +130,28 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		if err != nil {
 			return err
 		}
+	}
+	var agentCertificate liveCertificate
+	var renewals []func(time.Time) error
+	if agentTLS != nil {
+		agentCertificate.current.Store(&agentTLS.Certificates[0])
+		agentTLS.Certificates, agentTLS.GetCertificate = nil, agentCertificate.get
+		if authority != nil {
+			renewals = append(renewals, func(now time.Time) error {
+				if !agentCertificate.due(now) {
+					return nil
+				}
+				return renewAgentTransport(authority, settings.AgentTLSCertFile, settings.AgentTLSKeyFile, &agentCertificate, now)
+			})
+		}
+	}
+	if settings.APICACertFile != "" {
+		renewals = append(renewals, func(now time.Time) error {
+			if !apiCertificate.due(now) {
+				return nil
+			}
+			return renewAPI(settings.APICACertFile, settings.APICAKeyFile, settings.TLSCertFile, settings.TLSKeyFile, &apiCertificate, now)
+		})
 	}
 	var keyring *secret.Keyring
 	if settings.SecretKeyFile != "" {
@@ -170,7 +194,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	server := &http.Server{
 		Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
-		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}},
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: apiCertificate.get},
 		ErrorLog:  slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 	notificationCtx, stopNotifications := context.WithCancel(ctx)
@@ -178,17 +202,18 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	notifications.Go(func() {
 		deliverNotifications(notificationCtx, uuid.MustParse(settings.InstallationID), metadata, keyring, logger)
 	})
+	notifications.Go(func() { keepCertificates(notificationCtx, renewals, logger) })
 	defer func() { stopNotifications(); notifications.Wait() }()
 	stopped := make(chan error, 2)
 	logger.Info("controller API listening", "address", listener.Addr().String(), "installation_id", settings.InstallationID)
 	if agentTLS != nil {
-		receiver := agentstream.Receiver{Store: metadata}
+		receiver := agentstream.Receiver{Store: metadata, Authority: authority}
 		agentServer, err := controlstream.New(controlstream.Config{
 			InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Logger: logger,
 			Authorize: func(ctx context.Context, _, nodeID uuid.UUID, certificate *x509.Certificate) error {
 				return metadata.CheckAgentCertificate(ctx, nodeID, certificate)
 			},
-			Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "destination.health", "backup.exec", "restore.exec", "proof.exec", "files.read"},
+			Capabilities: []string{"runtime.docker", "apps.discovery", "destinations", "destination.serve", "destination.health", "backup.exec", "restore.exec", "proof.exec", "files.read", "certificate.renew"},
 			Handle: func(ctx context.Context, peer controlstream.Peer, message *agentv1.AgentMessage) error {
 				return receiver.Handle(ctx, peer, message)
 			},

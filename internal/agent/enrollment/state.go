@@ -462,3 +462,60 @@ func (s *State) Close() error {
 	}
 	return nil
 }
+
+// RenewalRequest returns a new certificate request signed by the enrolled key.
+// Renewal keeps the key, so the identity and the encrypted agent cache stay valid.
+func (s *State) RenewalRequest() ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failed || s.closed || s.state.Response == nil {
+		return nil, fmt.Errorf("%w: this handle is closed, poisoned, or holds no accepted enrollment", ErrState)
+	}
+	key, err := x509.ParsePKCS8PrivateKey(s.state.KeyDER)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parse the saved node key: %w", ErrState, err)
+	}
+	signer, ok := key.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("%w: the saved node key is not Ed25519", ErrState)
+	}
+	return x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, signer)
+}
+
+// Renew installs a certificate for the enrolled key after the enrollment checks.
+func (s *State) Renew(certificateID uuid.UUID, certificatePEM, caCertificatePEM string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failed || s.closed || s.state.Response == nil {
+		return fmt.Errorf("%w: this handle is closed, poisoned, or holds no accepted enrollment", ErrState)
+	}
+	if certificateID == s.state.Response.CertificateID {
+		return nil
+	}
+	response := *s.state.Response
+	response.CertificateID, response.CertificatePEM, response.CACertificatePEM, response.AcceptedAt, response.Replayed = certificateID, certificatePEM, caCertificatePEM, time.Now().UTC(), false
+	if err := s.validateCertificate(&response); err != nil {
+		return err
+	}
+	next := s.state
+	next.Response = &response
+	return s.persist(next)
+}
+
+// NotAfter returns the end of the installed certificate, even when it already ended.
+func (s *State) NotAfter() (time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Response == nil {
+		return time.Time{}, fmt.Errorf("%w: this handle holds no accepted enrollment", ErrState)
+	}
+	block, _ := pem.Decode([]byte(s.state.Response.CertificatePEM))
+	if block == nil {
+		return time.Time{}, ErrCertificate
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: %w", ErrCertificate, err)
+	}
+	return leaf.NotAfter, nil
+}

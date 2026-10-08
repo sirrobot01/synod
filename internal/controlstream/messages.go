@@ -116,6 +116,11 @@ func CheckAgentMessage(message *agentv1.AgentMessage) error {
 			return ErrMessage
 		}
 		return nil
+	case *agentv1.AgentMessage_CertificateRequest:
+		if value.CertificateRequest == nil || len(value.CertificateRequest.CsrDer) == 0 || len(value.CertificateRequest.CsrDer) > 64<<10 {
+			return ErrMessage
+		}
+		return nil
 	default:
 		return ErrMessage
 	}
@@ -177,6 +182,11 @@ func CheckControllerMessage(message *agentv1.ControllerMessage) error {
 		return nil
 	case *agentv1.ControllerMessage_Error:
 		if value.Error == nil || !visible(value.Error.Code, 64) || len(value.Error.Message) > 1024 {
+			return ErrMessage
+		}
+		return nil
+	case *agentv1.ControllerMessage_CertificateIssued:
+		if value.CertificateIssued == nil || !canonicalID(value.CertificateIssued.CertificateId) || len(value.CertificateIssued.CertificatePem) == 0 || len(value.CertificateIssued.CertificatePem) > 64<<10 || len(value.CertificateIssued.CaCertificatePem) == 0 || len(value.CertificateIssued.CaCertificatePem) > 64<<10 {
 			return ErrMessage
 		}
 		return nil

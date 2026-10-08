@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -129,6 +130,68 @@ func TestDeviceRepositorySurvivesRestartAndKeepsLocalRecovery(t *testing.T) {
 	}
 	if got, err := r.ReadCatalog(t.Context()); err != nil || !reflect.DeepEqual(got, catalog) {
 		t.Fatalf("remote read: %v", err)
+	}
+
+	// A renewed certificate for the same key reaches the repository once the plan pins it.
+	renewalRequest, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, certificates[source].PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewedPEM, err := ca.Issue(renewalRequest, pki.Identity{InstallationID: installation, Role: pki.Agent, SubjectID: source}, nil, now, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewedBlock, _ := pem.Decode(renewedPEM)
+	renewedHash := sha256.Sum256(renewedBlock.Bytes)
+	renewed := *identities[source]
+	renewed.CertificatePEM = string(renewedPEM)
+	readCatalog := func(identity *repository.DeviceIdentity) error {
+		t.Helper()
+		location, credentials, err := plan.Connection(id, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		other, err := repository.Open(t.Context(), location, credentials)
+		if err != nil {
+			return err
+		}
+		defer other.Close(context.Background())
+		got, err := other.ReadCatalog(t.Context())
+		if err == nil && !reflect.DeepEqual(got, catalog) {
+			err = errors.New("catalog differs")
+		}
+		return err
+	}
+	if readCatalog(&renewed) == nil {
+		t.Fatal("a renewed certificate that the plan does not pin reached the repository")
+	}
+	plan.Revision++
+	plan.Peers = append(plan.Peers, destination.Peer{NodeID: source, CertificateSHA256: hex.EncodeToString(renewedHash[:])})
+	if err := cache.SaveDestinationPlan(t.Context(), ring, plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := readCatalog(&renewed); err != nil {
+		t.Fatalf("the renewed certificate cannot read the repository: %v", err)
+	}
+	if err := readCatalog(identities[source]); err != nil {
+		t.Fatalf("the old certificate stopped working before its end: %v", err)
+	}
+	plan.Revision++
+	plan.Peers = slices.DeleteFunc(plan.Peers, func(peer destination.Peer) bool { return peer.CertificateSHA256 == hashes[source] })
+	if err := cache.SaveDestinationPlan(t.Context(), ring, plan); err != nil {
+		t.Fatal(err)
+	}
+	if readCatalog(identities[source]) == nil {
+		t.Fatal("a certificate that the plan no longer pins reached the repository")
+	}
+	if err := readCatalog(&renewed); err != nil {
+		t.Fatalf("the renewed certificate lost access: %v", err)
+	}
+	// The rest of this test uses the first certificate again.
+	plan.Revision++
+	plan.Peers = append(plan.Peers, destination.Peer{NodeID: source, CertificateSHA256: hashes[source]})
+	if err := cache.SaveDestinationPlan(t.Context(), ring, plan); err != nil {
+		t.Fatal(err)
 	}
 
 	snapshotSource := t.TempDir()

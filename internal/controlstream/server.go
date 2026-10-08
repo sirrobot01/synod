@@ -89,7 +89,7 @@ type Server struct {
 
 // New checks the server settings, applies defaults, and registers the gRPC service.
 func New(config Config) (*Server, error) {
-	if config.InstallationID == uuid.Nil || config.TLS == nil || config.TLS.ClientCAs == nil || len(config.TLS.Certificates) == 0 || config.TLS.GetConfigForClient != nil || config.TLS.InsecureSkipVerify || config.Authorize == nil || config.Handle == nil {
+	if config.InstallationID == uuid.Nil || config.TLS == nil || config.TLS.ClientCAs == nil || (len(config.TLS.Certificates) == 0 && config.TLS.GetCertificate == nil) || config.TLS.GetConfigForClient != nil || config.TLS.InsecureSkipVerify || config.Authorize == nil || config.Handle == nil {
 		return nil, errors.New("transport requires installation identity, mutual TLS, authorization, and durable handling")
 	}
 	if config.MaxMessageBytes == 0 {

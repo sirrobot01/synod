@@ -21,12 +21,16 @@ import (
 )
 
 // executeJobs runs backups and restores one at a time, so a restore never races a backup of the same app.
-func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agentrestore.Worker, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
+// reload returns true when the agent must start again. The loop checks it between jobs.
+func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agentrestore.Worker, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger, reload func() bool) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	defer worker.CloseIdle(0)
 	for {
 		if ctx.Err() != nil {
+			return
+		}
+		if reload() {
 			return
 		}
 		worker.CloseIdle(agentbackup.ConnectionIdle)

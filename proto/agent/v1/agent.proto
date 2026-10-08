@@ -55,6 +55,7 @@ message AgentMessage {
     RestoreEvent restore_event = 6;
     ProofEvent proof_event = 7;
     DestinationHealth destination_health = 8;
+    CertificateRequest certificate_request = 9;
   }
 }
 
@@ -68,7 +69,17 @@ message ControllerMessage {
     RestoreJob restore_job = 6;
     FileRequest file_request = 7;
     ProofJob proof_job = 8;
+    CertificateIssued certificate_issued = 9;
   }
+}
+
+// An agent asks for a new certificate for its enrolled key before the current one expires.
+message CertificateRequest { bytes csr_der = 1; }
+// The controller answers with a certificate that the agent installs after a check.
+message CertificateIssued {
+  string certificate_id = 1;
+  string certificate_pem = 2;
+  string ca_certificate_pem = 3;
 }
 
 // An inventory is complete. A failed scan has a failure code and no apps.

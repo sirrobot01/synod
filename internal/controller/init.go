@@ -84,6 +84,8 @@ type controllerJSON struct {
 	TLSKeyFile       string `json:"tls_key_file"`
 	CACertFile       string `json:"ca_cert_file"`
 	CAKeyFile        string `json:"ca_key_file"`
+	APICACertFile    string `json:"api_ca_cert_file"`
+	APICAKeyFile     string `json:"api_ca_key_file"`
 	AgentTLSCertFile string `json:"agent_tls_cert_file"`
 	AgentTLSKeyFile  string `json:"agent_tls_key_file"`
 	AgentCAFile      string `json:"agent_ca_file"`
@@ -162,6 +164,8 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		TLSKeyFile:       filepath.Join(absDir, "api.key"),
 		CACertFile:       filepath.Join(absDir, "ca.crt"),
 		CAKeyFile:        filepath.Join(absDir, "ca.key"),
+		APICACertFile:    filepath.Join(absDir, "api-ca.crt"),
+		APICAKeyFile:     filepath.Join(absDir, "api-ca.key"),
 		AgentTLSCertFile: filepath.Join(absDir, "agent-tls.crt"),
 		AgentTLSKeyFile:  filepath.Join(absDir, "agent-tls.key"),
 		AgentCAFile:      filepath.Join(absDir, "ca.crt"),

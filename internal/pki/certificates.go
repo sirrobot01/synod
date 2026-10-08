@@ -262,3 +262,7 @@ func (ca *CA) InstallationID() uuid.UUID {
 	}
 	return ca.installationID
 }
+
+// RenewalWindow is the remaining validity at which a certificate is renewed.
+// A device that is offline for longer than this needs a device-bound join token.
+const RenewalWindow = 10 * 24 * time.Hour

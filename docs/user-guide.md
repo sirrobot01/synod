@@ -544,6 +544,33 @@ Start the controller first, then the agents.
 Check the running versions and destination acknowledgements.
 The installer does not perform these service steps for you.
 
+## Keep certificates current
+
+Synod renews its certificates automatically.
+Device and controller transport certificates last 30 days.
+The controller API certificate lasts one year.
+Each certificate is renewed when less than 10 days remain.
+A device keeps its key, identity, approval, and encrypted cache.
+Other devices receive the new certificate in their settings before the device uses it.
+
+A device that is offline for more than 20 days can miss its renewal.
+Its agent then stops with a certificate expiry message.
+To recover the device, run this on the controller:
+
+```sh
+synod node join-token --device DEVICE
+```
+
+Then run these commands on the device:
+
+```sh
+systemctl stop synod-agent
+synod agent renew 'TOKEN' --dir /var/lib/synod/agent
+systemctl start synod-agent
+```
+
+The token works only for that device and only with its existing key.
+
 ## Read status and resolve a failure
 
 ```sh
@@ -585,12 +612,6 @@ journalctl -u synod-agent -n 100 --no-pager
 Do not send repository credentials, tokens, or private keys with a support report.
 
 ## Current limits
-
-These gaps block the v0.1 release:
-
-- Agent and controller transport certificates expire after 30 days. Automatic renewal is not implemented yet.
-
-Other current limits:
 
 - Linux hosts only. Docker Desktop is a development environment.
 - One controller per installation.
