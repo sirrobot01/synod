@@ -54,11 +54,10 @@ func (f *liveFile) Open(ctx context.Context) (_ kfs.Reader, retErr error) {
 		}
 		return &copyReader{io.NewSectionReader(copy, 0, info.Size()), f}, nil
 	}
-	opened, err := (&sourceFile{f.sourceEntry}).Open(ctx)
+	source, err := (&sourceFile{f.sourceEntry}).open(ctx)
 	if err != nil {
 		return nil, err
 	}
-	source := opened.(*sourceReader)
 	var header [16]byte
 	_, err = source.ReadAt(header[:], 0)
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -66,11 +65,7 @@ func (f *liveFile) Open(ctx context.Context) (_ kfs.Reader, retErr error) {
 		return nil, ErrSource
 	}
 	if err != nil || string(header[:]) != sqliteHeader {
-		if _, err := source.Seek(0, io.SeekStart); err != nil {
-			source.Close()
-			return nil, ErrSource
-		}
-		return source, nil
+		return f.tree.stable(source)
 	}
 	defer source.Close()
 	defer func() {

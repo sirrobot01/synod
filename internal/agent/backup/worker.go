@@ -238,8 +238,9 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			databases[item.Id] = item.Database
 		}
 	}
+	// Auto never stops an app. A live copy reads changed files again until they are stable.
 	if method == backup.Auto {
-		method = backup.Stop
+		method = backup.Live
 		if len(databases) > 0 {
 			method = backup.Dump
 		}
@@ -496,6 +497,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		state.Metadata.Exclusions = tree.Exclusions()
 		state.Metadata.Paths = tree.Paths
 		state.Metadata.SQLite = sqliteFiles
+		state.Metadata.Changing = tree.Changing()
 	}
 	durable, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	saveErr := w.save(durable, &state)
@@ -599,6 +601,9 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 	if result.FailureCode == "" {
 		result.SnapshotID = state.Metadata.ID
 		result.FileBytes = state.Metadata.FileBytes
+		if len(state.Metadata.Changing) > 0 {
+			result.WarningCodes = append(result.WarningCodes, "files_changed_during_copy")
+		}
 	}
 	if r != nil && state.RepositoryOpened {
 		plan, catalogErr := w.Journal.DestinationPlan(cleanup, w.Keyring)

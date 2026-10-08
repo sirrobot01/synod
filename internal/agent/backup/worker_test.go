@@ -136,11 +136,12 @@ func TestWorkerCopiesAndRestoresRealDockerApp(t *testing.T) {
 			if err != nil || !after.Container.State.Running {
 				t.Fatalf("app was not resumed: %v", err)
 			}
-			if method != backup.Live && (result.DowntimeMillis <= 0 || after.Container.State.StartedAt == before.Container.State.StartedAt) {
+			if method == backup.Stop && (result.DowntimeMillis <= 0 || after.Container.State.StartedAt == before.Container.State.StartedAt) {
 				t.Fatal("Stop method did not stop and resume the app")
 			}
-			if method == backup.Live && (result.DowntimeMillis != 0 || after.Container.State.StartedAt != before.Container.State.StartedAt) {
-				t.Fatal("Live method stopped the app")
+			// Auto never stops an app without a database.
+			if method != backup.Stop && (result.DowntimeMillis != 0 || after.Container.State.StartedAt != before.Container.State.StartedAt) {
+				t.Fatalf("%s method stopped the app", method)
 			}
 			replay, err := fixture.worker.Execute(t.Context(), fixture.request)
 			if err != nil || !reflect.DeepEqual(result, replay) {
@@ -162,7 +163,7 @@ func TestWorkerCopiesAndRestoresRealDockerApp(t *testing.T) {
 			if len(saved.Images) != 1 || saved.Images[0].ContainerID != fixture.id || !slices.Contains(saved.Images[0].Architectures, fixture.worker.Architecture) || saved.Images[0].Reference == "" {
 				t.Fatal("snapshot lost running image evidence")
 			}
-			if saved.Method == backup.Auto || (method == backup.Live && saved.Method != backup.Live) {
+			if saved.Method == backup.Auto || (method != backup.Stop && saved.Method != backup.Live) {
 				t.Fatal("snapshot did not record the resolved copy method")
 			}
 			target := filepath.Join(t.TempDir(), "restored")
@@ -170,7 +171,7 @@ func TestWorkerCopiesAndRestoresRealDockerApp(t *testing.T) {
 				t.Fatal(err)
 			}
 			expected := "before-stop"
-			if method != backup.Live {
+			if method == backup.Stop {
 				expected = "after-stop"
 			}
 			found := false

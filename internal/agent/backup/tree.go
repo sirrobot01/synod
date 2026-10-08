@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	kfs "github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/fs/virtualfs"
@@ -57,6 +59,8 @@ type Tree struct {
 	mu            sync.Mutex
 	observed      map[string]string
 	observedBytes int
+	// changing holds files that changed while a live copy read them.
+	changing map[string]struct{}
 }
 
 // NewTree selects the app's Included paths. include adds Large paths and paths that the walk
@@ -65,7 +69,7 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 	if backup.ValidateIncluded(include) != nil {
 		return nil, ErrSource
 	}
-	tree := &Tree{excluded: make(map[string]string), observed: make(map[string]string)}
+	tree := &Tree{excluded: make(map[string]string), observed: make(map[string]string), changing: make(map[string]struct{})}
 	for _, p := range include {
 		tree.included = append(tree.included, p)
 		if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved != p {
@@ -479,9 +483,128 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 	return kfs.StaticIterator(entries, nil), nil
 }
 
+// Changing returns up to maxChanging files that changed while a live copy read them.
+func (t *Tree) Changing() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	paths := slices.Sorted(maps.Keys(t.changing))
+	return paths[:min(len(paths), maxChanging)]
+}
+
+func (t *Tree) noteChanging(path string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.changing[path] = struct{}{}
+}
+
+const (
+	// maxChanging bounds the changed-file list in the snapshot metadata.
+	maxChanging = 256
+	// stableReadLimit bounds the memory of one checked read. Up to 16 uploads run at once.
+	stableReadLimit = 8 << 20
+	// stableReadAttempts is how many times a live copy reads a small file that keeps changing.
+	stableReadAttempts = 3
+)
+
+// afterLiveRead runs between a checked read and its second status check. Tests change files there.
+var afterLiveRead = func(string) {}
+
+// unchanged reports whether a file kept its size and modification time.
+func unchanged(before, after os.FileInfo) bool {
+	return before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
+}
+
+// stable makes a live read consistent. A small file is read whole, and read again if it
+// changed during the read. A large file streams and is checked when the read ends.
+// A file that still changes is saved as read and reported by Changing.
+func (t *Tree) stable(r *sourceReader) (kfs.Reader, error) {
+	for attempt := 1; ; attempt++ {
+		before, err := r.Stat()
+		if err != nil {
+			r.Close()
+			return nil, err
+		}
+		if before.Size() > stableReadLimit {
+			if _, err := r.Seek(0, io.SeekStart); err != nil {
+				r.Close()
+				return nil, err
+			}
+			return &watchedReader{sourceReader: r, opened: before}, nil
+		}
+		data, err := io.ReadAll(io.NewSectionReader(r, 0, stableReadLimit+1))
+		if err != nil {
+			r.Close()
+			return nil, err
+		}
+		afterLiveRead(r.entry.absolute)
+		after, err := r.Stat()
+		if err != nil {
+			r.Close()
+			return nil, err
+		}
+		same := int64(len(data)) == after.Size() && unchanged(before, after)
+		if !same && attempt < stableReadAttempts {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if !same && len(data) > stableReadLimit {
+			// The file grew past the memory bound. Stream it from the start.
+			if _, err := r.Seek(0, io.SeekStart); err != nil {
+				r.Close()
+				return nil, err
+			}
+			t.noteChanging(r.entry.absolute)
+			return &watchedReader{sourceReader: r, opened: after}, nil
+		}
+		r.Close()
+		if !same {
+			t.noteChanging(r.entry.absolute)
+		}
+		entry := r.entry
+		entry.FileInfo = after
+		return &bufferReader{Reader: bytes.NewReader(data), entry: &sourceFile{entry}}, nil
+	}
+}
+
+// watchedReader streams a large live file and checks it for changes at the end.
+type watchedReader struct {
+	*sourceReader
+	opened os.FileInfo
+}
+
+func (r *watchedReader) Read(p []byte) (int, error) {
+	n, err := r.sourceReader.Read(p)
+	if errors.Is(err, io.EOF) {
+		if now, statErr := r.Stat(); statErr != nil || !unchanged(r.opened, now) {
+			r.entry.tree.noteChanging(r.entry.absolute)
+		}
+	}
+	return n, err
+}
+
+// bufferReader serves a small file that was read whole.
+type bufferReader struct {
+	*bytes.Reader
+	entry kfs.Entry
+}
+
+func (*bufferReader) Close() error                { return nil }
+func (r *bufferReader) Entry() (kfs.Entry, error) { return r.entry, nil }
+
 type sourceFile struct{ sourceEntry }
 
 func (f *sourceFile) Open(ctx context.Context) (kfs.Reader, error) {
+	reader, err := f.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if f.tree.live {
+		return f.tree.stable(reader)
+	}
+	return reader, nil
+}
+
+func (f *sourceFile) open(ctx context.Context) (*sourceReader, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

@@ -98,24 +98,26 @@ type MountSource struct {
 
 // Snapshot is stored inside the encrypted repository beside its native Kopia snapshot.
 type Snapshot struct {
-	ID             uuid.UUID      `json:"id"`
-	InstallationID uuid.UUID      `json:"installation_id"`
-	DestinationID  uuid.UUID      `json:"destination_id"`
-	App            inventory.App  `json:"app"`
-	Method         Method         `json:"method"`
-	Architecture   string         `json:"architecture"`
-	Images         []Image        `json:"images"`
-	MountSources   []MountSource  `json:"mount_sources,omitempty"`
-	StartedAt      time.Time      `json:"started_at"`
-	CompletedAt    time.Time      `json:"completed_at"`
-	DowntimeMillis int64          `json:"downtime_ms"`
-	SQLite         []string       `json:"sqlite,omitempty"`
-	Dumps          []DatabaseDump `json:"dumps,omitempty"`
-	Paths          []Path         `json:"paths"`
-	Exclusions     []Exclusion    `json:"exclusions"`
-	FilesID        string         `json:"files_id"`
-	RootID         string         `json:"root_id"`
-	FileBytes      int64          `json:"file_bytes"`
+	ID             uuid.UUID     `json:"id"`
+	InstallationID uuid.UUID     `json:"installation_id"`
+	DestinationID  uuid.UUID     `json:"destination_id"`
+	App            inventory.App `json:"app"`
+	Method         Method        `json:"method"`
+	Architecture   string        `json:"architecture"`
+	Images         []Image       `json:"images"`
+	MountSources   []MountSource `json:"mount_sources,omitempty"`
+	StartedAt      time.Time     `json:"started_at"`
+	CompletedAt    time.Time     `json:"completed_at"`
+	DowntimeMillis int64         `json:"downtime_ms"`
+	SQLite         []string      `json:"sqlite,omitempty"`
+	// Changing lists files that kept changing while a live copy read them. They are saved as read.
+	Changing   []string       `json:"changing,omitempty"`
+	Dumps      []DatabaseDump `json:"dumps,omitempty"`
+	Paths      []Path         `json:"paths"`
+	Exclusions []Exclusion    `json:"exclusions"`
+	FilesID    string         `json:"files_id"`
+	RootID     string         `json:"root_id"`
+	FileBytes  int64          `json:"file_bytes"`
 }
 
 // Result is safe for controller metadata. Definitions and file contents stay in the repository.
@@ -163,11 +165,11 @@ func (e Event) Validate(request Request) error {
 	if e.ID != request.ID || result.DestinationID != request.DestinationID || result.DowntimeMillis < 0 || result.FileBytes < 0 || len(result.RestartPending) > 256 {
 		return ErrInvalid
 	}
-	if len(result.WarningCodes) > 2 || (len(result.WarningCodes) != 0 && !result.RepositoryOpened) {
+	if len(result.WarningCodes) > 3 || (len(result.WarningCodes) != 0 && !result.RepositoryOpened) {
 		return ErrInvalid
 	}
 	for i, warning := range result.WarningCodes {
-		if !slices.Contains([]string{"catalog_write_failed", "retention_failed"}, warning) || slices.Contains(result.WarningCodes[:i], warning) {
+		if !slices.Contains([]string{"files_changed_during_copy", "catalog_write_failed", "retention_failed"}, warning) || slices.Contains(result.WarningCodes[:i], warning) {
 			return ErrInvalid
 		}
 	}
