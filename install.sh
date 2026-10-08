@@ -8,7 +8,6 @@ install_dir=/usr/local/bin
 repository=https://github.com/sirrobot01/synod
 base_url=$repository/releases/download
 from_dir=
-upgrade=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --version|--install-dir|--base-url|--from-dir)
@@ -20,17 +19,16 @@ while [ "$#" -gt 0 ]; do
                 --from-dir) from_dir=$2 ;;
             esac
             shift 2 ;;
-        --upgrade) upgrade=true; shift ;;
         --help|-h)
             cat <<'HELP'
 Usage: sh install.sh [--version v0.1.0] [--install-dir /usr/local/bin]
                      [--base-url https://host/releases/download]
-                     [--from-dir /path/to/release] [--upgrade]
+                     [--from-dir /path/to/release]
 
 Without --version, the installer selects the latest GitHub release.
 Synod supports Linux amd64 and arm64.
 The installer verifies SHA-256 checksums before it installs the binary.
-Use --upgrade to replace an existing binary and save it as synod.previous.
+A different installed binary is replaced and saved as synod.previous.
 Restart the controller and agents after an upgrade. Keep their state directories.
 Use --from-dir for a release copied to a device without Internet access.
 HELP
@@ -83,12 +81,9 @@ trap '[ -z "$staging" ] || rm -rf "$staging"; rmdir "$lock"' EXIT
 trap 'exit 1' HUP INT TERM
 [ ! -L "$install_dir/synod" ] || { echo "The target is a symbolic link. Select another --install-dir." >&2; exit 1; }
 [ ! -e "$install_dir/synod" ] || [ -f "$install_dir/synod" ] || { echo "The target is not a regular file. Select another --install-dir." >&2; exit 1; }
-if [ "$upgrade" = true ]; then
-    [ -f "$install_dir/synod" ] || { echo "No binary is installed. Omit --upgrade for a fresh install." >&2; exit 1; }
-    [ ! -L "$install_dir/synod.previous" ] && { [ ! -e "$install_dir/synod.previous" ] || [ -f "$install_dir/synod.previous" ]; } || {
-        echo "synod.previous is not a regular file. Move it before the upgrade." >&2; exit 1;
-    }
-fi
+[ ! -L "$install_dir/synod.previous" ] && { [ ! -e "$install_dir/synod.previous" ] || [ -f "$install_dir/synod.previous" ]; } || {
+    echo "synod.previous is not a regular file. Move it, then retry." >&2; exit 1;
+}
 staging=$(mktemp -d "$install_dir/.synod-install.XXXXXX")
 asset=synod-linux-$arch
 for file in SHA256SUMS "$asset"; do
@@ -122,7 +117,6 @@ if [ -e "$install_dir/synod" ]; then
         echo "Synod $version is already installed at $install_dir/synod."
         exit 0
     fi
-    [ "$upgrade" = true ] || { echo "A different binary is installed. Follow the upgrade procedure and use --upgrade." >&2; exit 1; }
     # Save the old inode before replacing it. Running processes keep that inode.
     if ! cmp -s "$install_dir/synod" "$install_dir/synod.previous"; then
         ln "$install_dir/synod" "$staging/previous"

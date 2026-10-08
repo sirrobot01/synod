@@ -193,13 +193,13 @@ Approve each device. Then restore your apps.
 ## Upgrade
 
 Stop the agents, then the controller.
-Run the installer with `--upgrade` on each device.
+Run the install command again on each device. It installs the latest release.
 Start the controller, then the agents.
 
 ```sh
 systemctl stop synod-agent
 systemctl stop synod-server        # controller device only
-curl -fsSL https://synod.biodun.dev/install.sh | sh -s -- --upgrade
+curl -fsSL https://synod.biodun.dev/install.sh | sh
 systemctl start synod-server       # controller device only
 systemctl start synod-agent
 ```

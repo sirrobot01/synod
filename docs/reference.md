@@ -17,7 +17,6 @@ Pass options after `sh -s --`:
 | --- | --- |
 | `--version v0.1.0` | Install this version. Without it, the installer selects the latest GitHub release. |
 | `--install-dir DIR` | Install into this directory. The default is `/usr/local/bin`. |
-| `--upgrade` | Replace an installed binary. See [Upgrade](#upgrade-the-controller-and-agents). |
 | `--from-dir DIR` | Install from release files copied to a device without Internet access. Needs `--version`. |
 | `--base-url URL` | Download from another HTTPS release server. Needs `--version`. |
 
@@ -57,15 +56,17 @@ sudo systemctl stop synod-server
 
 Run the installer on each device.
 Use the directory that contains the executable in the service's `ExecStart` line.
-Add `--version` so that every device gets the same release:
+It installs the latest release:
 
 ```sh
-curl -fsSL https://synod.biodun.dev/install.sh | sudo sh -s -- --version v0.1.0 --upgrade
+curl -fsSL https://synod.biodun.dev/install.sh | sudo sh
 /usr/local/bin/synod --version
 ```
 
+To keep every device on the same release, add `-s -- --version v0.1.0` after `sh`.
+
 The installer verifies the download before it changes the installed file.
-It saves the old executable as `synod.previous` in the same directory.
+When a different binary is installed, it replaces it and saves the old executable as `synod.previous` in the same directory.
 It replaces `synod` with one filesystem rename.
 A repeat with identical bytes keeps both files.
 A failed checksum leaves both files unchanged.
