@@ -46,8 +46,9 @@ Follow these rules so that no two agents collide.
 1. Take one `todo` task whose needs are done, or the task that the user names. Work on one task at a time.
 2. Claim it in `TASKS.md` before you change code: set `doing` and your agent and model name.
 3. Do not take a task that another agent owns. Ask the user when a claim looks abandoned.
-4. Create your worktree from `main`: `git worktree add /Users/mukhtarakere/cools/synod-worktrees/TNN -b tNN main`.
-5. Change code only in your worktree. Change plan files only at the main checkout paths above.
+4. Use a worktree only for a large feature or fix: `git worktree add /Users/mukhtarakere/cools/synod-worktrees/TNN -b tNN main`.
+   Make small changes, such as documentation, README edits, and configuration, directly on `main`.
+5. In a worktree, change code only in that worktree. Change plan files only at the main checkout paths above.
 6. Shared contracts are proto files, migrations, `go.mod`, API shapes, and shared domain types. Before you change one, check the board for another `doing` task that changes it. If one exists, stop and ask the user.
 7. Before a merge, rebase on `main` and run the task's checks again in your worktree.
 8. Merge from the main checkout with `git merge --ff-only tNN`. Then remove the worktree and the branch.
@@ -99,7 +100,10 @@ Keep feature work fast. The owner decides when heavy checks run.
 - During feature work, run `go build ./...`, `gofmt`, `go vet`, and the fast tests of the changed packages.
 - Fast tests are the tests that run without `SYNOD_TEST_DOCKER_HOST` and without MinIO. Docker and MinIO tests skip themselves when these are not set.
 - Write tests for new behaviour. You do not need to run the heavy tests for each feature.
-- Run Docker tests, MinIO tests, the full suite, and real-host proofs only when the owner asks for them. The owner usually asks before a release.
+- Run Docker tests, MinIO tests, and the full suite only when the owner asks for them. The owner usually asks before a release.
+- GitHub Actions runs the fast checks on each push. The owner can start the heavy tests from the **test** workflow.
+- Do not add proof, benchmark, or helper scripts to the repository. Use Go tests and the GitHub workflows.
+- A release is a version tag. GoReleaser builds and publishes it. Push a tag only when the owner asks.
 - A task is done when its code builds and its fast checks pass. Record "heavy checks not run" in the done log.
 - Run tests with `-race -p 1`. Without `-p 1`, packages compete for Docker and fail on timing.
 - Controller tests use SQLite files in temporary directories. Run `go test -race -p 1 -count=1 <packages>`.
@@ -108,7 +112,7 @@ Keep feature work fast. The owner decides when heavy checks run.
 - A failure that also happens on the base revision is not yours. Record it in the task note in `TASKS.md`.
 - Enrollment tests in `internal/api` can fail on timing under heavy load. Run a failed timing test again alone before you draw a conclusion.
 - For web changes, run `npx svelte-check`, `npx vitest run`, and `npm run build` in `web/`. The `dist` output is committed.
-- Some behaviour needs real Linux hosts: host networking, `/proc`, and mTLS between machines. Read `HOSTS.md` before you use them. Run a real-host proof only when the owner asks.
+- Some behaviour needs real Linux hosts: host networking, `/proc`, and mTLS between machines. Read `HOSTS.md` before you use them. Use the real hosts only when the owner asks.
 
 ## Records
 

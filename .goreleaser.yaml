@@ -1,0 +1,34 @@
+version: 2
+
+# Build the Linux release from a version tag. The web UI in internal/web/dist is committed.
+project_name: synod
+
+builds:
+  - id: synod
+    main: ./cmd/synod
+    binary: synod
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -buildid=
+      - -X github.com/sirrobot01/synod/internal/buildinfo.Version={{ .Tag }}
+      - -X github.com/sirrobot01/synod/internal/buildinfo.Revision={{ .FullCommit }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+# install.sh downloads synod-linux-ARCH and SHA256SUMS from the release.
+archives:
+  - formats: [binary]
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+release:
+  extra_files:
+    - glob: ./install.sh
+
+changelog:
+  use: github

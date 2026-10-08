@@ -82,151 +82,45 @@ A changed migration causes a checksum error on an existing development database.
 Run `task dev:reset` only when you can delete that installation.
 Then run `task dev` to create a new one.
 
-## Build release files
+## Tests
 
-The release script builds static Linux binaries for amd64 and arm64.
-It uses the Go version in `go.mod` and the committed web assets.
-It records the version and source revision in both binaries.
-The agent reports the same version to the controller.
+GitHub Actions runs the checks in `.github/workflows/test.yml` on each push and pull request:
 
-Run the code and web checks above before you build a release.
-Commit the source and the web build.
-Then run:
+- `gofmt`, `go vet`, and the Go tests.
+- The web type check, tests, and build. The committed `internal/web/dist` must match the build.
+- A snapshot release and an install with `install.sh`.
 
-```sh
-sh scripts/build-release.sh v0.1.0-rc.1
-```
+Docker and MinIO tests are slow. They skip themselves unless you set their variables.
+Run them when you need them, usually before a release:
 
-The output is `dist/releases/v0.1.0-rc.1/`.
-It contains `synod-linux-amd64`, `synod-linux-arm64`, `install.sh`, `release.json`, and `SHA256SUMS`.
-The script refuses an existing output directory.
-A dirty tree requires the explicit `--allow-dirty` test option as the third argument.
-The revision of that build has a `-dirty` suffix.
-Do not publish a test build as a release.
-
-## Tests and proofs
-
-Docker tests, MinIO tests, and real-host proofs are slow.
-Run them when the owner asks, usually before a release.
-Real-host proofs follow `tmp/tasks/HOSTS.md` and use disposable test projects only.
-
-Run the release proof on the approved hosts:
+- In GitHub, run the **test** workflow by hand and select **heavy**.
+- On a Linux host, run them as root, because restore tests read named volumes in `/var/lib/docker`:
 
 ```sh
-python3 scripts/proof-release.py --release dist/releases/VERSION --evidence /path/to/new-private-evidence
+SYNOD_TEST_DOCKER_HOST=unix:///var/run/docker.sock go test -race -p 1 -count=1 ./...
 ```
 
-The proof installs the release, protects a test app, deletes it with its device state, and restores it on the other device.
+For S3 tests, start a MinIO server and set `SYNOD_TEST_S3_ENDPOINT`, `SYNOD_TEST_S3_ACCESS_KEY`, and `SYNOD_TEST_S3_SECRET_KEY`.
+The SFTP test starts its own SSH server.
 
-Test the installer without a system change:
+## Release
+
+GoReleaser builds the release from `.goreleaser.yaml`.
+It builds static Linux binaries for amd64 and arm64 from the committed web assets.
+The binaries report the tag and commit in `synod --version`.
+
+Build the release files locally without publishing:
 
 ```sh
-python3 scripts/test-install.py
+task release:snapshot
 ```
 
-Run the real-host proof only on the approved disposable proof paths:
+To publish a release, push a version tag:
 
 ```sh
-python3 scripts/proof-install.py --release dist/releases/v0.1.0-rc.1 --evidence /tmp/synod-install-proof.json
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-The upgrade proof uses two release directories and disposable Linux state:
-
-```sh
-python3 scripts/proof-upgrade.py --old-release /path/to/old-release --new-release /path/to/new-release --evidence /tmp/synod-upgrade-proof
-```
-
-To run the local Docker discovery test, load its pinned image first:
-
-```sh
-docker pull alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
-SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock go test -race -p 1 -count=1 ./internal/agent/discovery
-```
-
-The test creates private containers and a volume.
-It removes them after the test.
-
-Run the file restore proof with a built binary:
-
-```sh
-SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock python3 scripts/proof-files.py ./dist/synod
-```
-
-The proof uses a disposable Compose project and temporary controller and agent processes.
-It removes its files and containers when it exits.
-Add `--recover` to delete the test controller, agent state, and source files.
-The proof then rebuilds from the repository, restores the app, and makes a new backup.
-
-Run the local delivery proof with a built binary:
-
-```sh
-SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock python3 scripts/proof-checks.py ./dist/synod --notifications
-```
-
-The proof uses a local HTTP receiver and disposable Docker containers.
-It checks delivery after a controller restart and after a forced drill failure.
-
-Run the M4 proof on the approved Linux hosts:
-
-```sh
-python3 scripts/proof-alerts.py --binaries /path/to/linux-binaries --evidence /path/to/new-private-evidence
-```
-
-The binary directory must contain `synod-linux-amd64` and `synod-linux-arm64`.
-The proof uses the hosts and SSH settings in `scripts/proof-m1.py`.
-It starts only disposable projects and a loopback HTTP receiver.
-It checks database rows, drill isolation, alert delivery, cleanup, and existing container start times.
-Get host approval before you run it.
-
-Run the repository checks with a temporary MinIO service:
-
-```sh
-SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock ./scripts/test-minio.sh go test -race -p 1 -count=1 -timeout=2m ./internal/repository
-```
-
-The fixture builds MinIO from source revision `9e49d5e7a648`.
-It keeps the local test image for later runs.
-It binds a free port to loopback and removes the container after the command.
-The SFTP test starts its own SSH server on loopback.
-
-Run the SQLite source-path proof on Linux with a disposable container:
-
-```sh
-SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock ./scripts/test-sqlite.sh
-```
-
-The test uses a pinned Go image and a read-only module cache.
-It restores a live WAL database and compares committed writes.
-It also checks overlapping paths, sidecar links, corruption, and cancellation.
-
-Run the app restore tests on Linux with a disposable container:
-
-```sh
-SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock ./scripts/test-restore.sh
-SYNOD_TEST_DOCKER_HOST=unix:///path/to/docker.sock ./scripts/test-restore.sh -test.run TestRestoreRebuilds
-```
-
-The test container reads named volume data from `/var/lib/docker/volumes`, as a root agent does.
-It uses the Docker CLI and the Compose plugin from a pinned image.
-Its work directory is `/var/tmp` on the Docker host, so restored bind paths have the same path in both places.
-The test restores a lost Compose project with a bind path, a named volume, a PostgreSQL dump, a network, and a published port.
-It checks file content, owners, modes, and database rows.
-It also checks the conflict refusal, a replace with a safety snapshot, and recovery after an interrupted replace.
-On macOS, `go test` runs the same tests without the named volume.
-
-Run the database and disaster recovery proof on the approved Linux hosts:
-
-```sh
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/synod-proof-binaries/synod-linux-amd64 ./cmd/synod
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/synod-proof-binaries/synod-linux-arm64 ./cmd/synod
-python3 scripts/proof-recovery.py --binaries /tmp/synod-proof-binaries --evidence /tmp/synod-recovery-proof
-```
-
-The evidence directory must be new.
-The hosts need the pinned PostgreSQL and Alpine images named in the proof scripts.
-The proof writes to a disposable PostgreSQL app on server during backup.
-It deletes its controller, agent state, source project, and source volume.
-It rebuilds the controller from the repository on odin.
-It restores the amd64 app on arm64 and checks the saved rows, role, and files.
-It checks that existing running containers keep their start times.
-It removes its temporary processes, containers, volumes, and directories.
+The **release** workflow runs the tests. Then it publishes `synod-linux-amd64`, `synod-linux-arm64`, `SHA256SUMS`, and `install.sh` to the GitHub release.
+`install.sh` downloads these files and verifies their checksums.

@@ -6,7 +6,7 @@ For setup, read the [user guide](user-guide.md).
 ## Install a release binary
 
 No public v0.1 release exists yet.
-Build the release files (see [Development](development.md#build-release-files)), then copy them to the Linux device.
+Build the release files (see [Development](development.md#release)), then copy them to the Linux device.
 Run the installer from that directory:
 
 ```sh

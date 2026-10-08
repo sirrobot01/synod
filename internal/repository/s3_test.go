@@ -25,7 +25,7 @@ import (
 func TestMinIOEncryptedCatalog(t *testing.T) {
 	endpoint := os.Getenv("SYNOD_TEST_S3_ENDPOINT")
 	if endpoint == "" {
-		t.Skip("run scripts/test-minio.sh for the S3 proof")
+		t.Skip("set SYNOD_TEST_S3_ENDPOINT, SYNOD_TEST_S3_ACCESS_KEY, and SYNOD_TEST_S3_SECRET_KEY to test S3")
 	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil {

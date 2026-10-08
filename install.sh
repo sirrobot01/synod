@@ -78,7 +78,7 @@ if [ "$upgrade" = true ]; then
 fi
 staging=$(mktemp -d "$install_dir/.synod-install.XXXXXX")
 asset=synod-linux-$arch
-for file in SHA256SUMS release.json "$asset"; do
+for file in SHA256SUMS "$asset"; do
     if [ -n "$from_dir" ]; then
         cp "$from_dir/$file" "$staging/$file"
     else
@@ -87,7 +87,7 @@ for file in SHA256SUMS release.json "$asset"; do
             "${base_url%/}/$version/$file" --output "$staging/$file"
     fi
 done
-for file in release.json "$asset"; do
+for file in "$asset"; do
     expected=$(awk -v name="$file" '$2 == name { print $1 }' "$staging/SHA256SUMS")
     [ "${#expected}" -eq 64 ] && printf '%s\n' "$expected" | grep -Eq '^[0-9a-fA-F]{64}$' || {
         echo "The release checksum is absent or ambiguous. Download the release again." >&2; exit 1;
@@ -99,11 +99,11 @@ for file in release.json "$asset"; do
     fi
     [ "$actual" = "$expected" ] || { echo "The release checksum differs. The installed binary was not changed." >&2; exit 1; }
 done
-# The build writes this field on its own line. Match it literally, after verification.
-grep -Fqx "  \"version\": \"$version\"," "$staging/release.json" || {
+chmod 755 "$staging/$asset"
+# The binary reports "synod version VERSION (REVISION; linux/ARCH)". Run it only after verification.
+[ "$("$staging/$asset" --version | cut -d ' ' -f 3)" = "$version" ] || {
     echo "The release version differs from --version. Select the matching release." >&2; exit 1;
 }
-chmod 755 "$staging/$asset"
 if [ -e "$install_dir/synod" ]; then
     if cmp -s "$staging/$asset" "$install_dir/synod"; then
         echo "Synod $version is already installed at $install_dir/synod."

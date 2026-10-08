@@ -1,0 +1,94 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      heavy:
+        description: Also run the Docker and MinIO tests
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Check formatting
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))"
+      - run: go vet ./...
+      # Docker and MinIO tests skip themselves without their settings.
+      - run: go test -race -p 1 -count=1 ./...
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npx svelte-check
+      - run: npx vitest run
+      - run: npm run build
+      - name: Check that the committed web build is current
+        run: git diff --exit-code -- ../internal/web/dist
+
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean
+      - name: Install the snapshot release
+        run: |
+          release=$(mktemp -d)
+          cp install.sh dist/SHA256SUMS "$release/"
+          cp dist/synod_linux_amd64_v1/synod "$release/synod-linux-amd64"
+          tag=$(jq -r .tag dist/metadata.json)
+          sh install.sh --version "$tag" --from-dir "$release" --install-dir "$RUNNER_TEMP/bin"
+          "$RUNNER_TEMP/bin/synod" --version
+          sh install.sh --version "$tag" --from-dir "$release" --install-dir "$RUNNER_TEMP/bin"
+          echo corrupt >> "$release/synod-linux-amd64"
+          ! sh install.sh --version "$tag" --from-dir "$release" --install-dir "$RUNNER_TEMP/other"
+
+  heavy:
+    if: github.event_name == 'workflow_dispatch' && inputs.heavy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start MinIO
+        run: |
+          go mod download -json github.com/minio/minio@v0.0.0-20251015172955-9e49d5e7a648 > "$RUNNER_TEMP/minio.json"
+          (cd "$(jq -r .Dir "$RUNNER_TEMP/minio.json")" && CGO_ENABLED=0 go build -mod=readonly -o "$RUNNER_TEMP/minio" .)
+          secret=$(openssl rand -hex 24)
+          echo "::add-mask::$secret"
+          MINIO_ROOT_USER=synod-test MINIO_ROOT_PASSWORD=$secret "$RUNNER_TEMP/minio" server "$RUNNER_TEMP/minio-data" --address 127.0.0.1:9000 > "$RUNNER_TEMP/minio.log" 2>&1 &
+          for i in $(seq 100); do curl -sf http://127.0.0.1:9000/minio/health/ready && break; sleep 0.2; done
+          echo "SYNOD_TEST_S3_ENDPOINT=http://127.0.0.1:9000" >> "$GITHUB_ENV"
+          echo "SYNOD_TEST_S3_ACCESS_KEY=synod-test" >> "$GITHUB_ENV"
+          echo "SYNOD_TEST_S3_SECRET_KEY=$secret" >> "$GITHUB_ENV"
+      # Restore tests read named volumes in /var/lib/docker, as a root agent does.
+      - name: Run all tests as root with Docker
+        run: sudo --preserve-env=SYNOD_TEST_S3_ENDPOINT,SYNOD_TEST_S3_ACCESS_KEY,SYNOD_TEST_S3_SECRET_KEY env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" SYNOD_TEST_DOCKER_HOST=unix:///var/run/docker.sock go test -race -p 1 -count=1 -timeout=60m ./...
