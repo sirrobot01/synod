@@ -24,14 +24,16 @@ The examples use `192.168.0.20` for the controller. Use your own address.
 
 ## 1. Install
 
-Get the release files. Then run this on each device:
+Run this on each device:
 
 ```sh
-sh install.sh --version VERSION --install-dir /usr/local/bin
+curl -fsSL https://synod.biodun.dev/install.sh | sh
 synod --version
 ```
 
-The installer checks the release checksums. It does not start any service.
+The installer gets the latest release, checks its checksums, and installs `/usr/local/bin/synod`.
+It does not start any service.
+To select a version, add `-s -- --version v0.1.0` after `sh`.
 
 ## 2. Create the controller
 
@@ -191,13 +193,13 @@ Approve each device. Then restore your apps.
 ## Upgrade
 
 Stop the agents, then the controller.
-Run the new installer with `--upgrade` on each device.
+Run the installer with `--upgrade` on each device.
 Start the controller, then the agents.
 
 ```sh
 systemctl stop synod-agent
 systemctl stop synod-server        # controller device only
-sh install.sh --version VERSION --install-dir /usr/local/bin --upgrade
+curl -fsSL https://synod.biodun.dev/install.sh | sh -s -- --upgrade
 systemctl start synod-server       # controller device only
 systemctl start synod-agent
 ```

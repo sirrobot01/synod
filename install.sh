@@ -5,7 +5,8 @@ umask 077
 
 version=
 install_dir=/usr/local/bin
-base_url=https://github.com/sirrobot01/synod/releases/download
+repository=https://github.com/sirrobot01/synod
+base_url=$repository/releases/download
 from_dir=
 upgrade=false
 while [ "$#" -gt 0 ]; do
@@ -22,11 +23,12 @@ while [ "$#" -gt 0 ]; do
         --upgrade) upgrade=true; shift ;;
         --help|-h)
             cat <<'HELP'
-Usage: sh install.sh --version v0.1.0 [--install-dir /usr/local/bin]
+Usage: sh install.sh [--version v0.1.0] [--install-dir /usr/local/bin]
                      [--base-url https://host/releases/download]
                      [--from-dir /path/to/release] [--upgrade]
 
-Select a version. Synod supports Linux amd64 and arm64.
+Without --version, the installer selects the latest GitHub release.
+Synod supports Linux amd64 and arm64.
 The installer verifies SHA-256 checksums before it installs the binary.
 Use --upgrade to replace an existing binary and save it as synod.previous.
 Restart the controller and agents after an upgrade. Keep their state directories.
@@ -36,12 +38,6 @@ HELP
         *) echo "Unknown option. Run sh install.sh --help." >&2; exit 1 ;;
     esac
 done
-case "$version" in
-    *[!A-Za-z0-9.-]*) echo "The version contains invalid characters." >&2; exit 1 ;;
-esac
-printf '%s\n' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$' || {
-    echo "Use --version vMAJOR.MINOR.PATCH, with an optional prerelease suffix." >&2; exit 1;
-}
 case "$install_dir" in /*) ;; *) echo "Use an absolute --install-dir." >&2; exit 1 ;; esac
 [ "$(uname -s)" = Linux ] || { echo "Synod releases support Linux only." >&2; exit 1; }
 case "$(uname -m)" in
@@ -62,6 +58,23 @@ if [ -z "$from_dir" ]; then
 else
     case "$from_dir" in /*) ;; *) echo "Use an absolute --from-dir." >&2; exit 1 ;; esac
 fi
+if [ -z "$version" ]; then
+    [ -z "$from_dir" ] && [ "$base_url" = "$repository/releases/download" ] || {
+        echo "Use --version with --from-dir or --base-url." >&2; exit 1;
+    }
+    # GitHub redirects releases/latest to the page of the newest release tag.
+    latest=$(curl --fail --silent --show-error --location --head --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --connect-timeout 10 --max-time 60 --output /dev/null --write-out '%{url_effective}' "$repository/releases/latest") || {
+        echo "The latest release could not be found. Use --version." >&2; exit 1;
+    }
+    version=${latest##*/}
+fi
+case "$version" in
+    *[!A-Za-z0-9.-]*) echo "The version contains invalid characters." >&2; exit 1 ;;
+esac
+printf '%s\n' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$' || {
+    echo "Use --version vMAJOR.MINOR.PATCH, with an optional prerelease suffix." >&2; exit 1;
+}
 mkdir -p "$install_dir" || { echo "Use a writable --install-dir, or run with sudo." >&2; exit 1; }
 lock=$install_dir/.synod-install.lock
 mkdir "$lock" 2>/dev/null || { echo "Another installer holds $lock. Wait for it to finish. If it stopped, remove the empty lock directory and retry." >&2; exit 1; }

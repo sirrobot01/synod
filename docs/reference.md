@@ -5,26 +5,27 @@ For setup, read the [user guide](user-guide.md).
 
 ## Install a release binary
 
-No public v0.1 release exists yet.
-Build the release files (see [Development](development.md#release)), then copy them to the Linux device.
-Run the installer from that directory:
+Install the latest release:
 
 ```sh
-sh install.sh --version v0.1.0-rc.1 --from-dir /path/to/release --install-dir "$HOME/.local/bin"
-"$HOME/.local/bin/synod" --version
+curl -fsSL https://synod.biodun.dev/install.sh | sh
 ```
 
-Use `/usr/local/bin` and run the installer with `sudo` for a system installation.
-Add your selected directory to `PATH`.
+Pass options after `sh -s --`:
+
+| Option | Use |
+| --- | --- |
+| `--version v0.1.0` | Install this version. Without it, the installer selects the latest GitHub release. |
+| `--install-dir DIR` | Install into this directory. The default is `/usr/local/bin`. |
+| `--upgrade` | Replace an installed binary. See [Upgrade](#upgrade-the-controller-and-agents). |
+| `--from-dir DIR` | Install from release files copied to a device without Internet access. Needs `--version`. |
+| `--base-url URL` | Download from another HTTPS release server. Needs `--version`. |
+
 The device must run Linux on amd64 or arm64.
-It needs `sha256sum` or `shasum`.
+It needs `curl` and `sha256sum` or `shasum`.
 Docker and the Docker Compose plugin are required for app backup and restore.
 The installer does not change Docker, create installation state, or start a service.
-
-After release files are published, omit `--from-dir` to download them with `curl`.
-The default release base is `https://github.com/sirrobot01/synod/releases/download`.
-Use `--base-url https://host/releases/download` for another release server.
-Each server must put the files in a directory named for the version.
+It downloads `synod-linux-ARCH` and `SHA256SUMS` from the release.
 Downloads and redirects must use HTTPS.
 The checksums detect changed or incomplete downloads.
 Trust the release source before you run its installer.
@@ -54,12 +55,12 @@ sudo systemctl stop synod-agent
 sudo systemctl stop synod-server
 ```
 
-Run the new release installer on each device.
+Run the installer on each device.
 Use the directory that contains the executable in the service's `ExecStart` line.
-For an offline release in `/path/to/release`:
+Add `--version` so that every device gets the same release:
 
 ```sh
-sudo sh /path/to/release/install.sh --version v0.1.0-rc.2 --from-dir /path/to/release --install-dir /usr/local/bin --upgrade
+curl -fsSL https://synod.biodun.dev/install.sh | sudo sh -s -- --version v0.1.0 --upgrade
 /usr/local/bin/synod --version
 ```
 

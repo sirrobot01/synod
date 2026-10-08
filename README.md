@@ -16,10 +16,10 @@ v0.1 is not released yet.
 
 Run these commands as root on Linux.
 
-1. Install Synod on each device. Get `install.sh` from the release, then run:
+1. Install Synod on each device:
 
    ```sh
-   sh install.sh --version VERSION --install-dir /usr/local/bin
+   curl -fsSL https://synod.biodun.dev/install.sh | sh
    ```
 
 2. Create the controller on one device. Use an address that your other devices can reach:
