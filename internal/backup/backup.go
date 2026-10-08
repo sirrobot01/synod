@@ -110,6 +110,8 @@ type Snapshot struct {
 	CompletedAt    time.Time     `json:"completed_at"`
 	DowntimeMillis int64         `json:"downtime_ms"`
 	SQLite         []string      `json:"sqlite,omitempty"`
+	Consistency    Consistency   `json:"consistency,omitempty"`
+	Captures       []Capture     `json:"captures,omitempty"`
 	// Changing lists files that kept changing while a live copy read them. They are saved as read.
 	Changing   []string       `json:"changing,omitempty"`
 	Dumps      []DatabaseDump `json:"dumps,omitempty"`
@@ -122,16 +124,17 @@ type Snapshot struct {
 
 // Result is safe for controller metadata. Definitions and file contents stay in the repository.
 type Result struct {
-	SnapshotID       uuid.UUID `json:"snapshot_id,omitzero"`
-	DestinationID    uuid.UUID `json:"destination_id"`
-	StartedAt        time.Time `json:"started_at"`
-	CompletedAt      time.Time `json:"completed_at"`
-	DowntimeMillis   int64     `json:"downtime_ms"`
-	FileBytes        int64     `json:"file_bytes"`
-	FailureCode      string    `json:"failure_code,omitempty"`
-	RepositoryOpened bool      `json:"repository_opened,omitzero"`
-	RestartPending   []string  `json:"restart_pending,omitempty"`
-	WarningCodes     []string  `json:"warning_codes,omitempty"`
+	SnapshotID       uuid.UUID   `json:"snapshot_id,omitzero"`
+	DestinationID    uuid.UUID   `json:"destination_id"`
+	StartedAt        time.Time   `json:"started_at"`
+	CompletedAt      time.Time   `json:"completed_at"`
+	DowntimeMillis   int64       `json:"downtime_ms"`
+	FileBytes        int64       `json:"file_bytes"`
+	FailureCode      string      `json:"failure_code,omitempty"`
+	RepositoryOpened bool        `json:"repository_opened,omitzero"`
+	RestartPending   []string    `json:"restart_pending,omitempty"`
+	WarningCodes     []string    `json:"warning_codes,omitempty"`
+	Consistency      Consistency `json:"consistency,omitempty"`
 }
 
 // Submission holds the choices made by an administrator. The controller resolves the device.
@@ -162,6 +165,9 @@ func (e Event) Validate(request Request) error {
 		return ErrInvalid
 	}
 	result := e.Result
+	if result.Consistency.Validate() != nil || (result.Consistency != "" && e.Status != "succeeded") {
+		return ErrInvalid
+	}
 	if e.ID != request.ID || result.DestinationID != request.DestinationID || result.DowntimeMillis < 0 || result.FileBytes < 0 || len(result.RestartPending) > 256 {
 		return ErrInvalid
 	}

@@ -70,6 +70,7 @@ type AppPlan struct {
 	State                 ProtectionState `json:"state"`
 	DataLossWindowSeconds *int64          `json:"data_loss_window_seconds,omitzero"`
 	Targets               []TargetStatus  `json:"targets"`
+	LimitCodes            []string        `json:"limit_codes,omitempty"`
 }
 
 type TargetStatus struct {
@@ -80,6 +81,7 @@ type TargetStatus struct {
 	LastOperationID       uuid.UUID       `json:"last_operation_id,omitzero"`
 	FailureCode           string          `json:"failure_code,omitempty"`
 	LastGood              *Result         `json:"last_good,omitzero"`
+	LimitCodes            []string        `json:"limit_codes,omitempty"`
 	DataLossWindowSeconds *int64          `json:"data_loss_window_seconds,omitzero"`
 }
 

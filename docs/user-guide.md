@@ -130,7 +130,9 @@ On supported btrfs, ZFS, and LVM filesystems, Synod copies from filesystem snaps
 Each filesystem has its own capture time.
 On other disks, Synod reads a file again when it changed during the copy.
 These methods do not guarantee agreement between all files and databases in an app.
-New apps are protected automatically.
+New apps receive the backup schedule automatically.
+A successful copy has partial protection while app consistency remains unverified.
+Synod does not pause writes to gain full-protection status.
 
 Check the status:
 

@@ -520,6 +520,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		state.Metadata.Paths = tree.Paths
 		state.Metadata.SQLite = sqliteFiles
 		state.Metadata.Changing = tree.Changing()
+		state.Metadata.Consistency, state.Metadata.Captures = tree.captureEvidence(method, sqliteFiles, state.Metadata.Dumps)
 	}
 	durable, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	saveErr := w.save(durable, &state)
@@ -623,6 +624,7 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 	if result.FailureCode == "" {
 		result.SnapshotID = state.Metadata.ID
 		result.FileBytes = state.Metadata.FileBytes
+		result.Consistency = state.Metadata.Consistency
 		if len(state.Metadata.Changing) > 0 {
 			result.WarningCodes = append(result.WarningCodes, "files_changed_during_copy")
 		}

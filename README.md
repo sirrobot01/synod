@@ -3,7 +3,7 @@
 Synod backs up the Docker apps of your home lab and restores them on any of your devices.
 
 - **Finds your apps.** Synod discovers Compose projects and containers, with their files, volumes, and databases.
-- **Never stops your apps.** It makes native dumps of PostgreSQL, MySQL, MariaDB, and Redis, and copies other data while apps run.
+- **Apps keep running by default.** It makes native dumps of PostgreSQL, MySQL, MariaDB, and Redis, and copies other data while apps run.
 - **Restores anywhere.** Restore an app on the same device or on another one, amd64 or arm64.
 - **Proves your backups.** Agents test a restore each month and check repository content each week.
 - **Fast and encrypted.** Later backups read only changed files, like rsync. Backups go to another device, a local disk, SFTP, or S3.

@@ -123,6 +123,11 @@ func (t *Tree) useSnapshots(ctx context.Context, operation string) (*fsSnapshots
 		}
 		root.root.Close()
 		root.root, root.snapshot = opened, true
+		for _, base := range s.views {
+			if within(view, base) && len(base) > len(root.capturePoint) {
+				root.capturePoint = base
+			}
+		}
 	}
 	// A btrfs snapshot directory sits inside a mounted filesystem. Never copy it.
 	for _, m := range all {

@@ -176,7 +176,7 @@ func newProtectCommand(app *app) *cobra.Command {
 		plan.Apps = choices
 		app.result.Protection = &plan
 		app.result.ProtectionUpdate = &update
-		app.result.Message = fmt.Sprintf("Preview only. Repeat this command with --confirm %d to save this plan.", plan.Revision)
+		app.result.Message = fmt.Sprintf("Preview only. Repeat this command with --confirm %d to save this plan.\nA schedule does not establish full protection. App consistency remains unverified. Synod will not pause writes to gain full-protection status.", plan.Revision)
 		return nil
 	}}
 	command.Flags().BoolVar(&all, "all", false, "Select all apps and set the default for new apps")

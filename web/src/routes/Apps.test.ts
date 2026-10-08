@@ -10,7 +10,14 @@ it("keeps the successful restore date beside a later failed drill", async () => 
   render(Apps, { go: vi.fn() });
   expect(await screen.findByText(/Tested Oct 1/)).toBeTruthy();
   expect(screen.getByRole("link", { name: "Latest drill failed" }).getAttribute("href")).toBe("/operations/drill-failed");
-  expect(screen.getByText("Protected")).toBeTruthy();
+  expect(screen.getByText("Partial")).toBeTruthy();
+  expect(screen.getByText("App consistency unverified")).toBeTruthy();
+  expect(screen.queryByText("Protected")).toBeNull();
+});
+it("explains why a saved copy cannot give full protection", async () => {
+  render(Apps, { id: "a1", go: vi.fn() });
+  expect(await screen.findByText(/Full protection is unavailable/)).toBeTruthy();
+  expect(screen.getByText(/will not pause writes/)).toBeTruthy();
 });
 it("does not call a failed read an empty installation", async () => {
   vi.mocked(api.protection).mockRejectedValue(new TypeError("offline"));

@@ -199,6 +199,15 @@ func TestLiveCopyReadsLVMSnapshot(t *testing.T) {
 				t.Fatal(err)
 			}
 			metadata := backup.Snapshot{ID: uuid.New(), InstallationID: uuid.New(), DestinationID: uuid.New(), Method: backup.Live, Architecture: "arm64", StartedAt: time.Now().UTC(), CompletedAt: time.Now().UTC(), Paths: tree.Paths, App: inventory.App{ID: uuid.New(), NodeID: uuid.New(), Definition: app}}
+			metadata.Consistency, metadata.Captures = tree.captureEvidence(backup.Live, nil, nil)
+			if metadata.Consistency != backup.ConsistencyFilesystem || len(metadata.Captures) != 3 {
+				t.Fatalf("missing filesystem capture evidence: %+v", metadata.Captures)
+			}
+			for _, capture := range metadata.Captures {
+				if capture.Point == "" || capture.Point != metadata.Captures[0].Point {
+					t.Fatal("mount aliases do not share the capture point")
+				}
+			}
 			if _, err := repo.PublishSnapshot(ctx, prepared, metadata); err != nil {
 				t.Fatal(err)
 			}

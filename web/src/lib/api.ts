@@ -182,6 +182,7 @@ export interface WorkResult {
   file_bytes?: number; downtime_ms?: number; failure_code?: string; resource?: string;
   safety_snapshot_id?: string; target_app_id?: string; project_directory?: string;
   recovery_pending?: string[]; restart_pending?: string[]; warning_codes?: string[];
+  consistency?: "unverified" | "filesystem_snapshot";
   contents?: number; read?: number; bytes_read?: number; containers?: number;
   maintenance?: "completed" | "claimed" | "handing_over";
 }
@@ -190,8 +191,9 @@ export interface AppPlan {
   app: App; enabled: boolean; settings_current: boolean; settings: CopySettings;
   state: string; blocked_code?: string; only_on_source: boolean; data_loss_window_seconds?: number;
   restore_tested_at?: string; last_drill?: ProofStatus;
+  limit_codes?: string[];
   targets: { destination_id: string; selected: boolean; state: string; due_at?: string; last_operation_id?: string;
-    failure_code?: string; last_good?: WorkResult; data_loss_window_seconds?: number }[];
+    failure_code?: string; last_good?: WorkResult; data_loss_window_seconds?: number; limit_codes?: string[] }[];
 }
 export interface ProtectionPlan { revision: number; auto_protect: boolean; defaults: CopySettings; apps: AppPlan[] }
 export interface ProtectionUpdate { id: string; expected_revision: number; all: boolean; app_ids?: string[]; enabled: boolean; settings: CopySettings }

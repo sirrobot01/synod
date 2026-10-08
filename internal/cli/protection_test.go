@@ -91,3 +91,26 @@ func TestProtectCLIPreservesSavedChoicesAndSupportsOptOut(t *testing.T) {
 		}
 	}
 }
+
+func TestAppStatusExplainsTheConsistencyLimit(t *testing.T) {
+	plan := backup.ProtectionPlan{Revision: 1, Apps: []backup.AppPlan{{
+		App:     inventory.App{ID: uuid.New(), NodeID: uuid.New(), Definition: &agentv1.DiscoveredApp{Name: "notes"}},
+		Enabled: true, State: backup.Partial, LimitCodes: []string{backup.AppConsistencyUnverified},
+		Targets: []backup.TargetStatus{{DestinationID: uuid.New(), State: backup.Partial, LastGood: &backup.Result{SnapshotID: uuid.New(), Consistency: backup.ConsistencyFilesystem}}},
+	}}}
+	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/protection" || r.Method != "GET" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(plan)
+	}))
+	var output, diagnostics bytes.Buffer
+	if code := cli.Run(t.Context(), append(flags, "--json=false", "app", "status"), &output, &diagnostics); code != 0 {
+		t.Fatalf("status: %d %s", code, diagnostics.String())
+	}
+	for _, message := range []string{"Current status: partial", "agreement between app files and databases is not verified", "will not pause writes", "Capture scope: filesystem_snapshot"} {
+		if !bytes.Contains(output.Bytes(), []byte(message)) {
+			t.Fatalf("status omitted %q: %s", message, output.String())
+		}
+	}
+}

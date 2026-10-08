@@ -181,6 +181,13 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			}
 			fmt.Fprintf(&output, "  Method: %s  Daily: %s %s  Keep: %d daily, %d weekly, %d monthly\n", entry.Settings.Method, entry.Settings.At, entry.Settings.TimeZone, entry.Settings.Retention.Daily, entry.Settings.Retention.Weekly, entry.Settings.Retention.Monthly)
 			fmt.Fprintf(&output, "  Destinations: %v\n", entry.Settings.Destinations)
+			for _, limit := range entry.LimitCodes {
+				if limit == backup.AppConsistencyUnverified {
+					fmt.Fprintln(&output, "  Partial protection: agreement between app files and databases is not verified. Synod will not pause writes to gain full-protection status.")
+				} else {
+					fmt.Fprintf(&output, "  Protection limit: %s\n", limit)
+				}
+			}
 			if entry.DataLossWindowSeconds == nil {
 				fmt.Fprintln(&output, "  Data-loss window: no good snapshot reported")
 			} else {
@@ -204,6 +211,9 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 				fmt.Fprintf(&output, "  Destination %s: %s  Failure: %s\n", target.DestinationID, target.State, target.FailureCode)
 				if target.LastGood != nil {
 					fmt.Fprintf(&output, "    Last good: %s  Snapshot: %s\n", target.LastGood.StartedAt.Format(time.RFC3339), target.LastGood.SnapshotID)
+					if target.LastGood.Consistency != "" {
+						fmt.Fprintf(&output, "    Capture scope: %s\n", target.LastGood.Consistency)
+					}
 					for _, code := range target.LastGood.WarningCodes {
 						fmt.Fprintf(&output, "    Warning: %s\n", code)
 					}

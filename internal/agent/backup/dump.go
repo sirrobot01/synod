@@ -49,7 +49,7 @@ exec pg_dumpall --no-password --host=/var/run/postgresql --port="${PGPORT:-5432}
 		d.command = `password_file=${MARIADB_ROOT_PASSWORD_FILE:-${MYSQL_ROOT_PASSWORD_FILE:-}}
 if [ -n "$password_file" ]; then MYSQL_PWD=$(cat "$password_file"); else MYSQL_PWD=${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}; fi
 export MYSQL_PWD
-exec ` + tool + ` --no-defaults --protocol=socket --user=root --all-databases --lock-all-tables --quick --routines --events --triggers --hex-blob --flush-privileges` + extra
+exec ` + tool + ` --no-defaults --protocol=socket --user=root --all-databases --single-transaction --quick --routines --events --triggers --hex-blob --flush-privileges` + extra + ` --skip-lock-tables`
 	case "redis":
 		format = "rdb"
 		d.command = `if [ -n "${REDIS_PASSWORD_FILE:-}" ]; then REDISCLI_AUTH=$(cat "$REDIS_PASSWORD_FILE"); export REDISCLI_AUTH; elif [ -n "${REDIS_PASSWORD:-}" ]; then REDISCLI_AUTH=$REDIS_PASSWORD; export REDISCLI_AUTH; fi

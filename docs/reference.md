@@ -438,6 +438,14 @@ Live and Dump copy files while the containers run:
 - A file that still changed is saved as read. The snapshot lists it under `changing`, and the result has the warning `files_changed_during_copy`.
 - Separate filesystems have separate snapshot times. Live file copies and native database dumps also have separate capture times. These methods do not establish consistency between all files and databases in an app. A valid database dump alone does not prove that the app can recover.
 
+The manifest records each capture method and source under `captures`.
+A shared capture point identifies one filesystem snapshot.
+The `consistency` value is `filesystem_snapshot` only when all file roots use one snapshot and no independent database export is present.
+Other copies use `unverified`. Neither value proves agreement between all app resources.
+Successful copies show partial protection with `app_consistency_unverified`.
+Running, failed, and overdue states still show the consistency limit.
+Full protection stays unavailable until Synod supports and verifies a live export for the whole app.
+
 Stop is an explicit choice for an app that needs a stopped copy.
 With Stop, Synod keeps database containers running for their native dumps.
 Synod first uploads the files while the app runs.
@@ -462,7 +470,10 @@ Redis uses `redis-cli --rdb`.
 Synod waits for an existing Redis background save to end before it requests a dump.
 Dumps stream directly into the encrypted repository. Synod creates no plaintext dump files.
 Each dump records its source container and format in the snapshot manifest.
-MySQL and MariaDB hold a read lock during the dump. Writes wait until the dump ends.
+MySQL and MariaDB use `--single-transaction` and `--skip-lock-tables`. They do not take a global read lock.
+The transactional guarantee covers InnoDB rows. It does not cover MyISAM or MEMORY tables.
+Schema changes during a dump can also prevent a consistent export.
+Synod does not pause writes to cover these limits.
 PostgreSQL copies each database in its own transaction. The databases do not share one snapshot point.
 The native client, `sh`, `timeout`, and Linux `/proc` must be available in the container.
 Synod checks that the dump has its own process group before it starts the native client.

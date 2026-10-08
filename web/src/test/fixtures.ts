@@ -11,7 +11,7 @@ export const app: AppPlan = {
       { source: "/var/run/docker.sock", kind: "bind", status: "Never", reason: "host socket" },
     ] } },
   enabled: true, settings_current: true, settings: { destinations: ["d1"], method: "auto", at: "03:00", time_zone: "UTC", retention: { daily: 7, weekly: 4, monthly: 6 } },
-  state: "protected", only_on_source: false, data_loss_window_seconds: 3600, targets: [],
+  state: "partial", limit_codes: ["app_consistency_unverified"], only_on_source: false, data_loss_window_seconds: 3600, targets: [],
   restore_tested_at: "2026-10-01T03:00:00Z", last_drill: { id: "drill-failed", node_id: "n1", state: "failed", result: { failure_code: "drill_container_stopped" } },
 };
 export const plan: ProtectionPlan = { revision: 3, auto_protect: true, defaults: app.settings, apps: [app] };

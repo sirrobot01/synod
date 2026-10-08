@@ -32,6 +32,8 @@ type sourceRoot struct {
 	volume                bool
 	// snapshot is set when root reads a filesystem snapshot. Its files do not change during the copy.
 	snapshot bool
+	// capturePoint identifies the filesystem snapshot, including shared mount aliases.
+	capturePoint string
 }
 
 // nestedPath is an included path that its parent's walk copies. Each pass checks that it still exists.

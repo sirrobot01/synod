@@ -367,7 +367,7 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 		entry.LastDrill, entry.RestoreTestedAt = drills[entry.App.ID], tested[entry.App.ID]
 		entry.State = backup.Unprotected
 		if entry.Enabled {
-			entry.State = backup.Protected
+			entry.State = backup.Pending
 		}
 		targetIDs := slices.Clone(entry.Settings.Destinations)
 		for key := range latest {
@@ -387,7 +387,10 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 			if result, ok := good[key]; ok {
 				status.LastGood = &result
 				status.DataLossWindowSeconds = new(max(0, int64(now.Sub(result.StartedAt).Seconds())))
-				status.State = backup.Protected
+				// Current captures prove at most one filesystem state. No supported
+				// live app export yet establishes agreement across all app resources.
+				status.State = backup.Partial
+				status.LimitCodes = []string{backup.AppConsistencyUnverified}
 				if !status.Selected {
 					status.State = backup.Retained
 				} else if result.StartedAt.Before(status.DueAt) {
@@ -404,12 +407,17 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 					status.State = backup.ProtectionState(op.Status)
 				} else if op.Status == operation.Failed {
 					status.State = backup.Failed
-				} else if status.State == backup.Protected && status.LastGood != nil && len(status.LastGood.WarningCodes) > 0 {
+				} else if status.State == backup.Partial && status.LastGood != nil && len(status.LastGood.WarningCodes) > 0 {
 					status.State = backup.Warning
 				}
 			}
 			if status.Selected {
 				states[status.State] = true
+				for _, limit := range status.LimitCodes {
+					if !slices.Contains(entry.LimitCodes, limit) {
+						entry.LimitCodes = append(entry.LimitCodes, limit)
+					}
+				}
 			}
 			entry.Targets = append(entry.Targets, status)
 		}

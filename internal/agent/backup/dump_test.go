@@ -121,6 +121,42 @@ func TestWorkerDumpsAndRestoresRunningDatabases(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if db.name == "mysql" || db.name == "mariadb" {
+				// Keep the native dump active by blocking its output. A global read lock
+				// would block this independent writer until the dump reader closes.
+				seed := "CREATE TABLE proof.bulk(id INT PRIMARY KEY AUTO_INCREMENT, data LONGBLOB) ENGINE=InnoDB; INSERT INTO proof.bulk(data) VALUES(REPEAT('x',1048576));"
+				for range 5 {
+					seed += "INSERT INTO proof.bulk(data) SELECT data FROM proof.bulk;"
+				}
+				if _, err := dockerCommand(t.Context(), api, id, input(seed)); err != nil {
+					t.Fatal(err)
+				}
+				export, _, err := newDump(api, before.Container, db.name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dumpCtx, cancelDump := context.WithTimeout(t.Context(), time.Minute)
+				defer cancelDump()
+				reader, err := export.GetReader(dumpCtx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reader.Close()
+				if _, err := io.CopyN(io.Discard, reader, 1<<20); err != nil {
+					t.Fatal(err)
+				}
+				writeCtx, cancelWrite := context.WithTimeout(t.Context(), 10*time.Second)
+				_, writeErr := dockerCommand(writeCtx, api, id, input("INSERT INTO proof.data VALUES (-1, 'write-during-dump');"))
+				cancelWrite()
+				reader.Close()
+				cancelDump()
+				if writeErr != nil {
+					t.Fatalf("native dump blocked a concurrent write: %v", writeErr)
+				}
+				if _, err := dockerCommand(t.Context(), api, id, input("DROP TABLE proof.bulk;")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var writes atomic.Int64
 			writerCtx, stopWrites := context.WithCancel(t.Context())
 			writerDone := make(chan struct{})
