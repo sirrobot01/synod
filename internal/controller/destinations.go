@@ -17,7 +17,7 @@ import (
 
 // deliverDestinations resends until the current agent session confirms a durable save.
 func deliverDestinations(ctx context.Context, installationID uuid.UUID, metadata *store.Store, ring *secret.Keyring, stream *controlstream.Server, logger *slog.Logger) {
-	tick := time.NewTicker(5 * time.Second)
+	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
 		if ctx.Err() != nil {

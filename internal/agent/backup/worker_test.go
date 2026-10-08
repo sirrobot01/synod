@@ -371,3 +371,23 @@ func TestWorkerReusesItsConnectionForTheNextBackup(t *testing.T) {
 	}
 	t.Fatal("project path is absent from the manifest")
 }
+
+// A renewed peer certificate changes only the pins. The pool must not reuse a connection that pins the old one.
+func TestWorkerConnectionKeyFollowsPeerPins(t *testing.T) {
+	var w Worker
+	key := func(endpoint string, pins ...string) [32]byte {
+		location := repository.Location{Kind: "device", Device: &repository.DeviceLocation{Endpoint: endpoint, CertificateSHA256: pins}}
+		_, k, err := w.connect(t.Context(), uuid.Nil, location, repository.Credentials{}, false)
+		if err == nil {
+			t.Fatal("connected to an invalid device location")
+		}
+		return k
+	}
+	original := key("https://127.0.0.1:1", "old")
+	if key("https://127.0.0.1:1", "old") != original {
+		t.Fatal("the same settings produced another key")
+	}
+	if key("https://127.0.0.1:1", "old", "new") == original || key("https://127.0.0.1:2", "old") == original {
+		t.Fatal("changed pins or endpoint kept the pooled connection key")
+	}
+}

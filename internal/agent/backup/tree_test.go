@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,5 +173,14 @@ func TestTreeRefusesPathEscapeAndChangedParents(t *testing.T) {
 	if input, err := file.(kfs.File).Open(t.Context()); err == nil {
 		input.Close()
 		t.Fatal("internal parent symlink was followed")
+	}
+}
+
+// The agent logs the source error, so it must name the path that it could not read.
+func TestTreeNamesTheUnreadablePath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "volume", "_data")
+	_, err := NewTree(t.Context(), &agentv1.DiscoveredApp{Paths: []*agentv1.DiscoveredPath{{Source: missing, Kind: "bind", Status: "Included"}}}, nil, nil)
+	if !errors.Is(err, ErrSource) || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("NewTree() error = %v, want ErrSource naming %s", err, missing)
 	}
 }

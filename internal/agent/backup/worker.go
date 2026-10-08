@@ -63,12 +63,20 @@ const ConnectionIdle = 10 * time.Minute
 
 // connect reuses an idle connection opened with the same settings, or opens a new one.
 func (w *Worker) connect(ctx context.Context, destinationID uuid.UUID, location repository.Location, credentials repository.Credentials, initialize bool) (*repository.Repository, [32]byte, error) {
+	// The device endpoint and certificate pins are not in the JSON form of a location.
+	// A renewed peer certificate changes the pins, so the key must include them.
+	var device repository.DeviceLocation
+	if location.Device != nil {
+		device = *location.Device
+	}
 	settings, _ := json.Marshal(struct {
 		Location    repository.Location
+		Endpoint    string
+		Pins        []string
 		Credentials repository.Credentials
 		Identity    *repository.DeviceIdentity
 		Cache       string
-	}{location, credentials, credentials.DeviceIdentity, credentials.CacheDirectory})
+	}{location, device.Endpoint, device.CertificateSHA256, credentials, credentials.DeviceIdentity, credentials.CacheDirectory})
 	key := sha256.Sum256(settings)
 	clear(settings)
 	w.connectionsMu.Lock()
@@ -204,7 +212,10 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	// The next save records this. A crash before it only repeats the repository check.
 	state.RepositoryOpened = true
 	if err := r.CheckInstallation(ctx, w.InstallationID); err != nil {
-		state.FailureCode = "repository_installation_conflict"
+		state.FailureCode = "repository_open_failed"
+		if errors.Is(err, repository.ErrCatalogConflict) {
+			state.FailureCode = "repository_installation_conflict"
+		}
 		return w.finish(ctx, request, &state, r)
 	}
 	filters := make(client.Filters)
@@ -332,6 +343,9 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	tree, err := NewTree(ctx, app, excluded, request.IncludeLarge)
 	if err != nil {
+		if w.Logger != nil {
+			w.Logger.Warn("backup_source_unavailable", "operation_id", request.ID, "error", err)
+		}
 		state.FailureCode = "source_unavailable"
 		return w.finish(ctx, request, &state, r)
 	}

@@ -117,15 +117,21 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 			}
 			continue
 		}
-		if err != nil || discovery.Forbidden(resolved, item.Kind == "volume") {
-			return nil, ErrSource
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: %w", ErrSource, item.Source, err)
+		}
+		if discovery.Forbidden(resolved, item.Kind == "volume") {
+			return nil, fmt.Errorf("%w: %s is a forbidden path", ErrSource, resolved)
 		}
 		if tree.skip(item.Source) || tree.skip(resolved) {
 			continue
 		}
 		info, err := os.Lstat(resolved)
-		if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
-			return nil, ErrSource
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: %w", ErrSource, resolved, err)
+		}
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("%w: %s is not a directory or a regular file", ErrSource, resolved)
 		}
 		rootPath, relative := resolved, "."
 		if !info.IsDir() {

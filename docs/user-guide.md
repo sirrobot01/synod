@@ -593,6 +593,9 @@ Interrupting `operation wait` does not cancel the operation.
 | Device does not connect | Check its address, clock, port 8444, and service log. |
 | Destination cannot be read | Check the owner device or storage service, credentials, and free space. |
 | `app_definition_incomplete` | Restore access to the Compose project files on the source host. Wait for discovery. |
+| `source_unavailable` | Read the `backup_source_unavailable` line in the agent log. It names the path. Run the agent as root so that it can read Docker volumes. |
+| `repository_open_failed` | Check that the destination is online and that both devices have current settings. Run another backup. |
+| `repository_installation_conflict` | The repository belongs to another Synod installation. Select an empty directory or the correct repository. |
 | `catalog_write_failed` | Fix repository access and run another backup. The current recovery settings were not saved. |
 | `retention_failed` | Fix repository access and run another backup. Older snapshot records were not expired. |
 | `maintenance_failed` | Fix repository access from the maintenance device. Check its clock. Maintenance stops when the device clock differs from the storage clock by more than 5 minutes. The next daily run tries again. |

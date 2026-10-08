@@ -13,7 +13,7 @@ import (
 	"github.com/sirrobot01/synod/internal/store"
 )
 
-// readSnapshotFile selects an approved agent with current destination settings.
+// readSnapshotFile sends the request to an approved agent that can read the destination.
 func readSnapshotFile(ctx context.Context, metadata *store.Store, stream *controlstream.Server, request restore.FileRequest) (restore.FileHeader, io.ReadCloser, error) {
 	catalog, err := metadata.ListApps(ctx)
 	if err != nil {
@@ -45,25 +45,42 @@ func readSnapshotFile(ctx context.Context, metadata *store.Store, stream *contro
 		}
 		return 0
 	})
+	reader, ok := fileReader(nodes, listing, request, stream.Session)
+	if !ok {
+		return restore.FileHeader{}, nil, controlstream.ErrDisconnected
+	}
+	request.NodeID = reader
+	return stream.ReadFile(ctx, request)
+}
+
+// fileReader returns the first online agent that can read the destination. It prefers
+// agents with current settings. A plan change, such as a first backup that initializes
+// a destination, leaves every agent briefly behind. An agent with older settings still
+// reads a destination that it has saved, and refuses one that it has not.
+func fileReader(nodes []store.Node, listing destination.Listing, request restore.FileRequest, session func(uuid.UUID) (controlstream.Peer, bool)) (uuid.UUID, bool) {
+	behind := uuid.Nil
 	for _, node := range nodes {
 		if node.ApprovedAt == nil || (request.NodeID != uuid.Nil && node.ID != request.NodeID) {
 			continue
 		}
-		peer, online := stream.Session(node.ID)
+		peer, online := session(node.ID)
 		if !online || !slices.Contains(peer.Capabilities, "files.read") {
 			continue
 		}
-		current := slices.ContainsFunc(listing.Delivery, func(d destination.Delivery) bool {
-			return d.NodeID == node.ID && d.Current && d.SessionID == peer.SessionID
-		})
 		accessible := slices.ContainsFunc(listing.Destinations, func(d destination.Destination) bool {
 			return (request.DestinationID == uuid.Nil || d.ID == request.DestinationID) && (d.Location.Kind != "local" || d.NodeID == node.ID)
 		})
-		if !current || !accessible {
+		if !accessible {
 			continue
 		}
-		request.NodeID = node.ID
-		return stream.ReadFile(ctx, request)
+		if slices.ContainsFunc(listing.Delivery, func(d destination.Delivery) bool {
+			return d.NodeID == node.ID && d.Current && d.SessionID == peer.SessionID
+		}) {
+			return node.ID, true
+		}
+		if behind == uuid.Nil {
+			behind = node.ID
+		}
 	}
-	return restore.FileHeader{}, nil, controlstream.ErrDisconnected
+	return behind, behind != uuid.Nil
 }
