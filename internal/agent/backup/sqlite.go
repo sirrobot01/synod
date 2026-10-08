@@ -217,8 +217,9 @@ func copySQLite(ctx context.Context, uri string) (_ *os.File, retErr error) {
 	return file, nil
 }
 
-func (t *Tree) sqliteSidecar(parent *os.Root, name string) (bool, error) {
-	if !t.live {
+func (t *Tree) sqliteSidecar(source *sourceRoot, parent *os.Root, name string) (bool, error) {
+	// A snapshot holds a database and its sidecars from one moment, so they are copied together.
+	if !t.live || source.snapshot {
 		return false, nil
 	}
 	for _, suffix := range []string{"-wal", "-shm", "-journal"} {

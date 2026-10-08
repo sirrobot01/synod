@@ -350,8 +350,24 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		state.FailureCode = "source_unavailable"
 		return w.finish(ctx, request, &state, r)
 	}
-	defer tree.Close()
 	tree.live = method == backup.Live || method == backup.Dump
+	// A live copy reads from a filesystem snapshot where the disk can take one.
+	var snapshots *fsSnapshots
+	if tree.live {
+		if snapshots, err = tree.useSnapshots(ctx, request.ID.String()); err != nil && w.Logger != nil {
+			w.Logger.Warn("backup_snapshot_unavailable", "operation_id", request.ID, "error", err)
+		}
+		state.phase("snapshot")
+	}
+	defer func() {
+		// The snapshot is removed after the tree closes its directories in it.
+		tree.Close()
+		if snapshots != nil {
+			if err := snapshots.Close(); err != nil && w.Logger != nil {
+				w.Logger.Warn("backup_snapshot_remove_failed", "operation_id", request.ID, "error", err)
+			}
+		}
+	}()
 	if app.Kind == "compose" && !slices.ContainsFunc(tree.Paths, func(path backup.Path) bool { return path.Kind == "compose" }) {
 		state.FailureCode = "app_definition_excluded"
 		return w.finish(ctx, request, &state, r)

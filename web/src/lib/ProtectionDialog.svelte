@@ -46,8 +46,8 @@
             <label class="check"><input type="checkbox" bind:group={settings.destinations} value={destination.id} />{destination.name} <span class="mono dim">{destination.location.kind}</span></label>
           {:else}<p>Add a destination first.</p>{/each}
         </fieldset>
-        <label>Copy method<select bind:value={settings.method}><option value="auto">Automatic · dump databases, stop other apps</option><option value="stop">Stop · final copy while stopped</option><option value="dump">Dump · native database copies</option><option value="live">Live · app stays running</option></select></label>
-        {#if settings.method === "live"}<p class="callout">Live copies can be inconsistent. Use this only if the app supports a live file copy.</p>{/if}
+        <label>Copy method<select bind:value={settings.method}><option value="auto">Automatic · app keeps running</option><option value="live">Live · copy files while running</option><option value="dump">Dump · native database copies</option><option value="stop">Stop · final copy while stopped</option></select></label>
+        {#if settings.method === "stop"}<p class="callout">Stop stops the app briefly for each backup. Use it only if the app needs a stopped copy.</p>{/if}
         <div class="columns"><label>Daily time<input type="time" required bind:value={settings.at} /></label><label>Time zone<input required bind:value={settings.time_zone} placeholder="UTC" /></label></div>
         {#if large.length && enabled}
           <fieldset class="stack"><legend class="label">Large paths</legend>

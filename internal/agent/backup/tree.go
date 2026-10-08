@@ -31,6 +31,8 @@ type sourceRoot struct {
 	root                  *os.Root
 	path, source, archive string
 	volume                bool
+	// snapshot is set when root reads a filesystem snapshot. Its files do not change during the copy.
+	snapshot bool
 }
 
 // nestedPath is an included path that its parent's walk copies. Each pass checks that it still exists.
@@ -216,7 +218,7 @@ func (t *Tree) Root(ctx context.Context, definitions map[string][]byte, dumps ..
 			return nil, err
 		}
 		if root.path != "." {
-			sidecar, err := t.sqliteSidecar(root.root, root.path)
+			sidecar, err := t.sqliteSidecar(root, root.root, root.path)
 			if err != nil {
 				return nil, err
 			}
@@ -233,7 +235,7 @@ func (t *Tree) Root(ctx context.Context, definitions map[string][]byte, dumps ..
 			return nil, ErrSource
 		}
 		var wal os.FileInfo
-		if t.live && info.Mode().IsRegular() {
+		if t.live && !root.snapshot && info.Mode().IsRegular() {
 			if wal, err = root.root.Lstat(root.path + "-wal"); errors.Is(err, os.ErrNotExist) {
 				wal = nil
 			} else if err != nil {
@@ -350,7 +352,7 @@ func newSourceEntry(tree *Tree, root *sourceRoot, path, absolute, name string, i
 	case info.IsDir():
 		return &sourceDirectory{entry}
 	case info.Mode().IsRegular():
-		if tree.live {
+		if tree.live && !root.snapshot {
 			// A WAL commit changes only the -wal file. Its time makes Kopia read the database again.
 			if wal != nil && wal.ModTime().After(info.ModTime()) {
 				return &liveFile{entry, wal.ModTime()}
@@ -442,7 +444,7 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 			continue
 		}
 		reason := ""
-		sidecar, err := d.tree.sqliteSidecar(root, child.Name())
+		sidecar, err := d.tree.sqliteSidecar(d.source, root, child.Name())
 		if err != nil {
 			return nil, err
 		}
@@ -472,7 +474,7 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 			continue
 		}
 		var wal os.FileInfo
-		if d.tree.live && info.Mode().IsRegular() && names[child.Name()+"-wal"] {
+		if d.tree.live && !d.source.snapshot && info.Mode().IsRegular() && names[child.Name()+"-wal"] {
 			if wal, err = root.Lstat(child.Name() + "-wal"); err != nil {
 				return nil, err
 			}
@@ -598,7 +600,7 @@ func (f *sourceFile) Open(ctx context.Context) (kfs.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	if f.tree.live {
+	if f.tree.live && !f.source.snapshot {
 		return f.tree.stable(reader)
 	}
 	return reader, nil

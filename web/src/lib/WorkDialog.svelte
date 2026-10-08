@@ -45,9 +45,9 @@
       <legend class="label">{kind === "restore" ? "Restore choices" : "Run choices"}</legend>
       <label>Destination<select required bind:value={target} onchange={() => { nodeID = ""; }}><option value="" disabled>Select a destination</option>{#each allowedDestinations as d}<option value={d.id}>{d.name} · {d.location.kind}</option>{/each}</select></label>
       {#if kind === "backup"}
-        <label>Copy method<select bind:value={method}><option value="auto">Automatic</option><option value="stop">Stop</option><option value="dump">Dump</option><option value="live">Live</option></select></label>
-        <p class="note">Automatic uses database dumps where supported. Other apps stop briefly for the final copy.</p>
-        {#if method === "live"}<p class="callout">Use Live only if the app supports a live file copy.</p>{/if}
+        <label>Copy method<select bind:value={method}><option value="auto">Automatic</option><option value="live">Live</option><option value="dump">Dump</option><option value="stop">Stop</option></select></label>
+        <p class="note">Automatic never stops the app. It dumps databases and copies other files while the app runs.</p>
+        {#if method === "stop"}<p class="callout">Stop stops the app briefly for the final copy.</p>{/if}
       {:else}
         <label>{kind === "restore" ? "Restore to device" : "Run on device"}<select required bind:value={nodeID}><option value="" disabled>Select an approved device</option>{#each allowedNodes as node}<option value={node.id}>{node.name || node.id} · {node.architecture || "unknown platform"}</option>{/each}</select></label>
         <p class="note">The device must be online. Local destinations can only be read by their owner.</p>

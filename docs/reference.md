@@ -345,9 +345,9 @@ Use `--off` to stop future admissions after settings reach the agent.
 Admitted work still finishes. Existing snapshots remain available.
 
 The defaults are Auto, 03:00 UTC, 7 daily, 4 weekly, and 6 monthly snapshots.
-Auto uses Stop for file apps.
-Auto uses Dump for apps with a detected database.
-Use `--method live` only when the app permits a live copy.
+Auto never stops an app.
+Auto uses Dump for apps with a detected database, and Live for other apps.
+Use `--method stop` for an app that needs a stopped copy.
 Use `--keep-daily`, `--keep-weekly`, and `--keep-monthly` to change retention.
 Retention always keeps the newest copy, the copy just made, and Kopia pins.
 It expires older snapshot records after a successful backup.
@@ -377,6 +377,7 @@ Later backups read only the files that changed.
 Synod treats a file as unchanged when its size, modification time, mode, and owner are the same as in the previous snapshot.
 rsync uses the same rule.
 The Stop method reads the data while the app runs, then reads again only the files that changed before the app stopped.
+Live and Dump copy without a stop. See [Back up an app](#back-up-an-app).
 The agent keeps encrypted repository metadata in the `cache` directory beside its state directory.
 
 ## Space reclamation
@@ -408,7 +409,17 @@ synod operation wait OPERATION_ID
 ```
 
 The default method is Auto.
-Auto selects Dump for database apps and Stop for other apps.
+Auto selects Dump for database apps and Live for other apps. It never stops or pauses an app.
+
+Live and Dump copy files while the containers run:
+
+- On btrfs and ZFS, Synod takes a read-only snapshot of each subvolume or dataset at the start of the copy. It reads the files from the snapshot and removes the snapshot at the end. All files of a snapshot come from the same moment, as after a power cut. SQLite files and their `-wal` files are copied together from the snapshot.
+- Synod reads a path live when the snapshot cannot be complete: another filesystem is mounted below the path, a btrfs subvolume is nested below it, or the `btrfs` or `zfs` tool is absent. btrfs snapshots are in `.synod-snapshots` at the top of the mounted filesystem. The agent removes snapshots that an interrupted backup left when it starts.
+- On other filesystems, Synod reads a file of up to 8 MiB whole and checks its size and modification time. If the file changed during the read, Synod reads it again, up to 3 times. A larger file is checked at the end of its read.
+- A file that still changed is saved as read. The snapshot lists it under `changing`, and the result has the warning `files_changed_during_copy`.
+- Two files that the app changes together can come from slightly different moments on a filesystem without snapshots. Databases are not affected, because Synod dumps them.
+
+Stop is an explicit choice for an app that needs a stopped copy.
 With Stop, Synod keeps database containers running for their native dumps.
 Synod first uploads the files while the app runs.
 It then stops the running file containers and reads the final files again.
@@ -417,8 +428,6 @@ Synod restarts the containers before it publishes the snapshot.
 The result shows the snapshot ID, file bytes, and measured downtime.
 File containers that were stopped or paused before the backup keep that state.
 
-Live copies files while the containers run.
-Use it only when the app permits a live copy.
 On Linux agents, Live and Dump find SQLite files by their file header.
 They copy each database with the SQLite backup API.
 WAL writes can continue while Synod holds a read snapshot.
@@ -426,7 +435,7 @@ Overlapping app paths use the same database copy.
 The encrypted manifest lists the copied SQLite files and the excluded sidecars.
 The copy uses an unlinked temporary file until the upload ends.
 One app can contain up to 256 SQLite files in a Live or Dump backup.
-Use Stop for SQLite apps on other agent platforms.
+On other agent platforms, Live and Dump cannot copy SQLite files. Use Stop for such apps.
 Dump requires a detected database. Use Auto for other apps.
 Dump keeps the app running and replaces database data paths with native dumps.
 PostgreSQL uses `pg_dumpall`. MySQL and MariaDB use their native SQL dump tools.

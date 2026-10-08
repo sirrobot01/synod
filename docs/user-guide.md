@@ -120,8 +120,11 @@ synod protect --all --destination peer --confirm REVISION
 
 Synod backs up each app at once, then every day at 03:00 UTC.
 It keeps 7 daily, 4 weekly, and 6 monthly copies.
+Backups never stop or pause your apps.
 Databases (PostgreSQL, MySQL, MariaDB, Redis) are saved with native dumps while they run.
-Other apps stop only for a short final copy.
+Other data is copied while the app runs.
+On btrfs and ZFS, Synod copies from a snapshot, so all files come from the same moment.
+On other disks, Synod reads a file again when it changed during the copy.
 New apps are protected automatically.
 
 Check the status:
@@ -229,6 +232,7 @@ journalctl -u synod-server -n 100 --no-pager
 | Device does not connect | Check its address, port 8444, clock, and agent log. |
 | `source_unavailable` | Read the `backup_source_unavailable` line in the agent log. Run the agent as root. |
 | `repository_open_failed` | Check that the destination is online. Run another backup. |
+| `files_changed_during_copy` | Some files kept changing during the backup. They were saved as read. The snapshot lists them. If the app needs an exact copy, use `synod protect APP --method stop`. |
 | `repository_installation_conflict` | The repository belongs to another installation. Use an empty directory. |
 | Image refused for an architecture | Restore on a device with a matching architecture. |
 | Port or name conflict | Stop the conflicting container, or use `--replace`. |
