@@ -24,3 +24,8 @@ CREATE TABLE destination_deliveries (
     revision INTEGER NOT NULL,
     acknowledged_at INTEGER NOT NULL
 );
+-- The installation's recovery kit password. A destination added without a password uses it.
+CREATE TABLE repository_password (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    sealed BLOB NOT NULL
+);

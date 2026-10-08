@@ -21,25 +21,28 @@ func newDestinationCommand(app *app) *cobra.Command {
 	var port int
 	add := &cobra.Command{Use: "add NAME", Short: "Save a destination and deliver its settings to approved agents", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		app.ran = true
-		file, err := os.OpenFile(credentialsFile, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-		if err != nil {
-			return &client.Error{Code: "invalid_credentials", Message: "Open the private credentials file failed."}
-		}
-		defer file.Close()
-		info, err := file.Stat()
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) || info.Size() > destination.MaxEntryBytes {
-			return &client.Error{Code: "invalid_credentials", Message: "Use a regular credentials file owned by this user, with mode 0600 and at most 32 KiB."}
-		}
-		raw, err := io.ReadAll(io.LimitReader(file, destination.MaxEntryBytes+1))
-		if err != nil || len(raw) > destination.MaxEntryBytes {
-			return &client.Error{Code: "invalid_credentials", Message: "Read the private credentials file failed."}
-		}
-		defer clear(raw)
+		// Without a password, the controller uses the recovery kit password.
 		var credentials repository.Credentials
-		decoder := json.NewDecoder(bytes.NewReader(raw))
-		decoder.DisallowUnknownFields()
-		if decoder.Decode(&credentials) != nil || !errors.Is(decoder.Decode(new(any)), io.EOF) {
-			return &client.Error{Code: "invalid_credentials", Message: "Use one credentials JSON object with known fields."}
+		if credentialsFile != "" {
+			file, err := os.OpenFile(credentialsFile, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+			if err != nil {
+				return &client.Error{Code: "invalid_credentials", Message: "Open the private credentials file failed."}
+			}
+			defer file.Close()
+			info, err := file.Stat()
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) || info.Size() > destination.MaxEntryBytes {
+				return &client.Error{Code: "invalid_credentials", Message: "Use a regular credentials file owned by this user, with mode 0600 and at most 32 KiB."}
+			}
+			raw, err := io.ReadAll(io.LimitReader(file, destination.MaxEntryBytes+1))
+			if err != nil || len(raw) > destination.MaxEntryBytes {
+				return &client.Error{Code: "invalid_credentials", Message: "Read the private credentials file failed."}
+			}
+			defer clear(raw)
+			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder.DisallowUnknownFields()
+			if decoder.Decode(&credentials) != nil || !errors.Is(decoder.Decode(new(any)), io.EOF) {
+				return &client.Error{Code: "invalid_credentials", Message: "Use one credentials JSON object with known fields."}
+			}
 		}
 		entry := destination.Entry{Destination: destination.Destination{ID: uuid.New(), Name: args[0], Location: repository.Location{Kind: kind, Path: path}}, Credentials: credentials}
 		switch kind {
@@ -89,8 +92,12 @@ func newDestinationCommand(app *app) *cobra.Command {
 				entry.Destination.Location.Device = &repository.DeviceLocation{NodeID: node.ID, DestinationID: entry.Destination.ID}
 			}
 		}
-		if entry.Validate() != nil {
-			return &client.Error{Code: "invalid_request", Message: "The destination settings are invalid. Check its type, path, connection settings, and credentials."}
+		check := entry
+		if check.Credentials.Password == "" {
+			check.Credentials.Password = "recovery-kit-password"
+		}
+		if check.Validate() != nil {
+			return &client.Error{Code: "invalid_request", Message: "The destination settings are invalid. Check its type, path, connection settings, and credentials. S3 and SFTP need a credentials file with their keys."}
 		}
 		saved, err := app.api.AddDestination(cmd.Context(), entry)
 		if err != nil {
@@ -98,6 +105,11 @@ func newDestinationCommand(app *app) *cobra.Command {
 		}
 		app.result.Destination = &saved
 		app.result.Message = "Destination settings saved. Delivery to agents is pending. The connection has not been checked. No backup has run."
+		if entry.Credentials.Password == "" {
+			app.result.Message += " The repository uses the password in your recovery kit."
+		} else {
+			app.result.Message += " Keep this custom repository password with your recovery kit."
+		}
 		if destination.OnlyOnSource(saved.NodeID, []destination.Destination{saved}) {
 			app.result.Warnings = []string{"A backup stored only on device " + saved.NodeID.String() + " is lost if that device is lost. Add a destination on another device."}
 		}
@@ -107,7 +119,7 @@ func newDestinationCommand(app *app) *cobra.Command {
 	flags.StringVar(&kind, "type", "local", "Repository type: local, device, sftp, or s3")
 	flags.StringVar(&path, "path", "", "Absolute repository directory on the destination device or SFTP host")
 	flags.StringVar(&device, "device", "", "Device ID or name that owns the local or served path")
-	flags.StringVar(&credentialsFile, "credentials-file", "", "Private JSON file with the repository password and provider credentials")
+	flags.StringVar(&credentialsFile, "credentials-file", "", "Private JSON file with provider credentials and an optional custom repository password; without a password, the recovery kit password is used")
 	flags.StringVar(&host, "host", "", "SFTP host")
 	flags.IntVar(&port, "port", 22, "SFTP port")
 	flags.StringVar(&user, "user", "", "SFTP user")

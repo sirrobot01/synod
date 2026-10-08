@@ -19,8 +19,8 @@ They use encrypted local, Synod-device, SFTP, or S3 repositories.
 App restore to the same device or another device is available.
 File restore is available through the CLI, API, and web UI.
 Repository recovery is available.
-The generated recovery kit remains a release requirement.
-Until it is available, keep each repository password and storage credentials outside Synod.
+`synod server init` prints a recovery kit with the repository password and writes it to `recovery-kit.txt`.
+Keep the kit and any storage credentials outside Synod devices.
 Agents run weekly content checks and monthly isolated restore drills.
 Synod does not place running apps or provide automatic failover.
 
@@ -126,7 +126,7 @@ python3 scripts/proof-install.py --release dist/releases/v0.1.0-rc.1 --evidence 
 
 Select the same release for every device.
 Read its release notes before the upgrade.
-Keep the repository password and storage access details outside the devices.
+Keep the recovery kit and storage access details outside the devices.
 Keep the existing controller and agent state directories.
 Do not run `server init` or `agent join` again.
 Those commands create identities. An upgrade keeps the current identities and encrypted credentials.
@@ -282,7 +282,7 @@ SQLite uses WAL mode, full synchronous writes, and foreign key checks.
 
 ## Recover after controller loss
 
-Keep the repository password outside Synod.
+Use the repository password from the recovery kit.
 Stop the old controller and agents before recovery.
 Use a new private directory for the recovered controller.
 For a local or Synod-device repository, run recovery on the host with the repository files:
@@ -442,19 +442,20 @@ It removes them after the test.
 
 ## Destinations
 
-Put the repository password in a private JSON file.
+A destination without a password uses the recovery kit password that init saved.
+Put provider credentials, and a custom password for an existing repository, in a private JSON file.
 Set its mode to `0600`.
-Keep a separate copy of the password for recovery.
+Keep a custom password with the recovery kit.
 The CLI does not print saved credentials.
 
 ```json
-{"password":"use-a-long-random-repository-password"}
+{"password":"existing-repository-password"}
 ```
 
 Add a local directory on an approved device:
 
 ```sh
-synod destination add home --device server --path /srv/backups/synod --credentials-file ./repository.json
+synod destination add home --device server --path /srv/backups/synod
 synod destination list
 synod destination remove home
 ```
@@ -469,7 +470,7 @@ Pending devices receive no destination credentials.
 To use a directory on another Synod device, select type `device`:
 
 ```sh
-synod destination add peer --type device --device odin --path /srv/synod-backups --credentials-file ./repository.json
+synod destination add peer --type device --device odin --path /srv/synod-backups
 ```
 
 The destination agent serves that directory over mutual TLS.
@@ -1099,7 +1100,7 @@ The web UI uses the same API as the CLI.
 
 1. Open **Devices** to approve joined devices.
 2. Open **Destinations** to add an encrypted repository.
-3. Keep the repository password outside the devices.
+3. Keep the recovery kit outside the devices. A custom password is not in the kit.
 4. Open **Apps** and select **Protect all**.
 5. Review the paths and copy settings before you confirm.
 6. Open an app to change its schedule or stop its scheduled backups.

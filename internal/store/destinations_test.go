@@ -243,3 +243,61 @@ func TestDevicePlansRefreshAddressesAndCertificateAccess(t *testing.T) {
 		t.Fatalf("certificate revocation did not change plan: %v", err)
 	}
 }
+
+func TestDestinationUsesKitPasswordUnlessGiven(t *testing.T) {
+	s, ca := open(t), authority(t)
+	node, _ := join(t, s, ca)
+	session := uuid.New()
+	if err := s.RecordAgentSession(t.Context(), node, session, &agentv1.Hello{NodeId: node.String(), Architecture: "amd64"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApproveNode(t.Context(), node, "admin", "approve"); err != nil {
+		t.Fatal(err)
+	}
+	key := uuid.New()
+	ring, err := secret.NewKeyring(key, map[uuid.UUID][]byte{key: bytes.Repeat([]byte{61}, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(name, password string) error {
+		entry := destination.Entry{Destination: destination.Destination{ID: uuid.New(), Name: name, Location: repository.Location{Kind: "s3", S3: &repository.S3Location{Endpoint: "https://storage.example", Bucket: name}}}, Credentials: repository.Credentials{Password: password, AccessKeyID: "key", SecretAccessKey: "secret"}}
+		_, err := s.AddDestination(t.Context(), ca.InstallationID(), ring, entry, "admin", name)
+		return err
+	}
+	if err := add("before-kit", ""); code(err) != InvalidRequest {
+		t.Fatalf("a destination without any password was accepted: %v", err)
+	}
+	if err := s.SetRepositoryPassword(t.Context(), ca.InstallationID(), ring, "short"); code(err) != InvalidRequest {
+		t.Fatalf("a short kit password was accepted: %v", err)
+	}
+	const kit = "abcd-efgh-ijkl-mnop-qrst-uvwx-yz23-4567"
+	if err := s.SetRepositoryPassword(t.Context(), ca.InstallationID(), ring, kit); err != nil {
+		t.Fatal(err)
+	}
+	if err := add("default", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := add("custom", "custom-existing-repository-password"); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := s.DestinationPlan(t.Context(), ca.InstallationID(), node, session, ring)
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwords := map[string]string{}
+	for _, entry := range plan.Destinations {
+		passwords[entry.Destination.Name] = entry.Credentials.Password
+	}
+	if passwords["default"] != kit || passwords["custom"] != "custom-existing-repository-password" {
+		t.Fatal("destinations did not keep the kit password and the custom password")
+	}
+	other := uuid.New()
+	wrong, err := secret.NewKeyring(other, map[uuid.UUID][]byte{other: bytes.Repeat([]byte{62}, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := destination.Entry{Destination: destination.Destination{ID: uuid.New(), Name: "wrong-key", Location: repository.Location{Kind: "s3", S3: &repository.S3Location{Endpoint: "https://storage.example", Bucket: "w"}}}, Credentials: repository.Credentials{AccessKeyID: "key", SecretAccessKey: "secret"}}
+	if _, err := s.AddDestination(t.Context(), ca.InstallationID(), wrong, entry, "admin", "wrong"); err == nil {
+		t.Fatal("another key ring opened the kit password")
+	}
+}

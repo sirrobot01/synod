@@ -62,6 +62,9 @@ func TestInitRecoversMovedRepositoryWithoutOldControllerFiles(t *testing.T) {
 	if strings.Contains(out.String(), credentials.Password) {
 		t.Fatal("recovery printed the password")
 	}
+	if kit := readFile(t, dir, "recovery-kit.txt"); len(credentials.Password) >= 16 && !strings.Contains(kit, credentials.Password) {
+		t.Fatal("the recovered controller did not keep the repository password in its recovery kit")
+	}
 	var token jointoken.Token
 	for line := range strings.Lines(out.String()) {
 		if strings.HasPrefix(strings.TrimSpace(line), "synod_join_") {
@@ -129,11 +132,11 @@ func TestRecoverySelectsDestinationAndRollsBackInvalidImport(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := InitOptions{Directory: filepath.Join(root, "new-controller"), FromRepository: connection, SystemdDir: filepath.Join(root, "systemd")}
-	if _, _, err := readRecovery(t.Context(), options); err == nil || !strings.Contains(err.Error(), "--repository-destination") {
+	if _, _, _, err := readRecovery(t.Context(), options); err == nil || !strings.Contains(err.Error(), "--repository-destination") {
 		t.Fatalf("ambiguous destination: %v", err)
 	}
 	options.RepositoryDestination = catalog.Destinations[0].ID.String()
-	recovered, node, err := readRecovery(t.Context(), options)
+	recovered, node, _, err := readRecovery(t.Context(), options)
 	if err != nil || node == uuid.Nil || len(recovered.Devices) != 1 || recovered.Destinations[0].Location.Kind != "local" || recovered.Destinations[0].NodeID != node {
 		t.Fatalf("recovery from downloaded remote storage: %v", err)
 	}
@@ -150,14 +153,14 @@ func TestRecoverySelectsDestinationAndRollsBackInvalidImport(t *testing.T) {
 		t.Fatal("failed import installed a service")
 	}
 	options.InstallationID = uuid.NewString()
-	if _, _, err := readRecovery(t.Context(), options); err == nil {
+	if _, _, _, err := readRecovery(t.Context(), options); err == nil {
 		t.Fatal("conflicting installation ID accepted")
 	}
 	options.InstallationID = ""
 	if err := os.Chmod(connection, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := readRecovery(t.Context(), options); err == nil {
+	if _, _, _, err := readRecovery(t.Context(), options); err == nil {
 		t.Fatal("public credentials file accepted")
 	}
 }

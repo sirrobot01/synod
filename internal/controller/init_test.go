@@ -6,9 +6,14 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
+	"github.com/sirrobot01/synod/internal/destination"
+	"github.com/sirrobot01/synod/internal/repository"
+	"github.com/sirrobot01/synod/internal/store"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -335,5 +340,53 @@ func TestServerInitRegistersJoinToken(t *testing.T) {
 	var unbound bool
 	if err := raw.QueryRowContext(t.Context(), `SELECT node_id IS NULL AND consumed_at IS NULL FROM enrollment_tokens WHERE token_verifier=?`, verifier[:]).Scan(&unbound); err != nil || !unbound {
 		t.Fatalf("stored join token unbound=%v err=%v, want one unconsumed token with no node", unbound, err)
+	}
+}
+
+func TestServerInitWritesRecoveryKitAndDefaultPassword(t *testing.T) {
+	dir := t.TempDir()
+	cmd := initCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--dir", dir, "--address", "127.0.0.1", "--systemd-dir", filepath.Join(dir, "none")})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "recovery-kit.txt"))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("recovery kit file: %v", err)
+	}
+	kit := readFile(t, dir, "recovery-kit.txt")
+	if !strings.Contains(out.String(), kit) {
+		t.Fatal("init did not print the recovery kit")
+	}
+	lines := strings.Split(kit, "\n")
+	index := slices.Index(lines, "Repository password:")
+	if index < 0 || index+1 >= len(lines) {
+		t.Fatalf("kit has no password: %s", kit)
+	}
+	password := strings.TrimSpace(lines[index+1])
+	if len(strings.ReplaceAll(password, "-", "")) != 32 || !strings.Contains(kit, "--from-repository") {
+		t.Fatalf("kit password or recovery steps are wrong: %s", kit)
+	}
+
+	var cfg controllerJSON
+	if err := json.Unmarshal([]byte(readFile(t, dir, "controller.json")), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	ring, err := loadKeyring(cfg.SecretKeyFile, cfg.SecretKeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := store.Open(t.Context(), cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadata.Close()
+	// Without the saved kit password, a destination without a password is invalid.
+	id := uuid.New()
+	entry := destination.Entry{Destination: destination.Destination{ID: id, Name: "cloud", Location: repository.Location{Kind: "s3", S3: &repository.S3Location{Endpoint: "https://storage.example", Bucket: "b"}}}, Credentials: repository.Credentials{AccessKeyID: "key", SecretAccessKey: "secret"}}
+	if _, err := metadata.AddDestination(t.Context(), uuid.MustParse(cfg.InstallationID), ring, entry, "admin", "add"); err != nil {
+		t.Fatalf("a destination without a password did not use the kit password: %v", err)
 	}
 }

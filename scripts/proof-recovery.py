@@ -46,7 +46,7 @@ def main():
     fixture = "synod-m3-" + uuid.uuid4().hex[:20]
     volume = fixture + "_pgdata"
     project = root + "/project"
-    password, database_password = secrets.token_hex(24), secrets.token_hex(24)
+    password, database_password = "", secrets.token_hex(24)
     marker = "private-m3-state-" + secrets.token_hex(16)
     proof = {"passed": False, "remote_directory": root, "project": fixture, "checks": [],
              "binaries": {host: hashlib.sha256(binary.read_bytes()).hexdigest() for host, binary in binaries.items()}}
@@ -116,6 +116,9 @@ def main():
         source_started = remote("server", ["docker", "inspect", "--format", "{{.State.StartedAt}}", fixture])
         phase = "join and approve devices"
         remote("server", [root + "/synod", "server", "init", "--dir", root + "/controller", "--address", HOSTS["server"][3], "--systemd-dir", root + "/no-systemd"])
+        # The recovery kit is the only copy of the repository password that this proof keeps.
+        kit = remote("server", ["cat", root + "/controller/recovery-kit.txt"]).decode().splitlines()
+        password = kit[kit.index("Repository password:") + 1].strip()
         remote("server", ["python3", "-c", START, root, "controller", root + "/synod", "server", "--config", root + "/controller/controller.json", "--listen", "0.0.0.0:18443", "--agent-listen", "0.0.0.0:18444"])
         installation = wait(ready, "Controller did not start")["installation_id"]
         for host in HOSTS:
@@ -127,8 +130,7 @@ def main():
         for node in ids.values():
             request("node", "approve", node)
         app = wait(lambda: next((a for a in request("app", "list").get("apps", []) if a["node_id"] == ids["server"] and a["definition"]["name"] == fixture), None), "Source app was not discovered")
-        remote("server", ["python3", "-c", WRITE, root + "/credentials.json", "600"], json.dumps({"password": password}).encode())
-        destination = request("destination", "add", "survivor", "--type", "device", "--device", ids["odin"], "--path", root + "/repository", "--credentials-file", root + "/credentials.json")["destination"]["id"]
+        destination = request("destination", "add", "survivor", "--type", "device", "--device", ids["odin"], "--path", root + "/repository")["destination"]["id"]
         wait(delivery, "Both agents did not save the destination")
         phase = "back up during database writes"
         remote("server", ["docker", "exec", "-d", fixture, "sh", "-ec", WRITER])
@@ -169,7 +171,6 @@ def main():
             if host == "server":
                 paths.extend([root + "/controller", project])
             remote(host, ["python3", "-c", "import shutil,sys; [shutil.rmtree(p) for p in sys.argv[1:]]", *paths])
-        remote("server", ["rm", root + "/credentials.json"])
         phase = "recover controller on odin"
         remote("odin", ["python3", "-c", WRITE, root + "/password", "600"], password.encode())
         remote("odin", [root + "/synod", "server", "init", "--dir", root + "/controller", "--address", HOSTS["odin"][3], "--from-repository", root + "/repository", "--password-file", root + "/password", "--systemd-dir", root + "/no-systemd"])
@@ -177,6 +178,9 @@ def main():
         remote("odin", ["python3", "-c", START, root, "controller", root + "/synod", "server", "--config", root + "/controller/controller.json", "--listen", "0.0.0.0:18443", "--agent-listen", "0.0.0.0:18444"])
         if wait(ready, "Recovered controller did not start")["installation_id"] != installation:
             raise RuntimeError("Recovery changed the installation ID")
+        recovered_kit = remote("odin", ["cat", root + "/controller/recovery-kit.txt"]).decode()
+        if password not in recovered_kit:
+            raise RuntimeError("The recovered controller wrote another recovery kit password")
         if any(n["approved_at"] or n["connected_at"] for n in request("node", "list")["nodes"]):
             raise RuntimeError("Recovery trusted an old device")
         recovered_app = next(a for a in request("app", "list")["apps"] if a["definition"]["name"] == fixture)
@@ -189,7 +193,7 @@ def main():
         wait(lambda: any(n["id"] == recovered_node["id"] and n["connected_at"] for n in request("node", "list")["nodes"]), "Recovered agent did not connect")
         request("node", "approve", recovered_node["id"])
         wait(delivery, "Recovered agent did not save the destination")
-        proof["checks"].append("The repository and password rebuilt the installation on odin without old controller or agent files")
+        proof["checks"].append("A destination added without a password used the recovery kit, and the kit password alone rebuilt the installation on odin without old controller or agent files")
         print("Recovered the controller and repository device on odin. Restoring the amd64 source app on arm64.", flush=True)
         phase = "restore across architectures"
         result = request("restore", recovered_app["id"], "--to", recovered_node["id"], "--snapshot", snapshot, "--wait=false")["operation"]
@@ -222,11 +226,11 @@ def main():
         if phase == "back up during database writes":
             try:
                 diagnostic = remote("server", ["docker", "exec", fixture, "sh", "-c", "cat /tmp/synod-proof-error /tmp/synod-proof-exit 2>/dev/null || true"]).decode()
-                for value in (password, database_password, marker):
+                for value in [v for v in (password, database_password, marker) if v]:
                     diagnostic = diagnostic.replace(value, "[private]")
                 proof["writer_diagnostic"] = diagnostic[:2000]
                 diagnostic = remote("server", ["sh", "-c", "docker logs " + fixture + " 2>&1"]).decode()
-                for value in (password, database_password, marker):
+                for value in [v for v in (password, database_password, marker) if v]:
                     diagnostic = diagnostic.replace(value, "[private]")
                 proof["database_log"] = diagnostic[-12000:]
                 proof["memory_events"] = remote("server", ["docker", "exec", fixture, "cat", "/sys/fs/cgroup/memory.events", "/sys/fs/cgroup/memory.max"]).decode()
@@ -251,7 +255,7 @@ def main():
             for role in ("agent", "controller"):
                 try:
                     log = remote(host, ["python3", "-c", "import pathlib,sys; p=pathlib.Path(sys.argv[1]); sys.stdout.buffer.write(p.read_bytes() if p.exists() else b'')", root + "/" + role + ".log"])
-                    if any(secret.encode() in log for secret in (password, database_password, marker)):
+                    if any(secret.encode() in log for secret in [v for v in (password, database_password, marker) if v]):
                         cleanup.append(f"Private data found in {host} {role} log; log was not copied")
                     else:
                         (args.evidence / f"{host}-{role}.log").write_bytes(log)

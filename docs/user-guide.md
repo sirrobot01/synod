@@ -13,7 +13,7 @@ Go to:
 
 - [Install](#install-the-binary) and [create the controller](#create-the-controller).
 - [Join devices](#join-each-docker-device) and [open the web UI](#open-the-web-ui).
-- [Add a destination](#add-a-destination-and-keep-its-password) and [protect apps](#review-and-protect-apps).
+- [Add a destination](#add-a-destination) and [protect apps](#review-and-protect-apps).
 - [Test a backup](#prove-the-first-backup) and [configure alerts](#configure-alerts-with-shoutrrr).
 - [Restore an app](#restore-after-device-loss) or [recover the controller](#recover-when-the-controller-is-lost).
 - [Upgrade](#upgrade-synod) or [resolve a failure](#read-status-and-resolve-a-failure).
@@ -89,7 +89,12 @@ systemctl enable --now synod-server
 systemctl status synod-server
 ```
 
-Init prints one join token and three administrator settings.
+Init prints a recovery kit, one join token, and three administrator settings.
+The recovery kit holds the installation ID, the repository password, and the recovery steps.
+Init also writes the kit to `recovery-kit.txt` in the controller directory.
+Copy the kit to a password manager or to paper, away from your Synod devices.
+Then delete `recovery-kit.txt`.
+Without the repository password, nobody can read the backups, including Synod.
 The join token expires after seven days and permits one enrollment.
 Keep it private.
 Init creates the controller state in the selected directory.
@@ -183,20 +188,15 @@ Use **Devices** to inspect and approve devices.
 Use **Apps** to review protection.
 Use **Activity** to read operation results.
 
-## Add a destination and keep its password
+## Add a destination
 
 Each destination holds an encrypted repository.
-The repository password is required for recovery.
-Without it, nobody can read the backups, including Synod.
-The current build requires you to supply and save this password yourself.
-Init does not yet generate a recovery kit.
+A new destination uses the repository password from your recovery kit.
+You need the kit and the location of one surviving destination to recover.
+For S3 or SFTP, also keep the access keys or SSH key outside your Synod devices.
 
-For a new repository, choose a long random password.
-Keep it outside the controller and source devices.
-Also keep the repository location and any S3 or SFTP access credentials.
-For an existing repository, use its existing password.
-
-In the administrator shell, create a private credentials file:
+To connect an existing repository with its own password, put that password in a private credentials file.
+This custom password is not in your recovery kit. Store it with the kit.
 
 ```sh
 umask 077
@@ -204,16 +204,16 @@ ${EDITOR:-vi} /root/synod-repository.json
 chmod 600 /root/synod-repository.json
 ```
 
-Use this JSON form with your real password:
+Use this JSON form for a custom password:
 
 ```json
-{"password":"REPOSITORY_PASSWORD"}
+{"password":"EXISTING_REPOSITORY_PASSWORD"}
 ```
 
 For a directory on another joined device:
 
 ```sh
-synod destination add peer --type device --device DESTINATION_DEVICE_ID --path /srv/synod-backups --credentials-file /root/synod-repository.json
+synod destination add peer --type device --device DESTINATION_DEVICE_ID --path /srv/synod-backups
 synod destination list
 ```
 
@@ -226,12 +226,12 @@ Adding a destination does not prove that it can store a backup.
 The other destination types use these commands:
 
 ```sh
-synod destination add local-disk --type local --device DEVICE_ID --path /mnt/backup/synod --credentials-file /root/synod-repository.json
+synod destination add local-disk --type local --device DEVICE_ID --path /mnt/backup/synod
 synod destination add cloud --type s3 --endpoint https://s3.example.com --bucket backups --prefix synod/ --credentials-file /root/synod-s3.json
 synod destination add remote --type sftp --host backup.example.com --port 22 --user synod --path /srv/synod --known-hosts-file /root/known_hosts --credentials-file /root/synod-sftp.json
 ```
 
-For S3, add `access_key_id` and `secret_access_key` to the private credentials JSON.
+For S3, put `access_key_id` and `secret_access_key` in the private credentials JSON.
 Add `session_token` if the provider requires it.
 For SFTP, add `ssh_key` with the full private key as a JSON string.
 Verify the SSH server key before you add it to `known_hosts`.
@@ -472,7 +472,8 @@ Read the final result in **Activity**.
 
 ## Recover when the controller is lost
 
-You need the surviving repository, its password, and its storage access credentials.
+You need the surviving repository, the password from your recovery kit, and its storage access credentials.
+A destination that you added with a custom password needs that password instead.
 You do not need the old controller database or certificates.
 Stop old Synod agents and the old controller if they still run.
 Use a new controller directory.
@@ -480,7 +481,7 @@ Use a new controller directory.
 For a local or Synod-device repository, run this on the host with its files:
 
 ```sh
-chmod 600 /root/repository-password
+umask 077; printf '%s' 'PASSWORD_FROM_THE_KIT' > /root/repository-password
 synod server init --dir /var/lib/synod/recovered --address 192.168.0.20 --from-repository /mnt/surviving-repository --password-file /root/repository-password
 systemctl daemon-reload
 systemctl start synod-server
@@ -490,6 +491,7 @@ The password file contains only the repository password.
 Recovery opens an existing repository and reads its encrypted catalog.
 It keeps installation, app, device, destination, and protection IDs.
 It creates new controller keys and an administrator token.
+It writes a new `recovery-kit.txt` with the same password and does not print the password.
 Use the new administrator settings that init prints.
 
 The catalog reflects the most recent successful catalog write during backup.
@@ -586,7 +588,6 @@ Do not send repository credentials, tokens, or private keys with a support repor
 
 These gaps block the v0.1 release:
 
-- Init does not generate the promised recovery kit yet.
 - Agent and controller transport certificates expire after 30 days. Automatic renewal is not implemented yet.
 
 Other current limits:

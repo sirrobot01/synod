@@ -20,7 +20,15 @@ import (
 )
 
 // AddDestination saves settings once. A retry must have the same ID and input.
+// A destination without a password uses the recovery kit password. A given password stays custom.
 func (s *Store) AddDestination(ctx context.Context, installationID uuid.UUID, ring *secret.Keyring, entry destination.Entry, actorID, requestID string) (destination.Destination, error) {
+	if entry.Credentials.Password == "" && ring != nil {
+		password, err := repositoryPassword(ctx, s.db, installationID, ring)
+		if err != nil {
+			return destination.Destination{}, err
+		}
+		entry.Credentials.Password = password
+	}
 	if entry.Validate() != nil || !entry.Destination.CreatedAt.IsZero() || installationID == uuid.Nil || !printableWithin(actorID, 256) || !printableWithin(requestID, 128) {
 		return destination.Destination{}, &Error{Code: InvalidRequest}
 	}

@@ -18,60 +18,61 @@ import (
 )
 
 // readRecovery opens the surviving repository before initialization writes any files.
-func readRecovery(ctx context.Context, options InitOptions) (repository.Catalog, uuid.UUID, error) {
+// readRecovery also returns the password that opened the repository. It becomes the recovery kit password.
+func readRecovery(ctx context.Context, options InitOptions) (repository.Catalog, uuid.UUID, string, error) {
 	var connection struct {
 		Location    repository.Location    `json:"location"`
 		Credentials repository.Credentials `json:"credentials"`
 	}
 	info, err := os.Stat(options.FromRepository)
 	if err != nil {
-		return repository.Catalog{}, uuid.Nil, fmt.Errorf("read --from-repository: %w", err)
+		return repository.Catalog{}, uuid.Nil, "", fmt.Errorf("read --from-repository: %w", err)
 	}
 	if info.IsDir() {
 		path, err := filepath.Abs(options.FromRepository)
 		if err != nil {
-			return repository.Catalog{}, uuid.Nil, err
+			return repository.Catalog{}, uuid.Nil, "", err
 		}
 		connection.Location = repository.Location{Kind: "local", Path: path}
 	} else {
 		raw, err := readStartupFile(options.FromRepository, 64<<10, true)
 		if err != nil {
-			return repository.Catalog{}, uuid.Nil, fmt.Errorf("read private repository connection file: %w", err)
+			return repository.Catalog{}, uuid.Nil, "", fmt.Errorf("read private repository connection file: %w", err)
 		}
 		defer clear(raw)
 		decoder := json.NewDecoder(bytes.NewReader(raw))
 		decoder.DisallowUnknownFields()
 		if decoder.Decode(&connection) != nil || decoder.Decode(new(any)) != io.EOF {
-			return repository.Catalog{}, uuid.Nil, errors.New("invalid repository connection JSON; use location and credentials fields")
+			return repository.Catalog{}, uuid.Nil, "", errors.New("invalid repository connection JSON; use location and credentials fields")
 		}
 	}
 	if options.PasswordFile != "" {
 		password, err := readStartupFile(options.PasswordFile, 4096, true)
 		if err != nil {
-			return repository.Catalog{}, uuid.Nil, fmt.Errorf("read private repository password file: %w", err)
+			return repository.Catalog{}, uuid.Nil, "", fmt.Errorf("read private repository password file: %w", err)
 		}
 		connection.Credentials.Password = strings.TrimRight(string(password), "\r\n")
 		clear(password)
 	}
 	if connection.Location.Kind == "device" {
-		return repository.Catalog{}, uuid.Nil, errors.New("recover a device repository from its directory; use --from-repository PATH --password-file FILE on that device")
+		return repository.Catalog{}, uuid.Nil, "", errors.New("recover a device repository from its directory; use --from-repository PATH --password-file FILE on that device")
 	}
 	if repository.Validate(connection.Location, connection.Credentials) != nil {
-		return repository.Catalog{}, uuid.Nil, errors.New("invalid repository settings; a directory requires --password-file, and a remote repository requires a private connection JSON file")
+		return repository.Catalog{}, uuid.Nil, "", errors.New("invalid repository settings; a directory requires --password-file, and a remote repository requires a private connection JSON file")
 	}
 	repo, err := repository.Open(ctx, connection.Location, connection.Credentials)
 	if err != nil {
-		return repository.Catalog{}, uuid.Nil, err
+		return repository.Catalog{}, uuid.Nil, "", err
 	}
 	catalog, err := repo.ReadCatalog(ctx)
 	if err == nil {
 		err = repo.CheckInstallation(ctx, catalog.InstallationID)
 	}
 	if err = errors.Join(err, repo.Close(context.WithoutCancel(ctx))); err != nil {
-		return repository.Catalog{}, uuid.Nil, err
+		return repository.Catalog{}, uuid.Nil, "", err
 	}
 	if options.InstallationID != "" && options.InstallationID != catalog.InstallationID.String() {
-		return repository.Catalog{}, uuid.Nil, errors.New("--installation-id conflicts with the repository catalog; omit it")
+		return repository.Catalog{}, uuid.Nil, "", errors.New("--installation-id conflicts with the repository catalog; omit it")
 	}
 	var candidates []int
 	var choices []string
@@ -88,7 +89,7 @@ func readRecovery(ctx context.Context, options InitOptions) (repository.Catalog,
 		}
 	}
 	if len(candidates) != 1 {
-		return repository.Catalog{}, uuid.Nil, fmt.Errorf("select the surviving repository with --repository-destination NAME_OR_UUID; catalog destinations: %s", strings.Join(choices, ", "))
+		return repository.Catalog{}, uuid.Nil, "", fmt.Errorf("select the surviving repository with --repository-destination NAME_OR_UUID; catalog destinations: %s", strings.Join(choices, ", "))
 	}
 	d := &catalog.Destinations[candidates[0]]
 	joinNode := uuid.Nil
@@ -109,5 +110,5 @@ func readRecovery(ctx context.Context, options InitOptions) (repository.Catalog,
 	}
 	d.Credentials = connection.Credentials
 	d.Initialized = true
-	return catalog, joinNode, nil
+	return catalog, joinNode, connection.Credentials.Password, nil
 }

@@ -47,11 +47,15 @@
         <div class="columns"><label>Prefix (optional)<input bind:value={prefix} /></label><label>Region (optional)<input bind:value={region} /></label></div>
         <label>Access key ID<input required type="password" bind:value={accessKey} /></label><label>Secret access key<input required type="password" bind:value={secretKey} /></label><label>Session token (optional)<input type="password" bind:value={sessionToken} /></label>
       {/if}
-      <label>Repository password<input required type="password" bind:value={password} autocomplete="new-password" /></label>
-      <p class="callout">Keep this password with your recovery kit. Without it, nobody can read this repository, including Synod. Use the existing password when you connect an existing repository.</p>
-      <label class="check"><input type="checkbox" required bind:checked={savedPassword} />I saved the repository password outside this device.</label>
+      <label>Repository password (optional)<input type="password" bind:value={password} autocomplete="new-password" /></label>
+      {#if password}
+        <p class="callout">This custom password is not in your recovery kit. Without it, nobody can read this repository, including Synod. Use the existing password when you connect an existing repository.</p>
+        <label class="check"><input type="checkbox" required bind:checked={savedPassword} />I saved this custom password with my recovery kit, outside this device.</label>
+      {:else}
+        <p class="note">Synod uses the password in the recovery kit that <span class="mono">synod server init</span> printed. Keep that kit outside your Synod devices.</p>
+      {/if}
     </fieldset>
     {#if submitted}<p class="callout">The reply was not confirmed. Retry the same destination request before you add another.</p>{/if}
-    <button class="primary" disabled={busy || !savedPassword}>{busy ? "Saving…" : submitted ? "Retry same request" : "Add destination"}</button>
+    <button class="primary" disabled={busy || (password !== "" && !savedPassword)}>{busy ? "Saving…" : submitted ? "Retry same request" : "Add destination"}</button>
   </form>
 </Dialog>

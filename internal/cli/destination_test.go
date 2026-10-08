@@ -84,3 +84,36 @@ func TestDestinationCLIPrivateInputWarningAndRemoval(t *testing.T) {
 		t.Fatal("public credential file accepted or printed")
 	}
 }
+
+func TestDestinationCLIUsesRecoveryKitPasswordWithoutCredentialsFile(t *testing.T) {
+	node := uuid.New()
+	flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/nodes/by-name/host":
+			json.NewEncoder(w).Encode(client.Node{ID: node, Name: "host"})
+		case r.Method == "POST" && r.URL.Path == "/v1/destinations":
+			var entry destination.Entry
+			if err := json.NewDecoder(r.Body).Decode(&entry); err != nil || entry.Credentials.Password != "" {
+				t.Error("the CLI sent a password without a credentials file")
+			}
+			json.NewEncoder(w).Encode(entry.Destination)
+		default:
+			t.Error("unexpected destination request")
+			w.WriteHeader(404)
+		}
+	}))
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(t.Context(), append(flags, "destination", "add", "Home", "--device", "host", "--path", "/backup"), &stdout, &stderr); code != 0 {
+		t.Fatalf("add failed: %s", stderr.String())
+	}
+	var result cli.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || !strings.Contains(result.Message, "recovery kit") {
+		t.Fatalf("the result does not name the recovery kit password: %s %v", stdout.String(), err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := cli.Run(t.Context(), append(flags, "destination", "add", "Cloud", "--type", "s3", "--endpoint", "https://s3.example", "--bucket", "b"), &stdout, &stderr); code != 1 {
+		t.Fatal("an S3 destination without keys was accepted")
+	}
+}

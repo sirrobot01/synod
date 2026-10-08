@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -121,10 +122,11 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 	}
 	var catalog repository.Catalog
 	var joinNode uuid.UUID
+	var password string
 	complete := false
 	if options.FromRepository != "" {
 		var err error
-		catalog, joinNode, err = readRecovery(ctx, options)
+		catalog, joinNode, password, err = readRecovery(ctx, options)
 		if err != nil {
 			return err
 		}
@@ -191,13 +193,26 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		return err
 	}
 	defer metadata.Close()
+	ring, err := loadKeyring(cfg.SecretKeyFile, cfg.SecretKeyID)
+	if err != nil {
+		return err
+	}
 	if options.FromRepository != "" {
-		ring, err := loadKeyring(cfg.SecretKeyFile, cfg.SecretKeyID)
-		if err != nil {
-			return err
-		}
 		if err := metadata.ImportCatalog(ctx, catalog, ring); err != nil {
 			return fmt.Errorf("import recovery catalog: %w", err)
+		}
+	} else if password, err = newRepositoryPassword(); err != nil {
+		return err
+	}
+	// A recovered repository keeps its password. Shorter custom passwords stay explicit per destination.
+	kit := ""
+	if len(password) >= 16 {
+		if err := metadata.SetRepositoryPassword(ctx, res.id, ring, password); err != nil {
+			return fmt.Errorf("save the recovery kit password: %w", err)
+		}
+		kit = recoveryKit(res.id, password, time.Now().UTC())
+		if err := os.WriteFile(filepath.Join(absDir, "recovery-kit.txt"), []byte(kit), 0o600); err != nil {
+			return fmt.Errorf("write the recovery kit: %w", err)
 		}
 	}
 	encoded, err := registerJoinToken(ctx, metadata, res.id, joinNode, address, res.apiCACertPEM)
@@ -233,6 +248,14 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		serviceNote = fmt.Sprintf("Installed systemd service to %s/synod-server.service.", systemdDir)
 	}
 
+	kitNote := "No recovery kit was written. The recovered repository password is shorter than 16 characters.\nEach new destination needs its password in its credentials file."
+	if kit != "" {
+		kitNote = fmt.Sprintf("%s\nThe recovery kit is also in %s.\nCopy it to a password manager or to paper, away from your Synod devices. Then delete the file.", kit, filepath.Join(absDir, "recovery-kit.txt"))
+	}
+	// A recovery already used the password, so the output does not repeat it.
+	if kit != "" && options.FromRepository != "" {
+		kitNote = fmt.Sprintf("The recovery kit in %s holds the password that opened the repository.\nNew destinations use it unless you give another password.", filepath.Join(absDir, "recovery-kit.txt"))
+	}
 	report := fmt.Sprintf(`Synod installation %s initialized at %s.
 
 Metadata database:
@@ -240,6 +263,8 @@ Metadata database:
 
 Controller configuration written to:
   %s
+
+%s
 
 %s
 
@@ -254,6 +279,7 @@ To administer this installation:
 		cfg.DatabasePath,
 		configPath,
 		serviceNote,
+		kitNote,
 		joinNote,
 		address,
 		filepath.Join(absDir, "api-ca.crt"),
@@ -541,4 +567,43 @@ func installationID(declared string) (uuid.UUID, error) {
 		return uuid.Nil, errors.New("installation-id must be a nonzero UUID")
 	}
 	return id, nil
+}
+
+// newRepositoryPassword returns 160 random bits in groups of four base32 characters.
+func newRepositoryPassword() (string, error) {
+	raw := make([]byte, 20)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate the repository password: %w", err)
+	}
+	encoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw))
+	var groups []string
+	for len(encoded) > 0 {
+		groups = append(groups, encoded[:4])
+		encoded = encoded[4:]
+	}
+	return strings.Join(groups, "-"), nil
+}
+
+// recoveryKit is the text that the user keeps away from Synod devices.
+func recoveryKit(installationID uuid.UUID, password string, created time.Time) string {
+	return fmt.Sprintf(`SYNOD RECOVERY KIT
+Installation: %s
+Created: %s
+
+Repository password:
+  %s
+
+Without this password, nobody can read your backups, including Synod.
+Each destination that you add without its own password uses this password.
+
+To recover all apps after you lose the controller:
+1. Install Synod on a new device.
+2. Write the password into a private file:
+     umask 077; printf '%%s' 'PASSWORD' > /root/repository-password
+3. Rebuild the installation from a surviving repository:
+     synod server init --dir /var/lib/synod/recovered --address ADDRESS \
+       --from-repository REPOSITORY --password-file /root/repository-password
+   REPOSITORY is the repository directory, or a private connection JSON file for S3 or SFTP.
+4. Join the devices again and restore each app with synod restore APP --to DEVICE.
+`, installationID, created.Format(time.RFC3339), password)
 }
