@@ -631,6 +631,20 @@ Each saved volume becomes a new volume named `synod-OPERATION_ID-volumeN`.
 Synod applies the saved owners, modes, and times.
 A Large or Dumped bind path becomes an empty path with its saved owner and mode.
 A Never path keeps its original host path.
+Before it creates app resources, Synod checks each required device and Never mount.
+A bind source must exist with the saved type, permissions, and owner.
+A device must also have the saved device number at the saved path.
+An external volume must exist with the saved driver and no custom driver options.
+
+For host networking, the backup records TCP listeners and bound UDP sockets held by the app.
+This includes containers that share another app service's network namespace.
+The agent must run as root on the Docker host, in its network and mount namespaces.
+If the app is stopped, or its processes cannot be read without a change, its port requirements remain unverified.
+Synod saves the backup but refuses a host-network restore with unverified port requirements.
+Before restore, Synod checks Docker port reservations and host sockets.
+It also checks that each free port can bind to its saved address.
+The check runs again before app replacement or start.
+Another process can still take a port after the check.
 
 Synod loads each database dump into the new data before the app starts.
 The load container has no network and no published ports.
@@ -666,9 +680,10 @@ A recovery that cannot finish stays in the `waiting` state and is retried.
 
 Limits:
 
-- Host networking is not supported.
-- The port check reads Docker containers only. A host process that uses a port causes a start failure.
-- An image that was available only on the source device cannot be restored on another device.
+- Host-network port checks cover the TCP and UDP sockets observed during backup. They do not prove future listeners or app function.
+- A replace can reuse a host socket only when Synod verifies that the existing app or its Docker proxy holds it. Unreadable socket ownership blocks the replace.
+- Restore does not change saved host addresses, device paths, or Never mounts to fit a different device.
+- Local images can be restored on their saved platform. Another platform needs its own saved image archive.
 - The safety snapshot is reported in the restore result only. It is not a separate backup operation.
 
 ## Test a restore and check a repository

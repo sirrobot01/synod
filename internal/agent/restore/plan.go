@@ -80,6 +80,20 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 	if err != nil {
 		return nil, &failure{Code: "definition_unsupported", Resource: project, Cause: err}
 	}
+	hosts := make(map[string]bool)
+	for _, requirement := range saved.Host {
+		if p.Services[requirement.ContainerID] == "" || hosts[requirement.ContainerID] || (!requirement.PortsKnown && len(requirement.Ports) > 0) {
+			return nil, &failure{Code: "snapshot_invalid"}
+		}
+		hosts[requirement.ContainerID] = true
+		paths := make(map[string]bool)
+		for _, path := range requirement.Paths {
+			if !filepath.IsAbs(path.Path) || filepath.Clean(path.Path) != path.Path || paths[path.Path] || (!path.Known && (path.Mode != 0 || path.Device != 0 || path.UserID != 0 || path.GroupID != 0)) || os.FileMode(path.Mode)&^(os.ModeType|os.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+				return nil, &failure{Code: "snapshot_invalid"}
+			}
+			paths[path.Path] = true
+		}
+	}
 	images := make(map[string]backup.Image)
 	variants := make(map[string]backup.ImageVariant)
 	for _, image := range saved.Images {
@@ -120,9 +134,6 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 			return nil, &failure{Code: "snapshot_invalid"}
 		}
 		service := p.Definition.Services[p.Services[c.ID]]
-		if service.NetworkMode == "host" {
-			return nil, &failure{Code: "definition_unsupported", Resource: service.ContainerName + ": host networking"}
-		}
 		for _, variant := range image.Variants {
 			if variant.Architecture == architecture {
 				service.Image = variant.ID

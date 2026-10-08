@@ -51,7 +51,7 @@ func newFixture(t *testing.T, database bool) *fixture {
 }
 
 // buildFixture can also mount a media directory. Discovery marks it Large, and the backup includes it.
-func buildFixture(t *testing.T, database, media bool, sourceImage string) *fixture {
+func buildFixture(t *testing.T, database, media bool, sourceImage string, configure ...func(*container.Config, *container.HostConfig)) *fixture {
 	t.Helper()
 	host := os.Getenv("SYNOD_TEST_DOCKER_HOST")
 	if host == "" {
@@ -110,7 +110,11 @@ func buildFixture(t *testing.T, database, media bool, sourceImage string) *fixtu
 			hostConfig.Mounts = append(hostConfig.Mounts, mount.Mount{Type: mount.TypeVolume, Source: project + "_appdata", Target: "/data"})
 		}
 	}
-	created, err := api.ContainerCreate(t.Context(), client.ContainerCreateOptions{Name: project, Config: &container.Config{Image: sourceImage, Cmd: []string{"sleep", "3600"}, Env: []string{"SECRET=literal-$HOME-value"}, StopTimeout: new(1), Labels: labels("app")}, HostConfig: hostConfig, NetworkingConfig: &network.NetworkingConfig{EndpointsConfig: endpoints}})
+	config := &container.Config{Image: sourceImage, Cmd: []string{"sleep", "3600"}, Env: []string{"SECRET=literal-$HOME-value"}, StopTimeout: new(1), Labels: labels("app")}
+	for _, configure := range configure {
+		configure(config, hostConfig)
+	}
+	created, err := api.ContainerCreate(t.Context(), client.ContainerCreateOptions{Name: project, Config: config, HostConfig: hostConfig, NetworkingConfig: &network.NetworkingConfig{EndpointsConfig: endpoints}})
 	if err != nil {
 		t.Fatal(err)
 	}

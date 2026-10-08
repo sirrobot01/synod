@@ -254,7 +254,11 @@ tail -n 100 "/Library/Application Support/Synod/controller/controller.log"
 | `files_changed_during_copy` | Some files kept changing during the backup. They were saved as read. The snapshot lists them. If the app needs an exact copy, use `synod protect APP --method stop`. |
 | `repository_installation_conflict` | The repository belongs to another installation. Use an empty directory. |
 | Image refused for an architecture | Restore on a device with a matching architecture. |
-| Port or name conflict | Stop the conflicting container, or use `--replace`. |
+| Port or name conflict | Select a target with a free port and name. Use `--replace` only to replace the existing app. A host process can also hold a port. |
+| `host_requirements_unverified` | Run the agent as root on the Docker host. Take a new backup while the app runs. |
+| `host_port_unavailable` | Use a target with the saved host address and port. |
+| `device_unavailable` | Connect the required device at the saved path. Its type, device number, permissions, and owner must match. |
+| `mount_unavailable` | Provide the required Never mount or external volume on the target. A bind source must have its saved type, permissions, and owner. |
 
 Do not send passwords, tokens, or private keys with a support report.
 
@@ -263,8 +267,8 @@ Do not send passwords, tokens, or private keys with a support report.
 - Agents require Linux. Docker Desktop on macOS and Windows is not supported.
 - Keep the Mac awake for access to its controller. Agents keep their saved backup schedules while it sleeps.
 - One controller per installation.
-- Apps with host networking cannot be restored.
-- An image that exists only on the lost device cannot be restored elsewhere.
+- Host-network restore needs verified TCP and UDP port records. The target must provide the saved host addresses, devices, and Never mounts.
+- An image can be restored only on a platform whose archive is saved in the repository.
 - MongoDB and databases with custom connection settings have no native dumps.
 - Browser downloads are limited to 64 MiB. Use `synod file get` for larger files.
 - A restore test without network access cannot prove every app feature.

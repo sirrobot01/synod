@@ -386,6 +386,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		},
 		Method:       method,
 		Images:       archives.images,
+		Host:         w.captureHost(ctx, inspected, app),
 		Architecture: w.Architecture,
 		StartedAt:    state.StartedAt,
 		Paths:        tree.Paths,

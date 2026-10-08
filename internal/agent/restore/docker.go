@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"maps"
-	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,11 +14,17 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
+	"github.com/sirrobot01/synod/internal/backup"
+	"github.com/sirrobot01/synod/internal/runtime/host"
 )
 
 // findConflicts returns the container IDs of the one existing app that a replace may remove.
 // It refuses a name, a published port, or a network that another app holds.
 func findConflicts(ctx context.Context, api *client.Client, p *plan, replace bool) ([]string, string, error) {
+	ports, err := requiredPorts(p)
+	if err != nil {
+		return nil, "", err
+	}
 	list, err := api.ContainerList(ctx, client.ContainerListOptions{All: true})
 	if err != nil {
 		return nil, "", &failure{Code: "app_conflict", Cause: err}
@@ -62,16 +67,13 @@ func findConflicts(ctx context.Context, api *client.Client, p *plan, replace boo
 			if used.PublicPort == 0 {
 				continue
 			}
-			for _, service := range p.Definition.Services {
-				for _, port := range service.Ports {
-					low, high, ok := portRange(port.Published)
-					address, err := netip.ParseAddr(port.HostIP)
-					if !ok || err != nil || port.Protocol != used.Type || used.PublicPort < low || used.PublicPort > high {
-						continue
-					}
-					if address.IsUnspecified() || !used.IP.IsValid() || used.IP.IsUnspecified() || address == used.IP {
-						return nil, "", &failure{Code: "port_conflict", Resource: used.Type + "/" + strconv.Itoa(int(used.PublicPort))}
-					}
+			address := "0.0.0.0"
+			if used.IP.IsValid() {
+				address = used.IP.String()
+			}
+			for _, port := range ports {
+				if host.Overlaps(port, backup.HostPort{Address: address, Port: used.PublicPort, Protocol: used.Type}) {
+					return nil, "", &failure{Code: "port_conflict", Resource: used.Type + "/" + strconv.Itoa(int(used.PublicPort))}
 				}
 			}
 		}
@@ -85,6 +87,9 @@ func findConflicts(ctx context.Context, api *client.Client, p *plan, replace boo
 		if err != nil || existing.Network.Driver != p.Networks[name].Driver {
 			return nil, "", &failure{Code: "network_conflict", Resource: name, Cause: err}
 		}
+	}
+	if err := checkHost(ctx, api, p, ids, ports); err != nil {
+		return nil, "", err
 	}
 	return ids, key, nil
 }

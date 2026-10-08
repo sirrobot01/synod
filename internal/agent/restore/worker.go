@@ -177,6 +177,8 @@ func (w *Worker) run(ctx context.Context, request restore.Request, state *progre
 		if err := w.replace(ctx, request, state, p, replaced, key); err != nil {
 			return err
 		}
+	} else if _, _, err := findConflicts(ctx, api, p, false); err != nil {
+		return err
 	}
 	state.Phase = phaseStarting
 	if err := w.save(ctx, state); err != nil {

@@ -14,6 +14,7 @@ require (
 	github.com/nicholas-fedor/shoutrrr v0.20.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/pkg/sftp v1.13.10
+	github.com/prometheus/procfs v0.16.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	golang.org/x/crypto v0.57.0
@@ -74,7 +75,6 @@ require (
 	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.68.1 // indirect
-	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/sirupsen/logrus v1.10.1 // indirect
