@@ -142,6 +142,16 @@ func TestLiveCopyReadsLVMSnapshot(t *testing.T) {
 				}
 				paths = append(paths, &agentv1.DiscoveredPath{Source: directory, Kind: "bind", Status: "Included"})
 			}
+			alias := t.TempDir()
+			if err := syscall.Mount(top, alias, "", syscall.MS_BIND, ""); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := syscall.Unmount(alias, 0); err != nil {
+					t.Errorf("unmount alias: %v", err)
+				}
+			})
+			paths = append(paths, &agentv1.DiscoveredPath{Source: filepath.Join(alias, "data"), Kind: "bind", Status: "Included"})
 			app := &agentv1.DiscoveredApp{Key: "lvm-test", Name: "lvm-test", Paths: paths}
 			tree, err := NewTree(ctx, app, nil, nil)
 			if err != nil {
@@ -159,7 +169,7 @@ func TestLiveCopyReadsLVMSnapshot(t *testing.T) {
 				}
 			})
 			if len(snapshots.lvm) != 1 {
-				t.Fatalf("got %d LVM snapshots, want one shared by both roots", len(snapshots.lvm))
+				t.Fatalf("got %d LVM snapshots, want one shared by all roots and mount aliases", len(snapshots.lvm))
 			}
 			for _, root := range tree.roots {
 				if !root.snapshot {

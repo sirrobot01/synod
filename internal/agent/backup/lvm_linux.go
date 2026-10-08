@@ -122,6 +122,12 @@ func (s *fsSnapshots) lvmView(ctx context.Context, m mountEntry) (string, bool) 
 		if volume.Path == "" || syscall.Stat(volume.Path, &device) != nil || device.Mode&syscall.S_IFMT != syscall.S_IFBLK || uint64(device.Rdev) != uint64(mounted.Dev) {
 			continue
 		}
+		for _, captured := range s.lvm {
+			if captured.originUUID == volume.UUID {
+				s.views[m.point] = captured.directory
+				return captured.directory, true
+			}
+		}
 		extents, ok := volume.cowExtents()
 		if !ok {
 			return "", false
