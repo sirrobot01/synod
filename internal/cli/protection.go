@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 
 	"github.com/google/uuid"
@@ -14,7 +15,7 @@ import (
 func newProtectCommand(app *app) *cobra.Command {
 	var all, off bool
 	var device, method, at, zone string
-	var selected []string
+	var selected, includeLarge, excludeLarge []string
 	var confirm int64
 	var daily, weekly, monthly int
 	command := &cobra.Command{Use: "protect [APP]", Short: "Review a protection plan, then confirm its revision", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -82,6 +83,23 @@ func newProtectCommand(app *app) *cobra.Command {
 		}
 		if cmd.Flags().Changed("keep-monthly") {
 			settings.Retention.Monthly = monthly
+		}
+		if all && len(includeLarge) > 0 {
+			return &client.Error{Code: "invalid_request", Message: "Include Large paths for one app at a time. Select APP instead of --all."}
+		}
+		if all {
+			settings.IncludeLarge = nil
+		}
+		for _, p := range includeLarge {
+			if p = filepath.Clean(p); !slices.Contains(settings.IncludeLarge, p) {
+				settings.IncludeLarge = append(settings.IncludeLarge, p)
+			}
+		}
+		settings.IncludeLarge = slices.DeleteFunc(settings.IncludeLarge, func(p string) bool {
+			return slices.ContainsFunc(excludeLarge, func(excluded string) bool { return filepath.Clean(excluded) == p })
+		})
+		if !all && backup.CheckIncluded(choices[0].App.Definition, settings.IncludeLarge) != nil {
+			return &client.Error{Code: "invalid_request", Message: "Include only a whole Large path, or a skipped path inside an Included path. Never and Dumped paths stay excluded. Run synod app list to see the paths."}
 		}
 		var targets []destination.Destination
 		if !off {
@@ -171,6 +189,8 @@ func newProtectCommand(app *app) *cobra.Command {
 	command.Flags().IntVar(&daily, "keep-daily", 7, "Daily snapshots to keep, from 0 to 366")
 	command.Flags().IntVar(&weekly, "keep-weekly", 4, "Weekly snapshots to keep, from 0 to 104")
 	command.Flags().IntVar(&monthly, "keep-monthly", 6, "Monthly snapshots to keep, from 0 to 120")
+	command.Flags().StringSliceVar(&includeLarge, "include-large", nil, "Copy this Large or skipped path; repeat for more than one")
+	command.Flags().StringSliceVar(&excludeLarge, "exclude-large", nil, "Stop copying this previously included path")
 	command.Flags().Int64Var(&confirm, "confirm", 0, "Save the reviewed plan at this revision")
 	return command
 }

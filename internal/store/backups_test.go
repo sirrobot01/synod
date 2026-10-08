@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -88,7 +89,7 @@ func TestBackupRequestsAndResultsSurviveRestart(t *testing.T) {
 		t.Fatal(err, errors.Unwrap(err))
 	}
 	jobs, err := s.BackupRequests(t.Context())
-	if err != nil || len(jobs) != 1 || jobs[0] != request {
+	if err != nil || len(jobs) != 1 || !reflect.DeepEqual(jobs[0], request) {
 		t.Fatalf("saved request lost: %v", err)
 	}
 	progress := backup.Event{ID: input.ID, Status: "running", Result: backup.Result{DestinationID: input.DestinationID, StartedAt: time.Now().UTC(), RepositoryOpened: true}}

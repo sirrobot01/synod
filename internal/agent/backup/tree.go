@@ -53,13 +53,28 @@ type Tree struct {
 	nested        []nestedPath
 	Paths         []backup.Path
 	excluded      map[string]string
+	included      []string
 	mu            sync.Mutex
 	observed      map[string]string
 	observedBytes int
 }
 
-func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.Exclusion) (*Tree, error) {
+// NewTree selects the app's Included paths. include adds Large paths and paths that the walk
+// skips by default, such as media folders and files over 20 GiB. Never paths stay excluded.
+func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.Exclusion, include []string) (*Tree, error) {
+	if backup.ValidateIncluded(include) != nil {
+		return nil, ErrSource
+	}
 	tree := &Tree{excluded: make(map[string]string), observed: make(map[string]string)}
+	for _, p := range include {
+		tree.included = append(tree.included, p)
+		if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved != p {
+			tree.included = append(tree.included, resolved)
+		}
+	}
+	selected := func(item *agentv1.DiscoveredPath) bool {
+		return item.Status == "Included" || (item.Status == "Large" && slices.Contains(include, filepath.Clean(item.Source)))
+	}
 	ready := false
 	defer func() {
 		if !ready {
@@ -67,7 +82,7 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 		}
 	}()
 	for _, item := range app.Paths {
-		if item.Status != "Included" && filepath.IsAbs(item.Source) {
+		if !selected(item) && filepath.IsAbs(item.Source) {
 			excluded = append(excluded, backup.Exclusion{Source: filepath.Clean(item.Source), Reason: item.Reason})
 		}
 	}
@@ -85,7 +100,7 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if item.Status != "Included" {
+		if !selected(item) {
 			continue
 		}
 		if archive, ok := seen[item.Source]; ok {
@@ -156,13 +171,13 @@ func (t *Tree) nest() {
 			for _, part := range strings.Split(relative, string(filepath.Separator)) {
 				current = filepath.Join(current, part)
 				name := strings.ToLower(part)
-				if t.skip(current) || discovery.Forbidden(current, parent.volume) || slices.Contains(mediaNames, name) || strings.HasSuffix(name, "-wal") || strings.HasSuffix(name, "-shm") || strings.HasSuffix(name, "-journal") {
+				if t.skip(current) || discovery.Forbidden(current, parent.volume) || (slices.Contains(mediaNames, name) && !t.chosen(current)) || strings.HasSuffix(name, "-wal") || strings.HasSuffix(name, "-shm") || strings.HasSuffix(name, "-journal") {
 					walked = false
 					break
 				}
 			}
 			info, err := child.root.Lstat(child.path)
-			if err != nil || (info.Mode().IsRegular() && info.Size() > largeFileBytes) {
+			if err != nil || (info.Mode().IsRegular() && info.Size() > largeFileBytes && !t.chosen(child.source)) {
 				walked = false
 			}
 			if !walked {
@@ -264,6 +279,16 @@ func (t *Tree) Exclusions() []backup.Exclusion {
 	}
 	slices.SortFunc(result, func(a, b backup.Exclusion) int { return strings.Compare(a.Source, b.Source) })
 	return result
+}
+
+// chosen reports whether the user included path or one of its parents.
+func (t *Tree) chosen(path string) bool {
+	for _, included := range t.included {
+		if path == included || strings.HasPrefix(path, included+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *Tree) skip(path string) bool {
@@ -417,7 +442,7 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 		if discovery.Forbidden(absolute, d.source.volume) {
 			reason = "Host system paths are never copied."
 		}
-		if slices.Contains(mediaNames, strings.ToLower(child.Name())) {
+		if slices.Contains(mediaNames, strings.ToLower(child.Name())) && !d.tree.chosen(absolute) {
 			reason = "Media is skipped by default."
 		}
 		info, err := root.Lstat(child.Name())
@@ -427,7 +452,7 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 		if !info.Mode().IsRegular() && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 			reason = "This path is not a regular file, directory, or link."
 		}
-		if info.Mode().IsRegular() && info.Size() > largeFileBytes {
+		if info.Mode().IsRegular() && info.Size() > largeFileBytes && !d.tree.chosen(absolute) {
 			reason = "This file exceeds 20 GiB and is skipped by default."
 		}
 		if reason != "" {

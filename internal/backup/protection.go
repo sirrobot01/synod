@@ -1,11 +1,14 @@
 package backup
 
 import (
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/proof"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
 // ProtectionUpdate confirms the plan at ExpectedRevision. All also sets the default for new apps.
@@ -89,4 +92,38 @@ func BlockedCode(app inventory.App) string {
 		return "app_definition_incomplete"
 	}
 	return ""
+}
+
+// CheckIncluded accepts a path only if restore can place it. It must be a whole discovered
+// Large path, or a path inside an Included path that the copy skips by default, such as a
+// media folder or a file over 20 GiB. Dumped and Never paths stay excluded.
+func CheckIncluded(app *agentv1.DiscoveredApp, paths []string) error {
+	if err := ValidateIncluded(paths); err != nil {
+		return err
+	}
+	if len(paths) > 0 && app == nil {
+		return ErrInvalid
+	}
+	for _, p := range paths {
+		allowed := false
+		for _, discovered := range app.Paths {
+			source := filepath.Clean(discovered.Source)
+			if discovered.Status == "Large" && p == source {
+				allowed = true
+			}
+			if discovered.Status == "Included" && strings.HasPrefix(p, source+string(filepath.Separator)) {
+				allowed = true
+			}
+		}
+		for _, discovered := range app.Paths {
+			source := filepath.Clean(discovered.Source)
+			if (discovered.Status == "Never" || discovered.Status == "Dumped") && (p == source || strings.HasPrefix(p, source+string(filepath.Separator)) || strings.HasPrefix(source, p+string(filepath.Separator))) {
+				allowed = false
+			}
+		}
+		if !allowed {
+			return ErrInvalid
+		}
+	}
+	return nil
 }

@@ -69,6 +69,8 @@ func (s *Store) createBackup(ctx context.Context, tx *sql.Tx, installationID uui
 		if slices.Contains(policy.Destinations, job.DestinationID) {
 			job.Retention = new(policy.Retention)
 		}
+		// A manual backup copies the same paths as the scheduled one.
+		job.IncludeLarge = policy.IncludeLarge
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return operation.Operation{}, storeError(err)
 	}

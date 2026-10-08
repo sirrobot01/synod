@@ -413,7 +413,7 @@ Each path has a proposed status:
 | Status | Current meaning |
 | --- | --- |
 | Included | App files or state selected for each backup. |
-| Large | Media or more than 20 GiB. Skipped by default. |
+| Large | Media or more than 20 GiB. Skipped unless the user includes it for the app. |
 | Dumped | A detected database data path. A native dump replaces the live data copy. |
 | Never | A host system path or an unsupported mount. |
 

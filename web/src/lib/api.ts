@@ -163,6 +163,7 @@ export interface CopySettings {
   at: string;
   time_zone: string;
   retention: { daily: number; weekly: number; monthly: number };
+  include_large?: string[];
 }
 export interface SavedPath {
   source?: string; target?: string; volume?: string; kind: string;

@@ -40,6 +40,8 @@ type Request struct {
 	Retention      *Retention `json:"retention,omitzero"`
 	// RestoreID marks a safety snapshot that a replace takes. The restore result reports it.
 	RestoreID uuid.UUID `json:"restore_id,omitzero"`
+	// IncludeLarge comes from the app's saved settings. The agent copies these skipped paths.
+	IncludeLarge []string `json:"include_large,omitempty"`
 }
 
 func (r Request) Validate() error {
@@ -52,7 +54,7 @@ func (r Request) Validate() error {
 	if (r.ScheduleID == uuid.Nil) != r.ScheduledAt.IsZero() || (r.ScheduleID != uuid.Nil && (r.Initialize || !r.RequestedAt.Equal(r.ScheduledAt) || r.Retention == nil)) || (r.Retention != nil && r.Retention.Validate() != nil) {
 		return ErrInvalid
 	}
-	return nil
+	return ValidateIncluded(r.IncludeLarge)
 }
 
 // SafetyID derives the one safety snapshot ID that a restore can take.

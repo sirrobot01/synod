@@ -40,4 +40,23 @@ describe("protection confirmation", () => {
     expect(api.protect).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: "Confirm plan" })).toBeNull();
   });
+  it("includes a selected Large path for one app", async () => {
+    vi.mocked(api.protect).mockResolvedValue({ id: "p1", revision: 4 });
+    render(ProtectionDialog, { plan, apps: [app], destinations: [destination], all: false, onClose: vi.fn(), onSaved: vi.fn() });
+    await fireEvent.click(screen.getByRole("checkbox", { name: "/srv/media" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Review paths" }));
+    expect(screen.getByText("You included this Large path.")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "Confirm plan" }));
+    await waitFor(() => expect(api.protect).toHaveBeenCalled());
+    expect(vi.mocked(api.protect).mock.calls[0]?.[0].settings.include_large).toEqual(["/srv/media"]);
+  });
+  it("never sends Large paths in the plan for all apps", async () => {
+    vi.mocked(api.protect).mockResolvedValue({ id: "p1", revision: 4 });
+    render(ProtectionDialog, { plan, apps: [app], destinations: [destination], all: true, onClose: vi.fn(), onSaved: vi.fn() });
+    expect(screen.queryByRole("checkbox", { name: "/srv/media" })).toBe(null);
+    await fireEvent.click(screen.getByRole("button", { name: "Review paths" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Confirm plan" }));
+    await waitFor(() => expect(api.protect).toHaveBeenCalled());
+    expect(vi.mocked(api.protect).mock.calls[0]?.[0].settings.include_large).toBeUndefined();
+  });
 });

@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"io"
+	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -208,7 +211,16 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			}
 			if a.result.ProtectionUpdate != nil && entry.App.Definition != nil {
 				for _, path := range entry.App.Definition.Paths {
-					fmt.Fprintf(&output, "  %-8s %s  %s\n", path.Status, path.Source, path.Reason)
+					status, reason := path.Status, path.Reason
+					if path.Status == "Large" && slices.Contains(entry.Settings.IncludeLarge, filepath.Clean(path.Source)) {
+						status, reason = "Included", "You included this Large path."
+					}
+					fmt.Fprintf(&output, "  %-8s %s  %s\n", status, path.Source, reason)
+				}
+				for _, included := range entry.Settings.IncludeLarge {
+					if !slices.ContainsFunc(entry.App.Definition.Paths, func(p *agentv1.DiscoveredPath) bool { return filepath.Clean(p.Source) == included }) {
+						fmt.Fprintf(&output, "  %-8s %s  %s\n", "Included", included, "You included this skipped path.")
+					}
 				}
 			}
 		}

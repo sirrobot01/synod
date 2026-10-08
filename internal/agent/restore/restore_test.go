@@ -36,7 +36,7 @@ type fixture struct {
 	volume                        bool
 	app                           inventory.App
 	destinationID                 uuid.UUID
-	port                          string
+	port, media                   string
 }
 
 const postgresImage = "postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0"
@@ -44,6 +44,12 @@ const postgresImage = "postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1
 // newFixture backs up one Compose project. With a database, the project also has a
 // PostgreSQL service with a named volume, a user network, and a published port.
 func newFixture(t *testing.T, database bool) *fixture {
+	t.Helper()
+	return buildFixture(t, database, false)
+}
+
+// buildFixture can also mount a media directory. Discovery marks it Large, and the backup includes it.
+func buildFixture(t *testing.T, database, media bool) *fixture {
 	t.Helper()
 	host := os.Getenv("SYNOD_TEST_DOCKER_HOST")
 	if host == "" {
@@ -71,6 +77,16 @@ func newFixture(t *testing.T, database bool) *fixture {
 	}
 	t.Cleanup(func() { removeFixture(api, project) })
 	hostConfig := &container.HostConfig{NetworkMode: "none", Mounts: []mount.Mount{{Type: mount.TypeBind, Source: f.project, Target: "/config"}}}
+	if media {
+		f.media = filepath.Join(t.TempDir(), "media")
+		if err := os.MkdirAll(f.media, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.media, "movie"), []byte("private-included-media"), 0640); err != nil {
+			t.Fatal(err)
+		}
+		hostConfig.Mounts = append(hostConfig.Mounts, mount.Mount{Type: mount.TypeBind, Source: f.media, Target: "/media"})
+	}
 	var endpoints map[string]*network.EndpointSettings
 	if database {
 		f.network = project + "_default"
@@ -145,7 +161,11 @@ func newFixture(t *testing.T, database bool) *fixture {
 		t.Fatal(err)
 	}
 	f.app = app
-	result, err := f.worker.Execute(t.Context(), backup.Request{ID: uuid.New(), InstallationID: installation, AppID: app.ID, NodeID: node, SourceKey: app.Definition.Key, DestinationID: destID, Method: backup.Auto, Initialize: true, RequestedAt: time.Now().UTC()})
+	request := backup.Request{ID: uuid.New(), InstallationID: installation, AppID: app.ID, NodeID: node, SourceKey: app.Definition.Key, DestinationID: destID, Method: backup.Auto, Initialize: true, RequestedAt: time.Now().UTC()}
+	if media {
+		request.IncludeLarge = []string{f.media}
+	}
+	result, err := f.worker.Execute(t.Context(), request)
 	if err != nil || result.FailureCode != "" || len(result.WarningCodes) != 0 {
 		t.Fatalf("source backup: %+v %v", result, err)
 	}

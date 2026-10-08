@@ -45,7 +45,7 @@ func newIncrementalFixture(t *testing.T, directory string, live bool) *increment
 // backup takes one snapshot with the newest earlier snapshot as the base, and restores it.
 func (f *incrementalFixture) backup(definition string) string {
 	t := f.t
-	tree, err := NewTree(t.Context(), f.app, nil)
+	tree, err := NewTree(t.Context(), f.app, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,5 +156,79 @@ func TestIncrementalLiveBackupCopiesCommitsInTheWAL(t *testing.T) {
 	var count int
 	if err := copied.QueryRowContext(t.Context(), "SELECT count(*) FROM state").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("restored %d rows, want the commit from the WAL: %v", count, err)
+	}
+}
+
+func TestIncludedLargePathsAreCopiedAndRestored(t *testing.T) {
+	project, media, never := t.TempDir(), t.TempDir(), t.TempDir()
+	for path, data := range map[string]string{
+		filepath.Join(project, "state"):            "project-state",
+		filepath.Join(project, "uploads", "photo"): "selected-upload",
+		filepath.Join(media, "movie"):              "selected-media",
+		filepath.Join(never, "secret"):             "never-copied",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app := &agentv1.DiscoveredApp{Key: "compose:large", Name: "large", Kind: "compose", ProjectDirectory: project, Paths: []*agentv1.DiscoveredPath{
+		{Source: project, Kind: "project", Status: "Included"},
+		{Source: media, Kind: "bind", Status: "Large", Reason: "Media is skipped by default."},
+		{Source: never, Kind: "bind", Status: "Never", Reason: "Host system paths are never copied."},
+	}}
+	r, err := repository.Create(t.Context(), repository.Location{Kind: "local", Path: t.TempDir()}, repository.Credentials{Password: "large-test-password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close(context.Background())
+	installation := uuid.New()
+	restore := func(include []string) map[string]string {
+		t.Helper()
+		tree, err := NewTree(t.Context(), app, nil, include)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tree.Close()
+		root, err := tree.Root(t.Context(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := r.UploadFiles(t.Context(), root, snapshot.SourceInfo{Host: "test", UserName: "test", Path: app.Key}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadata := backup.Snapshot{ID: uuid.New(), InstallationID: installation, DestinationID: uuid.New(), App: inventory.App{ID: uuid.New(), NodeID: uuid.New(), Definition: app}, Method: backup.Stop, Architecture: "arm64", StartedAt: time.Now().UTC(), CompletedAt: time.Now().UTC(), Paths: tree.Paths, Exclusions: tree.Exclusions()}
+		if _, err := r.PublishSnapshot(t.Context(), prepared, metadata); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "restored")
+		if err := r.RestoreFiles(t.Context(), metadata.ID, target); err != nil {
+			t.Fatal(err)
+		}
+		found := map[string]string{}
+		for _, mapping := range tree.Paths {
+			filepath.WalkDir(filepath.Join(target, mapping.Archive), func(path string, entry os.DirEntry, err error) error {
+				if err == nil && entry.Type().IsRegular() {
+					data, _ := os.ReadFile(path)
+					found[filepath.Base(path)] = string(data)
+				}
+				return nil
+			})
+		}
+		return found
+	}
+	skipped := restore(nil)
+	if skipped["state"] != "project-state" || skipped["photo"] != "" || skipped["movie"] != "" || skipped["secret"] != "" {
+		t.Fatalf("default copy: %v", skipped)
+	}
+	selected := restore([]string{filepath.Join(project, "uploads"), media, never})
+	if selected["state"] != "project-state" || selected["photo"] != "selected-upload" || selected["movie"] != "selected-media" {
+		t.Fatalf("selected paths were not restored: %v", selected)
+	}
+	if selected["secret"] != "" {
+		t.Fatal("an included Never path was copied")
 	}
 }

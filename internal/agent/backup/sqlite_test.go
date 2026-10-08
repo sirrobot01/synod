@@ -211,7 +211,7 @@ func TestTreeCopiesLiveSQLiteAndSkipsSidecars(t *testing.T) {
 		{Source: path, Status: "Included", Kind: "bind"},
 		{Source: path + "-wal", Status: "Included", Kind: "bind"},
 	}}
-	tree, err := NewTree(t.Context(), app, nil)
+	tree, err := NewTree(t.Context(), app, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

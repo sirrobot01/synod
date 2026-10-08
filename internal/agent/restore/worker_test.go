@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -189,5 +191,28 @@ func TestRestoreRecoversReplacedAppAfterInterruption(t *testing.T) {
 	var output bytes.Buffer
 	if err := execCommand(t.Context(), api, f.name, []string{"cat", "/config/state"}, nil, &output); err != nil || output.String() != "private-restored-value" {
 		t.Fatal("recovered app lost its bind data", err)
+	}
+}
+
+func TestRestorePlacesAnIncludedLargeMount(t *testing.T) {
+	f := buildFixture(t, false, true)
+	if !slices.ContainsFunc(f.app.Definition.Paths, func(p *agentv1.DiscoveredPath) bool { return p.Source == f.media && p.Status == "Large" }) {
+		t.Fatal("discovery did not mark the media mount Large")
+	}
+	if !slices.ContainsFunc(f.saved.Paths, func(p backup.Path) bool { return p.Source == f.media }) {
+		t.Fatalf("the snapshot does not contain the included Large path: %+v", f.saved.Paths)
+	}
+	api := f.worker.Docker
+	w := &Worker{Backup: f.worker, Directory: t.TempDir()}
+	removeFixture(api, f.name)
+	request := newRequest(f, false)
+	t.Cleanup(func() { removeLabelled(context.Background(), api, request.ID, true) })
+	result, err := w.Execute(t.Context(), request)
+	if err != nil || result.FailureCode != "" {
+		t.Fatalf("restore: %+v %v", result, err)
+	}
+	var output bytes.Buffer
+	if err := execCommand(t.Context(), api, f.name, []string{"cat", "/media/movie"}, nil, &output); err != nil || output.String() != "private-included-media" {
+		t.Fatalf("restored media = %q: %v", output.String(), err)
 	}
 }

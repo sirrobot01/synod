@@ -41,7 +41,7 @@ func TestTreeRestoresIncludedPathsAndExcludesOverlaps(t *testing.T) {
 		{Source: filepath.Join(project, "data", "db"), Kind: "bind", Status: "Dumped", Reason: "Database data needs a dump."},
 		{Source: filepath.Join(project, "cache"), Kind: "bind", Status: "Large", Reason: "This path exceeds 20 GiB."},
 	}}
-	tree, err := NewTree(t.Context(), app, []backup.Exclusion{{Source: filepath.Join(project, "repository"), Reason: "Do not copy the destination into itself."}})
+	tree, err := NewTree(t.Context(), app, []backup.Exclusion{{Source: filepath.Join(project, "repository"), Reason: "Do not copy the destination into itself."}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestTreeRestoresIncludedPathsAndExcludesOverlaps(t *testing.T) {
 
 func TestTreeRefusesPathEscapeAndChangedParents(t *testing.T) {
 	for _, source := range []string{"/etc", "relative"} {
-		if tree, err := NewTree(t.Context(), &agentv1.DiscoveredApp{Paths: []*agentv1.DiscoveredPath{{Source: source, Kind: "bind", Status: "Included"}}}, nil); err == nil {
+		if tree, err := NewTree(t.Context(), &agentv1.DiscoveredApp{Paths: []*agentv1.DiscoveredPath{{Source: source, Kind: "bind", Status: "Included"}}}, nil, nil); err == nil {
 			tree.Close()
 			t.Fatalf("unsafe root accepted: %s", source)
 		}
@@ -118,7 +118,7 @@ func TestTreeRefusesPathEscapeAndChangedParents(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(project, "state", "file"), []byte("safe"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	tree, err := NewTree(t.Context(), &agentv1.DiscoveredApp{ProjectDirectory: project, Paths: []*agentv1.DiscoveredPath{{Source: project, Kind: "project", Status: "Included"}, {Source: filepath.Join(project, ".env"), Kind: "env", Status: "Included"}}}, nil)
+	tree, err := NewTree(t.Context(), &agentv1.DiscoveredApp{ProjectDirectory: project, Paths: []*agentv1.DiscoveredPath{{Source: project, Kind: "project", Status: "Included"}, {Source: filepath.Join(project, ".env"), Kind: "env", Status: "Included"}}}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

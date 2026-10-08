@@ -286,8 +286,23 @@ Review every path and its reason:
 | Never | Exclude host system paths, sockets, and unsupported mounts. |
 
 Check that required app data is included or dumped.
-The current build has no user override for Large paths.
 Do not assume that skipped media is protected.
+
+To copy a Large path, include it for one app:
+
+```sh
+synod protect photos --include-large /srv/photos/library
+synod protect photos --include-large /srv/photos/library --confirm REVISION
+```
+
+You can include a whole Large path.
+You can also include a skipped folder or file inside an Included path, such as `/srv/app/uploads`.
+Synod refuses a folder inside a Large path. Include the whole Large path instead.
+Synod refuses Never and Dumped paths.
+Use `--exclude-large PATH` to stop copying a path.
+Omitted flags keep the saved choice.
+Make sure that the destination has space for the included data.
+In the web UI, **Protect** shows a **Large paths** list for one app.
 
 Repeat the command with the revision shown in the preview:
 
@@ -571,7 +586,6 @@ Do not send repository credentials, tokens, or private keys with a support repor
 
 These gaps block the v0.1 release:
 
-- Large paths have no user inclusion control yet.
 - Init does not generate the promised recovery kit yet.
 - Agent and controller transport certificates expire after 30 days. Automatic renewal is not implemented yet.
 

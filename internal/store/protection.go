@@ -58,6 +58,10 @@ func (s *Store) UpdateProtection(ctx context.Context, installationID uuid.UUID, 
 	if revision != update.ExpectedRevision {
 		return 0, &Error{Code: PlanConflict}
 	}
+	// Included paths belong to one app. The default for new apps cannot name them.
+	if update.All && len(update.Settings.IncludeLarge) > 0 {
+		return 0, &Error{Code: InvalidRequest}
+	}
 	if update.Enabled {
 		for _, id := range update.Settings.Destinations {
 			var available bool
@@ -105,6 +109,19 @@ func (s *Store) UpdateProtection(ctx context.Context, installationID uuid.UUID, 
 		var key string
 		if err := tx.QueryRowContext(ctx, `SELECT a.node_id,a.source_key FROM apps a JOIN nodes n ON n.id=a.node_id WHERE a.id=? AND (?=0 OR (n.approved_at IS NOT NULL AND n.revoked_at IS NULL AND a.present=1))`, id, update.Enabled).Scan(&node, &key); err != nil {
 			return 0, storeError(err)
+		}
+		if update.Enabled && len(update.Settings.IncludeLarge) > 0 {
+			var raw []byte
+			if err := tx.QueryRowContext(ctx, `SELECT definition FROM apps WHERE id=?`, id).Scan(&raw); err != nil {
+				return 0, storeError(err)
+			}
+			definition := new(agentv1.DiscoveredApp)
+			if proto.Unmarshal(raw, definition) != nil {
+				return 0, &Error{Code: Unavailable}
+			}
+			if backup.CheckIncluded(definition, update.Settings.IncludeLarge) != nil {
+				return 0, &Error{Code: InvalidRequest}
+			}
 		}
 		if update.Enabled {
 			for _, destinationID := range update.Settings.Destinations {

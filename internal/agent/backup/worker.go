@@ -330,7 +330,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if location.Kind == "local" || (location.Kind == "device" && location.Device.NodeID == w.NodeID) {
 		excluded = append(excluded, backup.Exclusion{Source: location.Path, Reason: "The destination must not be copied into itself."})
 	}
-	tree, err := NewTree(ctx, app, excluded)
+	tree, err := NewTree(ctx, app, excluded, request.IncludeLarge)
 	if err != nil {
 		state.FailureCode = "source_unavailable"
 		return w.finish(ctx, request, &state, r)

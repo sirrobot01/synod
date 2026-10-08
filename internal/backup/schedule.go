@@ -3,6 +3,7 @@ package backup
 import (
 	"bytes"
 	"encoding/json"
+	"path/filepath"
 	"slices"
 	"time"
 	_ "time/tzdata"
@@ -32,6 +33,8 @@ type Settings struct {
 	At           string      `json:"at"`
 	TimeZone     string      `json:"time_zone"`
 	Retention    Retention   `json:"retention"`
+	// IncludeLarge lists paths that the user includes although Synod skips them by default.
+	IncludeLarge []string `json:"include_large,omitempty"`
 }
 
 func DefaultSettings() Settings {
@@ -50,6 +53,19 @@ func (s Settings) Validate() error {
 	}
 	for i, id := range s.Destinations {
 		if id == uuid.Nil || slices.Contains(s.Destinations[:i], id) {
+			return ErrInvalid
+		}
+	}
+	return ValidateIncluded(s.IncludeLarge)
+}
+
+// ValidateIncluded accepts at most 64 distinct, clean, absolute paths below the root.
+func ValidateIncluded(paths []string) error {
+	if len(paths) > 64 {
+		return ErrInvalid
+	}
+	for i, p := range paths {
+		if len(p) > 4096 || !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" || slices.Contains(paths[:i], p) {
 			return ErrInvalid
 		}
 	}
@@ -116,6 +132,7 @@ func (s Schedule) Request(destinationID uuid.UUID, slot time.Time) (Request, err
 		InstallationID: s.InstallationID, AppID: s.AppID, NodeID: s.NodeID, SourceKey: s.SourceKey,
 		DestinationID: destinationID, Method: s.Settings.Method, RequestedAt: slot,
 		ScheduleID: s.ID, ScheduledAt: slot, Retention: new(s.Settings.Retention),
+		IncludeLarge: s.Settings.IncludeLarge,
 	}
 	return request, request.Validate()
 }

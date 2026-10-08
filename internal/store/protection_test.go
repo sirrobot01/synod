@@ -244,3 +244,90 @@ func TestProtectionPersistsAutoProtectOptOutAndOfflineResults(t *testing.T) {
 		t.Fatal("status used job admission order instead of the actual backup time")
 	}
 }
+
+func TestProtectionIncludesSelectedLargePaths(t *testing.T) {
+	s, ca := open(t), authority(t)
+	node, _ := join(t, s, ca)
+	session := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	s.now = func() time.Time { return now }
+	if err := s.RecordAgentSession(t.Context(), node, session, &agentv1.Hello{NodeId: node.String(), Architecture: "amd64"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApproveNode(t.Context(), node, "admin", "approve"); err != nil {
+		t.Fatal(err)
+	}
+	report := &agentv1.AppInventory{ObservedAt: timestamppb.New(now), Apps: []*agentv1.DiscoveredApp{{Key: "compose:photos", Name: "photos", Kind: "compose", ProjectDirectory: "/srv/photos",
+		Containers: []*agentv1.DiscoveredContainer{{Id: "app", Name: "photos", Image: "alpine"}},
+		Paths: []*agentv1.DiscoveredPath{
+			{Source: "/srv/photos", Kind: "project", Status: "Included", Reason: "App files and state."},
+			{Source: "/srv/photos/db", Kind: "bind", Status: "Dumped", Reason: "Database data needs a dump."},
+			{Source: "/mnt/library", Kind: "bind", Status: "Large", Reason: "Media is skipped by default."},
+			{Source: "/var/run/docker.sock", Kind: "bind", Status: "Never", Reason: "Host system paths are never copied."},
+		}}}}
+	if err := s.RecordInventory(t.Context(), node, session, report); err != nil {
+		t.Fatal(err)
+	}
+	key := uuid.New()
+	ring, err := secret.NewKeyring(key, map[uuid.UUID][]byte{key: bytes.Repeat([]byte{51}, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := destination.Entry{Destination: destination.Destination{ID: uuid.New(), NodeID: node, Name: "disk", Location: repository.Location{Kind: "local", Path: "/backups"}}, Credentials: repository.Credentials{Password: "private-repository"}}
+	if _, err := s.AddDestination(t.Context(), ca.InstallationID(), ring, dest, "admin", "destination"); err != nil {
+		t.Fatal(err)
+	}
+	appID := uuid.NewSHA1(node, []byte("compose:photos"))
+	update := func(all bool, include ...string) error {
+		t.Helper()
+		plan, err := s.ProtectionPlan(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings := backup.DefaultSettings()
+		settings.Destinations, settings.IncludeLarge = []uuid.UUID{dest.Destination.ID}, include
+		request := backup.ProtectionUpdate{ID: uuid.New(), ExpectedRevision: plan.Revision, All: all, Enabled: true, Settings: settings}
+		if !all {
+			request.AppIDs = []uuid.UUID{appID}
+		}
+		_, err = s.UpdateProtection(t.Context(), ca.InstallationID(), request, "admin", "protect")
+		return err
+	}
+	for name, include := range map[string][]string{
+		"inside a Large path": {"/mnt/library/2024"},
+		"a Never path":        {"/var/run/docker.sock"},
+		"a Dumped path":       {"/srv/photos/db"},
+		"a parent of Dumped":  {"/srv/photos"},
+		"an unknown path":     {"/opt/other"},
+	} {
+		if err := update(false, include...); code(err) != InvalidRequest {
+			t.Fatalf("%s was accepted: %v", name, err)
+		}
+	}
+	if err := update(true, "/mnt/library"); code(err) != InvalidRequest {
+		t.Fatalf("protect-all accepted app paths: %v", err)
+	}
+	if err := update(false, "/mnt/library", "/srv/photos/uploads"); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := s.ProtectionPlan(t.Context())
+	if err != nil || len(plan.Apps) != 1 || !slices.Equal(plan.Apps[0].Settings.IncludeLarge, []string{"/mnt/library", "/srv/photos/uploads"}) {
+		t.Fatal("the plan does not show the included paths", err)
+	}
+	private, err := s.DestinationPlan(t.Context(), ca.InstallationID(), node, session, ring)
+	if err != nil || len(private.Schedules) != 1 || !slices.Equal(private.Schedules[0].Settings.IncludeLarge, []string{"/mnt/library", "/srv/photos/uploads"}) {
+		t.Fatal("the schedule lost the included paths", err)
+	}
+	recovery, err := repository.DecodeCatalog(private.Catalog)
+	if err != nil || len(recovery.Protection) != 1 || !slices.Equal(recovery.Protection[0].Settings.IncludeLarge, []string{"/mnt/library", "/srv/photos/uploads"}) {
+		t.Fatal("the recovery catalog lost the included paths", err)
+	}
+	op, err := s.CreateBackup(t.Context(), ca.InstallationID(), backup.Submission{ID: uuid.New(), AppID: appID, DestinationID: dest.Destination.ID, Method: backup.Auto}, "admin", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manual backup.Request
+	if json.Unmarshal(op.Input, &manual) != nil || !slices.Equal(manual.IncludeLarge, []string{"/mnt/library", "/srv/photos/uploads"}) {
+		t.Fatal("a manual backup ignores the included paths")
+	}
+}
