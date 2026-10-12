@@ -546,6 +546,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		state.Metadata.Changing = tree.Changing()
 		state.Metadata.Consistency, state.Metadata.Captures = tree.captureEvidence(method, sqliteFiles, state.Metadata.Dumps)
 		state.Limits = snapshotLimits(app, request.IncludeLarge, tree, inspected, state.Metadata)
+		state.Metadata.Limits = state.Limits
 	}
 	durable, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	saveErr := w.save(durable, &state)

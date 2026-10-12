@@ -221,6 +221,7 @@ export interface Snapshot {
   id: string; destination_ids: string[]; source_node_id: string; source_node_name: string; architecture: string;
   method: Method; started_at: string; completed_at: string; file_bytes: number; paths: string[];
   databases?: string[]; exclusions?: { source: string; reason: string; status?: string }[];
+  consistency?: "unverified" | "filesystem_snapshot"; limits?: string[]; restore_architectures?: string[];
 }
 export interface FileHeader {
   path_type?: string;

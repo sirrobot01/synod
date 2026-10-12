@@ -118,6 +118,8 @@ type Snapshot struct {
 	SQLite         []string           `json:"sqlite,omitempty"`
 	Consistency    Consistency        `json:"consistency,omitempty"`
 	Captures       []Capture          `json:"captures,omitempty"`
+	// Limits name the requirements of full protection that this snapshot does not meet.
+	Limits []string `json:"limits,omitempty"`
 	// Changing lists files that kept changing while a live copy read them. They are saved as read.
 	Changing   []string       `json:"changing,omitempty"`
 	Dumps      []DatabaseDump `json:"dumps,omitempty"`

@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { api, detail, download, type ProtectionPlan, type DestinationList, type Node, type Snapshot, type FileHeader } from "../lib/api";
   import { errorView, type APIError } from "../lib/state";
-  import { bytes, timestamp } from "../lib/format";
+  import { bytes, timestamp, limits } from "../lib/format";
   import Panel from "../lib/ui/Panel.svelte";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
   import WorkDialog from "../lib/WorkDialog.svelte";
@@ -83,7 +83,8 @@
   {#if selected}
     <Panel title="Selected snapshot" note={timestamp(selected.completed_at)}>
       {#snippet actions()}<button onclick={() => work = "drill"} disabled={downloading}>Test restore</button><button class="primary" onclick={() => work = "restore"} disabled={downloading}>Restore app…</button>{/snippet}
-      <div class="pad stack"><dl class="facts mono"><dt>Snapshot ID</dt><dd>{selected.id}</dd><dt>Saved paths</dt><dd>{(selected.paths ?? []).join(", ") || "None"}</dd><dt>Database dumps</dt><dd>{selected.databases?.join(", ") || "None"}</dd></dl>
+      <div class="pad stack"><dl class="facts mono"><dt>Snapshot ID</dt><dd>{selected.id}</dd><dt>Saved paths</dt><dd>{(selected.paths ?? []).join(", ") || "None"}</dd><dt>Database dumps</dt><dd>{selected.databases?.join(", ") || "None"}</dd><dt>Capture scope</dt><dd>{selected.consistency ?? "unverified"}</dd><dt>Restores on</dt><dd>{selected.restore_architectures?.join(", ") || "Unknown"}</dd></dl>
+        {#each selected.limits ?? [] as code}<p class="callout">{limits[code]?.text ?? code}</p>{/each}
         {#if selected.exclusions?.length}<details><summary>Excluded paths · {selected.exclusions.length}</summary><ul>{#each selected.exclusions as excluded}<li><span class="mono">{excluded.source}</span> · {excluded.reason}</li>{/each}</ul></details>{/if}
         <p class="note">A restore creates the saved app. A drill starts an isolated copy to test it.</p>
       </div>

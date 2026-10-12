@@ -62,11 +62,20 @@ type SnapshotSummary struct {
 	Paths          []string           `json:"paths"`
 	Databases      []string           `json:"databases,omitempty"`
 	Exclusions     []backup.Exclusion `json:"exclusions,omitempty"`
+	Consistency    backup.Consistency `json:"consistency,omitempty"`
+	Limits         []string           `json:"limits,omitempty"`
+	// Architectures lists the device architectures that every saved image supports.
+	Architectures []string `json:"restore_architectures,omitempty"`
 }
 
 // Summarize keeps the fields that a user needs to choose a snapshot.
 func Summarize(saved backup.Snapshot, destinationID uuid.UUID) SnapshotSummary {
-	summary := SnapshotSummary{ID: saved.ID, DestinationIDs: []uuid.UUID{destinationID}, SourceNodeID: saved.App.NodeID, SourceNodeName: saved.App.NodeName, Architecture: saved.Architecture, Method: saved.Method, StartedAt: saved.StartedAt, CompletedAt: saved.CompletedAt, FileBytes: saved.FileBytes, Exclusions: saved.Exclusions}
+	summary := SnapshotSummary{ID: saved.ID, DestinationIDs: []uuid.UUID{destinationID}, SourceNodeID: saved.App.NodeID, SourceNodeName: saved.App.NodeName, Architecture: saved.Architecture, Method: saved.Method, StartedAt: saved.StartedAt, CompletedAt: saved.CompletedAt, FileBytes: saved.FileBytes, Exclusions: saved.Exclusions, Consistency: saved.Consistency, Limits: saved.Limits}
+	for _, architecture := range []string{"amd64", "arm64"} {
+		if len(saved.Images) > 0 && !slices.ContainsFunc(saved.Images, func(image backup.Image) bool { return !slices.Contains(image.Architectures, architecture) }) {
+			summary.Architectures = append(summary.Architectures, architecture)
+		}
+	}
 	for _, item := range saved.Paths {
 		if !slices.Contains(summary.Paths, item.Source) {
 			summary.Paths = append(summary.Paths, item.Source)

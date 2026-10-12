@@ -97,6 +97,10 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 		}
 		for _, saved := range files.Snapshots {
 			fmt.Fprintf(&output, "%s  %s  %s  %d bytes\n", saved.ID, saved.CompletedAt.Format(time.RFC3339), saved.Method, saved.FileBytes)
+			fmt.Fprintf(&output, "  Restores on: %s  Capture scope: %s\n", strings.Join(saved.Architectures, ", "), saved.Consistency)
+			for _, limit := range saved.Limits {
+				fmt.Fprintf(&output, "  Limit: %s\n", limit)
+			}
 		}
 		for _, entry := range files.Entries {
 			fmt.Fprintf(&output, "%s  %d  %q\n", entry.Type, entry.Size, entry.Name)
