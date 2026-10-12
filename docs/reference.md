@@ -715,17 +715,36 @@ Kopia verifies the checksum and encryption of each item that it reads.
 A successful sample does not prove that all stored content is intact.
 
 A drill restores the latest available snapshot into a private scratch directory.
-It restores files and volumes and loads database dumps.
+It restores files and volumes.
+It writes the saved database files of a `filesystem_snapshot` copy, or loads the database dumps of another copy.
 It gives every container a new name.
-It starts containers with no network and no published ports.
-It checks that they stay up for 30 seconds.
-It then removes the temporary containers, volumes, and directory.
+It puts all containers on one new internal Docker network. This network has no route out of the device and publishes no ports.
+Each service keeps its service name, container name, and network aliases on this network. The services of the app find each other as on the source.
+The containers must stay up for 30 seconds. Then the drill runs these checks:
+
+| Check | What passes |
+| --- | --- |
+| `data_files` | Each restored file root has the same file count and bytes as the snapshot. Synod counts before any app container starts. |
+| `database_content` | Each database that the backup listed exists, and a database that had tables or keys still has some. The backup lists the databases before the export. |
+| `container_health` | A container with a Docker health check becomes `healthy`. |
+| `port_tcp` | A TCP port that the source published, or an exposed image port, accepts a connection inside the container's network namespace. |
+| `http_response` | A port that answers HTTP returns a status below 500. |
+| `app_function` | Unchecked when a service has no health check and no port to probe. |
+
+The drill waits up to 5 minutes for health, databases, and ports.
+A failed check fails the drill with `drill_check_failed` and names the check.
+An unchecked requirement does not fail the drill. The drill result lists it, and the proof is incomplete.
+An exposed image port that does not answer is unchecked, because the app may not use it.
+Port checks need root, because the agent enters the container's network namespace.
+To make a service fully testable, give it a Docker health check or a port.
+
+The drill then removes the temporary containers, volumes, network, and directory.
 Cleanup must finish before the agent reports a result.
 After an interruption, the agent removes the drill and reports a failure.
 
 Drills refuse privileged containers, host devices, shared host namespaces,
 added capabilities, custom security options, and mounts outside the copied data.
-An app that needs network access can fail this test.
+An app that needs internet access can fail this test.
 A drill does not prove that every app feature works.
 The source app keeps running during the drill.
 
@@ -1015,4 +1034,5 @@ The token works only for that device and only with its existing key.
 - Maintenance runs in the agent's job queue. A long maintenance run delays other jobs on that device.
 - A program that rewrites a file and keeps its old size and modification time defeats change detection. Synod copies that file again only after its size or time changes.
 - A local destination syncs each repository file to disk. On a slow disk, a Synod-device destination is faster, because it syncs once before each index write.
-- An isolated drill cannot prove app behavior that needs network access.
+- An isolated drill cannot prove app behavior that needs internet or LAN access.
+- A host-network service that listens on one host address cannot start its listener in a drill. Its function check is unchecked.

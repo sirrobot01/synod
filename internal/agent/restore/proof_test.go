@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -96,7 +97,7 @@ func TestProofRestoresIsolatedDataChecksRunningContainersAndCleansUp(t *testing.
 		if list, err := api.VolumeList(t.Context(), client.VolumeListOptions{Filters: filters}); err != nil || len(list.Items) != 0 {
 			t.Fatal("drill left volumes", err)
 		}
-		if repeated, err := w.ExecuteProof(t.Context(), request); err != nil || repeated != out.result {
+		if repeated, err := w.ExecuteProof(t.Context(), request); err != nil || !reflect.DeepEqual(repeated, out.result) {
 			t.Fatal("completed drill ran again", err)
 		}
 	}

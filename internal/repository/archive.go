@@ -256,3 +256,24 @@ func (r *Repository) Stat(ctx context.Context, id uuid.UUID, source string) (fs.
 	}
 	return header.FileInfo(), nil
 }
+
+// Summary returns the regular file count and their total bytes below source.
+func (r *Repository) Summary(ctx context.Context, id uuid.UUID, source string) (files, bytes int64, err error) {
+	entry, err := r.SnapshotEntry(ctx, id, source)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer entry.Close()
+	if entry.Mode().IsRegular() {
+		return 1, entry.Size(), nil
+	}
+	directory, ok := entry.(kfs.DirectoryWithSummary)
+	if !ok {
+		return 0, 0, ErrSnapshotIncomplete
+	}
+	summary, err := directory.Summary(ctx)
+	if err != nil || summary == nil {
+		return 0, 0, errors.Join(ErrSnapshotIncomplete, err)
+	}
+	return summary.TotalFileCount, summary.TotalFileSize, nil
+}

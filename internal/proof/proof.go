@@ -3,6 +3,7 @@ package proof
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -131,6 +132,54 @@ type Result struct {
 	Maintenance string `json:"maintenance,omitempty"`
 	FailureCode string `json:"failure_code,omitempty"`
 	Resource    string `json:"resource,omitempty"`
+	// Checks lists what a drill verified. Container survival alone is not a check.
+	Checks []Check `json:"checks,omitempty"`
+}
+
+// Check kinds of a restore drill.
+const (
+	CheckDataFiles       = "data_files"
+	CheckDatabaseContent = "database_content"
+	CheckContainerHealth = "container_health"
+	CheckPort            = "port_tcp"
+	CheckHTTP            = "http_response"
+	// CheckAppFunction is unchecked when a service has no health check and no port to probe.
+	CheckAppFunction = "app_function"
+)
+
+// Check statuses. An unchecked requirement leaves the proof incomplete.
+const (
+	CheckPassed    = "passed"
+	CheckFailed    = "failed"
+	CheckUnchecked = "unchecked"
+)
+
+// Check records one drill check. Detail holds counts or codes, never app data.
+type Check struct {
+	Kind     string `json:"kind"`
+	Resource string `json:"resource"`
+	Status   string `json:"status"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+// Complete reports whether a drill passed and verified every requirement that it found.
+func (r Result) Complete() bool {
+	if r.FailureCode != "" || len(r.Checks) == 0 {
+		return false
+	}
+	for _, check := range r.Checks {
+		if check.Status != CheckPassed {
+			return false
+		}
+	}
+	return true
+}
+
+func (c Check) validate() error {
+	if !slices.Contains([]string{CheckDataFiles, CheckDatabaseContent, CheckContainerHealth, CheckPort, CheckHTTP, CheckAppFunction}, c.Kind) || !slices.Contains([]string{CheckPassed, CheckFailed, CheckUnchecked}, c.Status) || len(c.Resource) > 512 || len(c.Detail) > 512 || strings.ContainsFunc(c.Resource+c.Detail, unicode.IsControl) {
+		return ErrInvalid
+	}
+	return nil
 }
 
 type Event struct {
@@ -145,12 +194,20 @@ func (e Event) Validate(request Request) error {
 	if request.Validate() != nil || e.ID != request.ID || (e.Request != nil && *e.Request != request) || (request.ScheduleID != uuid.Nil && e.Request == nil) || r.Contents < 0 || r.Read < 0 || r.Read > r.Contents || r.BytesRead < 0 || r.Containers < 0 || r.Containers > 256 || len(r.Resource) > 2048 || strings.ContainsFunc(r.Resource, unicode.IsControl) {
 		return ErrInvalid
 	}
+	if len(r.Checks) > 1024 || (len(r.Checks) > 0 && request.Kind != Drill) {
+		return ErrInvalid
+	}
+	for _, check := range r.Checks {
+		if check.validate() != nil {
+			return ErrInvalid
+		}
+	}
 	if (r.DestinationID != uuid.Nil && request.DestinationID != uuid.Nil && r.DestinationID != request.DestinationID) || (r.SnapshotID != uuid.Nil && request.SnapshotID != uuid.Nil && r.SnapshotID != request.SnapshotID) || (request.Kind == Integrity && (r.SnapshotID != uuid.Nil || r.Containers != 0)) || (request.Kind == Drill && (r.Contents != 0 || r.Read != 0 || r.BytesRead != 0)) || (request.Kind == Maintenance && (r.SnapshotID != uuid.Nil || r.Containers != 0 || r.Contents != 0 || r.Read != 0 || r.BytesRead != 0)) || (r.Maintenance != "" && (request.Kind != Maintenance || !slices.Contains([]string{"completed", "claimed", "handing_over"}, r.Maintenance))) {
 		return ErrInvalid
 	}
 	switch e.Status {
 	case "queued":
-		if r != (Result{}) {
+		if !reflect.ValueOf(r).IsZero() {
 			return ErrInvalid
 		}
 	case "running", "waiting":
@@ -165,7 +222,7 @@ func (e Event) Validate(request Request) error {
 			if r.FailureCode != "" || r.Resource != "" || r.DestinationID == uuid.Nil || (request.Kind == Integrity && r.Read == 0) || (request.Kind == Drill && (r.SnapshotID == uuid.Nil || r.Containers == 0)) || (request.Kind == Maintenance && r.Maintenance == "") {
 				return ErrInvalid
 			}
-		} else if !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "integrity_check_failed", "snapshot_not_found", "snapshot_invalid", "image_platform_unsupported", "image_archive_missing", "image_archive_invalid", "image_load_failed", "compose_unavailable", "definition_unsupported", "app_conflict", "source_path_unavailable", "file_restore_failed", "volume_restore_failed", "database_restore_failed", "compose_start_failed", "drill_container_stopped", "drill_isolation_failed", "maintenance_not_owner", "maintenance_failed", "agent_interrupted"}, r.FailureCode) || r.Maintenance != "" {
+		} else if !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "integrity_check_failed", "snapshot_not_found", "snapshot_invalid", "image_platform_unsupported", "image_archive_missing", "image_archive_invalid", "image_load_failed", "compose_unavailable", "definition_unsupported", "app_conflict", "source_path_unavailable", "file_restore_failed", "volume_restore_failed", "database_restore_failed", "compose_start_failed", "drill_container_stopped", "drill_isolation_failed", "drill_check_failed", "maintenance_not_owner", "maintenance_failed", "agent_interrupted"}, r.FailureCode) || r.Maintenance != "" {
 			return ErrInvalid
 		}
 	default:

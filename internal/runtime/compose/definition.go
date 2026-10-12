@@ -133,6 +133,9 @@ type Volume struct {
 type Network struct {
 	Name     string `json:"name"`
 	External bool   `json:"external"`
+	// Internal networks have no route out of the host. Restore drills use one.
+	Internal bool              `json:"internal,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`
 }
 type Attachment struct {
 	Aliases         []string          `json:"aliases,omitempty"`

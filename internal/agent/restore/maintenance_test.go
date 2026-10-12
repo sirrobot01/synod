@@ -3,6 +3,7 @@ package restore
 import (
 	"bytes"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -70,7 +71,7 @@ func TestScheduledMaintenanceRunsOnlyForThePlannedOwner(t *testing.T) {
 	if result.Maintenance != string(repository.MaintenanceHandingOver) {
 		t.Fatalf("maintenance during handover: %+v", result)
 	}
-	if repeated, err := w.ExecuteProof(t.Context(), request); err != nil || repeated != result {
+	if repeated, err := w.ExecuteProof(t.Context(), request); err != nil || !reflect.DeepEqual(repeated, result) {
 		t.Fatal("completed maintenance ran again", err)
 	}
 	if n, err := cache.AdmitScheduled(t.Context(), ring, created.Add(36*time.Hour)); err != nil || n != 0 {

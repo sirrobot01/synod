@@ -151,6 +151,7 @@ func (w *Worker) runProof(ctx context.Context, request proof.Request, result *pr
 	if err != nil {
 		return err
 	}
+	targets := drillTargets(p)
 	if err := isolateDrill(p, request.ID, directory); err != nil {
 		return err
 	}
@@ -177,6 +178,8 @@ func (w *Worker) runProof(ctx context.Context, request proof.Request, result *pr
 	if err != nil {
 		return err
 	}
+	// The data check runs before any app container can change the restored files.
+	result.Checks = checkData(ctx, b.Docker, r, p, directory)
 	if err := prepareDatabases(ctx, b.Docker, r, p, request.ID); err != nil {
 		return err
 	}
@@ -196,7 +199,7 @@ func (w *Worker) runProof(ctx context.Context, request proof.Request, result *pr
 			name := p.Definition.Services[key].ContainerName
 			inspected, err := b.Docker.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
 			c := inspected.Container
-			if err != nil || c.Config == nil || c.HostConfig == nil || c.State == nil || c.Config.Labels[operationLabel] != request.ID.String() || c.HostConfig.NetworkMode != "none" || len(c.HostConfig.PortBindings) != 0 {
+			if err != nil || c.Config == nil || c.HostConfig == nil || c.State == nil || c.NetworkSettings == nil || c.Config.Labels[operationLabel] != request.ID.String() || len(c.HostConfig.PortBindings) != 0 || len(c.NetworkSettings.Networks) != 1 || c.NetworkSettings.Networks[drillNetwork(request.ID)] == nil {
 				return &failure{Code: "drill_isolation_failed", Resource: key, Cause: err}
 			}
 			if !c.State.Running || c.State.Restarting || c.RestartCount != 0 || c.State.OOMKilled || (c.State.Health != nil && c.State.Health.Status == "unhealthy") {
@@ -212,16 +215,44 @@ func (w *Worker) runProof(ctx context.Context, request proof.Request, result *pr
 		case <-time.After(time.Second):
 		}
 	}
+	network, err := b.Docker.NetworkInspect(ctx, drillNetwork(request.ID), client.NetworkInspectOptions{})
+	if err != nil || !network.Network.Internal || network.Network.Labels[operationLabel] != request.ID.String() {
+		return &failure{Code: "drill_isolation_failed", Resource: drillNetwork(request.ID), Cause: err}
+	}
 	result.Containers = len(p.Definition.Services)
+	result.Checks = append(result.Checks, checkApp(ctx, b.Docker, p, targets)...)
+	for _, check := range result.Checks {
+		if check.Status == proof.CheckFailed {
+			return &failure{Code: "drill_check_failed", Resource: check.Kind + " " + check.Resource}
+		}
+	}
 	return nil
 }
 
+func drillNetwork(id uuid.UUID) string { return "synod-drill-" + id.String() }
+
 // isolateDrill permits only copied mounts and ordinary container namespaces.
 // Rebuild each service from the allowed fields so new Compose fields cannot weaken isolation.
+// All services join one internal network. It has no route out and publishes no ports.
+// Each service keeps its service name, container name, and network aliases on it, so the
+// app's services find each other as on the source.
 func isolateDrill(p *plan, id uuid.UUID, directory string) error {
-	p.Definition.Name = "synod-drill-" + id.String()
-	p.Definition.Networks = nil
+	p.Definition.Name = drillNetwork(id)
+	p.Definition.Networks = map[string]compose.Network{"drill": {Name: drillNetwork(id), Internal: true, Labels: map[string]string{operationLabel: id.String()}}}
+	names := make(map[string]string)
+	for _, c := range p.Containers {
+		names[p.Services[c.ID]] = strings.TrimPrefix(c.Name, "/")
+	}
 	for key, service := range p.Definition.Services {
+		aliases := []string{key}
+		if names[key] != "" {
+			aliases = append(aliases, names[key])
+		}
+		for _, attachment := range service.Networks {
+			aliases = append(aliases, attachment.Aliases...)
+		}
+		slices.Sort(aliases)
+		aliases = slices.Compact(aliases)
 		if service.Privileged || service.PID != "" || (service.IPC != "" && service.IPC != "private" && service.IPC != "shareable") || service.UTS != "" || service.UserNS != "" || len(service.Devices)+len(service.DeviceCgroupRules)+len(service.CapAdd)+len(service.SecurityOpt) != 0 || (service.Runtime != "" && service.Runtime != "runc") {
 			return &failure{Code: "drill_isolation_failed", Resource: key}
 		}
@@ -242,7 +273,7 @@ func isolateDrill(p *plan, id uuid.UUID, directory string) error {
 			Labels: map[string]string{operationLabel: id.String(), "io.synod.proof": "true"},
 			Init:   service.Init, StopSignal: service.StopSignal, StopGracePeriod: service.StopGracePeriod,
 			Healthcheck: service.Healthcheck, Restart: "no", ReadOnly: service.ReadOnly,
-			NetworkMode: "none", Volumes: service.Volumes, Tmpfs: service.Tmpfs,
+			Networks: map[string]compose.Attachment{"drill": {Aliases: aliases}}, Volumes: service.Volumes, Tmpfs: service.Tmpfs,
 			GroupAdd: service.GroupAdd, CapDrop: service.CapDrop, ShmSize: service.ShmSize,
 			CPUs: service.CPUs, Memory: service.Memory, MemorySwap: service.MemorySwap, PidsLimit: service.PidsLimit,
 			Logging: &compose.Logging{Driver: "none"},

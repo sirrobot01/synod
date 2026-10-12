@@ -333,6 +333,13 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 				state.FailureCode = "database_dump_failed"
 				return w.finish(ctx, request, &state, r)
 			}
+			// A drill compares the restored database with this inventory. Without it,
+			// the drill reports the database content as unchecked.
+			if inventory, err := DatabaseInventory(ctx, w.Docker, c, database); err == nil {
+				metadata.Inventory = inventory
+			} else if w.Logger != nil {
+				w.Logger.Warn("database_inventory_failed", "operation_id", request.ID, "container", c.ID)
+			}
 			dumps = append(dumps, stream)
 			streams = append(streams, stream)
 			dumpMetadata = append(dumpMetadata, metadata)

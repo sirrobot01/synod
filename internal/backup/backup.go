@@ -78,6 +78,9 @@ type DatabaseDump struct {
 	Database    string `json:"database"`
 	Archive     string `json:"archive"`
 	Format      string `json:"format"`
+	// Inventory maps each database, or Redis logical database, to its table or key count
+	// before the export. A drill compares the restored database with it.
+	Inventory map[string]int64 `json:"inventory,omitempty"`
 }
 
 // Image records immutable platform evidence for a saved container image.
