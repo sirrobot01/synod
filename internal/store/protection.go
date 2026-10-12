@@ -352,7 +352,10 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 			}
 			status.DestinationID = status.Result.DestinationID
 			if successful {
-				tested[appID] = new(status.Result.CompletedAt)
+				// Only a drill that verified every requirement it found proves the restore.
+				if status.Result.Complete() {
+					tested[appID] = new(status.Result.CompletedAt)
+				}
 			} else {
 				drills[appID] = status
 			}
@@ -391,8 +394,11 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 				// data directories, establishes agreement across the app's resources.
 				status.State = backup.Protected
 				if result.Consistency != backup.ConsistencyFilesystem {
+					status.LimitCodes = append(status.LimitCodes, backup.AppConsistencyUnverified)
+				}
+				status.LimitCodes = append(status.LimitCodes, result.Limits...)
+				if len(status.LimitCodes) > 0 {
 					status.State = backup.Partial
-					status.LimitCodes = []string{backup.AppConsistencyUnverified}
 				}
 				if !status.Selected {
 					status.State = backup.Retained
@@ -429,6 +435,13 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 		} else {
 			for state := range states {
 				entry.State = state
+			}
+		}
+		// A saved copy is a claim until a complete drill restores the app.
+		if entry.RestoreTestedAt == nil && slices.ContainsFunc(entry.Targets, func(target backup.TargetStatus) bool { return target.Selected && target.LastGood != nil }) {
+			entry.LimitCodes = append(entry.LimitCodes, backup.RestoreUnproven)
+			if entry.State == backup.Protected {
+				entry.State = backup.Partial
 			}
 		}
 		if entry.Enabled && entry.BlockedCode != "" {

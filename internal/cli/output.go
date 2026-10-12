@@ -182,8 +182,8 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			fmt.Fprintf(&output, "  Method: %s  Daily: %s %s  Keep: %d daily, %d weekly, %d monthly\n", entry.Settings.Method, entry.Settings.At, entry.Settings.TimeZone, entry.Settings.Retention.Daily, entry.Settings.Retention.Weekly, entry.Settings.Retention.Monthly)
 			fmt.Fprintf(&output, "  Destinations: %v\n", entry.Settings.Destinations)
 			for _, limit := range entry.LimitCodes {
-				if limit == backup.AppConsistencyUnverified {
-					fmt.Fprintln(&output, "  Partial protection: the last copy did not read all app files and databases from one filesystem snapshot. Put the app and database data on one btrfs subvolume, ZFS dataset, or LVM volume for full protection. Synod will not pause writes to gain full-protection status.")
+				if text, ok := limitText[limit]; ok {
+					fmt.Fprintf(&output, "  Partial protection (%s): %s\n", limit, text)
 				} else {
 					fmt.Fprintf(&output, "  Protection limit: %s\n", limit)
 				}
@@ -353,4 +353,14 @@ func writeChecks(output *strings.Builder, checks []proof.Check) {
 		}
 		fmt.Fprintln(output)
 	}
+}
+
+// limitText tells the user what each protection limit means and how to remove it.
+var limitText = map[string]string{
+	backup.AppConsistencyUnverified:   "the last copy did not read all app files and databases from one filesystem snapshot. Put the app and database data on one btrfs subvolume, ZFS pool, or LVM volume for full protection. Synod will not pause writes to gain full-protection status.",
+	backup.DataExcluded:               "the last copy skipped Large paths, media, or files over 20 GiB. Include them with synod protect APP --include-large PATH, or accept the gap.",
+	backup.ImagePlatformsLimited:      "the registry was unavailable, so the copy holds only the source architecture of an image. The next backup with registry access saves the other architectures.",
+	backup.HostRequirementsUnverified: "Synod could not record the host ports or devices of a host-network service. Run the agent as root.",
+	backup.ContainerLayerData:         "a container keeps more than 64 MiB in its writable layer. No backup copies that data. Move it to a volume or bind mount.",
+	backup.RestoreUnproven:            "no restore drill has verified this app. The monthly drill runs after the first good backup. Give each service a Docker health check or a port so that the drill can verify it.",
 }

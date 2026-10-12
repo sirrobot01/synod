@@ -28,6 +28,7 @@ import (
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/runtime/compose"
 	"github.com/sirrobot01/synod/internal/secret"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
 var ErrRestartPending = errors.New("app restart is pending; restore Docker access so the agent can resume the app")
@@ -137,6 +138,7 @@ type progress struct {
 	RepositoryOpened bool               `json:"repository_opened,omitzero"`
 	FailureCode      string             `json:"failure_code,omitempty"`
 	Prepared         *snapshot.Manifest `json:"prepared,omitempty"`
+	Limits           []string           `json:"limits,omitempty"`
 	Metadata         backup.Snapshot    `json:"metadata"`
 	// phases holds the milliseconds of each backup step for the backup_timing log.
 	phases []any
@@ -255,7 +257,8 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	var inspected, fileContainers []container.InspectResponse
 	for _, item := range app.Containers {
-		response, err := w.Docker.ContainerInspect(ctx, item.Id, client.ContainerInspectOptions{})
+		// The writable layer size shows data that no volume or bind mount holds.
+		response, err := w.Docker.ContainerInspect(ctx, item.Id, client.ContainerInspectOptions{Size: true})
 		if err != nil || response.Container.Config == nil || response.Container.HostConfig == nil || response.Container.State == nil {
 			state.FailureCode = "app_scan_failed"
 			return w.finish(ctx, request, &state, r)
@@ -542,6 +545,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		state.Metadata.SQLite = sqliteFiles
 		state.Metadata.Changing = tree.Changing()
 		state.Metadata.Consistency, state.Metadata.Captures = tree.captureEvidence(method, sqliteFiles, state.Metadata.Dumps)
+		state.Limits = snapshotLimits(app, request.IncludeLarge, tree, inspected, state.Metadata)
 	}
 	durable, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	saveErr := w.save(durable, &state)
@@ -646,6 +650,7 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 		result.SnapshotID = state.Metadata.ID
 		result.FileBytes = state.Metadata.FileBytes
 		result.Consistency = state.Metadata.Consistency
+		result.Limits = state.Limits
 		if len(state.Metadata.Changing) > 0 {
 			result.WarningCodes = append(result.WarningCodes, "files_changed_during_copy")
 		}
@@ -734,4 +739,38 @@ func (w *Worker) checkStopped(ctx context.Context, containers []container.Inspec
 		}
 	}
 	return nil
+}
+
+// containerLayerLimit is the writable layer size above which a container keeps data that
+// no backup copies. Small layers hold caches and process files.
+const containerLayerLimit = 64 << 20
+
+// snapshotLimits names each requirement of full protection that the snapshot does not meet.
+func snapshotLimits(app *agentv1.DiscoveredApp, include []string, tree *Tree, inspected []container.InspectResponse, saved backup.Snapshot) []string {
+	var limits []string
+	excluded := tree.skippedData.Load() || slices.ContainsFunc(app.Paths, func(path *agentv1.DiscoveredPath) bool {
+		return path.Status == "Large" && !slices.Contains(include, filepath.Clean(path.Source))
+	})
+	if excluded {
+		limits = append(limits, backup.DataExcluded)
+	}
+	for i, image := range saved.Images {
+		if image.LocalOnly && i < len(app.Containers) && len(app.Containers[i].RepoDigests) > 0 {
+			limits = append(limits, backup.ImagePlatformsLimited)
+			break
+		}
+	}
+	for _, requirement := range saved.Host {
+		if !requirement.PortsKnown || slices.ContainsFunc(requirement.Paths, func(path backup.HostPath) bool { return !path.Known }) {
+			limits = append(limits, backup.HostRequirementsUnverified)
+			break
+		}
+	}
+	for _, c := range inspected {
+		if c.SizeRw != nil && *c.SizeRw > containerLayerLimit {
+			limits = append(limits, backup.ContainerLayerData)
+			break
+		}
+	}
+	return limits
 }

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	kfs "github.com/kopia/kopia/fs"
@@ -74,6 +75,8 @@ type Tree struct {
 	databaseMissing bool
 	// databaseFiles is set when the copy keeps the database data directories.
 	databaseFiles bool
+	// skippedData is set when a walk skipped media or a file over 20 GiB.
+	skippedData atomic.Bool
 }
 
 // NewTree selects the app's Included paths. include adds Large paths and paths that the walk
@@ -553,6 +556,7 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 		}
 		if slices.Contains(mediaNames, strings.ToLower(child.Name())) && !d.tree.chosen(absolute) {
 			reason = "Media is skipped by default."
+			d.tree.skippedData.Store(true)
 		}
 		info, err := root.Lstat(child.Name())
 		if err != nil {
@@ -563,6 +567,7 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 		}
 		if info.Mode().IsRegular() && info.Size() > largeFileBytes && !d.tree.chosen(absolute) {
 			reason = "This file exceeds 20 GiB and is skipped by default."
+			d.tree.skippedData.Store(true)
 		}
 		if reason != "" {
 			if err := d.tree.exclude(absolute, reason); err != nil {

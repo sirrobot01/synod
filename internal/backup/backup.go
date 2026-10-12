@@ -141,6 +141,8 @@ type Result struct {
 	RestartPending   []string    `json:"restart_pending,omitempty"`
 	WarningCodes     []string    `json:"warning_codes,omitempty"`
 	Consistency      Consistency `json:"consistency,omitempty"`
+	// Limits name what this snapshot does not cover. Any limit prevents full protection.
+	Limits []string `json:"limits,omitempty"`
 }
 
 // Submission holds the choices made by an administrator. The controller resolves the device.
@@ -182,6 +184,14 @@ func (e Event) Validate(request Request) error {
 	}
 	for i, warning := range result.WarningCodes {
 		if !slices.Contains([]string{"files_changed_during_copy", "catalog_write_failed", "retention_failed"}, warning) || slices.Contains(result.WarningCodes[:i], warning) {
+			return ErrInvalid
+		}
+	}
+	if len(result.Limits) > len(SnapshotLimits) || (len(result.Limits) > 0 && result.SnapshotID == uuid.Nil) {
+		return ErrInvalid
+	}
+	for i, limit := range result.Limits {
+		if !slices.Contains(SnapshotLimits, limit) || slices.Contains(result.Limits[:i], limit) {
 			return ErrInvalid
 		}
 	}

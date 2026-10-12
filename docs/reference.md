@@ -445,8 +445,21 @@ The manifest records each capture method and source under `captures`.
 A shared capture point identifies one filesystem snapshot.
 The `consistency` value is `filesystem_snapshot` only when one snapshot holds all file roots and all database data directories, and no SQLite file or changing file needed a separate read.
 Other copies use `unverified`.
-A copy with `filesystem_snapshot` gives full protection. Other successful copies show partial protection with `app_consistency_unverified`.
-Running, failed, and overdue states still show the consistency limit.
+An app shows `protected` only when its latest good copy meets every requirement and a complete restore drill passed.
+Otherwise it shows `partial` and one limit code for each missing requirement:
+
+| Limit | Cause | Remove it |
+| --- | --- | --- |
+| `app_consistency_unverified` | The copy is not `filesystem_snapshot`. | Put the app data and the database data on one btrfs subvolume, ZFS pool, or LVM volume. |
+| `data_excluded` | The copy skipped Large paths, media folders, or files over 20 GiB. | Include the paths with `synod protect APP --include-large PATH`. |
+| `image_platforms_limited` | The registry was unavailable. The copy holds only the source architecture of a registry image. | Back up again with registry access. |
+| `host_requirements_unverified` | The agent could not record the host ports or devices of a host-network service. | Run the agent as root. |
+| `container_layer_data` | A container keeps more than 64 MiB in its writable layer. No backup copies that layer. | Move the data to a volume or bind mount. |
+| `restore_unproven` | No complete restore drill passed. A drill is complete when every check passed and none is unchecked. | Wait for the drill, or give each service a health check or a port. |
+
+An image that exists for one architecture only is an explicit incompatibility, not a limit. Restore refuses other architectures and names the image.
+Running, failed, and overdue states still show the limits of the last good copy.
+`Restore tested on DATE` shows the time of the latest complete drill.
 A restore of a `filesystem_snapshot` copy writes the saved database files and does not load the dumps.
 A restore of another copy loads the dumps into new database data.
 `filesystem_snapshot` does not prove that the app works after restore. Restore drills check that.

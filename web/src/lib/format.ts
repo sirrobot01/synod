@@ -19,6 +19,16 @@ export function timestamp(value?: string | null): string {
   return new Date(value).toLocaleString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) + " UTC";
 }
 
+// Each limit prevents full protection. The text says how to remove it.
+export const limits: Record<string, { short: string; text: string }> = {
+  app_consistency_unverified: { short: "App consistency unverified", text: "The last copy did not read all files and databases of this app from one filesystem snapshot. Put the app and database data on one btrfs subvolume, ZFS pool, or LVM volume for full protection. Synod will not pause writes to gain full-protection status." },
+  data_excluded: { short: "Data excluded", text: "The last copy skipped Large paths, media, or files over 20 GiB. Include them in Edit protection, or accept the gap." },
+  image_platforms_limited: { short: "Image platforms limited", text: "The registry was unavailable, so the copy holds only the source architecture of an image. The next backup with registry access saves the other architectures." },
+  host_requirements_unverified: { short: "Host requirements unverified", text: "Synod could not record the host ports or devices of a host-network service. Run the agent as root." },
+  container_layer_data: { short: "Data in container layer", text: "A container keeps more than 64 MiB in its writable layer. No backup copies that data. Move it to a volume or bind mount." },
+  restore_unproven: { short: "Restore not proven", text: "No restore drill has verified this app. The monthly drill runs after the first good backup. Give each service a Docker health check or a port so that the drill can verify it." },
+};
+
 export function protectionMark(state: string): Mark {
   switch (state) {
     case "protected": return { glyph: "✓", shape: "circle", tone: "ok", label: "Protected" };
