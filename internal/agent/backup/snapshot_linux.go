@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -91,6 +92,8 @@ type fsSnapshots struct {
 	views   map[string]string
 	removes []func() error
 	lvm     []*lvmSnapshot
+	// groups maps a snapshot base to a capture point that several bases share.
+	groups map[string]string
 }
 
 // useSnapshots moves each supported tree root to a filesystem snapshot.
@@ -101,7 +104,8 @@ func (t *Tree) useSnapshots(ctx context.Context, operation string) (*fsSnapshots
 	if err != nil {
 		return nil, err
 	}
-	s := &fsSnapshots{name: snapshotPrefix + operation, mounts: all, views: make(map[string]string)}
+	s := &fsSnapshots{name: snapshotPrefix + operation, mounts: all, views: make(map[string]string), groups: make(map[string]string)}
+	s.zfsTogether(ctx, t.roots)
 	for _, root := range t.roots {
 		directory := root.source
 		if root.path != "." {
@@ -128,6 +132,9 @@ func (t *Tree) useSnapshots(ctx context.Context, operation string) (*fsSnapshots
 				root.capturePoint = base
 			}
 		}
+		if group, ok := s.groups[root.capturePoint]; ok {
+			root.capturePoint = group
+		}
 	}
 	// A btrfs snapshot directory sits inside a mounted filesystem. Never copy it.
 	for _, m := range all {
@@ -136,6 +143,50 @@ func (t *Tree) useSnapshots(ctx context.Context, operation string) (*fsSnapshots
 		}
 	}
 	return s, nil
+}
+
+// zfsTogether snapshots the ZFS datasets of the roots with one command for each pool.
+// ZFS takes the snapshots of one command at the same moment, so the roots share one
+// capture point. If the command fails, view snapshots each dataset alone.
+func (s *fsSnapshots) zfsTogether(ctx context.Context, roots []*sourceRoot) {
+	pools := make(map[string][]mountEntry)
+	for _, root := range roots {
+		directory := root.source
+		if root.path != "." {
+			directory = filepath.Dir(root.source)
+		}
+		var stat syscall.Statfs_t
+		if syscall.Statfs(directory, &stat) != nil || uint32(stat.Type) != zfsMagic {
+			continue
+		}
+		m, ok, nested := containing(s.mounts, directory)
+		if !ok || nested || m.root != "/" || m.fstype != "zfs" {
+			continue
+		}
+		pool, _, _ := strings.Cut(m.source, "/")
+		if !slices.ContainsFunc(pools[pool], func(known mountEntry) bool { return known.point == m.point }) {
+			pools[pool] = append(pools[pool], m)
+		}
+	}
+	for pool, datasets := range pools {
+		if len(datasets) < 2 {
+			continue
+		}
+		arguments := []string{"snapshot"}
+		for _, m := range datasets {
+			arguments = append(arguments, m.source+"@"+s.name)
+		}
+		if run(ctx, "zfs", arguments...) != nil {
+			continue
+		}
+		for _, m := range datasets {
+			base := filepath.Join(m.point, ".zfs", "snapshot", s.name)
+			dataset := m.source + "@" + s.name
+			s.removes = append(s.removes, func() error { return run(context.Background(), "zfs", "destroy", dataset) })
+			s.views[m.point] = base
+			s.groups[base] = "zfs:" + pool + "@" + s.name
+		}
+	}
 }
 
 // view returns the snapshot path of a live directory, and takes the snapshot when needed.
