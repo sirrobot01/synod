@@ -3,12 +3,15 @@ package backup
 import (
 	"context"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
 	kfs "github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/snapshot"
+	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/repository"
 )
 
@@ -20,7 +23,7 @@ const liveCopyPasses = 3
 var afterLiveRead = func(string) {}
 
 // liveFile reads a file in place while the app runs. Each reader compares the file's size
-// and time at close with the values at open. A change marks the file, and recopy reads it
+// and time at close with the values at open. A change marks the file, and copyLive reads it
 // again in another pass. Nothing is staged, so a copy costs no extra disk or memory.
 // An SQLite file uses its WAL time so that a new commit prevents incremental reuse,
 // and its content comes from the SQLite backup API.
@@ -111,35 +114,48 @@ func (t *Tree) noteRetry(path string) {
 }
 
 // takeRetries returns the files that changed during the last pass and clears the list.
-func (t *Tree) takeRetries() int {
+func (t *Tree) takeRetries() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	n := len(t.retry)
+	paths := slices.Collect(maps.Keys(t.retry))
 	clear(t.retry)
-	return n
+	return paths
 }
 
-// recopy copies the files that changed during a live pass again, up to liveCopyPasses passes
-// in total. Unchanged files keep their entries from the previous pass and are not read again.
-// Files that still change in the last pass are saved as read and reported by Changing.
-func (t *Tree) recopy(ctx context.Context, r *repository.Repository, root func() (kfs.Directory, error), source snapshot.SourceInfo, prepared *snapshot.Manifest) (*snapshot.Manifest, error) {
-	for pass := 2; pass <= liveCopyPasses; pass++ {
-		if t.takeRetries() == 0 {
-			return prepared, nil
-		}
-		directory, err := root()
-		if err != nil {
-			return nil, err
-		}
-		if prepared, err = r.UploadFiles(ctx, directory, source, false, prepared); err != nil {
-			return nil, err
-		}
-	}
+func (t *Tree) noteChanging(paths []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for path := range t.retry {
+	for _, path := range paths {
 		t.changing[path] = struct{}{}
 	}
-	clear(t.retry)
-	return prepared, nil
+}
+
+// copyLive copies a live tree in up to liveCopyPasses passes. A later pass reads only the
+// files that changed during the pass before it. The pass without changes, or the last
+// pass, publishes the snapshot that finish describes in its own write session, so the
+// repository writes its index once. Files that changed during every pass are saved as
+// read and reported by Changing.
+func (t *Tree) copyLive(ctx context.Context, r *repository.Repository, root func() (kfs.Directory, error), source snapshot.SourceInfo, previous *snapshot.Manifest, finish func(*snapshot.Manifest) (backup.Snapshot, error)) (*snapshot.Manifest, backup.Snapshot, error) {
+	for pass := 1; ; pass++ {
+		directory, err := root()
+		if err != nil {
+			return nil, backup.Snapshot{}, err
+		}
+		prepared, published, err := r.UploadSnapshot(ctx, directory, source, previous, func(prepared *snapshot.Manifest) (backup.Snapshot, bool, error) {
+			changed := t.takeRetries()
+			if len(changed) > 0 && pass < liveCopyPasses {
+				return backup.Snapshot{}, false, nil
+			}
+			t.noteChanging(changed)
+			metadata, err := finish(prepared)
+			return metadata, err == nil, err
+		})
+		if err != nil {
+			return nil, backup.Snapshot{}, err
+		}
+		if published != nil {
+			return prepared, *published, nil
+		}
+		previous = prepared
+	}
 }

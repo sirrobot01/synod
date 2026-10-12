@@ -138,8 +138,10 @@ type progress struct {
 	RepositoryOpened bool               `json:"repository_opened,omitzero"`
 	FailureCode      string             `json:"failure_code,omitempty"`
 	Prepared         *snapshot.Manifest `json:"prepared,omitempty"`
-	Limits           []string           `json:"limits,omitempty"`
-	Metadata         backup.Snapshot    `json:"metadata"`
+	// Published is set when the copy session also published the snapshot.
+	Published bool            `json:"published,omitzero"`
+	Limits    []string        `json:"limits,omitempty"`
+	Metadata  backup.Snapshot `json:"metadata"`
 	// phases holds the milliseconds of each backup step for the backup_timing log.
 	phases []any
 	mark   time.Time
@@ -510,28 +512,56 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	final, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 	tree.images = archives.entries
-	root, err := tree.Root(final, definitions, dumps...)
-	if err == nil {
-		state.Prepared, err = r.UploadFiles(final, root, source, false, previous)
+	// describe completes the metadata of a finished copy.
+	describe := func() {
+		tree.sqliteMu.Lock()
+		sqliteFiles := slices.Sorted(maps.Keys(tree.sqlite))
+		tree.sqliteMu.Unlock()
+		state.Metadata.Exclusions = tree.Exclusions()
+		state.Metadata.Paths = tree.Paths
+		state.Metadata.SQLite = sqliteFiles
+		state.Metadata.Changing = tree.Changing()
+		state.Metadata.Consistency, state.Metadata.Captures = tree.captureEvidence(method, sqliteFiles, state.Metadata.Dumps)
+		state.Limits = snapshotLimits(app, request.IncludeLarge, tree, inspected, state.Metadata)
+		state.Metadata.Limits = state.Limits
 	}
-	if err == nil && tree.live {
-		state.Prepared, err = tree.recopy(final, r, func() (kfs.Directory, error) { return tree.Root(final, definitions, dumps...) }, source, state.Prepared)
-	}
-	if err == nil && method == backup.Stop {
-		err = w.checkStopped(final, fileContainers)
-	}
-	if err == nil && snapshots != nil {
-		err = snapshots.Check(final)
-		if err != nil && w.Logger != nil {
-			w.Logger.Warn("backup_snapshot_invalid", "operation_id", request.ID, "error", err)
+	root := func() (kfs.Directory, error) { return tree.Root(final, definitions, dumps...) }
+	if method == backup.Stop {
+		// A Stop copy publishes after the app restarts, so its downtime ends first.
+		var directory kfs.Directory
+		if directory, err = root(); err == nil {
+			state.Prepared, err = r.UploadFiles(final, directory, source, false, previous)
+		}
+		if err == nil {
+			err = w.checkStopped(final, fileContainers)
+		}
+		if err == nil {
+			describe()
+		}
+	} else {
+		var saved backup.Snapshot
+		state.Prepared, saved, err = tree.copyLive(final, r, root, source, previous, func(*snapshot.Manifest) (backup.Snapshot, error) {
+			if snapshots != nil {
+				if err := snapshots.Check(final); err != nil {
+					if w.Logger != nil {
+						w.Logger.Warn("backup_snapshot_invalid", "operation_id", request.ID, "error", err)
+					}
+					return backup.Snapshot{}, err
+				}
+			}
+			describe()
+			state.Metadata.CompletedAt = time.Now().UTC()
+			return state.Metadata, nil
+		})
+		if err == nil {
+			state.Metadata, state.Published = saved, true
 		}
 	}
 	state.phase("final_copy")
-	tree.sqliteMu.Lock()
-	sqliteErr := tree.sqliteErr
-	sqliteFiles := slices.Sorted(maps.Keys(tree.sqlite))
-	tree.sqliteMu.Unlock()
 	if err != nil {
+		tree.sqliteMu.Lock()
+		sqliteErr := tree.sqliteErr
+		tree.sqliteMu.Unlock()
 		// The cause names a path or a destination error. It stays in the device log.
 		if w.Logger != nil {
 			w.Logger.Warn("backup_copy_failed", "operation_id", request.ID, "error", err, "cause", errors.Unwrap(err))
@@ -549,14 +579,6 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 				state.FailureCode = "database_dump_failed"
 			}
 		}
-	} else {
-		state.Metadata.Exclusions = tree.Exclusions()
-		state.Metadata.Paths = tree.Paths
-		state.Metadata.SQLite = sqliteFiles
-		state.Metadata.Changing = tree.Changing()
-		state.Metadata.Consistency, state.Metadata.Captures = tree.captureEvidence(method, sqliteFiles, state.Metadata.Dumps)
-		state.Limits = snapshotLimits(app, request.IncludeLarge, tree, inspected, state.Metadata)
-		state.Metadata.Limits = state.Limits
 	}
 	durable, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	saveErr := w.save(durable, &state)
@@ -628,7 +650,7 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 	if len(pending) > 0 {
 		return backup.Result{}, ErrRestartPending
 	}
-	if state.Prepared != nil && state.FailureCode == "" {
+	if state.Prepared != nil && state.FailureCode == "" && !state.Published {
 		if r == nil {
 			plan, err := w.Journal.DestinationPlan(cleanup, w.Keyring)
 			if err != nil {

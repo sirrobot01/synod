@@ -528,6 +528,8 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 			return nil, ErrSourceLimit
 		}
 	}
+	// Most app directories cannot hold a host system path, so they skip the check per child.
+	hostBelow := discovery.ReachesForbidden(d.absolute)
 	names := make(map[string]bool, len(children))
 	for _, child := range children {
 		names[child.Name()] = true
@@ -546,7 +548,7 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 		if sidecar {
 			reason = "SQLite sidecars are excluded from live copies."
 		}
-		if discovery.Forbidden(absolute, d.source.volume) {
+		if strings.HasSuffix(child.Name(), ".sock") || (hostBelow && discovery.Forbidden(absolute, d.source.volume)) {
 			reason = "Host system paths are never copied."
 		}
 		if slices.Contains(mediaNames, strings.ToLower(child.Name())) && !d.tree.chosen(absolute) {

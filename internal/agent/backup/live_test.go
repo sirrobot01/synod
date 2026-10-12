@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	kfs "github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/snapshot"
+	"github.com/sirrobot01/synod/internal/backup"
 )
 
 // liveCopy copies directory with every live pass and restores the published snapshot.
@@ -30,21 +31,17 @@ func liveCopy(t *testing.T, directory string) (string, *Tree) {
 	tree.live = true
 	source := snapshot.SourceInfo{Host: "test", UserName: "test", Path: f.app.Key}
 	root := func() (kfs.Directory, error) { return tree.Root(t.Context(), nil) }
-	directoryRoot, err := root()
-	if err != nil {
-		t.Fatal(err)
-	}
-	prepared, err := f.r.UploadFiles(t.Context(), directoryRoot, source, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prepared, err = tree.recopy(t.Context(), f.r, root, source, prepared); err != nil {
-		t.Fatal(err)
-	}
 	metadata := f.metadata
-	metadata.ID, metadata.StartedAt, metadata.CompletedAt, metadata.Paths = uuid.New(), time.Now().UTC(), time.Now().UTC(), tree.Paths
-	if _, err := f.r.PublishSnapshot(t.Context(), prepared, metadata); err != nil {
+	metadata.ID, metadata.StartedAt = uuid.New(), time.Now().UTC()
+	_, saved, err := tree.copyLive(t.Context(), f.r, root, source, nil, func(*snapshot.Manifest) (backup.Snapshot, error) {
+		metadata.CompletedAt, metadata.Paths = time.Now().UTC(), tree.Paths
+		return metadata, nil
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if listed, err := f.r.Snapshot(t.Context(), saved.ID); err != nil || listed.ID != metadata.ID {
+		t.Fatal("the copy session did not publish the snapshot", err)
 	}
 	target := filepath.Join(t.TempDir(), "restore")
 	if err := f.r.RestoreFiles(t.Context(), metadata.ID, target); err != nil {

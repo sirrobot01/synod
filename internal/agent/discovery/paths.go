@@ -16,12 +16,19 @@ import (
 const largeBytes = 20 << 30
 
 // Forbidden checks before a path is opened. Broad host roots are not app data.
+var (
+	// hostRoots are refused as whole paths. Paths below them can hold app data.
+	hostRoots = []string{"/", "/var", "/home", "/Users", "/mnt", "/media", "/srv", "/opt", "/tmp", "/private"}
+	// hostPrefixes are refused with every path below them.
+	hostPrefixes = []string{"/etc", "/private/etc", "/proc", "/sys", "/dev", "/run", "/var/run", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/var/lib/docker", "/var/lib/containerd"}
+)
+
 func Forbidden(path string, volume bool) bool {
 	path = filepath.Clean(path)
-	if !filepath.IsAbs(path) || slices.Contains([]string{"/", "/var", "/home", "/Users", "/mnt", "/media", "/srv", "/opt", "/tmp", "/private"}, path) {
+	if !filepath.IsAbs(path) || slices.Contains(hostRoots, path) {
 		return true
 	}
-	for _, prefix := range []string{"/etc", "/private/etc", "/proc", "/sys", "/dev", "/run", "/var/run", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/var/lib/docker", "/var/lib/containerd"} {
+	for _, prefix := range hostPrefixes {
 		if path == prefix || strings.HasPrefix(path, prefix+"/") {
 			// Docker reports the exact local volume data directory.
 			if parts := strings.Split(strings.TrimPrefix(path, "/var/lib/docker/volumes/"), "/"); volume && prefix == "/var/lib/docker" && strings.HasPrefix(path, prefix+"/volumes/") && len(parts) >= 2 && parts[0] != "" && parts[1] == "_data" {
@@ -31,6 +38,18 @@ func Forbidden(path string, volume bool) bool {
 		}
 	}
 	return strings.HasSuffix(path, ".sock")
+}
+
+// ReachesForbidden reports whether a path below directory can be refused by Forbidden for
+// a reason other than its .sock name. A walk checks each child only then.
+func ReachesForbidden(directory string) bool {
+	directory = filepath.Clean(directory)
+	for _, path := range slices.Concat(hostRoots, hostPrefixes) {
+		if directory == "/" || strings.HasPrefix(path, directory+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // measure reads metadata only. It never follows a link during a directory walk.
