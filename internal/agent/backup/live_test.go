@@ -151,3 +151,54 @@ func TestLiveFileReleasesStaging(t *testing.T) {
 		})
 	}
 }
+
+func TestLiveCopyOfASmallFileIsFreedAfterItsLastReader(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "state"), []byte("small live file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newIncrementalFixture(t, source, true)
+	tree, err := NewTree(t.Context(), f.app, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tree.Close()
+	tree.live = true
+	root, err := tree.Root(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := root.Child(t.Context(), "paths")
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory, err := paths.(kfs.Directory).Child(t.Context(), tree.roots[0].archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := directory.(kfs.Directory).Child(t.Context(), "state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := entry.(*liveFile)
+	first, err := file.Open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := file.Open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+	if file.copy == nil {
+		t.Fatal("a copy was freed while a reader still used it")
+	}
+	if data, err := io.ReadAll(second); err != nil || string(data) != "small live file" {
+		t.Fatalf("second reader: %q, %v", data, err)
+	}
+	second.Close()
+	second.Close()
+	if file.copy != nil || file.readers != 0 {
+		t.Fatalf("the copy stayed in memory: readers=%d", file.readers)
+	}
+}

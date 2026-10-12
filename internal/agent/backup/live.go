@@ -25,9 +25,9 @@ var afterLiveRead = func(string) {}
 type liveFile struct {
 	sourceEntry
 	modified time.Time
-	once     sync.Once
+	mu       sync.Mutex
 	copy     *fileCopy
-	err      error
+	readers  int
 }
 
 type fileCopy struct {
@@ -42,15 +42,23 @@ func (f *liveFile) Open(ctx context.Context) (kfs.Reader, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	f.once.Do(func() { f.copy, f.err = f.capture(ctx) })
-	if f.err != nil {
-		return nil, f.err
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.copy == nil {
+		copied, err := f.capture(ctx)
+		if err != nil {
+			return nil, err
+		}
+		f.copy = copied
 	}
-	return &copyReader{io.NewSectionReader(f.copy, 0, f.copy.size), f}, nil
+	f.readers++
+	return &copyReader{SectionReader: io.NewSectionReader(f.copy, 0, f.copy.size), entry: f}, nil
 }
 
 // Close releases staging after all parts finish. Tree.Close also cleans up on failure.
 func (f *liveFile) Close() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.copy != nil && f.copy.staging != nil {
 		f.tree.mu.Lock()
 		defer f.tree.mu.Unlock()
@@ -61,10 +69,28 @@ func (f *liveFile) Close() {
 
 type copyReader struct {
 	*io.SectionReader
-	entry *liveFile
+	entry  *liveFile
+	closed bool
 }
 
-func (*copyReader) Close() error                { return nil }
+// Close frees an in-memory copy after its last reader. Kopia reads a small file once,
+// so the copies of a large directory do not stay in memory until the walk ends.
+// A staged copy stays until the entry closes.
+func (r *copyReader) Close() error {
+	f := r.entry
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	f.readers--
+	if f.readers == 0 && f.copy != nil && f.copy.staging == nil {
+		f.copy = nil
+	}
+	return nil
+}
+
 func (r *copyReader) Entry() (kfs.Entry, error) { return r.entry, nil }
 
 // stable retries changed files before upload. Large files use private disk staging.
