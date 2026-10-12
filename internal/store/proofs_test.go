@@ -112,7 +112,7 @@ func TestProofSchedulesSurviveSettingsChangesAndReportHonestStatus(t *testing.T)
 	if err != nil || len(checks) != 1 {
 		t.Fatal("restart lost the pending check", err)
 	}
-	event := proof.Event{ID: drill.ID, Status: "succeeded", Request: &drill, Result: proof.Result{DestinationID: destID, SnapshotID: uuid.New(), StartedAt: now, CompletedAt: now.Add(time.Minute), Containers: 2}}
+	event := proof.Event{ID: drill.ID, Status: "succeeded", Request: &drill, Result: proof.Result{DestinationID: destID, SnapshotID: uuid.New(), StartedAt: now, CompletedAt: now.Add(time.Minute), Containers: 2, Checks: []proof.Check{{Kind: proof.CheckDataFiles, Resource: "/srv/app", Status: proof.CheckPassed}}}}
 	if err := s.RecordProofEvent(t.Context(), node, uuid.New(), event); !errors.Is(err, ErrStaleSession) {
 		t.Fatalf("stale proof session: %v", err)
 	}

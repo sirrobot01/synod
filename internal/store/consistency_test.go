@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/destination"
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/secret"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -49,7 +50,8 @@ func TestProtectionRequiresOneAppCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	appID := uuid.NewSHA1(node, []byte("compose:test"))
-	for _, scope := range []backup.Consistency{"", backup.ConsistencyUnverified, backup.ConsistencyFilesystem} {
+	record := func(scope backup.Consistency, limits ...string) uuid.UUID {
+		t.Helper()
 		now = now.Add(time.Minute)
 		id := uuid.New()
 		if _, err := s.CreateBackup(t.Context(), ca.InstallationID(), backup.Submission{ID: id, AppID: appID, DestinationID: dest.Destination.ID, Method: backup.Auto}, "test", "backup"); err != nil {
@@ -59,27 +61,62 @@ func TestProtectionRequiresOneAppCapture(t *testing.T) {
 		if err := s.RecordBackupEvent(t.Context(), node, session, backup.Event{ID: id, Status: "succeeded", Result: result}); code(err) != InvalidRequest {
 			t.Fatalf("accepted an unsupported application consistency claim: %v", err)
 		}
-		result.Consistency = scope
+		result.Consistency, result.Limits = scope, []string{"unknown_limit"}
+		if err := s.RecordBackupEvent(t.Context(), node, session, backup.Event{ID: id, Status: "succeeded", Result: result}); code(err) != InvalidRequest {
+			t.Fatalf("accepted an unknown limit: %v", err)
+		}
+		result.Limits = limits
 		if err := s.RecordBackupEvent(t.Context(), node, session, backup.Event{ID: id, Status: "succeeded", Result: result}); err != nil {
 			t.Fatal(err)
 		}
-		plan, err = s.ProtectionPlan(t.Context())
+		return id
+	}
+	drill := func(checks ...proof.Check) {
+		t.Helper()
+		now = now.Add(time.Minute)
+		op, err := s.CreateProof(t.Context(), ca.InstallationID(), proof.Submission{ID: uuid.New(), Kind: proof.Drill, NodeID: node, AppID: appID, DestinationID: dest.Destination.ID}, "test", uuid.NewString())
 		if err != nil {
 			t.Fatal(err)
 		}
-		app := plan.Apps[0]
-		if scope == backup.ConsistencyFilesystem {
-			// One filesystem snapshot of every root, with the database files, is one capture time.
-			if app.State != backup.Protected || len(app.LimitCodes) != 0 || app.Targets[0].State != backup.Protected || len(app.Targets[0].LimitCodes) != 0 {
-				t.Fatalf("a coherent snapshot did not give full protection: %+v", app)
-			}
-			continue
-		}
-		if app.State != backup.Partial || !slices.Contains(app.LimitCodes, backup.AppConsistencyUnverified) || app.DataLossWindowSeconds == nil {
-			t.Fatalf("scope %q claimed full protection or lost its saved copy: %+v", scope, app)
-		}
-		if len(app.Targets) != 1 || app.Targets[0].State != backup.Partial || app.Targets[0].LastGood.SnapshotID != id || !slices.Contains(app.Targets[0].LimitCodes, backup.AppConsistencyUnverified) {
-			t.Fatalf("target hides its consistency limit: %+v", app.Targets)
+		result := proof.Result{DestinationID: dest.Destination.ID, SnapshotID: uuid.New(), StartedAt: now, CompletedAt: now.Add(time.Second), Containers: 1, Checks: checks}
+		if err := s.RecordProofEvent(t.Context(), node, session, proof.Event{ID: op.ID, Status: "succeeded", Result: result}); err != nil {
+			t.Fatal(err)
 		}
 	}
+	expect := func(name string, app, target backup.ProtectionState, limits ...string) backup.AppPlan {
+		t.Helper()
+		plan, err := s.ProtectionPlan(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := plan.Apps[0]
+		slices.Sort(entry.LimitCodes)
+		slices.Sort(limits)
+		if entry.State != app || !slices.Equal(entry.LimitCodes, limits) || entry.DataLossWindowSeconds == nil || len(entry.Targets) != 1 || entry.Targets[0].State != target {
+			t.Fatalf("%s: state %s, target %s, limits %v", name, entry.State, entry.Targets[0].State, entry.LimitCodes)
+		}
+		return entry
+	}
+	for _, scope := range []backup.Consistency{"", backup.ConsistencyUnverified} {
+		record(scope)
+		expect("unverified "+string(scope), backup.Partial, backup.Partial, backup.AppConsistencyUnverified, backup.RestoreUnproven)
+	}
+	// A new app cannot gain full protection from a coherent copy before a drill restores it.
+	record(backup.ConsistencyFilesystem)
+	expect("coherent copy without drill", backup.Partial, backup.Protected, backup.RestoreUnproven)
+	passed := proof.Check{Kind: proof.CheckDataFiles, Resource: "/srv/app", Status: proof.CheckPassed}
+	drill(passed, proof.Check{Kind: proof.CheckAppFunction, Resource: "worker", Status: proof.CheckUnchecked})
+	if entry := expect("incomplete drill", backup.Partial, backup.Protected, backup.RestoreUnproven); entry.RestoreTestedAt != nil {
+		t.Fatal("an incomplete drill set the restore test date")
+	}
+	drill(passed, proof.Check{Kind: proof.CheckHTTP, Resource: "app:80", Status: proof.CheckPassed})
+	if entry := expect("complete drill", backup.Protected, backup.Protected); entry.RestoreTestedAt == nil {
+		t.Fatal("a complete drill did not set the restore test date")
+	}
+	for _, limit := range backup.SnapshotLimits {
+		record(backup.ConsistencyFilesystem, limit)
+		expect(limit, backup.Partial, backup.Partial, limit)
+	}
+	record(backup.ConsistencyUnverified, backup.DataExcluded, backup.ContainerLayerData)
+	expect("several limits", backup.Partial, backup.Partial, backup.AppConsistencyUnverified, backup.DataExcluded, backup.ContainerLayerData)
 }

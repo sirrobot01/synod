@@ -39,3 +39,11 @@ it("filters apps without treating no matches as no discovery", async () => {
   await fireEvent.input(screen.getByRole("searchbox"), { target: { value: "not-here" } });
   expect(screen.getByText("No apps match this filter.")).toBeTruthy();
 });
+it("names each missing requirement and how to remove it", async () => {
+  vi.mocked(api.protection).mockResolvedValue({ ...plan, apps: [{ ...plan.apps[0]!, limit_codes: ["data_excluded", "container_layer_data", "restore_unproven"] }] });
+  render(Apps, { id: "a1", go: vi.fn() });
+  expect(await screen.findByText(/skipped Large paths, media, or files over 20 GiB/)).toBeTruthy();
+  expect(screen.getByText(/Move it to a volume or bind mount/)).toBeTruthy();
+  expect(screen.getByText(/No restore drill has verified this app/)).toBeTruthy();
+  expect(screen.queryByText(/one filesystem snapshot/)).toBeNull();
+});

@@ -33,3 +33,12 @@ it("does not call a repository failure an empty history", async () => {
   expect(await screen.findByRole("alert")).toBeTruthy();
   expect(screen.queryByText(/No saved snapshots were found/)).toBeNull();
 });
+it("shows the limits and restorable platforms of a snapshot before restore", async () => {
+  vi.mocked(api.files).mockResolvedValue({ entries: [], path_type: "directory" });
+  vi.mocked(api.snapshots).mockResolvedValue({ snapshots: [{ ...snapshot, consistency: "unverified", limits: ["image_platforms_limited"], restore_architectures: ["arm64"] }] });
+  render(Snapshots, { id: "a1", onApp: vi.fn(), onOperation: vi.fn() });
+  await fireEvent.click(await screen.findByRole("button", { name: /Oct 7/ }));
+  expect(await screen.findByText(/holds only the source architecture of an image/)).toBeTruthy();
+  expect(screen.getByText("arm64", { selector: "dd" })).toBeTruthy();
+  expect(screen.getByText("unverified", { selector: "dd" })).toBeTruthy();
+});

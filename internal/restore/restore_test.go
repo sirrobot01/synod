@@ -1,11 +1,13 @@
 package restore
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/proof"
 )
 
@@ -36,5 +38,20 @@ func TestRestoreResultCannotChangeSelectionOrSkipRecovery(t *testing.T) {
 		if changed.Validate(r) == nil {
 			t.Fatal("invalid terminal result accepted")
 		}
+	}
+}
+
+func TestSnapshotSummaryShowsLimitsAndRestorablePlatforms(t *testing.T) {
+	saved := backup.Snapshot{ID: uuid.New(), Consistency: backup.ConsistencyFilesystem, Limits: []string{backup.DataExcluded}, Images: []backup.Image{
+		{ContainerID: "web", Architectures: []string{"amd64", "arm64"}},
+		{ContainerID: "worker", LocalOnly: true, Architectures: []string{"arm64"}},
+	}}
+	summary := Summarize(saved, uuid.New())
+	if summary.Consistency != backup.ConsistencyFilesystem || !slices.Equal(summary.Limits, []string{backup.DataExcluded}) || !slices.Equal(summary.Architectures, []string{"arm64"}) {
+		t.Fatalf("summary: %+v", summary)
+	}
+	saved.Images = nil
+	if summary := Summarize(saved, uuid.New()); len(summary.Architectures) != 0 {
+		t.Fatalf("a snapshot without images claimed platforms: %v", summary.Architectures)
 	}
 }
