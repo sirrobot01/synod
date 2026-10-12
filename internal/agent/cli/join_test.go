@@ -28,41 +28,7 @@ import (
 func TestJoinEnrollsAndConfiguresTheAgent(t *testing.T) {
 	for _, mode := range []string{"new", "bound"} {
 		t.Run(mode, func(t *testing.T) {
-			metadata, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "synod.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { metadata.Close() })
-			installation := uuid.New()
-			admin, err := auth.NewAdminToken(strings.Repeat("join-admin-", 4), "test-admin")
-			if err != nil {
-				t.Fatal(err)
-			}
-			caCert, caKey, err := pki.CreateCA(installation, time.Now(), 2*store.AgentCertificateLifetime)
-			if err != nil {
-				t.Fatal(err)
-			}
-			authority, err := pki.LoadCA(installation, caCert, caKey)
-			if err != nil {
-				t.Fatal(err)
-			}
-			server, err := api.NewServer(metadata, admin, installation, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			server.EnrollmentAuthority = authority
-			server.AgentListen = "0.0.0.0:8444"
-			// The httptest certificate is a self-signed CA, so it is also the pinned API CA.
-			https := httptest.NewTLSServer(server)
-			t.Cleanup(https.Close)
-
-			token := jointoken.Token{Address: https.Listener.Addr().String(), InstallationID: installation, Fingerprint: jointoken.Fingerprint(https.Certificate().Raw), Secret: jointoken.NewSecret()}
-			if mode == "bound" {
-				token.NodeID = uuid.New()
-			}
-			if _, err := metadata.RegisterEnrollmentToken(t.Context(), store.TokenRegistration{NodeID: token.NodeID, ActorID: "test", RequestID: uuid.NewString(), IdempotencyKey: uuid.NewString(), TokenVerifier: sha256.Sum256([]byte(token.Secret)), TTLSeconds: 600}); err != nil {
-				t.Fatal(err)
-			}
+			token, installation := enrollmentToken(t, mode == "bound")
 			parent := t.TempDir()
 			if err := os.Chmod(parent, 0o700); err != nil {
 				t.Fatal(err)
@@ -101,5 +67,77 @@ func TestJoinEnrollsAndConfiguresTheAgent(t *testing.T) {
 				t.Fatalf("second join: %v, want a state error", err)
 			}
 		})
+	}
+}
+
+// enrollmentToken starts a controller API that accepts one join token.
+func enrollmentToken(t *testing.T, bound bool) (jointoken.Token, uuid.UUID) {
+	t.Helper()
+	metadata, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "synod.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { metadata.Close() })
+	installation := uuid.New()
+	admin, err := auth.NewAdminToken(strings.Repeat("join-admin-", 4), "test-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, caKey, err := pki.CreateCA(installation, time.Now(), 2*store.AgentCertificateLifetime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := pki.LoadCA(installation, caCert, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := api.NewServer(metadata, admin, installation, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.EnrollmentAuthority = authority
+	server.AgentListen = "0.0.0.0:8444"
+	// The httptest certificate is a self-signed CA, so it is also the pinned API CA.
+	https := httptest.NewTLSServer(server)
+	t.Cleanup(https.Close)
+
+	token := jointoken.Token{Address: https.Listener.Addr().String(), InstallationID: installation, Fingerprint: jointoken.Fingerprint(https.Certificate().Raw), Secret: jointoken.NewSecret()}
+	if bound {
+		token.NodeID = uuid.New()
+	}
+	if _, err := metadata.RegisterEnrollmentToken(t.Context(), store.TokenRegistration{NodeID: token.NodeID, ActorID: "test", RequestID: uuid.NewString(), IdempotencyKey: uuid.NewString(), TokenVerifier: sha256.Sum256([]byte(token.Secret)), TTLSeconds: 600}); err != nil {
+		t.Fatal(err)
+	}
+	return token, installation
+}
+
+func TestRunJoinsOnceWithAToken(t *testing.T) {
+	token, installation := enrollmentToken(t, false)
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(parent, "agent", "agent.json")
+	if err := joinIfNeeded(t.Context(), configPath, "", "", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(configPath)); !os.IsNotExist(err) {
+		t.Fatal("run without a token created agent state")
+	}
+	var output bytes.Buffer
+	if err := joinIfNeeded(t.Context(), configPath, jointoken.Encode(token), "192.0.2.10:8445", &output); err != nil {
+		t.Fatal(err)
+	}
+	joined, err := daemon.Load(configPath)
+	if err != nil || joined.InstallationID != installation.String() || joined.DestinationAddress != "192.0.2.10:8445" || joined.DestinationListen != ":8445" {
+		t.Fatalf("joined config: %+v, %v", joined, err)
+	}
+	// A restart keeps the identity. The used token is ignored.
+	if err := joinIfNeeded(t.Context(), configPath, "spent-token", "", io.Discard); err != nil {
+		t.Fatalf("restart with a spent token: %v", err)
+	}
+	again, err := daemon.Load(configPath)
+	if err != nil || again.NodeID != joined.NodeID {
+		t.Fatal("restart changed the device", err)
 	}
 }

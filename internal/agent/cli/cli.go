@@ -41,13 +41,8 @@ func Command() *cobra.Command {
 	run := &cobra.Command{Use: "run", Short: "Run the agent of a joined device", Long: `Run starts the agent of a joined device.
 With --join-token, run first joins a device that has no configuration yet.
 The agent container image uses this, so one Compose file joins and runs the agent.`, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		joinToken, destinationAddress := cmp.Or(joinToken, os.Getenv("SYNOD_JOIN_TOKEN")), cmp.Or(destinationAddress, os.Getenv("SYNOD_DESTINATION_ADDRESS"))
-		if _, err := os.Lstat(configPath); errors.Is(err, os.ErrNotExist) && joinToken != "" && configPath != "" {
-			// The token is used once. Later starts find the configuration and ignore it.
-			options := joinOptions{dir: filepath.Dir(configPath), dockerSocket: "/var/run/docker.sock", destinationListen: ":8445", destinationAddress: destinationAddress}
-			if err := join(cmd.Context(), joinToken, options, cmd.ErrOrStderr()); err != nil {
-				return err
-			}
+		if err := joinIfNeeded(cmd.Context(), configPath, cmp.Or(joinToken, os.Getenv("SYNOD_JOIN_TOKEN")), cmp.Or(destinationAddress, os.Getenv("SYNOD_DESTINATION_ADDRESS")), cmd.ErrOrStderr()); err != nil {
+			return err
 		}
 		config, err := daemon.Load(configPath)
 		if err != nil {
@@ -65,6 +60,16 @@ The agent container image uses this, so one Compose file joins and runs the agen
 	run.Flags().StringVar(&destinationAddress, "destination-address", "", "Reachable host:port for other agents when run joins the device (default: $SYNOD_DESTINATION_ADDRESS)")
 	root.AddCommand(joinCommand(), renewCommand(), run)
 	return root
+}
+
+// joinIfNeeded joins the device when configPath does not exist and a token is given.
+// The token is used once. Later starts find the configuration and ignore it.
+func joinIfNeeded(ctx context.Context, configPath, token, destinationAddress string, output io.Writer) error {
+	if _, err := os.Lstat(configPath); token == "" || configPath == "" || !errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	options := joinOptions{dir: filepath.Dir(configPath), dockerSocket: "/var/run/docker.sock", destinationListen: ":8445", destinationAddress: destinationAddress}
+	return join(ctx, token, options, output)
 }
 
 // Report writes the failure for err to stderr and returns the exit status.

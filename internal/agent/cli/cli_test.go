@@ -63,3 +63,12 @@ func run(t *testing.T, args []string, stdout, stderr io.Writer) int {
 	command.SetErr(stderr)
 	return Report(command.ExecuteContext(t.Context()), stderr)
 }
+
+func TestRunHelpNeverShowsTheJoinToken(t *testing.T) {
+	t.Setenv("SYNOD_JOIN_TOKEN", "private-env-join-token")
+	var stdout, stderr bytes.Buffer
+	run(t, []string{"run", "--help"}, &stdout, &stderr)
+	if !strings.Contains(stdout.String(), "--join-token") || strings.Contains(stdout.String()+stderr.String(), "private-env-join-token") {
+		t.Fatalf("help output: %s %s", stdout.String(), stderr.String())
+	}
+}
