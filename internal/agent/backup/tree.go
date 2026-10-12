@@ -68,9 +68,10 @@ type Tree struct {
 	mu            sync.Mutex
 	observed      map[string]string
 	observedBytes int
-	// changing holds files that changed while a live copy read them.
+	// changing holds files that changed during every live copy pass.
 	changing map[string]struct{}
-	staged   map[*os.File]struct{}
+	// retry holds files that changed during the current live copy pass.
+	retry map[string]struct{}
 	// databaseMissing is set when a database data directory could not be opened.
 	databaseMissing bool
 	// databaseFiles is set when the copy keeps the database data directories.
@@ -85,7 +86,7 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 	if backup.ValidateIncluded(include) != nil {
 		return nil, ErrSource
 	}
-	tree := &Tree{excluded: make(map[string]string), observed: make(map[string]string), changing: make(map[string]struct{})}
+	tree := &Tree{excluded: make(map[string]string), observed: make(map[string]string), changing: make(map[string]struct{}), retry: make(map[string]struct{})}
 	for _, p := range include {
 		tree.included = append(tree.included, p)
 		if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved != p {
@@ -356,12 +357,6 @@ type definitionFile struct{ kfs.StreamingFile }
 func (*definitionFile) Mode() os.FileMode { return 0600 }
 
 func (t *Tree) Close() {
-	t.mu.Lock()
-	for file := range t.staged {
-		file.Close()
-		delete(t.staged, file)
-	}
-	t.mu.Unlock()
 	t.sqliteMu.Lock()
 	defer t.sqliteMu.Unlock()
 	for _, file := range t.sqlite {
@@ -587,18 +582,12 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 	return kfs.StaticIterator(entries, nil), nil
 }
 
-// Changing returns up to maxChanging files that changed while a live copy read them.
+// Changing returns up to maxChanging files that changed during every live copy pass.
 func (t *Tree) Changing() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	paths := slices.Sorted(maps.Keys(t.changing))
 	return paths[:min(len(paths), maxChanging)]
-}
-
-func (t *Tree) noteChanging(path string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.changing[path] = struct{}{}
 }
 
 // maxChanging bounds the changed-file list in the snapshot metadata.

@@ -47,8 +47,10 @@ func (f *liveFile) capture(ctx context.Context) (_ *fileCopy, retErr error) {
 		return nil, ErrSource
 	}
 	if err != nil || string(header[:]) != sqliteHeader {
+		// An ordinary file is read in place by liveReader.
+		source.Close()
 		f.tree.sqliteMu.Unlock()
-		return f.tree.stable(ctx, source)
+		return nil, nil
 	}
 	defer f.tree.sqliteMu.Unlock()
 	defer source.Close()

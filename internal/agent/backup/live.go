@@ -1,39 +1,40 @@
 package backup
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"sync"
 	"time"
 
 	kfs "github.com/kopia/kopia/fs"
+	"github.com/kopia/kopia/snapshot"
+	"github.com/sirrobot01/synod/internal/repository"
 )
 
-const (
-	stableReadLimit    = 8 << 20
-	stableReadAttempts = 3
-)
+// liveCopyPasses bounds the copy passes of a live backup. A file that still changes
+// during the last pass is saved as read and reported by Changing.
+const liveCopyPasses = 3
 
-// afterLiveRead runs before the second status check. Tests change files there.
+// afterLiveRead runs when a live reader closes, before its status check. Tests change files there.
 var afterLiveRead = func(string) {}
 
-// liveFile shares one captured version across all of Kopia's parallel file parts.
-// An SQLite file uses its WAL time so that a new commit prevents incremental reuse.
+// liveFile reads a file in place while the app runs. Each reader compares the file's size
+// and time at close with the values at open. A change marks the file, and recopy reads it
+// again in another pass. Nothing is staged, so a copy costs no extra disk or memory.
+// An SQLite file uses its WAL time so that a new commit prevents incremental reuse,
+// and its content comes from the SQLite backup API.
 type liveFile struct {
 	sourceEntry
 	modified time.Time
 	mu       sync.Mutex
-	copy     *fileCopy
-	readers  int
+	checked  bool
+	sqlite   *fileCopy
 }
 
 type fileCopy struct {
 	io.ReaderAt
-	size    int64
-	staging *os.File
+	size int64
 }
 
 func (f *liveFile) ModTime() time.Time { return f.modified }
@@ -43,146 +44,102 @@ func (f *liveFile) Open(ctx context.Context) (kfs.Reader, error) {
 		return nil, err
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.copy == nil {
+	if !f.checked {
 		copied, err := f.capture(ctx)
 		if err != nil {
+			f.mu.Unlock()
 			return nil, err
 		}
-		f.copy = copied
+		f.sqlite, f.checked = copied, true
 	}
-	f.readers++
-	return &copyReader{SectionReader: io.NewSectionReader(f.copy, 0, f.copy.size), entry: f}, nil
+	copied := f.sqlite
+	f.mu.Unlock()
+	if copied != nil {
+		return &copyReader{io.NewSectionReader(copied, 0, copied.size), f}, nil
+	}
+	source, err := (&sourceFile{f.sourceEntry}).open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := source.Stat()
+	if err != nil {
+		source.Close()
+		return nil, err
+	}
+	return &liveReader{sourceReader: source, opened: opened}, nil
 }
 
-// Close releases staging after all parts finish. Tree.Close also cleans up on failure.
-func (f *liveFile) Close() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.copy != nil && f.copy.staging != nil {
-		f.tree.mu.Lock()
-		defer f.tree.mu.Unlock()
-		f.copy.staging.Close()
-		delete(f.tree.staged, f.copy.staging)
-	}
-}
-
-type copyReader struct {
-	*io.SectionReader
-	entry  *liveFile
+// liveReader reads the source file directly and checks it for changes when it closes.
+type liveReader struct {
+	*sourceReader
+	opened os.FileInfo
 	closed bool
 }
 
-// Close frees an in-memory copy after its last reader. Kopia reads a small file once,
-// so the copies of a large directory do not stay in memory until the walk ends.
-// A staged copy stays until the entry closes.
-func (r *copyReader) Close() error {
-	f := r.entry
-	f.mu.Lock()
-	defer f.mu.Unlock()
+// Entry reports the file as it was at open, so a later pass sees a change as new metadata.
+func (r *liveReader) Entry() (kfs.Entry, error) {
+	entry := r.entry
+	entry.FileInfo = r.opened
+	return &sourceFile{entry}, nil
+}
+
+func (r *liveReader) Close() error {
 	if r.closed {
 		return nil
 	}
 	r.closed = true
-	f.readers--
-	if f.readers == 0 && f.copy != nil && f.copy.staging == nil {
-		f.copy = nil
+	afterLiveRead(r.entry.absolute)
+	current, err := r.File.Stat()
+	if err != nil || current.Size() != r.opened.Size() || !current.ModTime().Equal(r.opened.ModTime()) {
+		r.entry.tree.noteRetry(r.entry.absolute)
 	}
-	return nil
+	return r.File.Close()
 }
 
+type copyReader struct {
+	*io.SectionReader
+	entry *liveFile
+}
+
+func (*copyReader) Close() error                { return nil }
 func (r *copyReader) Entry() (kfs.Entry, error) { return r.entry, nil }
 
-// stable retries changed files before upload. Large files use private disk staging.
-// A file that changes on every attempt is saved as read and reported by Changing.
-// This check does not establish consistency between files in an app.
-func (t *Tree) stable(ctx context.Context, r *sourceReader) (*fileCopy, error) {
-	defer r.Close()
-	var staging *os.File
-	defer func() {
-		if staging != nil {
-			staging.Close()
+func (t *Tree) noteRetry(path string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.retry[path] = struct{}{}
+}
+
+// takeRetries returns the files that changed during the last pass and clears the list.
+func (t *Tree) takeRetries() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := len(t.retry)
+	clear(t.retry)
+	return n
+}
+
+// recopy copies the files that changed during a live pass again, up to liveCopyPasses passes
+// in total. Unchanged files keep their entries from the previous pass and are not read again.
+// Files that still change in the last pass are saved as read and reported by Changing.
+func (t *Tree) recopy(ctx context.Context, r *repository.Repository, root func() (kfs.Directory, error), source snapshot.SourceInfo, prepared *snapshot.Manifest) (*snapshot.Manifest, error) {
+	for pass := 2; pass <= liveCopyPasses; pass++ {
+		if t.takeRetries() == 0 {
+			return prepared, nil
 		}
-	}()
-	for attempt := 1; ; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		before, err := r.Stat()
+		directory, err := root()
 		if err != nil {
 			return nil, err
 		}
-		// Bound each attempt to the starting size even when writers keep appending.
-		input := io.NewSectionReader(r, 0, before.Size())
-		copied := &fileCopy{}
-		if before.Size() <= stableReadLimit {
-			data, err := io.ReadAll(input)
-			if err != nil {
-				return nil, err
-			}
-			copied.ReaderAt, copied.size = bytes.NewReader(data), int64(len(data))
-		} else {
-			if staging == nil {
-				staging, err = os.CreateTemp("", "synod-live-")
-				if err != nil {
-					return nil, err
-				}
-				// No plaintext copy remains after a crash.
-				if err := os.Remove(staging.Name()); err != nil {
-					return nil, err
-				}
-			} else {
-				if err := staging.Truncate(0); err != nil {
-					return nil, err
-				}
-				if _, err := staging.Seek(0, io.SeekStart); err != nil {
-					return nil, err
-				}
-			}
-			for copied.size < before.Size() {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				n, err := io.CopyN(staging, input, min(1<<20, before.Size()-copied.size))
-				copied.size += n
-				if errors.Is(err, io.EOF) {
-					break // A shrink is a change. Retry it below.
-				}
-				if err != nil {
-					return nil, err
-				}
-			}
-			copied.ReaderAt, copied.staging = staging, staging
-		}
-		afterLiveRead(r.entry.absolute)
-		if err := ctx.Err(); err != nil {
+		if prepared, err = r.UploadFiles(ctx, directory, source, false, prepared); err != nil {
 			return nil, err
 		}
-		after, err := r.Stat()
-		if err != nil {
-			return nil, err
-		}
-		same := copied.size == after.Size() && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
-		if !same && attempt < stableReadAttempts {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(20 * time.Millisecond):
-			}
-			continue
-		}
-		if !same {
-			t.noteChanging(r.entry.absolute)
-		}
-		if copied.staging != nil {
-			t.mu.Lock()
-			if t.staged == nil {
-				t.staged = make(map[*os.File]struct{})
-			}
-			t.staged[staging] = struct{}{}
-			t.mu.Unlock()
-			staging = nil // The entry and tree now own it.
-		}
-		return copied, nil
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for path := range t.retry {
+		t.changing[path] = struct{}{}
+	}
+	clear(t.retry)
+	return prepared, nil
 }

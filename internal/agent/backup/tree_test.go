@@ -3,8 +3,6 @@ package backup
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -189,94 +187,3 @@ func TestTreeNamesTheUnreadablePath(t *testing.T) {
 
 // A live copy reads a file again when it changed during the read. It saves a complete
 // read of a file that keeps changing and reports that file.
-func TestLiveTreeRereadsChangingFiles(t *testing.T) {
-	project, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	write := func(name, data string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(project, name), []byte(data), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("steady", "steady-v1")
-	write("settles", "settles-v1")
-	write("busy", "busy-v1")
-	large := strings.Repeat("L", stableReadLimit+1)
-	write("large", large)
-	write("large-busy", large)
-	write("grows", "small")
-	write("shrinks", large)
-	reads := make(map[string]int)
-	afterLiveRead = func(path string) {
-		name := filepath.Base(path)
-		reads[name]++
-		switch {
-		case name == "settles" && reads[name] == 1:
-			write("settles", "settles-v2-longer")
-		case name == "busy":
-			write("busy", fmt.Sprintf("busy-v%d-%s", reads[name]+1, strings.Repeat("x", reads[name])))
-		case name == "large" && reads[name] == 1:
-			write(name, large+"settled")
-		case name == "large-busy":
-			write(name, large+strings.Repeat("x", reads[name]))
-		case name == "grows" && reads[name] == 1:
-			write(name, large)
-		case name == "shrinks" && reads[name] == 1:
-			write(name, "small")
-		}
-	}
-	t.Cleanup(func() { afterLiveRead = func(string) {} })
-
-	tree, err := NewTree(t.Context(), &agentv1.DiscoveredApp{ProjectDirectory: project, Paths: []*agentv1.DiscoveredPath{{Source: project, Kind: "project", Status: "Included"}}}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tree.Close()
-	tree.live = true
-	root, err := tree.Root(t.Context(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := root.Child(t.Context(), "paths")
-	if err != nil {
-		t.Fatal(err)
-	}
-	entries, err := kfs.GetAllEntries(t.Context(), paths.(kfs.Directory))
-	if err != nil || len(entries) != 1 {
-		t.Fatal("the project path is missing", err)
-	}
-	open := func(name string) kfs.Reader {
-		t.Helper()
-		file, err := entries[0].(kfs.Directory).Child(t.Context(), name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(file.Close)
-		reader, err := file.(kfs.File).Open(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { reader.Close() })
-		return reader
-	}
-	for name, want := range map[string]string{
-		"steady": "steady-v1", "settles": "settles-v2-longer", "busy": "busy-v3-xx",
-		"large": large + "settled", "large-busy": large + "xx", "grows": large, "shrinks": "small",
-	} {
-		data, err := io.ReadAll(open(name))
-		if err != nil || string(data) != want {
-			t.Fatalf("%s: captured content differs (got %d bytes, want %d): %v", name, len(data), len(want), err)
-		}
-	}
-	for name, want := range map[string]int{"steady": 1, "settles": 2, "busy": 3, "large": 2, "large-busy": 3, "grows": 2, "shrinks": 2} {
-		if reads[name] != want {
-			t.Fatalf("%s: got %d read attempts, want %d", name, reads[name], want)
-		}
-	}
-	want := []string{filepath.Join(project, "busy"), filepath.Join(project, "large-busy")}
-	if got := tree.Changing(); !slices.Equal(got, want) {
-		t.Fatalf("Changing() = %v, want %v", got, want)
-	}
-}

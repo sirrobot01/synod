@@ -2,24 +2,116 @@ package backup
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
-	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	kfs "github.com/kopia/kopia/fs"
-	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
+	"github.com/kopia/kopia/snapshot"
 )
 
-func TestLiveBackupRestoresOneLargeFileVersion(t *testing.T) {
+// liveCopy copies directory with every live pass and restores the published snapshot.
+func liveCopy(t *testing.T, directory string) (string, *Tree) {
+	t.Helper()
+	f := newIncrementalFixture(t, directory, true)
+	tree, err := NewTree(t.Context(), f.app, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(tree.Close)
+	tree.live = true
+	source := snapshot.SourceInfo{Host: "test", UserName: "test", Path: f.app.Key}
+	root := func() (kfs.Directory, error) { return tree.Root(t.Context(), nil) }
+	directoryRoot, err := root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := f.r.UploadFiles(t.Context(), directoryRoot, source, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared, err = tree.recopy(t.Context(), f.r, root, source, prepared); err != nil {
+		t.Fatal(err)
+	}
+	metadata := f.metadata
+	metadata.ID, metadata.StartedAt, metadata.CompletedAt, metadata.Paths = uuid.New(), time.Now().UTC(), time.Now().UTC(), tree.Paths
+	if _, err := f.r.PublishSnapshot(t.Context(), prepared, metadata); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "restore")
+	if err := f.r.RestoreFiles(t.Context(), metadata.ID, target); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(target, tree.Paths[0].Archive), tree
+}
+
+func TestLiveCopyReadsChangedFilesAgainInLaterPasses(t *testing.T) {
+	directory := t.TempDir()
+	write := func(name, data string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	large := strings.Repeat("L", 9<<20)
+	write("steady", "steady-v1")
+	write("settles", "settles-v1")
+	write("busy", "busy-v1")
+	write("grows", "small")
+	write("shrinks", large)
+	var mu sync.Mutex
+	reads := make(map[string]int)
+	afterLiveRead = func(path string) {
+		mu.Lock()
+		defer mu.Unlock()
+		name := filepath.Base(path)
+		reads[name]++
+		switch {
+		case name == "settles" && reads[name] == 1:
+			write(name, "settles-v2-longer")
+		case name == "busy":
+			write(name, fmt.Sprintf("busy-v%d-%s", reads[name]+1, strings.Repeat("x", reads[name])))
+		case name == "grows" && reads[name] == 1:
+			write(name, large)
+		case name == "shrinks" && reads[name] == 1:
+			write(name, "small")
+		}
+	}
+	t.Cleanup(func() { afterLiveRead = func(string) {} })
+	restored, tree := liveCopy(t, directory)
+	// The last pass reads busy-v3, then the app writes busy-v4.
+	for name, want := range map[string]string{"steady": "steady-v1", "settles": "settles-v2-longer", "busy": "busy-v3-xx", "grows": large, "shrinks": "small"} {
+		data, err := os.ReadFile(filepath.Join(restored, name))
+		if err != nil || string(data) != want {
+			t.Fatalf("%s: restored %d bytes, want %d: %v", name, len(data), len(want), err)
+		}
+	}
+	for name, want := range map[string]int{"steady": 1, "settles": 2, "busy": liveCopyPasses, "grows": 2, "shrinks": 2} {
+		if reads[name] != want {
+			t.Fatalf("%s: read %d times, want %d", name, reads[name], want)
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tree.Changing(); !slices.Equal(got, []string{filepath.Join(resolved, "busy")}) {
+		t.Fatalf("Changing() = %v", got)
+	}
+}
+
+func TestLiveCopyRestoresOneVersionOfALargeFileReadInParts(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "changing")
-	// More than 128 MiB makes Kopia open parallel parts of the same entry.
+	// More than 128 MiB makes Kopia read parts of the same file in parallel.
 	const size = 129 << 20
 	write := func(version byte) {
 		t.Helper()
@@ -36,169 +128,25 @@ func TestLiveBackupRestoresOneLargeFileVersion(t *testing.T) {
 		}
 	}
 	write(1)
-	var attempts atomic.Int32
-	afterLiveRead = func(string) { write(byte(attempts.Add(1) + 1)) }
+	var once sync.Once
+	// The app rewrites the file while the first pass reads its parts.
+	afterLiveRead = func(string) { once.Do(func() { write(2) }) }
 	t.Cleanup(func() { afterLiveRead = func(string) {} })
-	f := newIncrementalFixture(t, directory, true)
-	restored := f.backup("large-live-copy")
-	if got := attempts.Load(); got != stableReadAttempts {
-		t.Fatalf("got %d captures, want %d shared across all parts", got, stableReadAttempts)
-	}
+	restored, tree := liveCopy(t, directory)
 	file, err := os.Open(filepath.Join(restored, "changing"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
 	actual, expected := sha256.New(), sha256.New()
-	count, err := io.Copy(actual, file)
-	if err != nil || count != size {
+	if count, err := io.Copy(actual, file); err != nil || count != size {
 		t.Fatalf("restored %d bytes, want %d: %v", count, size, err)
 	}
-	chunk := bytes.Repeat([]byte{stableReadAttempts}, 1<<20)
+	chunk := bytes.Repeat([]byte{2}, 1<<20)
 	for range size / len(chunk) {
 		expected.Write(chunk)
 	}
-	if !bytes.Equal(actual.Sum(nil), expected.Sum(nil)) {
-		t.Fatal("restored file mixes versions or misses data")
-	}
-}
-
-func TestLiveFileReleasesStaging(t *testing.T) {
-	for _, stop := range []string{"entry", "tree", "cancel", "staging-error"} {
-		t.Run(stop, func(t *testing.T) {
-			directory := t.TempDir()
-			path := filepath.Join(directory, "large")
-			if err := os.WriteFile(path, bytes.Repeat([]byte("L"), stableReadLimit+1), 0600); err != nil {
-				t.Fatal(err)
-			}
-			tree, err := NewTree(t.Context(), &agentv1.DiscoveredApp{Paths: []*agentv1.DiscoveredPath{{Source: path, Kind: "bind", Status: "Included"}}}, nil, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer tree.Close()
-			tree.live = true
-			root, err := tree.Root(t.Context(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			paths, err := root.Child(t.Context(), "paths")
-			if err != nil {
-				t.Fatal(err)
-			}
-			entries, err := kfs.GetAllEntries(t.Context(), paths.(kfs.Directory))
-			if err != nil || len(entries) != 1 {
-				t.Fatal("missing source entry", err)
-			}
-			file := entries[0].(*liveFile)
-			defer file.Close()
-			staging := t.TempDir()
-			t.Setenv("TMPDIR", staging)
-			if stop == "staging-error" {
-				t.Setenv("TMPDIR", filepath.Join(staging, "missing"))
-			}
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			if stop == "cancel" {
-				afterLiveRead = func(string) { cancel() }
-				t.Cleanup(func() { afterLiveRead = func(string) {} })
-			}
-			reader, err := file.Open(ctx)
-			if stop == "cancel" || stop == "staging-error" {
-				if reader != nil || err == nil || (stop == "cancel" && !errors.Is(err, context.Canceled)) {
-					t.Fatalf("capture did not fail: reader %v, error %v", reader, err)
-				}
-				if len(tree.staged) != 0 {
-					t.Fatal("failed capture kept staging open")
-				}
-			} else {
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(tree.staged) != 1 {
-					t.Fatal("large file was not staged")
-				}
-				// Separate readers have independent cursors and the same captured bytes.
-				var readers sync.WaitGroup
-				for range 3 {
-					readers.Go(func() {
-						r, err := file.Open(ctx)
-						if err != nil {
-							t.Error(err)
-							return
-						}
-						defer r.Close()
-						if n, err := io.Copy(io.Discard, r); err != nil || n != stableReadLimit+1 {
-							t.Errorf("read %d bytes: %v", n, err)
-						}
-					})
-				}
-				readers.Wait()
-				reader.Close()
-				if stop == "entry" {
-					file.Close()
-					file.Close()
-				} else {
-					tree.Close()
-				}
-				if _, err := file.copy.staging.Stat(); !errors.Is(err, os.ErrClosed) || len(tree.staged) != 0 {
-					t.Fatalf("staging remains open: %v", err)
-				}
-			}
-			left, err := os.ReadDir(staging)
-			if err != nil || len(left) != 0 {
-				t.Fatalf("plaintext remains in staging: %v, %v", left, err)
-			}
-		})
-	}
-}
-
-func TestLiveCopyOfASmallFileIsFreedAfterItsLastReader(t *testing.T) {
-	source := t.TempDir()
-	if err := os.WriteFile(filepath.Join(source, "state"), []byte("small live file"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f := newIncrementalFixture(t, source, true)
-	tree, err := NewTree(t.Context(), f.app, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tree.Close()
-	tree.live = true
-	root, err := tree.Root(t.Context(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths, err := root.Child(t.Context(), "paths")
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory, err := paths.(kfs.Directory).Child(t.Context(), tree.roots[0].archive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry, err := directory.(kfs.Directory).Child(t.Context(), "state")
-	if err != nil {
-		t.Fatal(err)
-	}
-	file := entry.(*liveFile)
-	first, err := file.Open(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := file.Open(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	first.Close()
-	if file.copy == nil {
-		t.Fatal("a copy was freed while a reader still used it")
-	}
-	if data, err := io.ReadAll(second); err != nil || string(data) != "small live file" {
-		t.Fatalf("second reader: %q, %v", data, err)
-	}
-	second.Close()
-	second.Close()
-	if file.copy != nil || file.readers != 0 {
-		t.Fatalf("the copy stayed in memory: readers=%d", file.readers)
+	if !bytes.Equal(actual.Sum(nil), expected.Sum(nil)) || len(tree.Changing()) != 0 {
+		t.Fatalf("restored file mixes versions, or the settled file was reported: %v", tree.Changing())
 	}
 }

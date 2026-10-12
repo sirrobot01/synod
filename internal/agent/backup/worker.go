@@ -514,6 +514,9 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if err == nil {
 		state.Prepared, err = r.UploadFiles(final, root, source, false, previous)
 	}
+	if err == nil && tree.live {
+		state.Prepared, err = tree.recopy(final, r, func() (kfs.Directory, error) { return tree.Root(final, definitions, dumps...) }, source, state.Prepared)
+	}
 	if err == nil && method == backup.Stop {
 		err = w.checkStopped(final, fileContainers)
 	}
