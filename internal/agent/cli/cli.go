@@ -2,10 +2,13 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/sirrobot01/synod/internal/agent/daemon"
@@ -34,8 +37,18 @@ func Command() *cobra.Command {
 			return nil
 		},
 	}
-	var configPath string
-	run := &cobra.Command{Use: "run", Short: "Run the agent of a joined device", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	var configPath, joinToken, destinationAddress string
+	run := &cobra.Command{Use: "run", Short: "Run the agent of a joined device", Long: `Run starts the agent of a joined device.
+With --join-token, run first joins a device that has no configuration yet.
+The agent container image uses this, so one Compose file joins and runs the agent.`, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		joinToken, destinationAddress := cmp.Or(joinToken, os.Getenv("SYNOD_JOIN_TOKEN")), cmp.Or(destinationAddress, os.Getenv("SYNOD_DESTINATION_ADDRESS"))
+		if _, err := os.Lstat(configPath); errors.Is(err, os.ErrNotExist) && joinToken != "" && configPath != "" {
+			// The token is used once. Later starts find the configuration and ignore it.
+			options := joinOptions{dir: filepath.Dir(configPath), dockerSocket: "/var/run/docker.sock", destinationListen: ":8445", destinationAddress: destinationAddress}
+			if err := join(cmd.Context(), joinToken, options, cmd.ErrOrStderr()); err != nil {
+				return err
+			}
+		}
 		config, err := daemon.Load(configPath)
 		if err != nil {
 			return err
@@ -48,6 +61,8 @@ func Command() *cobra.Command {
 		}{Event: "agent_stopped"})
 	}}
 	run.Flags().StringVar(&configPath, "config", "", "Private agent JSON configuration file (required)")
+	run.Flags().StringVar(&joinToken, "join-token", "", "Join token to use when the device has not joined (default: $SYNOD_JOIN_TOKEN)")
+	run.Flags().StringVar(&destinationAddress, "destination-address", "", "Reachable host:port for other agents when run joins the device (default: $SYNOD_DESTINATION_ADDRESS)")
 	root.AddCommand(joinCommand(), renewCommand(), run)
 	return root
 }

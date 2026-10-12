@@ -11,6 +11,7 @@ Synod backs up the Docker apps of your home lab and restores them on any of your
 
 Synod agents run on Linux (amd64 and arm64) with Docker Engine and the Compose plugin.
 The controller also runs on macOS, on Intel and Apple silicon Macs. It needs no Docker.
+On a device without systemd, such as Unraid or Synology, run the agent as a container. See [Run the agent in Docker](docs/user-guide.md#run-the-agent-in-docker).
 v0.1 is not released yet.
 
 ## Quick start

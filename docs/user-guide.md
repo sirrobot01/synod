@@ -80,6 +80,57 @@ synod node approve DEVICE
 
 A token joins one device and expires after seven days.
 
+### Run the agent in Docker
+
+Use the agent image on a device without systemd, such as Unraid or Synology.
+You do not need to install the binary on that device.
+Create a `compose.yaml` file:
+
+```yaml
+services:
+  synod-agent:
+    image: ghcr.io/sirrobot01/synod:latest
+    container_name: synod-agent
+    restart: unless-stopped
+    privileged: true
+    pid: host
+    network_mode: host
+    environment:
+      SYNOD_JOIN_TOKEN: "TOKEN"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker:/var/lib/docker
+      - /var/lib/synod:/var/lib/synod
+      # Add each directory that holds app files, at the same path.
+      - /srv:/srv
+```
+
+Replace `TOKEN` with a join token. Then start the agent:
+
+```sh
+docker compose up -d
+```
+
+The agent joins on its first start. Later starts ignore the token.
+Approve the device as for any other device.
+
+Mount every directory at the same path as on the host.
+Docker reads restored bind paths on the host, so the paths must agree.
+Add each directory that holds Compose projects or bind mounts, for example `/mnt/user/appdata` on Unraid or `/volume1/docker` on Synology.
+A backup of an app fails with `source_unavailable` when one of its paths is not mounted.
+
+The container needs these settings:
+
+- `privileged` lets the agent take filesystem snapshots and enter container namespaces for drill checks.
+- `pid: host` lets the agent find app processes and their listening ports.
+- `network_mode: host` lets other agents reach a destination on this device and lets host checks see the host ports.
+
+To upgrade the agent, pull the new image and start the container again:
+
+```sh
+docker compose pull && docker compose up -d
+```
+
 ## 4. Open the web UI
 
 ```sh
@@ -216,6 +267,7 @@ curl -fsSL https://synod.biodun.dev/install.sh | sh
 It installs the latest release and restarts the Synod services on that device.
 Upgrade the controller device first.
 Do not run `server init` or `agent join` again. Your devices keep their identities.
+For an agent that runs in Docker, see [Run the agent in Docker](#run-the-agent-in-docker).
 
 ## Certificates
 
@@ -228,6 +280,13 @@ synod agent renew 'TOKEN'
 ```
 
 Renew stops the agent, gets a new certificate, and starts the agent again.
+For an agent in Docker, stop the container and renew in a new container:
+
+```sh
+docker compose stop
+docker compose run --rm synod-agent agent renew 'TOKEN'
+docker compose up -d
+```
 
 ## Troubleshoot
 
@@ -242,6 +301,12 @@ On Linux, read the service logs:
 ```sh
 journalctl -u synod-agent -n 100 --no-pager
 journalctl -u synod-server -n 100 --no-pager
+```
+
+For an agent in Docker, read the container log:
+
+```sh
+docker logs --tail 100 synod-agent
 ```
 
 On macOS, read the controller log:
@@ -276,5 +341,7 @@ Do not send passwords, tokens, or private keys with a support report.
 - MongoDB and databases with custom connection settings have no native dumps.
 - Browser downloads are limited to 64 MiB. Use `synod file get` for larger files.
 - A restore test without network access cannot prove every app feature.
+- An agent in Docker uses a filesystem snapshot only when the whole filesystem is mounted at the same path in the container. Otherwise it copies live and the app shows `app_consistency_unverified`.
+- The agent image has btrfs and LVM tools. It has no ZFS tools, so an agent in Docker does not take ZFS snapshots.
 
 The [reference](reference.md) lists all limits.
