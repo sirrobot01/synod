@@ -61,8 +61,10 @@ type connection struct {
 	used time.Time
 }
 
-// ConnectionIdle is how long an unused repository connection stays open.
-const ConnectionIdle = 10 * time.Minute
+// ConnectionIdle is how long an unused repository connection stays open. Opening a
+// repository derives its key from the password, which takes about a second on a small
+// device. A daily schedule reuses the connection, because it stays open for a day.
+const ConnectionIdle = 25 * time.Hour
 
 // connect reuses an idle connection opened with the same settings, or opens a new one.
 func (w *Worker) connect(ctx context.Context, destinationID uuid.UUID, location repository.Location, credentials repository.Credentials, initialize bool) (*repository.Repository, [32]byte, error) {
