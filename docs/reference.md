@@ -227,6 +227,7 @@ Media paths are not scanned for size.
 A size scan stops after five seconds, 100,000 entries, or more than 20 GiB.
 An incomplete size is shown as unknown or as a lower bound.
 Sizes are file lengths, not disk usage.
+The agent keeps a measured directory size for 10 minutes. Discovery and backups in that time use it. A directory that grows past 20 GiB becomes Large within 10 minutes. A single file over 20 GiB is skipped at once.
 A failed Docker scan keeps the last app list and shows a failure code.
 A complete scan marks absent apps as missing and keeps their records.
 The scan time remains visible when a device disconnects.
@@ -434,6 +435,8 @@ Live and Dump copy files while the containers run:
 - On btrfs and ZFS, Synod takes a read-only snapshot of each subvolume or dataset at the start of the copy. It reads the files from the snapshot and removes the snapshot at the end. All files of a snapshot come from the same moment, as after a power cut. SQLite files and their `-wal` files are copied together from the snapshot.
 - On LVM, Synod snapshots ext4 and XFS filesystems. This needs root, the LVM tools, and free volume group space. Synod uses a thick snapshot, including for a thin source volume. It reserves 10% of the source size, from 64 MiB to 1 GiB, rounded to volume extents. The reservation cannot exceed half of the free group space. The copy is mounted read-only under `/run/synod-snapshots`. A full or invalid snapshot fails the backup before publication. Startup cleanup removes only tagged Synod snapshots. The heavy test workflow includes restore, overflow, and cleanup checks on disposable LVM volumes.
 - Synod reads a path live when the snapshot cannot be complete: another filesystem is mounted below the path, a btrfs subvolume is nested below it, the required tools are absent, or the LVM volume has insufficient space or an unsupported state. btrfs snapshots are in `.synod-snapshots` at the top of the mounted filesystem. The agent removes snapshots that an interrupted backup left when it starts.
+- An agent keeps the connection to each destination open for 25 hours after its last use, so a daily backup does not open the repository again. An open repository keeps its index in memory.
+- In a backup with an earlier snapshot, a directory whose files all have the same names, sizes, modification times, modes, and owners is taken from that snapshot without a new copy pass. Kopia applies the same rule to single files.
 - On other filesystems, Synod reads each file in place. It compares the size and modification time of the file at the start and at the end of each read. After the copy, Synod copies the files that changed again, in up to 3 passes in total. Files that did not change are not read again. Synod uses no temporary copy in memory or on disk.
 - A file that still changed is saved as read. The snapshot lists it under `changing`, and the result has the warning `files_changed_during_copy`.
 - When the roots of an app are on several ZFS datasets of one pool, Synod snapshots these datasets with one `zfs snapshot` command. ZFS takes them at the same moment, so they share one capture point. btrfs subvolumes and LVM volumes are snapshotted one at a time.
