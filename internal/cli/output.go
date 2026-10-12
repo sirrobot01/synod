@@ -183,7 +183,7 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			fmt.Fprintf(&output, "  Destinations: %v\n", entry.Settings.Destinations)
 			for _, limit := range entry.LimitCodes {
 				if limit == backup.AppConsistencyUnverified {
-					fmt.Fprintln(&output, "  Partial protection: agreement between app files and databases is not verified. Synod will not pause writes to gain full-protection status.")
+					fmt.Fprintln(&output, "  Partial protection: the last copy did not read all app files and databases from one filesystem snapshot. Put the app and database data on one btrfs subvolume, ZFS dataset, or LVM volume for full protection. Synod will not pause writes to gain full-protection status.")
 				} else {
 					fmt.Fprintf(&output, "  Protection limit: %s\n", limit)
 				}

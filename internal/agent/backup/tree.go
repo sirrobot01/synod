@@ -34,6 +34,10 @@ type sourceRoot struct {
 	snapshot bool
 	// capturePoint identifies the filesystem snapshot, including shared mount aliases.
 	capturePoint string
+	// database holds the data directory of a detected database. The copy keeps it only
+	// when it reads the same filesystem snapshot as every other root.
+	database bool
+	item     backup.Path
 }
 
 // nestedPath is an included path that its parent's walk copies. Each pass checks that it still exists.
@@ -66,6 +70,10 @@ type Tree struct {
 	// changing holds files that changed while a live copy read them.
 	changing map[string]struct{}
 	staged   map[*os.File]struct{}
+	// databaseMissing is set when a database data directory could not be opened.
+	databaseMissing bool
+	// databaseFiles is set when the copy keeps the database data directories.
+	databaseFiles bool
 }
 
 // NewTree selects the app's Included paths. include adds Large paths and paths that the walk
@@ -109,6 +117,11 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		database := item.Status == "Dumped"
+		if database {
+			tree.openDatabase(item)
+			continue
+		}
 		if !selected(item) {
 			continue
 		}
@@ -132,7 +145,7 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 		if discovery.Forbidden(resolved, item.Kind == "volume") {
 			return nil, fmt.Errorf("%w: %s is a forbidden path", ErrSource, resolved)
 		}
-		if tree.skip(item.Source) || tree.skip(resolved) {
+		if tree.skip("", item.Source) || tree.skip("", resolved) {
 			continue
 		}
 		info, err := os.Lstat(resolved)
@@ -166,6 +179,72 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 	return tree, nil
 }
 
+// openDatabase adds a candidate root for a database data directory. The native export
+// stays the database copy when the directory is not available.
+func (t *Tree) openDatabase(item *agentv1.DiscoveredPath) {
+	for _, root := range t.roots {
+		if root.database && root.item.Source == item.Source {
+			return
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(item.Source)
+	if err != nil || discovery.Forbidden(item.Source, item.Kind == "volume") || discovery.Forbidden(resolved, item.Kind == "volume") || t.skip(item.Source, item.Source) || t.skip(resolved, resolved) {
+		t.databaseMissing = true
+		return
+	}
+	info, err := os.Lstat(resolved)
+	if err != nil || !info.IsDir() {
+		t.databaseMissing = true
+		return
+	}
+	root, err := os.OpenRoot(resolved)
+	if err != nil {
+		t.databaseMissing = true
+		return
+	}
+	if current, err := root.Lstat("."); err != nil || !os.SameFile(info, current) {
+		root.Close()
+		t.databaseMissing = true
+		return
+	}
+	digest := sha256.Sum256([]byte(item.Source))
+	archive := fmt.Sprintf("%x", digest[:16])
+	t.roots = append(t.roots, &sourceRoot{root: root, path: ".", source: resolved, archive: archive, volume: item.Kind == "volume", database: true, item: backup.Path{Source: item.Source, Archive: "paths/" + archive, Kind: item.Kind}})
+}
+
+// keepDatabaseFiles keeps the database roots only when every root reads one filesystem
+// snapshot. The database files and the app files then hold the state of one moment, as
+// after a power loss, and the database recovers from it as from a crash. Otherwise it
+// closes the database roots, and the native exports stay the only database copies.
+func (t *Tree) keepDatabaseFiles() bool {
+	coherent := !t.databaseMissing && slices.ContainsFunc(t.roots, func(root *sourceRoot) bool { return root.database })
+	for _, root := range t.roots {
+		if !root.snapshot || root.capturePoint == "" || root.capturePoint != t.roots[0].capturePoint {
+			coherent = false
+		}
+	}
+	t.roots = slices.DeleteFunc(t.roots, func(root *sourceRoot) bool {
+		if !root.database {
+			return false
+		}
+		if coherent {
+			// The directory is now app data. A parent walk can copy it, as for any nested path.
+			delete(t.excluded, root.item.Source)
+			delete(t.excluded, root.source)
+			t.Paths = append(t.Paths, root.item)
+			root.database = false
+			return false
+		}
+		root.root.Close()
+		return true
+	})
+	if coherent {
+		t.nest()
+	}
+	t.databaseFiles = coherent
+	return coherent
+}
+
 // nest copies an included path once when it lies inside another included directory.
 // A Compose project often mounts ./data, so the project walk already reads that data.
 // The path keeps its own mapping into the parent's archive. Restore and file browsing
@@ -174,7 +253,7 @@ func (t *Tree) nest() {
 	for i := 0; i < len(t.roots); i++ {
 		child := t.roots[i]
 		for _, parent := range t.roots {
-			if parent == child || parent.path != "." {
+			if parent == child || parent.path != "." || parent.database || child.database {
 				continue
 			}
 			relative, err := filepath.Rel(parent.source, child.source)
@@ -186,7 +265,7 @@ func (t *Tree) nest() {
 			for _, part := range strings.Split(relative, string(filepath.Separator)) {
 				current = filepath.Join(current, part)
 				name := strings.ToLower(part)
-				if t.skip(current) || discovery.Forbidden(current, parent.volume) || (slices.Contains(mediaNames, name) && !t.chosen(current)) || strings.HasSuffix(name, "-wal") || strings.HasSuffix(name, "-shm") || strings.HasSuffix(name, "-journal") {
+				if t.skip("", current) || discovery.Forbidden(current, parent.volume) || (slices.Contains(mediaNames, name) && !t.chosen(current)) || strings.HasSuffix(name, "-wal") || strings.HasSuffix(name, "-shm") || strings.HasSuffix(name, "-journal") {
 					walked = false
 					break
 				}
@@ -312,8 +391,13 @@ func (t *Tree) chosen(path string) bool {
 	return false
 }
 
-func (t *Tree) skip(path string) bool {
+// skip reports whether path is excluded. An exclusion of root or of a parent of root does
+// not apply below root. A database root is excluded from the other walks, not from its own.
+func (t *Tree) skip(root, path string) bool {
 	for excluded := range t.excluded {
+		if root != "" && (root == excluded || strings.HasPrefix(root, excluded+string(filepath.Separator))) {
+			continue
+		}
 		if path == excluded || strings.HasPrefix(path, excluded+string(filepath.Separator)) {
 			return true
 		}
@@ -449,7 +533,7 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 	var entries []kfs.Entry
 	for _, child := range children {
 		absolute := filepath.Join(d.absolute, child.Name())
-		if d.tree.skip(absolute) {
+		if d.tree.skip(d.source.source, absolute) {
 			continue
 		}
 		reason := ""

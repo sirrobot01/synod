@@ -47,7 +47,7 @@
           {:else}<p>Add a destination first.</p>{/each}
         </fieldset>
         <label>Copy method<select bind:value={settings.method}><option value="auto">Automatic · app keeps running</option><option value="live">Live · copy files while running</option><option value="dump">Dump · native database copies</option><option value="stop">Stop · final copy while stopped</option></select></label>
-        <p class="note">A schedule does not establish full protection. Until a supported live export proves agreement between app files and databases, saved copies show partial protection. Synod will not pause writes to gain full-protection status.</p>
+        <p class="note">A schedule does not establish full protection. A copy gets full protection only when one btrfs, ZFS, or LVM snapshot holds all files and database data of the app. Other copies show partial protection. Synod will not pause writes to gain full-protection status.</p>
         {#if settings.method === "stop"}<p class="callout">Stop stops the app briefly for each backup. Use it only if the app needs a stopped copy.</p>{/if}
         <div class="columns"><label>Daily time<input type="time" required bind:value={settings.at} /></label><label>Time zone<input required bind:value={settings.time_zone} placeholder="UTC" /></label></div>
         {#if large.length && enabled}

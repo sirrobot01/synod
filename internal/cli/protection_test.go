@@ -108,7 +108,7 @@ func TestAppStatusExplainsTheConsistencyLimit(t *testing.T) {
 	if code := cli.Run(t.Context(), append(flags, "--json=false", "app", "status"), &output, &diagnostics); code != 0 {
 		t.Fatalf("status: %d %s", code, diagnostics.String())
 	}
-	for _, message := range []string{"Current status: partial", "agreement between app files and databases is not verified", "will not pause writes", "Capture scope: filesystem_snapshot"} {
+	for _, message := range []string{"Current status: partial", "did not read all app files and databases from one filesystem snapshot", "will not pause writes", "Capture scope: filesystem_snapshot"} {
 		if !bytes.Contains(output.Bytes(), []byte(message)) {
 			t.Fatalf("status omitted %q: %s", message, output.String())
 		}

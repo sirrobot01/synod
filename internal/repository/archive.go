@@ -177,6 +177,18 @@ func (r *Repository) SnapshotEntry(ctx context.Context, id uuid.UUID, source str
 	if files.RootEntry == nil || files.RootObjectID().String() != saved.RootID || files.IncompleteReason != "" {
 		return nil, ErrSnapshotIncomplete
 	}
+	return r.PreparedEntry(ctx, files, source)
+}
+
+// PreparedEntry reads uploaded content before publication. The caller closes it.
+// It refuses incomplete roots and never traverses a symlink.
+func (r *Repository) PreparedEntry(ctx context.Context, files *snapshot.Manifest, source string) (kfs.Entry, error) {
+	if !fs.ValidPath(source) || strings.ContainsAny(source, "\\\x00") {
+		return nil, backup.ErrInvalid
+	}
+	if files == nil || files.RootEntry == nil || files.RootEntry.DirSummary == nil || files.IncompleteReason != "" || files.RootEntry.DirSummary.FatalErrorCount != 0 || files.RootEntry.DirSummary.IgnoredErrorCount != 0 {
+		return nil, ErrSnapshotIncomplete
+	}
 	entry := snapshotfs.EntryFromDirEntry(r.repo, files.RootEntry)
 	ready := false
 	defer func() {

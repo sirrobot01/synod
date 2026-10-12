@@ -6,7 +6,8 @@ import (
 	"github.com/sirrobot01/synod/internal/backup"
 )
 
-// captureEvidence records scope without treating separate exports as one app transaction.
+// captureEvidence records scope. Only one filesystem snapshot of every root, including the
+// database data directories, gives one capture time for the whole app.
 func (t *Tree) captureEvidence(method backup.Method, sqlite []string, dumps []backup.DatabaseDump) (backup.Consistency, []backup.Capture) {
 	level := backup.ConsistencyFilesystem
 	points := make(map[string]string)
@@ -34,7 +35,9 @@ func (t *Tree) captureEvidence(method backup.Method, sqlite []string, dumps []ba
 	for _, dump := range dumps {
 		captures = append(captures, backup.Capture{Source: dump.ContainerID, Method: dump.Database + "_export"})
 	}
-	if len(points) != 1 || len(sqlite) > 0 || len(dumps) > 0 || len(t.Changing()) > 0 {
+	// Exports run at other moments. They agree with the files only as a fallback beside
+	// database files that the shared snapshot holds.
+	if len(points) != 1 || len(sqlite) > 0 || (len(dumps) > 0 && !t.databaseFiles) || len(t.Changing()) > 0 {
 		level = backup.ConsistencyUnverified
 	}
 	return level, captures

@@ -322,6 +322,23 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	defer archives.Close()
 	state.phase("capture_images")
+	source := snapshot.SourceInfo{Host: w.NodeID.String(), UserName: "synod", Path: request.AppID.String()}
+	var dumps []kfs.Entry
+	var streams []*dumpFile
+	var dumpMetadata []backup.DatabaseDump
+	for _, c := range inspected {
+		if database := databases[c.ID]; database != "" {
+			stream, metadata, err := newDump(w.Docker, c, database)
+			if err != nil {
+				state.FailureCode = "database_dump_failed"
+				return w.finish(ctx, request, &state, r)
+			}
+			dumps = append(dumps, stream)
+			streams = append(streams, stream)
+			dumpMetadata = append(dumpMetadata, metadata)
+		}
+	}
+
 	if app.Kind == "container" {
 		definition, err := compose.FromContainer(inspected[0])
 		if err != nil {
@@ -334,6 +351,21 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			return w.finish(ctx, request, &state, r)
 		}
 		definitions["compose.json"] = encoded
+	}
+	if method != backup.Stop && len(dumps) > 0 {
+		capture, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		dumps, err = stageDumps(capture, r, dumps, source)
+		cancel()
+		if err != nil {
+			state.FailureCode = "database_dump_failed"
+			return w.finish(ctx, request, &state, r)
+		}
+		defer func() {
+			for _, dump := range dumps {
+				dump.Close()
+			}
+		}()
+		state.phase("capture_databases")
 	}
 	excluded := make([]backup.Exclusion, 0, len(w.PrivatePaths)+1)
 	for _, path := range w.PrivatePaths {
@@ -359,6 +391,8 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		}
 		state.phase("snapshot")
 	}
+	// Without one shared snapshot, raw database files would hold an unusable state.
+	tree.keepDatabaseFiles()
 	defer func() {
 		// The snapshot is removed after the tree closes its directories in it.
 		tree.Close()
@@ -386,6 +420,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		},
 		Method:       method,
 		Images:       archives.images,
+		Dumps:        dumpMetadata,
 		Host:         w.captureHost(ctx, inspected, app),
 		Architecture: w.Architecture,
 		StartedAt:    state.StartedAt,
@@ -403,7 +438,6 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		state.Metadata.MountSources = append(state.Metadata.MountSources, backup.MountSource{Source: path.Source, Mode: uint32(info.Mode()), UserID: owner.Uid, GroupID: owner.Gid})
 	}
 	state.phase("prepare_tree")
-	source := snapshot.SourceInfo{Host: w.NodeID.String(), UserName: "synod", Path: request.AppID.String()}
 	// Without a readable previous snapshot, the backup reads every file.
 	previous, err := r.LatestFiles(ctx, w.InstallationID, request.AppID, request.DestinationID)
 	if err != nil {
@@ -462,20 +496,6 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	final, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	var dumps []kfs.Entry
-	var streams []*dumpFile
-	for _, c := range inspected {
-		if database := databases[c.ID]; database != "" {
-			stream, metadata, err := newDump(w.Docker, c, database)
-			if err != nil {
-				state.FailureCode = "database_dump_failed"
-				return w.finish(ctx, request, &state, r)
-			}
-			dumps = append(dumps, stream)
-			streams = append(streams, stream)
-			state.Metadata.Dumps = append(state.Metadata.Dumps, metadata)
-		}
-	}
 	tree.images = archives.entries
 	root, err := tree.Root(final, definitions, dumps...)
 	if err == nil {

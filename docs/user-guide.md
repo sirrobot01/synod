@@ -129,10 +129,14 @@ Other data is copied while the app runs.
 On supported btrfs, ZFS, and LVM filesystems, Synod copies from filesystem snapshots.
 Each filesystem has its own capture time.
 On other disks, Synod reads a file again when it changed during the copy.
-These methods do not guarantee agreement between all files and databases in an app.
-New apps receive the backup schedule automatically.
-A successful copy has partial protection while app consistency remains unverified.
+An app gets full protection when one filesystem snapshot holds all of its data.
+This includes the database data directories.
+Synod then also copies the database files from that snapshot.
+A restore uses these files, as after a power cut. The dumps stay as a fallback.
+Put the app data and the Docker volumes on one btrfs subvolume, ZFS dataset, or LVM volume to get full protection.
+Other copies have partial protection.
 Synod does not pause writes to gain full-protection status.
+New apps receive the backup schedule automatically.
 
 Check the status:
 

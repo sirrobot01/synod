@@ -387,10 +387,13 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 			if result, ok := good[key]; ok {
 				status.LastGood = &result
 				status.DataLossWindowSeconds = new(max(0, int64(now.Sub(result.StartedAt).Seconds())))
-				// Current captures prove at most one filesystem state. No supported
-				// live app export yet establishes agreement across all app resources.
-				status.State = backup.Partial
-				status.LimitCodes = []string{backup.AppConsistencyUnverified}
+				// Only one filesystem snapshot of every app root, including the database
+				// data directories, establishes agreement across the app's resources.
+				status.State = backup.Protected
+				if result.Consistency != backup.ConsistencyFilesystem {
+					status.State = backup.Partial
+					status.LimitCodes = []string{backup.AppConsistencyUnverified}
+				}
 				if !status.Selected {
 					status.State = backup.Retained
 				} else if result.StartedAt.Before(status.DueAt) {
@@ -407,7 +410,7 @@ func (s *Store) ProtectionPlan(ctx context.Context) (backup.ProtectionPlan, erro
 					status.State = backup.ProtectionState(op.Status)
 				} else if op.Status == operation.Failed {
 					status.State = backup.Failed
-				} else if status.State == backup.Partial && status.LastGood != nil && len(status.LastGood.WarningCodes) > 0 {
+				} else if (status.State == backup.Partial || status.State == backup.Protected) && status.LastGood != nil && len(status.LastGood.WarningCodes) > 0 {
 					status.State = backup.Warning
 				}
 			}

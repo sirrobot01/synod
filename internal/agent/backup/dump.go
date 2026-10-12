@@ -11,12 +11,44 @@ import (
 
 	kfs "github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/fs/virtualfs"
+	"github.com/kopia/kopia/snapshot"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/backup"
+	"github.com/sirrobot01/synod/internal/repository"
 )
 
 var errDump = errors.New("database dump failed; check that the database is running and its native tool and local administrator credentials are available")
+
+// stageDumps finishes native exports before any filesystem capture starts.
+// Only encrypted repository objects reach disk. Publication belongs to the final app snapshot.
+func stageDumps(ctx context.Context, r *repository.Repository, dumps []kfs.Entry, source snapshot.SourceInfo) ([]kfs.Entry, error) {
+	prepared, err := r.UploadFiles(ctx, virtualfs.NewStaticDirectory("databases", dumps), source, false)
+	if err != nil {
+		return nil, err
+	}
+	root, err := r.PreparedEntry(ctx, prepared, ".")
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	directory, ok := root.(kfs.Directory)
+	if !ok {
+		return nil, repository.ErrSnapshotIncomplete
+	}
+	var entries []kfs.Entry
+	err = kfs.IterateEntries(ctx, directory, func(_ context.Context, entry kfs.Entry) error {
+		entries = append(entries, entry)
+		return nil
+	})
+	if err != nil {
+		for _, entry := range entries {
+			entry.Close()
+		}
+		return nil, err
+	}
+	return entries, nil
+}
 
 // dumpFile starts its command only when Kopia reads it. No plaintext dump reaches disk.
 type dumpFile struct {

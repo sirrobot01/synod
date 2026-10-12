@@ -436,15 +436,19 @@ Live and Dump copy files while the containers run:
 - Synod reads a path live when the snapshot cannot be complete: another filesystem is mounted below the path, a btrfs subvolume is nested below it, the required tools are absent, or the LVM volume has insufficient space or an unsupported state. btrfs snapshots are in `.synod-snapshots` at the top of the mounted filesystem. The agent removes snapshots that an interrupted backup left when it starts.
 - On other filesystems, Synod checks each file before upload. If its size or modification time changes during the read, Synod reads it again, up to 3 times. Files up to 8 MiB use memory. Larger files use a private temporary file. All parallel upload parts read the same captured copy. Synod removes the temporary file after upload. The temporary disk must have space for the large files that Synod copies at the same time. A capture fails if this disk is full.
 - A file that still changed is saved as read. The snapshot lists it under `changing`, and the result has the warning `files_changed_during_copy`.
-- Separate filesystems have separate snapshot times. Live file copies and native database dumps also have separate capture times. These methods do not establish consistency between all files and databases in an app. A valid database dump alone does not prove that the app can recover.
+- Separate filesystems have separate snapshot times. Live file copies and native database dumps also have separate capture times. These copies do not establish consistency between all files and databases in an app. A valid database dump alone does not prove that the app can recover.
+- Synod runs the native dumps before it takes the filesystem snapshots. The dumps go into the repository as encrypted objects. No plaintext dump reaches the disk.
+- When one snapshot holds every app root and every database data directory, Synod also copies the database data directories from that snapshot. The app files and the database files then hold the state of one moment. This is the state after a power cut, and each supported database recovers from it as from a crash.
 
 The manifest records each capture method and source under `captures`.
 A shared capture point identifies one filesystem snapshot.
-The `consistency` value is `filesystem_snapshot` only when all file roots use one snapshot and no independent database export is present.
-Other copies use `unverified`. Neither value proves agreement between all app resources.
-Successful copies show partial protection with `app_consistency_unverified`.
+The `consistency` value is `filesystem_snapshot` only when one snapshot holds all file roots and all database data directories, and no SQLite file or changing file needed a separate read.
+Other copies use `unverified`.
+A copy with `filesystem_snapshot` gives full protection. Other successful copies show partial protection with `app_consistency_unverified`.
 Running, failed, and overdue states still show the consistency limit.
-Full protection stays unavailable until Synod supports and verifies a live export for the whole app.
+A restore of a `filesystem_snapshot` copy writes the saved database files and does not load the dumps.
+A restore of another copy loads the dumps into new database data.
+`filesystem_snapshot` does not prove that the app works after restore. Restore drills check that.
 
 Stop is an explicit choice for an app that needs a stopped copy.
 With Stop, Synod keeps database containers running for their native dumps.

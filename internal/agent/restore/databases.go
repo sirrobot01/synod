@@ -28,6 +28,13 @@ func prepareDatabases(ctx context.Context, api *client.Client, r *repository.Rep
 			return &failure{Code: "snapshot_invalid"}
 		}
 		seen[dump.ContainerID] = true
+		files, err := databaseFiles(p.Snapshot, dump.ContainerID)
+		if err != nil {
+			return err
+		}
+		if files {
+			continue
+		}
 		if err := loadDatabase(ctx, api, r, p, operationID, p.Containers[index], dump); err != nil {
 			return &failure{Code: "database_restore_failed", Resource: p.Definition.Services[p.Services[dump.ContainerID]].ContainerName, Cause: err}
 		}
@@ -38,6 +45,30 @@ func prepareDatabases(ctx context.Context, api *client.Client, r *repository.Rep
 		}
 	}
 	return nil
+}
+
+// databaseFiles reports whether the snapshot holds the database data directories of the
+// container. The data restore then writes them, and the export is not loaded. The files
+// are usable only from one filesystem snapshot of the whole app.
+func databaseFiles(saved backup.Snapshot, containerID string) (bool, error) {
+	copied, missing := 0, 0
+	for _, item := range saved.App.Definition.Paths {
+		if item.ContainerId != containerID || item.Status != "Dumped" {
+			continue
+		}
+		if slices.ContainsFunc(saved.Paths, func(path backup.Path) bool { return path.Source == item.Source }) {
+			copied++
+		} else {
+			missing++
+		}
+	}
+	if copied == 0 {
+		return false, nil
+	}
+	if missing > 0 || saved.Consistency != backup.ConsistencyFilesystem {
+		return false, &failure{Code: "snapshot_invalid"}
+	}
+	return true, nil
 }
 
 // loadDatabase imports into isolated data. It never publishes a port or mounts an excluded host path.
