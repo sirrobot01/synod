@@ -75,9 +75,14 @@ type Tree struct {
 	retry map[string]struct{}
 	// previous is the app root of the previous snapshot. Unchanged directories reuse its entries.
 	previous kfs.Directory
-	// unchanged and listed remember directory comparisons and their listings for one pass.
+	// unchanged, listed, and digests remember directory comparisons, listings, and listing
+	// digests for one pass.
 	unchanged map[string]bool
 	listed    map[string][]kfs.Entry
+	digests   map[string][sha256.Size]byte
+	// stored maps a stored directory object to the digest of the listing that produced it.
+	// The worker keeps it across backups, so an unchanged directory needs no stored listing.
+	stored *sync.Map
 	// databaseMissing is set when a database data directory could not be opened.
 	databaseMissing bool
 	// databaseFiles is set when the copy keeps the database data directories.
@@ -308,6 +313,7 @@ func (t *Tree) Root(ctx context.Context, definitions map[string][]byte, dumps ..
 	t.mu.Lock()
 	clear(t.unchanged)
 	clear(t.listed)
+	clear(t.digests)
 	t.mu.Unlock()
 	var entries []kfs.Entry
 	for _, root := range t.roots {
@@ -526,6 +532,74 @@ func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, e
 	return d.list(ctx)
 }
 
+// entries lists a directory once per pass. Iterate later takes the same listing.
+func (t *Tree) entries(ctx context.Context, d *sourceDirectory) ([]kfs.Entry, error) {
+	key := d.source.archive + "/" + d.path
+	t.mu.Lock()
+	entries, ok := t.listed[key]
+	t.mu.Unlock()
+	if ok {
+		return entries, nil
+	}
+	iterator, err := d.list(ctx)
+	if err != nil {
+		return nil, err
+	}
+	entries, err = kfs.GetAllEntries(ctx, &listedDirectory{d, iterator})
+	if err != nil {
+		return nil, err
+	}
+	t.mu.Lock()
+	if t.listed == nil {
+		t.listed = make(map[string][]kfs.Entry)
+	}
+	t.listed[key] = entries
+	t.mu.Unlock()
+	return entries, nil
+}
+
+// digest summarizes the metadata that Kopia's reuse rule compares, for a directory and
+// everything below it. A link makes the digest unusable, because its target is content.
+func (t *Tree) digest(ctx context.Context, d *sourceDirectory) ([sha256.Size]byte, bool, error) {
+	key := d.source.archive + "/" + d.path
+	t.mu.Lock()
+	sum, ok := t.digests[key]
+	t.mu.Unlock()
+	if ok {
+		return sum, true, nil
+	}
+	entries, err := t.entries(ctx, d)
+	if err != nil {
+		return sum, false, err
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%v %v\n", d.Mode(), d.Owner())
+	for _, entry := range entries {
+		fmt.Fprintf(h, "%q %v %v", entry.Name(), entry.Mode(), entry.Owner())
+		switch entry := entry.(type) {
+		case *sourceDirectory:
+			child, usable, err := t.digest(ctx, entry)
+			if err != nil || !usable {
+				return sum, false, err
+			}
+			h.Write(child[:])
+		case *sourceFile, *liveFile:
+			fmt.Fprintf(h, " %d %d", entry.Size(), entry.ModTime().UnixNano())
+		default:
+			return sum, false, nil
+		}
+		h.Write([]byte{'\n'})
+	}
+	copy(sum[:], h.Sum(nil))
+	t.mu.Lock()
+	if t.digests == nil {
+		t.digests = make(map[string][sha256.Size]byte)
+	}
+	t.digests[key] = sum
+	t.mu.Unlock()
+	return sum, true, nil
+}
+
 // DirEntryOrNil lets Kopia reuse the directory from the previous snapshot without a walk.
 // It returns that entry only when the directory and everything below it have the same
 // names, types, sizes, modification times, modes, and owners as in the previous snapshot.
@@ -581,7 +655,7 @@ func (t *Tree) sameAs(ctx context.Context, d *sourceDirectory, stored kfs.Direct
 		return same, nil
 	}
 	t.mu.Unlock()
-	same, err := t.compare(ctx, d, stored, key)
+	same, err := t.compare(ctx, d, stored)
 	if err != nil {
 		return false, err
 	}
@@ -594,26 +668,36 @@ func (t *Tree) sameAs(ctx context.Context, d *sourceDirectory, stored kfs.Direct
 	return same, nil
 }
 
-func (t *Tree) compare(ctx context.Context, d *sourceDirectory, stored kfs.Directory, key string) (bool, error) {
+func (t *Tree) compare(ctx context.Context, d *sourceDirectory, stored kfs.Directory) (bool, error) {
 	// A stored directory reports the newest time below it, so directories compare only
 	// their mode and owner. Their children are compared one by one.
 	if d.Mode() != stored.Mode() || d.Owner() != stored.Owner() {
 		return false, nil
 	}
-	iterator, err := d.list(ctx)
+	current, err := t.entries(ctx, d)
 	if err != nil {
 		return false, err
 	}
-	current, err := kfs.GetAllEntries(ctx, &listedDirectory{d, iterator})
+	sum, usable, err := t.digest(ctx, d)
 	if err != nil {
 		return false, err
 	}
-	t.mu.Lock()
-	if t.listed == nil {
-		t.listed = make(map[string][]kfs.Entry)
+	var object string
+	if entry, ok := stored.(snapshot.HasDirEntry); ok && t.stored != nil {
+		object = entry.DirEntry().ObjectID.String()
+		if known, ok := t.stored.Load(object); usable && ok && known.([sha256.Size]byte) == sum {
+			return true, nil
+		}
 	}
-	t.listed[key] = current
-	t.mu.Unlock()
+	same, err := t.compareListings(ctx, current, stored)
+	if same && usable && object != "" {
+		t.stored.Store(object, sum)
+	}
+	return same, err
+}
+
+// compareListings compares a source listing with the stored listing, entry by entry.
+func (t *Tree) compareListings(ctx context.Context, current []kfs.Entry, stored kfs.Directory) (bool, error) {
 	previous, err := kfs.GetAllEntries(ctx, stored)
 	if err != nil || len(previous) != len(current) {
 		return false, nil

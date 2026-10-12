@@ -48,6 +48,8 @@ type Worker struct {
 	images         sync.Map
 	// catalogs maps a destination to the newest catalog generation known to be stored there.
 	catalogs sync.Map
+	// storedDirs maps stored directory objects to their listing digests for Tree.stored.
+	storedDirs sync.Map
 	// connections keeps one open repository for each destination between backups.
 	connectionsMu sync.Mutex
 	connections   map[uuid.UUID]connection
@@ -401,6 +403,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return w.finish(ctx, request, &state, r)
 	}
 	tree.live = method == backup.Live || method == backup.Dump
+	tree.stored = &w.storedDirs
 	if previous != nil {
 		if stored, err := r.PreparedEntry(ctx, previous, "."); err == nil {
 			if directory, ok := stored.(kfs.Directory); ok {

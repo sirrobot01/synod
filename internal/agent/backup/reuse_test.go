@@ -3,6 +3,7 @@ package backup
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,13 +13,16 @@ import (
 )
 
 // copyWithPrevious takes one snapshot that may reuse directories of previous.
-func copyWithPrevious(t *testing.T, f *incrementalFixture, previous *snapshot.Manifest) (*snapshot.Manifest, string) {
+func copyWithPrevious(t *testing.T, f *incrementalFixture, previous *snapshot.Manifest, stored ...*sync.Map) (*snapshot.Manifest, string) {
 	t.Helper()
 	tree, err := NewTree(t.Context(), f.app, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tree.Close()
+	if len(stored) > 0 {
+		tree.stored = stored[0]
+	}
 	if previous != nil {
 		stored, err := f.r.PreparedEntry(t.Context(), previous, ".")
 		if err != nil {
@@ -92,5 +96,31 @@ func TestUnchangedDirectoriesReuseThePreviousSnapshot(t *testing.T) {
 		if data, err := os.ReadFile(filepath.Join(restored, change.check)); err != nil || string(data) != change.want {
 			t.Fatalf("%s: restored %q, %v", change.name, data, err)
 		}
+	}
+}
+
+func TestRememberedListingsSkipTheStoredListing(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "state"), []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newIncrementalFixture(t, source, false)
+	var stored sync.Map
+	first, _ := copyWithPrevious(t, f, nil, &stored)
+	second, _ := copyWithPrevious(t, f, first, &stored)
+	remembered := 0
+	stored.Range(func(any, any) bool { remembered++; return true })
+	if remembered == 0 || second.Stats.CachedFiles+second.Stats.NonCachedFiles != 0 {
+		t.Fatalf("the comparison was not remembered: %d entries, %+v", remembered, second.Stats)
+	}
+	// A wrong digest must not reuse a changed directory.
+	stored.Range(func(key, _ any) bool { stored.Store(key, [32]byte{1}); return true })
+	time.Sleep(10 * time.Millisecond)
+	if err := os.WriteFile(filepath.Join(source, "state"), []byte("v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, restored := copyWithPrevious(t, f, second, &stored)
+	if data, err := os.ReadFile(filepath.Join(restored, "state")); err != nil || string(data) != "v2" {
+		t.Fatalf("restored %q, %v", data, err)
 	}
 }
