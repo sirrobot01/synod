@@ -15,7 +15,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestProtectionRequiresApplicationConsistency(t *testing.T) {
+func TestProtectionRequiresOneAppCapture(t *testing.T) {
 	s, ca := open(t), authority(t)
 	node, _ := join(t, s, ca)
 	session := uuid.New()
@@ -68,6 +68,13 @@ func TestProtectionRequiresApplicationConsistency(t *testing.T) {
 			t.Fatal(err)
 		}
 		app := plan.Apps[0]
+		if scope == backup.ConsistencyFilesystem {
+			// One filesystem snapshot of every root, with the database files, is one capture time.
+			if app.State != backup.Protected || len(app.LimitCodes) != 0 || app.Targets[0].State != backup.Protected || len(app.Targets[0].LimitCodes) != 0 {
+				t.Fatalf("a coherent snapshot did not give full protection: %+v", app)
+			}
+			continue
+		}
 		if app.State != backup.Partial || !slices.Contains(app.LimitCodes, backup.AppConsistencyUnverified) || app.DataLossWindowSeconds == nil {
 			t.Fatalf("scope %q claimed full protection or lost its saved copy: %+v", scope, app)
 		}

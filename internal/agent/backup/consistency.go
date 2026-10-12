@@ -13,6 +13,9 @@ func (t *Tree) captureEvidence(method backup.Method, sqlite []string, dumps []ba
 	points := make(map[string]string)
 	var captures []backup.Capture
 	for _, root := range t.roots {
+		if root.database {
+			continue
+		}
 		capture := backup.Capture{Source: root.source, Method: "live_files"}
 		if method == backup.Stop {
 			capture.Method = "stopped_files"

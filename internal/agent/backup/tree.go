@@ -299,6 +299,10 @@ func (t *Tree) Root(ctx context.Context, definitions map[string][]byte, dumps ..
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		// A database root is copied only after keepDatabaseFiles accepts it.
+		if root.database {
+			continue
+		}
 		if root.path != "." {
 			sidecar, err := t.sqliteSidecar(root, root.root, root.path)
 			if err != nil {
