@@ -401,6 +401,15 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return w.finish(ctx, request, &state, r)
 	}
 	tree.live = method == backup.Live || method == backup.Dump
+	if previous != nil {
+		if stored, err := r.PreparedEntry(ctx, previous, "."); err == nil {
+			if directory, ok := stored.(kfs.Directory); ok {
+				tree.previous = directory
+			} else {
+				stored.Close()
+			}
+		}
+	}
 	// A live copy reads from a filesystem snapshot where the disk can take one.
 	var snapshots *fsSnapshots
 	if tree.live {

@@ -19,6 +19,7 @@ import (
 
 	kfs "github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/fs/virtualfs"
+	"github.com/kopia/kopia/snapshot"
 	"github.com/sirrobot01/synod/internal/agent/discovery"
 	"github.com/sirrobot01/synod/internal/backup"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -72,6 +73,11 @@ type Tree struct {
 	changing map[string]struct{}
 	// retry holds files that changed during the current live copy pass.
 	retry map[string]struct{}
+	// previous is the app root of the previous snapshot. Unchanged directories reuse its entries.
+	previous kfs.Directory
+	// unchanged and listed remember directory comparisons and their listings for one pass.
+	unchanged map[string]bool
+	listed    map[string][]kfs.Entry
 	// databaseMissing is set when a database data directory could not be opened.
 	databaseMissing bool
 	// databaseFiles is set when the copy keeps the database data directories.
@@ -298,6 +304,11 @@ func (t *Tree) nest() {
 
 // Root refreshes source metadata for each pass. Definition files stay in memory.
 func (t *Tree) Root(ctx context.Context, definitions map[string][]byte, dumps ...kfs.Entry) (kfs.Directory, error) {
+	// Each pass compares the source again.
+	t.mu.Lock()
+	clear(t.unchanged)
+	clear(t.listed)
+	t.mu.Unlock()
 	var entries []kfs.Entry
 	for _, root := range t.roots {
 		if err := ctx.Err(); err != nil {
@@ -357,6 +368,9 @@ type definitionFile struct{ kfs.StreamingFile }
 func (*definitionFile) Mode() os.FileMode { return 0600 }
 
 func (t *Tree) Close() {
+	if t.previous != nil {
+		t.previous.Close()
+	}
 	t.sqliteMu.Lock()
 	defer t.sqliteMu.Unlock()
 	for _, file := range t.sqlite {
@@ -501,6 +515,148 @@ func (d *sourceDirectory) Child(ctx context.Context, name string) (kfs.Entry, er
 	return kfs.IterateEntriesAndFindChild(ctx, d, name)
 }
 func (d *sourceDirectory) Iterate(ctx context.Context) (kfs.DirectoryIterator, error) {
+	key := d.source.archive + "/" + d.path
+	d.tree.mu.Lock()
+	entries, ok := d.tree.listed[key]
+	delete(d.tree.listed, key)
+	d.tree.mu.Unlock()
+	if ok {
+		return kfs.StaticIterator(entries, nil), nil
+	}
+	return d.list(ctx)
+}
+
+// DirEntryOrNil lets Kopia reuse the directory from the previous snapshot without a walk.
+// It returns that entry only when the directory and everything below it have the same
+// names, types, sizes, modification times, modes, and owners as in the previous snapshot.
+// Kopia reuses an unchanged file by the same rule.
+func (d *sourceDirectory) DirEntryOrNil(ctx context.Context) (*snapshot.DirEntry, error) {
+	stored := d.tree.storedDirectory(ctx, d.source.archive, d.path)
+	if stored == nil {
+		return nil, nil
+	}
+	same, err := d.tree.sameAs(ctx, d, stored)
+	if err != nil || !same {
+		return nil, err
+	}
+	entry, ok := stored.(snapshot.HasDirEntry)
+	if !ok {
+		return nil, nil
+	}
+	return entry.DirEntry(), nil
+}
+
+// storedDirectory finds a directory of a source root in the previous snapshot, or nil.
+func (t *Tree) storedDirectory(ctx context.Context, archive, relative string) kfs.Directory {
+	if t.previous == nil {
+		return nil
+	}
+	current := kfs.Entry(t.previous)
+	parts := []string{"paths", archive}
+	if relative != "." {
+		parts = append(parts, strings.Split(relative, string(filepath.Separator))...)
+	}
+	for _, part := range parts {
+		directory, ok := current.(kfs.Directory)
+		if !ok {
+			return nil
+		}
+		child, err := directory.Child(ctx, part)
+		if err != nil {
+			return nil
+		}
+		current = child
+	}
+	directory, _ := current.(kfs.Directory)
+	return directory
+}
+
+// sameAs compares a source directory with its stored copy, recursively. It keeps the
+// listing for Iterate, so a changed directory is not listed twice.
+func (t *Tree) sameAs(ctx context.Context, d *sourceDirectory, stored kfs.Directory) (bool, error) {
+	key := d.source.archive + "/" + d.path
+	t.mu.Lock()
+	if same, ok := t.unchanged[key]; ok {
+		t.mu.Unlock()
+		return same, nil
+	}
+	t.mu.Unlock()
+	same, err := t.compare(ctx, d, stored, key)
+	if err != nil {
+		return false, err
+	}
+	t.mu.Lock()
+	if t.unchanged == nil {
+		t.unchanged = make(map[string]bool)
+	}
+	t.unchanged[key] = same
+	t.mu.Unlock()
+	return same, nil
+}
+
+func (t *Tree) compare(ctx context.Context, d *sourceDirectory, stored kfs.Directory, key string) (bool, error) {
+	// A stored directory reports the newest time below it, so directories compare only
+	// their mode and owner. Their children are compared one by one.
+	if d.Mode() != stored.Mode() || d.Owner() != stored.Owner() {
+		return false, nil
+	}
+	iterator, err := d.list(ctx)
+	if err != nil {
+		return false, err
+	}
+	current, err := kfs.GetAllEntries(ctx, &listedDirectory{d, iterator})
+	if err != nil {
+		return false, err
+	}
+	t.mu.Lock()
+	if t.listed == nil {
+		t.listed = make(map[string][]kfs.Entry)
+	}
+	t.listed[key] = current
+	t.mu.Unlock()
+	previous, err := kfs.GetAllEntries(ctx, stored)
+	if err != nil || len(previous) != len(current) {
+		return false, nil
+	}
+	kfs.Sort(previous)
+	for i, entry := range current {
+		old := previous[i]
+		if entry.Name() != old.Name() || entry.Mode() != old.Mode() || entry.Owner() != old.Owner() {
+			return false, nil
+		}
+		switch entry := entry.(type) {
+		case *sourceDirectory:
+			directory, ok := old.(kfs.Directory)
+			if !ok {
+				return false, nil
+			}
+			if same, err := t.sameAs(ctx, entry, directory); err != nil || !same {
+				return false, err
+			}
+		case *sourceFile, *liveFile:
+			if entry.Size() != old.Size() || !entry.ModTime().Equal(old.ModTime()) {
+				return false, nil
+			}
+		default:
+			// A link target is stored as content. Kopia compares it in a normal walk.
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// listedDirectory hands one prepared listing to GetAllEntries.
+type listedDirectory struct {
+	*sourceDirectory
+	iterator kfs.DirectoryIterator
+}
+
+func (l *listedDirectory) Iterate(context.Context) (kfs.DirectoryIterator, error) {
+	return l.iterator, nil
+}
+
+// list reads the directory, applies exclusions, and creates its entries.
+func (d *sourceDirectory) list(ctx context.Context) (kfs.DirectoryIterator, error) {
 	root, err := openDirectory(d.source.root, d.path)
 	if err != nil {
 		return nil, err
