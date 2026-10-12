@@ -67,6 +67,13 @@ func (w *Worker) captureImages(ctx context.Context, r *repository.Repository, ap
 		}
 	}()
 	savedFiles := make(map[string]backup.ImageVariant)
+	// The prior snapshot is opened once. Each saved archive is a child of its images directory.
+	var priorImages kfs.Directory
+	defer func() {
+		if priorImages != nil {
+			priorImages.Close()
+		}
+	}()
 	for i := range result.images {
 		current := &result.images[i]
 		c := app.Containers[i]
@@ -96,7 +103,19 @@ func (w *Worker) captureImages(ctx context.Context, r *repository.Repository, ap
 						return nil, backup.ErrInvalid
 					}
 				} else {
-					entry, err := r.SnapshotEntry(ctx, prior.ID, previous.Archive)
+					if priorImages == nil {
+						opened, err := r.SnapshotEntry(ctx, prior.ID, "images")
+						if err != nil {
+							return nil, err
+						}
+						directory, ok := opened.(kfs.Directory)
+						if !ok {
+							opened.Close()
+							return nil, backup.ErrInvalid
+						}
+						priorImages = directory
+					}
+					entry, err := priorImages.Child(ctx, path.Base(previous.Archive))
 					if err != nil {
 						return nil, err
 					}
