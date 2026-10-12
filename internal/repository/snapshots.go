@@ -69,6 +69,38 @@ func (r *Repository) LatestFiles(ctx context.Context, installationID, appID, des
 	return nil, nil
 }
 
+// PriorSnapshot returns the newest snapshot of one app at one destination and its files,
+// or nil. It reads the state that the backup's CheckInstallation refreshed, so it does not
+// ask the destination again. A snapshot that another device wrote since then is missed;
+// the backup then reads more files, and the result stays correct.
+func (r *Repository) PriorSnapshot(ctx context.Context, installationID, appID, destinationID uuid.UUID) (*backup.Snapshot, *snapshot.Manifest, error) {
+	entries, err := r.repo.FindManifests(ctx, map[string]string{"type": "synod.backup", "installation": installationID.String(), "app": appID.String(), "destination": destinationID.String()})
+	if err != nil {
+		return nil, nil, &Error{Action: "list app snapshots", Cause: err}
+	}
+	var newest *backup.Snapshot
+	for _, entry := range entries {
+		var saved backup.Snapshot
+		if _, err := r.repo.GetManifest(ctx, entry.ID, &saved); err != nil {
+			return nil, nil, &Error{Action: "read app snapshot", Cause: err}
+		}
+		if saved.ID.String() != entry.Labels["snapshot"] || saved.InstallationID != installationID || saved.App.ID != appID || saved.DestinationID != destinationID || saved.FilesID == "" || saved.RootID == "" || saved.CompletedAt.IsZero() {
+			return nil, nil, backup.ErrInvalid
+		}
+		if newest == nil || saved.CompletedAt.After(newest.CompletedAt) || (saved.CompletedAt.Equal(newest.CompletedAt) && saved.ID.String() < newest.ID.String()) {
+			newest = &saved
+		}
+	}
+	if newest == nil {
+		return nil, nil, nil
+	}
+	files, err := r.Files(ctx, *newest)
+	if err != nil {
+		return nil, nil, err
+	}
+	return newest, files, nil
+}
+
 // Files loads the Kopia files manifest of a listed snapshot. It refuses an incomplete root.
 func (r *Repository) Files(ctx context.Context, saved backup.Snapshot) (*snapshot.Manifest, error) {
 	files, err := snapshot.LoadSnapshot(ctx, r.repo, manifest.ID(saved.FilesID))

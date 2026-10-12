@@ -124,3 +124,36 @@ func TestRememberedListingsSkipTheStoredListing(t *testing.T) {
 		t.Fatalf("restored %q, %v", data, err)
 	}
 }
+
+func TestPriorSnapshotIsTheNewestAtThisDestination(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "state"), []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newIncrementalFixture(t, source, false)
+	here := f.metadata.DestinationID
+	if prior, files, err := f.r.PriorSnapshot(t.Context(), f.metadata.InstallationID, f.metadata.App.ID, here); err != nil || prior != nil || files != nil {
+		t.Fatalf("an empty repository has a prior snapshot: %v", err)
+	}
+	copyWithPrevious(t, f, nil)
+	time.Sleep(10 * time.Millisecond)
+	copyWithPrevious(t, f, nil)
+	time.Sleep(10 * time.Millisecond)
+	f.metadata.DestinationID = uuid.New()
+	copyWithPrevious(t, f, nil)
+	saved, err := f.r.Snapshots(t.Context(), f.metadata.InstallationID, f.metadata.App.ID)
+	if err != nil || len(saved) != 3 {
+		t.Fatalf("snapshots: %d, %v", len(saved), err)
+	}
+	var want uuid.UUID
+	for _, s := range saved {
+		if s.DestinationID == here {
+			want = s.ID // Snapshots lists newest first.
+			break
+		}
+	}
+	prior, files, err := f.r.PriorSnapshot(t.Context(), f.metadata.InstallationID, f.metadata.App.ID, here)
+	if err != nil || prior == nil || prior.ID != want || files == nil || files.RootObjectID().String() != prior.RootID {
+		t.Fatalf("prior snapshot: %+v, %v", prior, err)
+	}
+}

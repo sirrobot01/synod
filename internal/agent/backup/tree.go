@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -729,6 +730,32 @@ func (t *Tree) compareListings(ctx context.Context, current []kfs.Entry, stored 
 	return true, nil
 }
 
+// statChildren reads the status of each child. A large directory uses several goroutines,
+// because each status read is one system call and a small CPU spends most time there.
+func statChildren(root *os.Root, children []os.DirEntry) ([]os.FileInfo, error) {
+	infos := make([]os.FileInfo, len(children))
+	workers := 1
+	if len(children) > 256 {
+		workers = min(runtime.NumCPU(), 4)
+	}
+	var next atomic.Int64
+	errs := make([]error, workers)
+	var group sync.WaitGroup
+	for w := range workers {
+		group.Go(func() {
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(children) || errs[w] != nil {
+					return
+				}
+				infos[i], errs[w] = root.Lstat(children[i].Name())
+			}
+		})
+	}
+	group.Wait()
+	return infos, errors.Join(errs...)
+}
+
 // listedDirectory hands one prepared listing to GetAllEntries.
 type listedDirectory struct {
 	*sourceDirectory
@@ -774,8 +801,12 @@ func (d *sourceDirectory) list(ctx context.Context) (kfs.DirectoryIterator, erro
 	for _, child := range children {
 		names[child.Name()] = true
 	}
+	infos, err := statChildren(root, children)
+	if err != nil {
+		return nil, err
+	}
 	var entries []kfs.Entry
-	for _, child := range children {
+	for i, child := range children {
 		absolute := filepath.Join(d.absolute, child.Name())
 		if d.tree.skip(d.source.source, absolute) {
 			continue
@@ -795,10 +826,7 @@ func (d *sourceDirectory) list(ctx context.Context) (kfs.DirectoryIterator, erro
 			reason = "Media is skipped by default."
 			d.tree.skippedData.Store(true)
 		}
-		info, err := root.Lstat(child.Name())
-		if err != nil {
-			return nil, err
-		}
+		info := infos[i]
 		if !info.Mode().IsRegular() && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 			reason = "This path is not a regular file, directory, or link."
 		}

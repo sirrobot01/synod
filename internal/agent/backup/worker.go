@@ -313,19 +313,12 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	definitions["networks.json"] = raw
 	state.phase("inspect_containers")
-	// One listing finds the previous snapshot at this destination. Its files let unchanged
-	// files and saved images be reused. Without them, the backup reads and saves everything.
-	var prior *backup.Snapshot
-	var previous *snapshot.Manifest
-	if saved, err := r.Snapshots(ctx, w.InstallationID, request.AppID); err == nil {
-		for _, saved := range saved {
-			if saved.DestinationID == request.DestinationID {
-				if files, err := r.Files(ctx, saved); err == nil {
-					prior, previous = new(saved), files
-				}
-				break
-			}
-		}
+	// The previous snapshot at this destination comes from the state that CheckInstallation
+	// refreshed. Its files let unchanged files and saved images be reused. Without them,
+	// the backup reads and saves everything.
+	prior, previous, err := r.PriorSnapshot(ctx, w.InstallationID, request.AppID, request.DestinationID)
+	if err != nil {
+		prior, previous = nil, nil
 	}
 	state.phase("read_previous")
 	archives, err := w.captureImages(ctx, r, app, prior, previous)
