@@ -185,7 +185,9 @@ export interface WorkResult {
   consistency?: "unverified" | "filesystem_snapshot";
   contents?: number; read?: number; bytes_read?: number; containers?: number;
   maintenance?: "completed" | "claimed" | "handing_over";
+  checks?: Check[];
 }
+export interface Check { kind: string; resource: string; status: "passed" | "failed" | "unchecked"; detail?: string }
 export interface ProofStatus { id: string; node_id: string; destination_id?: string; state: OperationStatus; result: WorkResult }
 export interface AppPlan {
   app: App; enabled: boolean; settings_current: boolean; settings: CopySettings;

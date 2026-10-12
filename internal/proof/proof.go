@@ -175,7 +175,7 @@ func (r Result) Complete() bool {
 	return true
 }
 
-func (c Check) validate() error {
+func (c Check) Validate() error {
 	if !slices.Contains([]string{CheckDataFiles, CheckDatabaseContent, CheckContainerHealth, CheckPort, CheckHTTP, CheckAppFunction}, c.Kind) || !slices.Contains([]string{CheckPassed, CheckFailed, CheckUnchecked}, c.Status) || len(c.Resource) > 512 || len(c.Detail) > 512 || strings.ContainsFunc(c.Resource+c.Detail, unicode.IsControl) {
 		return ErrInvalid
 	}
@@ -198,7 +198,7 @@ func (e Event) Validate(request Request) error {
 		return ErrInvalid
 	}
 	for _, check := range r.Checks {
-		if check.validate() != nil {
+		if check.Validate() != nil {
 			return ErrInvalid
 		}
 	}

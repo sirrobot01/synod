@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/proof"
 )
 
 var ErrInvalid = errors.New("invalid restore request or result")
@@ -52,6 +53,8 @@ type Result struct {
 	Resource         string    `json:"resource,omitempty"`
 	RecoveryPending  []string  `json:"recovery_pending,omitempty"`
 	WarningCodes     []string  `json:"warning_codes,omitempty"`
+	// Checks verify the restored data and the started app. A failed check is a warning.
+	Checks []proof.Check `json:"checks,omitempty"`
 }
 
 type Event struct {
@@ -62,11 +65,16 @@ type Event struct {
 
 func (e Event) Validate(request Request) error {
 	r := e.Result
-	if request.Validate() != nil || e.ID != request.ID || (r.SnapshotID != uuid.Nil && request.SnapshotID != uuid.Nil && r.SnapshotID != request.SnapshotID) || (r.DestinationID != uuid.Nil && request.DestinationID != uuid.Nil && r.DestinationID != request.DestinationID) || (r.SafetySnapshotID != uuid.Nil && (!request.Replace || r.DestinationID == uuid.Nil)) || len(r.Resource) > 2048 || strings.ContainsFunc(r.Resource, unicode.IsControl) || len(r.ProjectDirectory) > 4096 || (r.ProjectDirectory != "" && (!filepath.IsAbs(r.ProjectDirectory) || strings.ContainsFunc(r.ProjectDirectory, unicode.IsControl))) || len(r.RecoveryPending) > 256 || len(r.WarningCodes) > 3 {
+	if request.Validate() != nil || e.ID != request.ID || (r.SnapshotID != uuid.Nil && request.SnapshotID != uuid.Nil && r.SnapshotID != request.SnapshotID) || (r.DestinationID != uuid.Nil && request.DestinationID != uuid.Nil && r.DestinationID != request.DestinationID) || (r.SafetySnapshotID != uuid.Nil && (!request.Replace || r.DestinationID == uuid.Nil)) || len(r.Resource) > 2048 || strings.ContainsFunc(r.Resource, unicode.IsControl) || len(r.ProjectDirectory) > 4096 || (r.ProjectDirectory != "" && (!filepath.IsAbs(r.ProjectDirectory) || strings.ContainsFunc(r.ProjectDirectory, unicode.IsControl))) || len(r.RecoveryPending) > 256 || len(r.WarningCodes) > 4 || len(r.Checks) > 1024 {
 		return ErrInvalid
 	}
 	for i, warning := range r.WarningCodes {
-		if !slices.Contains([]string{"excluded_paths", "destination_unavailable", "cleanup_pending"}, warning) || slices.Contains(r.WarningCodes[:i], warning) {
+		if !slices.Contains([]string{"excluded_paths", "destination_unavailable", "cleanup_pending", "restore_check_failed"}, warning) || slices.Contains(r.WarningCodes[:i], warning) {
+			return ErrInvalid
+		}
+	}
+	for _, check := range r.Checks {
+		if check.Validate() != nil {
 			return ErrInvalid
 		}
 	}

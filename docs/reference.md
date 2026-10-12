@@ -738,6 +738,10 @@ An exposed image port that does not answer is unchecked, because the app may not
 Port checks need root, because the agent enters the container's network namespace.
 To make a service fully testable, give it a Docker health check or a port.
 
+An app restore runs the same data and app checks after it starts the app.
+A failed check does not undo the restore. The result has the warning `restore_check_failed`, and the checks show the failed requirement.
+`synod operation get ID` and the web Operation page list each check.
+
 The drill then removes the temporary containers, volumes, network, and directory.
 Cleanup must finish before the agent reports a result.
 After an interruption, the agent removes the drill and reports a failure.

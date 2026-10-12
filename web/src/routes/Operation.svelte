@@ -94,6 +94,11 @@
             {#if operation.result.recovery_pending?.length}<p class="callout danger">Recovery needs attention: <span class="mono">{operation.result.recovery_pending.join(", ")}</span>. Inspect these resources on the device before a new restore.</p>{/if}
             {#if operation.result.restart_pending?.length}<p class="callout danger">Containers still need a restart: <span class="mono">{operation.result.restart_pending.join(", ")}</span>.</p>{/if}
             {#each operation.result.warning_codes ?? [] as warning}<p class="callout mono">{warning}</p>{/each}
+            {#if operation.result.checks?.length}
+              <h2>Checks</h2>
+              {#if operation.result.checks.some((check) => check.status !== "passed")}<p class="callout">Proof is incomplete or failed. Each line that did not pass names a requirement that Synod could not verify.</p>{/if}
+              <div class="scroll"><table><thead><tr><th>Status</th><th>Check</th><th>Resource</th><th>Detail</th></tr></thead><tbody>{#each operation.result.checks as check}<tr><td>{check.status}</td><td class="mono">{check.kind}</td><td class="mono wrap">{check.resource}</td><td class="mono">{check.detail ?? ""}</td></tr>{/each}</tbody></table></div>
+            {/if}
           </section>
         {/if}
         <button onclick={read} disabled={reading}>{reading ? "Reading" : "Read again"}</button>

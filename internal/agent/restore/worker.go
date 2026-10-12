@@ -16,6 +16,7 @@ import (
 	agentbackup "github.com/sirrobot01/synod/internal/agent/backup"
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/backup"
+	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/restore"
 	"github.com/sirrobot01/synod/internal/runtime/compose"
@@ -54,6 +55,7 @@ type progress struct {
 	FailureCode      string                      `json:"failure_code,omitempty"`
 	Resource         string                      `json:"resource,omitempty"`
 	Warnings         []string                    `json:"warnings,omitempty"`
+	Checks           []proof.Check               `json:"checks,omitempty"`
 }
 
 // Execute starts admitted work once. A running record is recovered and never copied again.
@@ -162,6 +164,7 @@ func (w *Worker) run(ctx context.Context, request restore.Request, state *progre
 	if err != nil {
 		return err
 	}
+	state.Checks = checkData(ctx, api, r, p, directory)
 	if err := prepareDatabases(ctx, api, r, p, request.ID); err != nil {
 		return err
 	}
@@ -189,6 +192,10 @@ func (w *Worker) run(ctx context.Context, request restore.Request, state *progre
 	}
 	if err := checkStarted(ctx, api, p, request.ID); err != nil {
 		return err
+	}
+	state.Checks = append(state.Checks, checkApp(ctx, api, p, drillTargets(p))...)
+	if slices.ContainsFunc(state.Checks, func(check proof.Check) bool { return check.Status == proof.CheckFailed }) {
+		state.Warnings = append(state.Warnings, "restore_check_failed")
 	}
 	state.Phase = phaseStarted
 	return w.save(ctx, state)
@@ -302,6 +309,7 @@ func (w *Worker) finish(ctx context.Context, request restore.Request, state *pro
 	} else {
 		result.TargetAppID = uuid.NewSHA1(w.Backup.NodeID, []byte("compose:"+state.Project))
 		result.ProjectDirectory = filepath.Join(w.Directory, request.ID.String())
+		result.Checks = state.Checks
 	}
 	for _, warning := range state.Warnings {
 		if !slices.Contains(result.WarningCodes, warning) {

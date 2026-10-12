@@ -267,10 +267,14 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 					fmt.Fprintf(&output, "Maintenance: %s\n", result.Maintenance)
 				default:
 					fmt.Fprintf(&output, "Snapshot: %s\nContainers tested: %d\n", result.SnapshotID, result.Containers)
+					if op.Status == "succeeded" && !result.Complete() {
+						fmt.Fprintln(&output, "Proof: incomplete. Each unchecked line names a requirement that the drill could not verify.")
+					}
 				}
 				if result.Resource != "" {
 					fmt.Fprintf(&output, "Resource: %s\n", result.Resource)
 				}
+				writeChecks(&output, result.Checks)
 			}
 		}
 		if op.Kind == "backup" && len(op.Result) > 0 {
@@ -285,6 +289,12 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 				for _, code := range result.WarningCodes {
 					fmt.Fprintf(&output, "Warning: %s\n", code)
 				}
+			}
+		}
+		if op.Kind == "restore" && len(op.Result) > 0 {
+			var result restore.Result
+			if json.Unmarshal(op.Result, &result) == nil {
+				writeChecks(&output, result.Checks)
 			}
 		}
 	}
@@ -332,4 +342,15 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 		return 1
 	}
 	return code
+}
+
+// writeChecks prints drill and restore checks. Details hold counts and codes only.
+func writeChecks(output *strings.Builder, checks []proof.Check) {
+	for _, check := range checks {
+		fmt.Fprintf(output, "Check: %-9s %-16s %s", check.Status, check.Kind, check.Resource)
+		if check.Detail != "" {
+			fmt.Fprintf(output, " (%s)", check.Detail)
+		}
+		fmt.Fprintln(output)
+	}
 }
