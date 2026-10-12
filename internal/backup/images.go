@@ -38,16 +38,16 @@ func (image Image) Validate() error {
 	if image.ContainerID == "" || image.Reference == "" || len(image.Variants) == 0 || len(image.Variants) > 2 || len(image.Architectures) != len(image.Variants) {
 		return ErrInvalid
 	}
-	source := false
 	seen := make(map[string]bool)
 	for _, variant := range image.Variants {
 		if variant.Validate() != nil || seen[variant.Architecture] || !slices.Contains(image.Architectures, variant.Architecture) {
 			return ErrInvalid
 		}
 		seen[variant.Architecture] = true
-		source = source || variant.ID == image.SourceID
 	}
-	if !source {
+	// The containerd image store gives SourceID an index or manifest digest, so the
+	// running image is found by its platform, not by its ID.
+	if !seen[image.SourceArchitecture] {
 		return ErrInvalid
 	}
 	return nil

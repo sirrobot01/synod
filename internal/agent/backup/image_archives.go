@@ -16,6 +16,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	kfs "github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/fs/virtualfs"
+	"github.com/moby/moby/client"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/runtime/image"
@@ -72,6 +74,7 @@ func (w *Worker) captureImages(ctx context.Context, r *repository.Repository, ap
 		if !slices.Contains(current.Architectures, sourceArchitecture) {
 			return nil, &image.Error{Code: image.InvalidManifest}
 		}
+		current.SourceArchitecture = sourceArchitecture
 		for _, architecture := range current.Architectures {
 			var previous *backup.ImageVariant
 			if prior != nil {
@@ -108,7 +111,10 @@ func (w *Worker) captureImages(ctx context.Context, r *repository.Repository, ap
 				continue
 			}
 			var img v1.Image
-			id := current.SourceID
+			// id is the config digest of this platform. It names the image in both Docker
+			// image stores. The containerd store gives a running image an index or manifest
+			// digest instead, so the source variant takes its id from the saved archive.
+			id := ""
 			if !current.LocalOnly {
 				reference := current.Reference
 				if evidence, ok := w.images.Load(current.Reference); ok && evidence.(image.Resolution).Manifests[architecture] != "" {
@@ -127,9 +133,50 @@ func (w *Worker) captureImages(ctx context.Context, r *repository.Repository, ap
 					return nil, err
 				}
 				id = config.String()
-				if architecture == sourceArchitecture && id != current.SourceID {
+			}
+			if architecture != sourceArchitecture {
+				if existing, ok := savedFiles["images/"+strings.TrimPrefix(id, "sha256:")+".tar"]; ok {
+					if existing.Architecture != architecture {
+						return nil, backup.ErrInvalid
+					}
+					current.Variants = append(current.Variants, existing)
+					continue
+				}
+			}
+			file, digest, size, err := image.StageArchive(ctx, func(output io.Writer) error {
+				if architecture != sourceArchitecture {
+					ref, err := name.NewDigest("synod.invalid/image@" + id)
+					if err != nil {
+						return err
+					}
+					return tarball.Write(ref, img, output)
+				}
+				// A multi-platform image must give one platform. An older daemon refuses the
+				// platform option; its classic store holds one platform for the image ID.
+				input, err := w.Docker.ImageSave(ctx, []string{current.SourceID}, client.ImageSaveWithPlatforms(ocispec.Platform{OS: "linux", Architecture: architecture}))
+				if err != nil {
+					if input, err = w.Docker.ImageSave(ctx, []string{current.SourceID}); err != nil {
+						return err
+					}
+				}
+				_, copyErr := io.Copy(output, input)
+				return errors.Join(copyErr, input.Close())
+			})
+			if file != nil {
+				result.files = append(result.files, file)
+			}
+			if err != nil {
+				return nil, err
+			}
+			if architecture == sourceArchitecture {
+				saved, err := image.ArchiveConfig(ctx, file)
+				if err != nil {
+					return nil, err
+				}
+				if id != "" && saved != id {
 					return nil, &image.Error{Code: image.InvalidManifest}
 				}
+				id = saved
 			}
 			archive := "images/" + strings.TrimPrefix(id, "sha256:") + ".tar"
 			if existing, ok := savedFiles[archive]; ok {
@@ -139,25 +186,6 @@ func (w *Worker) captureImages(ctx context.Context, r *repository.Repository, ap
 				current.Variants = append(current.Variants, existing)
 				continue
 			}
-			file, digest, size, err := image.StageArchive(ctx, func(output io.Writer) error {
-				if architecture == sourceArchitecture {
-					input, err := w.Docker.ImageSave(ctx, []string{current.SourceID})
-					if err != nil {
-						return err
-					}
-					_, copyErr := io.Copy(output, input)
-					return errors.Join(copyErr, input.Close())
-				}
-				ref, err := name.NewDigest("synod.invalid/image@" + id)
-				if err != nil {
-					return err
-				}
-				return tarball.Write(ref, img, output)
-			})
-			if err != nil {
-				return nil, err
-			}
-			result.files = append(result.files, file)
 			if _, err := image.CheckArchive(ctx, file, id, architecture); err != nil {
 				return nil, err
 			}

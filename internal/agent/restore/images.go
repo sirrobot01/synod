@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -75,11 +77,13 @@ func loadImages(ctx context.Context, api *client.Client, r *repository.Repositor
 		done := make(chan error, 1)
 		go func() { err := tarball.Write(ref, images[id], writer); writer.CloseWithError(err); done <- err }()
 		response, err := api.ImageLoad(ctx, reader)
+		loaded := ""
 		if err == nil {
 			decoder := jsontext.NewDecoder(response)
 			for {
 				var message struct {
-					Error string `json:"error"`
+					Stream string `json:"stream"`
+					Error  string `json:"error"`
 				}
 				readErr := json.UnmarshalDecode(decoder, &message)
 				if errors.Is(readErr, io.EOF) {
@@ -89,6 +93,9 @@ func loadImages(ctx context.Context, api *client.Client, r *repository.Repositor
 					err = errors.New("Docker rejected the saved image")
 					break
 				}
+				if value, ok := strings.CutPrefix(strings.TrimSpace(message.Stream), "Loaded image ID: "); ok {
+					loaded = value
+				}
 			}
 			err = errors.Join(err, response.Close())
 		}
@@ -97,10 +104,33 @@ func loadImages(ctx context.Context, api *client.Client, r *repository.Repositor
 		if err != nil {
 			return &failure{Code: "image_load_failed", Resource: id, Cause: err}
 		}
-		inspected, err := api.ImageInspect(ctx, id)
-		if err != nil || inspected.ID != id || inspected.Os != "linux" || inspected.Architecture != architecture {
+		// The classic image store names the image by its config digest. The containerd store
+		// names it by a manifest digest that it writes on load. Both report the name.
+		if loaded == "" {
+			loaded = id
+		}
+		config, err := images[id].ConfigFile()
+		if err != nil {
+			return &failure{Code: "image_archive_invalid", Resource: id, Cause: err}
+		}
+		inspected, err := api.ImageInspect(ctx, loaded)
+		if err != nil || inspected.Os != "linux" || inspected.Architecture != architecture || inspected.RootFS.Type != "layers" || !slices.Equal(inspected.RootFS.Layers, layerDigests(config.RootFS.DiffIDs)) {
 			return &failure{Code: "image_load_failed", Resource: id, Cause: err}
+		}
+		for key, service := range p.Definition.Services {
+			if service.Image == id {
+				service.Image = loaded
+				p.Definition.Services[key] = service
+			}
 		}
 	}
 	return nil
+}
+
+func layerDigests(hashes []v1.Hash) []string {
+	digests := make([]string, len(hashes))
+	for i, hash := range hashes {
+		digests[i] = hash.String()
+	}
+	return digests
 }

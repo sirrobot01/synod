@@ -67,9 +67,8 @@ func (r *Repository) UploadFiles(ctx context.Context, root kfs.Entry, source sna
 // PublishSnapshot saves the files and metadata after the app has resumed.
 func (r *Repository) PublishSnapshot(ctx context.Context, prepared *snapshot.Manifest, metadata backup.Snapshot) (backup.Snapshot, error) {
 	for _, image := range metadata.Images {
-		if image.Validate() != nil || !slices.ContainsFunc(image.Variants, func(v backup.ImageVariant) bool {
-			return v.ID == image.SourceID && v.Architecture == metadata.Architecture
-		}) {
+		// Validate requires a saved variant for the running image's platform.
+		if image.Validate() != nil || image.SourceArchitecture != metadata.Architecture {
 			return backup.Snapshot{}, backup.ErrInvalid
 		}
 	}

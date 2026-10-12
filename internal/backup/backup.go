@@ -91,6 +91,8 @@ type Image struct {
 	Reference     string         `json:"reference"`
 	Architectures []string       `json:"architectures"`
 	LocalOnly     bool           `json:"local_only,omitzero"`
+	// SourceArchitecture is the platform of the running image. Its variant is always saved.
+	SourceArchitecture string `json:"source_architecture"`
 }
 
 // MountSource records the type and owner of a bind source, including skipped sources.

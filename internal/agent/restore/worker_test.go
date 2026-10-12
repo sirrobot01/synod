@@ -7,6 +7,7 @@ import (
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -59,6 +60,9 @@ func newRequest(f *fixture, replace bool) restore.Request {
 }
 
 func TestRestoreRebuildsLostAppAndReplacesOnRequest(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("published ports need the host check of a Linux Docker host")
+	}
 	f := newFixture(t, true)
 	api := f.worker.Docker
 	w := &Worker{Backup: f.worker, Directory: t.TempDir()}

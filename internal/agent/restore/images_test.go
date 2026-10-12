@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,12 +34,13 @@ import (
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/repository"
+	"github.com/sirrobot01/synod/internal/runtime/compose"
 	imagecheck "github.com/sirrobot01/synod/internal/runtime/image"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
 func TestImageRestoreChecksAllContentBeforeLoading(t *testing.T) {
-	for _, test := range []string{"good", "checksum", "wrong platform", "missing", "docker error"} {
+	for _, test := range []string{"good", "checksum", "wrong platform", "missing", "docker error", "changed layers"} {
 		t.Run(test, func(t *testing.T) {
 			r, err := repository.Create(t.Context(), repository.Location{Kind: "local", Path: t.TempDir()}, repository.Credentials{Password: "image-test-password"})
 			if err != nil {
@@ -70,7 +72,7 @@ func TestImageRestoreChecksAllContentBeforeLoading(t *testing.T) {
 				}
 				defer file.Close()
 				variant := backup.ImageVariant{Architecture: "arm64", ID: id.String(), Archive: "images/" + id.Hex + ".tar", Digest: digest, Size: size}
-				metadata.Images = append(metadata.Images, backup.Image{ContainerID: uuid.NewString(), SourceID: id.String(), Reference: "unreachable.invalid/image@" + id.String(), Architectures: []string{"arm64"}, Variants: []backup.ImageVariant{variant}})
+				metadata.Images = append(metadata.Images, backup.Image{ContainerID: uuid.NewString(), SourceID: id.String(), Reference: "unreachable.invalid/image@" + id.String(), Architectures: []string{"arm64"}, SourceArchitecture: "arm64", Variants: []backup.ImageVariant{variant}})
 				if test == "checksum" && index == 1 {
 					file.WriteAt([]byte("broken"), 0)
 				}
@@ -88,6 +90,8 @@ func TestImageRestoreChecksAllContentBeforeLoading(t *testing.T) {
 				t.Fatal(err)
 			}
 			requests, loaded := 0, 0
+			// Like the containerd image store, the fake names a loaded image by its manifest digest.
+			layers := make(map[string][]string)
 			docker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				requests++
 				if req.Method == "POST" && strings.HasSuffix(req.URL.Path, "/images/load") {
@@ -105,9 +109,20 @@ func TestImageRestoreChecksAllContentBeforeLoading(t *testing.T) {
 					}
 					if test == "docker error" {
 						io.WriteString(w, `{"error":"private daemon error"}`)
-					} else {
-						io.WriteString(w, `{"stream":"Loaded image"}`)
+						return
 					}
+					img, err := tarball.Image(func() (io.ReadCloser, error) { return io.NopCloser(io.NewSectionReader(file, 0, size)), nil }, nil)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					digest, _ := img.Digest()
+					config, _ := img.ConfigFile()
+					layers[digest.String()] = layerDigests(config.RootFS.DiffIDs)
+					if test == "changed layers" {
+						layers[digest.String()] = []string{"sha256:" + strings.Repeat("0", 64)}
+					}
+					io.WriteString(w, `{"stream":"Loaded image ID: `+digest.String()+`\n"}`)
 					return
 				}
 				if req.Method == "GET" && strings.HasSuffix(req.URL.Path, "/json") {
@@ -116,7 +131,14 @@ func TestImageRestoreChecksAllContentBeforeLoading(t *testing.T) {
 						ID           string `json:"Id"`
 						OS           string `json:"Os"`
 						Architecture string
-					}{id, "linux", "arm64"})
+						RootFS       struct {
+							Type   string
+							Layers []string
+						}
+					}{id, "linux", "arm64", struct {
+						Type   string
+						Layers []string
+					}{"layers", layers[id]}})
 					return
 				}
 				t.Errorf("unexpected Docker action %s %s", req.Method, req.URL.Path)
@@ -128,12 +150,22 @@ func TestImageRestoreChecksAllContentBeforeLoading(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer api.Close()
-			err = loadImages(t.Context(), api, r, &plan{Snapshot: saved}, "arm64")
+			p := &plan{Snapshot: saved, Definition: &compose.Definition{Services: make(map[string]compose.Service)}}
+			for i, saved := range saved.Images {
+				p.Definition.Services[strconv.Itoa(i)] = compose.Service{Image: saved.Variants[0].ID}
+			}
+			err = loadImages(t.Context(), api, r, p, "arm64")
 			if test == "good" {
 				if err != nil || loaded != 2 {
 					t.Fatalf("offline image load: %d %v", loaded, err)
 				}
-			} else if test == "docker error" {
+				// Services start the image that Docker named on load.
+				for _, service := range p.Definition.Services {
+					if _, ok := layers[service.Image]; !ok {
+						t.Fatalf("service image %s is not a loaded image", service.Image)
+					}
+				}
+			} else if test == "docker error" || test == "changed layers" {
 				if err == nil || strings.Contains(err.Error(), "private") {
 					t.Fatal("Docker load error was lost or exposed", err)
 				}

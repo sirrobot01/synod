@@ -75,6 +75,25 @@ func CheckArchive(ctx context.Context, file *os.File, id, architecture string) (
 	return img, ctx.Err()
 }
 
+// ArchiveConfig returns the config digest of the one image in a docker save archive.
+func ArchiveConfig(ctx context.Context, file *os.File) (string, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	img, err := tarball.Image(func() (io.ReadCloser, error) {
+		return &archiveSection{io.NewSectionReader(file, 0, info.Size())}, ctx.Err()
+	}, nil)
+	if err != nil {
+		return "", &Error{Code: InvalidManifest, Cause: err}
+	}
+	config, err := img.ConfigName()
+	if err != nil {
+		return "", &Error{Code: InvalidManifest, Cause: err}
+	}
+	return config.String(), ctx.Err()
+}
+
 // Keep Seek visible so tar readers skip layer bodies when they read metadata.
 type archiveSection struct{ *io.SectionReader }
 

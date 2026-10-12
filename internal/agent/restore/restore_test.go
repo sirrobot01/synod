@@ -206,6 +206,10 @@ func TestPrepareRestoredDataPreservesOverlappingMounts(t *testing.T) {
 	if len(p.Data) != 1 || p.Data[0].Relative != "project" {
 		t.Fatalf("overlapping project copies were not joined: %+v", p.Data)
 	}
+	// The containerd image store knows a saved image only after a load.
+	if err := loadImages(t.Context(), f.worker.Docker, f.repo, p, f.worker.Architecture); err != nil {
+		t.Fatal(err)
+	}
 	helper, err := prepareData(t.Context(), f.worker.Docker, f.repo, p, id, f.directory)
 	if helper != "" {
 		t.Cleanup(func() {
