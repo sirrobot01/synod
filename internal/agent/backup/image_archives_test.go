@@ -82,9 +82,10 @@ func TestImageArchivesSurviveRegistryLossAndRetention(t *testing.T) {
 	f.app.Containers = []*agentv1.DiscoveredContainer{{Id: "one", ImageId: ids["arm64"], Platform: "linux/arm64/v8", RepoDigests: []string{pin}}, {Id: "two", ImageId: ids["arm64"], Platform: "linux/arm64/v8", RepoDigests: []string{pin}}}
 	worker := &Worker{Docker: api}
 	var prior *backup.Snapshot
+	var priorFiles *snapshot.Manifest
 	var first uuid.UUID
 	for pass := range 2 {
-		archives, err := worker.captureImages(t.Context(), f.r, f.app, prior)
+		archives, err := worker.captureImages(t.Context(), f.r, f.app, prior, priorFiles)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -107,6 +108,9 @@ func TestImageArchivesSurviveRegistryLossAndRetention(t *testing.T) {
 			t.Fatal(err)
 		}
 		prior = &saved
+		if priorFiles, err = f.r.Files(t.Context(), saved); err != nil {
+			t.Fatal(err)
+		}
 		if pass == 0 {
 			first = saved.ID
 			registry.Close()

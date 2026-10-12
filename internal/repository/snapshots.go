@@ -62,14 +62,21 @@ func (r *Repository) LatestFiles(ctx context.Context, installationID, appID, des
 		return nil, err
 	}
 	for _, s := range saved {
-		if s.DestinationID != destinationID {
-			continue
+		if s.DestinationID == destinationID {
+			return r.Files(ctx, s)
 		}
-		files, err := snapshot.LoadSnapshot(ctx, r.repo, manifest.ID(s.FilesID))
-		if err != nil {
-			return nil, &Error{Action: "read previous snapshot files", Cause: err}
-		}
-		return files, nil
 	}
 	return nil, nil
+}
+
+// Files loads the Kopia files manifest of a listed snapshot. It refuses an incomplete root.
+func (r *Repository) Files(ctx context.Context, saved backup.Snapshot) (*snapshot.Manifest, error) {
+	files, err := snapshot.LoadSnapshot(ctx, r.repo, manifest.ID(saved.FilesID))
+	if err != nil {
+		return nil, &Error{Action: "read previous snapshot files", Cause: err}
+	}
+	if files.RootEntry == nil || files.RootObjectID().String() != saved.RootID || files.IncompleteReason != "" {
+		return nil, ErrSnapshotIncomplete
+	}
+	return files, nil
 }

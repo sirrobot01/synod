@@ -311,16 +311,22 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	definitions["networks.json"] = raw
 	state.phase("inspect_containers")
+	// One listing finds the previous snapshot at this destination. Its files let unchanged
+	// files and saved images be reused. Without them, the backup reads and saves everything.
 	var prior *backup.Snapshot
+	var previous *snapshot.Manifest
 	if saved, err := r.Snapshots(ctx, w.InstallationID, request.AppID); err == nil {
 		for _, saved := range saved {
 			if saved.DestinationID == request.DestinationID {
-				prior = new(saved)
+				if files, err := r.Files(ctx, saved); err == nil {
+					prior, previous = new(saved), files
+				}
 				break
 			}
 		}
 	}
-	archives, err := w.captureImages(ctx, r, app, prior)
+	state.phase("read_previous")
+	archives, err := w.captureImages(ctx, r, app, prior, previous)
 	if err != nil {
 		state.FailureCode = "image_capture_failed"
 		return w.finish(ctx, request, &state, r)
@@ -450,12 +456,6 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		state.Metadata.MountSources = append(state.Metadata.MountSources, backup.MountSource{Source: path.Source, Mode: uint32(info.Mode()), UserID: owner.Uid, GroupID: owner.Gid})
 	}
 	state.phase("prepare_tree")
-	// Without a readable previous snapshot, the backup reads every file.
-	previous, err := r.LatestFiles(ctx, w.InstallationID, request.AppID, request.DestinationID)
-	if err != nil {
-		previous = nil
-	}
-	state.phase("read_previous")
 	if method == backup.Stop {
 		var copied *snapshot.Manifest
 		root, err := tree.Root(ctx, definitions)

@@ -16,6 +16,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	kfs "github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/fs/virtualfs"
+	"github.com/kopia/kopia/snapshot"
 	"github.com/moby/moby/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirrobot01/synod/internal/backup"
@@ -40,7 +41,7 @@ func (a *imageArchives) Close() {
 }
 
 // captureImages reuses immutable repository content before asking a registry or Docker.
-func (w *Worker) captureImages(ctx context.Context, r *repository.Repository, app *agentv1.DiscoveredApp, prior *backup.Snapshot) (*imageArchives, error) {
+func (w *Worker) captureImages(ctx context.Context, r *repository.Repository, app *agentv1.DiscoveredApp, prior *backup.Snapshot, priorFiles *snapshot.Manifest) (*imageArchives, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 	if prior != nil {
@@ -104,7 +105,7 @@ func (w *Worker) captureImages(ctx context.Context, r *repository.Repository, ap
 					}
 				} else {
 					if priorImages == nil {
-						opened, err := r.SnapshotEntry(ctx, prior.ID, "images")
+						opened, err := r.PreparedEntry(ctx, priorFiles, "images")
 						if err != nil {
 							return nil, err
 						}
