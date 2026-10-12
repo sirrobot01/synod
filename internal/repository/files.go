@@ -48,6 +48,9 @@ func WriteBlobFile(root *os.Root, file string, data io.Reader, length int64, mod
 	if err == nil && !pack {
 		err = f.Sync()
 	}
+	if err == nil && pack {
+		err = startWriteback(f)
+	}
 	if err := errors.Join(err, f.Close()); err != nil {
 		return nil, err
 	}

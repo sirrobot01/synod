@@ -120,8 +120,10 @@ func newDevice(ctx context.Context, options *deviceOptions, create bool) (blob.S
 		}
 		return nil
 	}}
-	transport := &http.Transport{TLSClientConfig: tlsConfig, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second, MaxConnsPerHost: 8, MaxIdleConnsPerHost: 8, IdleConnTimeout: time.Minute}
-	s := &deviceStorage{options: *options, client: &http.Client{Transport: transport, Timeout: 2 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("device storage redirect refused") }}}
+	// An index write first makes every pack durable. On an SD card or a busy disk that can
+	// take minutes, so the timeouts allow a slow disk and still end a dead connection.
+	transport := &http.Transport{TLSClientConfig: tlsConfig, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 5 * time.Minute, MaxConnsPerHost: 8, MaxIdleConnsPerHost: 8, IdleConnTimeout: time.Minute}
+	s := &deviceStorage{options: *options, client: &http.Client{Transport: transport, Timeout: 10 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("device storage redirect refused") }}}
 	s.Storage = sharded.New(s, ".", sharded.Options{}, create)
 	response, err := s.request(ctx, http.MethodGet, "", nil, nil)
 	if err != nil {

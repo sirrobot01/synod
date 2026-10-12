@@ -464,6 +464,9 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		previous = copied
 		state.phase("first_copy")
 		if err != nil {
+			if w.Logger != nil {
+				w.Logger.Warn("backup_copy_failed", "operation_id", request.ID, "error", err, "cause", errors.Unwrap(err))
+			}
 			state.FailureCode = "first_copy_failed"
 			return w.finish(ctx, request, &state, r)
 		}
@@ -526,6 +529,10 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	sqliteFiles := slices.Sorted(maps.Keys(tree.sqlite))
 	tree.sqliteMu.Unlock()
 	if err != nil {
+		// The cause names a path or a destination error. It stays in the device log.
+		if w.Logger != nil {
+			w.Logger.Warn("backup_copy_failed", "operation_id", request.ID, "error", err, "cause", errors.Unwrap(err))
+		}
 		state.Prepared = nil
 		state.FailureCode = "final_copy_failed"
 		if sqliteErr != nil {

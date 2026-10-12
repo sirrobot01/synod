@@ -8,3 +8,5 @@ import "os"
 const deferredSync = false
 
 func syncFilesystem(*os.Root) error { return nil }
+
+func startWriteback(*os.File) error { return nil }
