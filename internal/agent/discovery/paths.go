@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -94,49 +95,15 @@ func measure(ctx context.Context, path *agentv1.DiscoveredPath) {
 	if info.Mode().IsRegular() {
 		path.SizeBytes, path.SizeKnown = info.Size(), true
 	} else if info.IsDir() {
-		root, err := os.OpenRoot(resolved)
-		if err != nil {
-			path.Reason = "Size is unknown. Check access to this directory."
-			return
-		}
-		defer root.Close()
-		opened, err := root.Stat(".")
-		if err != nil || !os.SameFile(info, opened) {
-			path.Reason = "Size is unknown. The directory changed during the scan."
-			return
-		}
-		scan, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		entries := 0
-		err = fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
+		if size, ok := sizes.get(resolved); ok {
+			path.SizeBytes, path.SizeKnown = size.bytes, size.known
+			if !size.known {
+				path.Reason = "Size is incomplete. The scan reached a limit or could not read a path."
 			}
-			if err := scan.Err(); err != nil {
-				return err
+		} else {
+			if measureDirectory(ctx, path, resolved, info, volume) {
+				sizes.put(resolved, measuredSize{bytes: path.SizeBytes, known: path.SizeKnown})
 			}
-			entries++
-			if entries > 100000 || path.SizeBytes > largeBytes {
-				return fs.SkipAll
-			}
-			if name != "." && Forbidden(filepath.Join(resolved, name), volume) {
-				return errors.New("directory contains a host system path")
-			}
-			if entry.Type()&os.ModeSymlink != 0 {
-				return nil
-			}
-			if entry.Type().IsRegular() {
-				info, err := entry.Info()
-				if err != nil {
-					return err
-				}
-				path.SizeBytes += info.Size()
-			}
-			return nil
-		})
-		path.SizeKnown = err == nil && entries <= 100000 && path.SizeBytes <= largeBytes
-		if !path.SizeKnown {
-			path.Reason = "Size is incomplete. The scan reached a limit or could not read a path."
 		}
 	} else {
 		path.Status, path.Reason = "Never", "Only regular files and directories can be copied."
@@ -144,5 +111,99 @@ func measure(ctx context.Context, path *agentv1.DiscoveredPath) {
 	}
 	if path.SizeBytes > largeBytes && path.Status != "Dumped" {
 		path.Status, path.Reason = "Large", "This path exceeds 20 GiB and is skipped by default."
+	}
+}
+
+// measureDirectory adds the sizes of the regular files below a directory. It reports
+// whether the result can be kept: a directory that cannot be opened or that changes
+// during the scan is measured again next time.
+func measureDirectory(ctx context.Context, path *agentv1.DiscoveredPath, resolved string, info os.FileInfo, volume bool) bool {
+	root, err := os.OpenRoot(resolved)
+	if err != nil {
+		path.Reason = "Size is unknown. Check access to this directory."
+		return false
+	}
+	defer root.Close()
+	opened, err := root.Stat(".")
+	if err != nil || !os.SameFile(info, opened) {
+		path.Reason = "Size is unknown. The directory changed during the scan."
+		return false
+	}
+	scan, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	entries := 0
+	err = fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := scan.Err(); err != nil {
+			return err
+		}
+		entries++
+		if entries > 100000 || path.SizeBytes > largeBytes {
+			return fs.SkipAll
+		}
+		if name != "." && Forbidden(filepath.Join(resolved, name), volume) {
+			return errors.New("directory contains a host system path")
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if entry.Type().IsRegular() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			path.SizeBytes += info.Size()
+		}
+		return nil
+	})
+	path.SizeKnown = err == nil && entries <= 100000 && path.SizeBytes <= largeBytes
+	if !path.SizeKnown {
+		path.Reason = "Size is incomplete. The scan reached a limit or could not read a path."
+	}
+	return true
+}
+
+// sizeLifetime is how long a measured directory size stays in use. The agent scans each
+// minute and each backup scans again, so the cache prevents a full walk on every scan.
+// A directory that grows past the Large limit is noticed within this time.
+const sizeLifetime = 10 * time.Minute
+
+type measuredSize struct {
+	bytes    int64
+	known    bool
+	measured time.Time
+}
+
+type sizeCache struct {
+	mu    sync.Mutex
+	sizes map[string]measuredSize
+}
+
+var sizes = &sizeCache{sizes: make(map[string]measuredSize)}
+
+func (c *sizeCache) get(path string) (measuredSize, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	size, ok := c.sizes[path]
+	if ok && time.Since(size.measured) > sizeLifetime {
+		delete(c.sizes, path)
+		return measuredSize{}, false
+	}
+	return size, ok
+}
+
+func (c *sizeCache) put(path string, size measuredSize) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	size.measured = time.Now()
+	c.sizes[path] = size
+	if len(c.sizes) > 4096 {
+		for key, old := range c.sizes {
+			if time.Since(old.measured) > sizeLifetime {
+				delete(c.sizes, key)
+			}
+		}
 	}
 }
