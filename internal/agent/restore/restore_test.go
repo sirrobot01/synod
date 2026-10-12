@@ -44,10 +44,19 @@ const helperImage = "alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c87
 const postgresImage = "postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0"
 
 // newFixture backs up one Compose project. With a database, the project also has a
-// PostgreSQL service with a named volume, a user network, and a published port.
+// PostgreSQL service with a named volume, a user network, and a published port that answers HTTP.
 func newFixture(t *testing.T, database bool) *fixture {
 	t.Helper()
+	if database {
+		return buildFixture(t, database, false, helperImage, serveStatus)
+	}
 	return buildFixture(t, database, false, helperImage)
+}
+
+// serveStatus answers HTTP on port 80 with the status line in /config/status, or 200 OK.
+// A drill can make the restored copy fail while its container keeps running.
+func serveStatus(config *container.Config, _ *container.HostConfig) {
+	config.Cmd = []string{"sh", "-c", `exec nc -lk -p 80 -e sh -c 'read -r line; status=$(cat /config/status 2>/dev/null || echo "200 OK"); printf "HTTP/1.1 %s\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" "$status"'`}
 }
 
 // buildFixture can also mount a media directory. Discovery marks it Large, and the backup includes it.

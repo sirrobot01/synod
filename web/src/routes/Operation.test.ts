@@ -129,3 +129,18 @@ describe("a failed operation", () => {
     expect(screen.getByText(/The result is unknown/)).toBeTruthy();
   });
 });
+
+describe("drill checks", () => {
+  it("lists each check and says when the proof is incomplete", async () => {
+    answers.op_drill = { ...operation("op_drill", "succeeded", "restore_drill"), result: { snapshot_id: "s1", containers: 2, checks: [
+      { kind: "data_files", resource: "/srv/app", status: "passed", detail: "files=2 bytes=27" },
+      { kind: "app_function", resource: "worker", status: "unchecked", detail: "no_health_check_or_port" },
+    ] } };
+    open("op_drill");
+    await settle();
+    expect(screen.getByRole("heading", { name: "Checks" })).toBeTruthy();
+    expect(screen.getByText("app_function")).toBeTruthy();
+    expect(screen.getByText("no_health_check_or_port")).toBeTruthy();
+    expect(screen.getByText(/Proof is incomplete or failed/)).toBeTruthy();
+  });
+});

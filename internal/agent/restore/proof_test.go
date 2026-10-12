@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -26,7 +27,8 @@ func TestProofRestoresIsolatedDataChecksRunningContainersAndCleansUp(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, fail := range []bool{false, true} {
+	for _, mode := range []string{"working", "stopped", "broken"} {
+		fail := mode != "working"
 		request := proof.Request{Submission: proof.Submission{ID: uuid.New(), Kind: proof.Drill, NodeID: f.worker.NodeID, AppID: f.app.ID}, InstallationID: f.worker.InstallationID, RequestedAt: time.Now().UTC()}
 		t.Cleanup(func() { removeLabelled(context.Background(), api, request.ID, true) })
 		type outcome struct {
@@ -46,7 +48,7 @@ func TestProofRestoresIsolatedDataChecksRunningContainersAndCleansUp(t *testing.
 			}
 			current, err := api.ContainerInspect(t.Context(), name, client.ContainerInspectOptions{})
 			if err == nil && current.Container.State.Running {
-				if current.Container.HostConfig.NetworkMode != "none" || len(current.Container.HostConfig.PortBindings) != 0 || current.Container.Config.Labels["synod.test"] != "" {
+				if len(current.Container.NetworkSettings.Networks) != 1 || current.Container.NetworkSettings.Networks[drillNetwork(request.ID)] == nil || len(current.Container.HostConfig.PortBindings) != 0 || current.Container.Config.Labels["synod.test"] != "" {
 					t.Fatal("drill kept live app connections or automation labels")
 				}
 				break
@@ -55,11 +57,17 @@ func TestProofRestoresIsolatedDataChecksRunningContainersAndCleansUp(t *testing.
 				t.Fatal("drill did not start")
 			}
 		}
-		if fail {
+		switch mode {
+		case "stopped":
 			if _, err := api.ContainerStop(t.Context(), name, client.ContainerStopOptions{Timeout: new(1)}); err != nil {
 				t.Fatal(err)
 			}
-		} else {
+		case "broken":
+			// The container keeps running, but the restored app answers with a server error.
+			if err := execCommand(t.Context(), api, name, []string{"sh", "-c", "echo '500 Internal Server Error' > /config/status"}, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+		default:
 			var data bytes.Buffer
 			if err := execCommand(t.Context(), api, name, []string{"cat", "/config/state"}, nil, &data); err != nil || data.String() != "private-restored-value" {
 				t.Fatalf("drill file differs: %v", err)
@@ -77,14 +85,36 @@ func TestProofRestoresIsolatedDataChecksRunningContainersAndCleansUp(t *testing.
 		out := <-done
 		cancel()
 		wantStatus, wantFailure := "succeeded", ""
-		if fail {
+		switch mode {
+		case "stopped":
 			wantStatus, wantFailure = "failed", "drill_container_stopped"
+		case "broken":
+			wantStatus, wantFailure = "failed", "drill_check_failed"
+			// Port probes enter the container's network namespace. They need a root agent on Linux.
+			if slices.ContainsFunc(out.result.Checks, func(check proof.Check) bool { return check.Detail == "namespace_unavailable" }) {
+				wantStatus, wantFailure = "succeeded", ""
+			}
 		}
 		if out.err != nil || out.result.FailureCode != wantFailure || (proof.Event{ID: request.ID, Status: wantStatus, Result: out.result}).Validate(request) != nil {
 			t.Fatalf("drill result: %+v %v", out.result, out.err)
 		}
 		if !fail && (out.result.Containers != 2 || out.result.CompletedAt.Sub(out.result.StartedAt) < 30*time.Second) {
 			t.Fatal("drill did not observe both containers")
+		}
+		if mode == "working" {
+			for _, kind := range []string{proof.CheckDataFiles, proof.CheckDatabaseContent} {
+				if !slices.ContainsFunc(out.result.Checks, func(check proof.Check) bool { return check.Kind == kind && check.Status == proof.CheckPassed }) {
+					t.Fatalf("drill did not pass %s: %+v", kind, out.result.Checks)
+				}
+			}
+			if !slices.ContainsFunc(out.result.Checks, func(check proof.Check) bool {
+				return check.Kind == proof.CheckHTTP && check.Status == proof.CheckPassed
+			}) && !slices.ContainsFunc(out.result.Checks, func(check proof.Check) bool { return check.Detail == "namespace_unavailable" }) {
+				t.Fatalf("drill did not check the app response: %+v", out.result.Checks)
+			}
+		}
+		if mode == "broken" && wantFailure != "" && out.result.Resource != proof.CheckHTTP+" app:80" {
+			t.Fatalf("drill named the wrong failed check: %q", out.result.Resource)
 		}
 		if _, err := os.Stat(filepath.Join(w.Directory, request.ID.String())); !os.IsNotExist(err) {
 			t.Fatal("drill kept its scratch directory", err)
@@ -96,6 +126,9 @@ func TestProofRestoresIsolatedDataChecksRunningContainersAndCleansUp(t *testing.
 		}
 		if list, err := api.VolumeList(t.Context(), client.VolumeListOptions{Filters: filters}); err != nil || len(list.Items) != 0 {
 			t.Fatal("drill left volumes", err)
+		}
+		if list, err := api.NetworkList(t.Context(), client.NetworkListOptions{Filters: filters}); err != nil || len(list.Items) != 0 {
+			t.Fatal("drill left its network", err)
 		}
 		if repeated, err := w.ExecuteProof(t.Context(), request); err != nil || !reflect.DeepEqual(repeated, out.result) {
 			t.Fatal("completed drill ran again", err)
