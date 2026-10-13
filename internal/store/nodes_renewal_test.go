@@ -117,3 +117,71 @@ func TestAgentRenewsItsCertificateOverItsSession(t *testing.T) {
 		t.Fatalf("peers still pin an expired certificate: %v", hashes)
 	}
 }
+
+func TestDeviceReclaimsItsIdentityWithABoundToken(t *testing.T) {
+	s, ca := open(t), authority(t)
+	request := func(signer ed25519.PrivateKey) []byte {
+		t.Helper()
+		der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, signer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return der
+	}
+	leaf := func(certificatePEM string) *x509.Certificate {
+		t.Helper()
+		block, _ := pem.Decode([]byte(certificatePEM))
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return certificate
+	}
+	register := func(name string, node uuid.UUID) [32]byte {
+		t.Helper()
+		verifier := sha256.Sum256([]byte(name))
+		if _, err := s.RegisterEnrollmentToken(t.Context(), TokenRegistration{NodeID: node, ActorID: "admin", RequestID: name, IdempotencyKey: name, TokenVerifier: verifier, TTLSeconds: 3600}); err != nil {
+			t.Fatal(err)
+		}
+		return verifier
+	}
+	_, oldKey, _ := ed25519.GenerateKey(rand.Reader)
+	node := uuid.New()
+	first, err := s.EnrollAgent(t.Context(), EnrollmentRequest{NodeID: node, TokenVerifier: register("first", uuid.Nil), RequestID: uuid.New(), CSRDER: request(oldKey)}, ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordAgentSession(t.Context(), node, uuid.New(), &agentv1.Hello{NodeId: node.String(), Architecture: "amd64"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApproveNode(t.Context(), node, "admin", "approve"); err != nil {
+		t.Fatal(err)
+	}
+	// An unbound token never takes an existing device.
+	_, newKey, _ := ed25519.GenerateKey(rand.Reader)
+	if _, err := s.EnrollAgent(t.Context(), EnrollmentRequest{NodeID: node, TokenVerifier: register("unbound", uuid.Nil), RequestID: uuid.New(), CSRDER: request(newKey)}, ca); code(err) != EnrollmentConflict {
+		t.Fatalf("an unbound token took the device: %v", err)
+	}
+	listing, err := s.ListDestinations(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The device lost its state. An owner-issued device token reclaims its identity with a new key.
+	reclaimed, err := s.EnrollAgent(t.Context(), EnrollmentRequest{NodeID: node, TokenVerifier: register("reclaim", node), RequestID: uuid.New(), CSRDER: request(newKey)}, ca)
+	if err != nil {
+		t.Fatalf("reclaim: %v: %v", err, errors.Unwrap(err))
+	}
+	var unapproved bool
+	if err := s.db.QueryRowContext(t.Context(), `SELECT approved_at IS NULL FROM nodes WHERE id=?`, node).Scan(&unapproved); err != nil || !unapproved {
+		t.Fatal("a reclaimed device kept its approval", err)
+	}
+	if err := s.CheckAgentCertificate(t.Context(), node, leaf(first.CertificatePEM)); code(err) != EnrollmentUnauthorized {
+		t.Fatalf("the old key still works: %v", err)
+	}
+	if err := s.CheckAgentCertificate(t.Context(), node, leaf(reclaimed.CertificatePEM)); err != nil {
+		t.Fatalf("the new key does not work: %v", err)
+	}
+	if after, err := s.ListDestinations(t.Context()); err != nil || after.Revision != listing.Revision+1 {
+		t.Fatal("peers did not get a new plan revision for the new key", err)
+	}
+}

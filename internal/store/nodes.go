@@ -174,14 +174,20 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE id=?),EXISTS(SELECT 1 FROM nodes WHERE id=? AND (public_key_hash IS NOT NULL OR revoked_at IS NOT NULL))`, r.NodeID, r.NodeID).Scan(&exists, &enrolled); err != nil {
 		return EnrollmentResult{}, storeError(err)
 	}
+	reclaim := false
 	if enrolled && tokenNode.Valid {
 		// A device-bound token renews an expired device that kept its key. Its approval stays.
+		// With a new key, it lets a device that lost its state reclaim its identity. Its
+		// destinations and apps keep working, the owner approves it again, and the old key's
+		// certificates stop working. A revoked device cannot reclaim.
 		if err := tx.QueryRowContext(ctx, `SELECT public_key_hash FROM nodes WHERE id=? AND revoked_at IS NULL`, r.NodeID).Scan(&enrolledKey); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return EnrollmentResult{}, storeError(err)
 		}
-		if key, err := csrKeyHash(r.CSRDER); err != nil || enrolledKey == nil || !bytes.Equal(key[:], enrolledKey) {
+		key, err := csrKeyHash(r.CSRDER)
+		if err != nil || enrolledKey == nil {
 			return EnrollmentResult{}, &Error{Code: EnrollmentConflict}
 		}
+		reclaim = !bytes.Equal(key[:], enrolledKey)
 	} else if enrolled || (exists && !tokenNode.Valid) {
 		return EnrollmentResult{}, &Error{Code: EnrollmentConflict}
 	}
@@ -215,6 +221,14 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
 	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id,public_key_hash,enrolled_at) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET public_key_hash=excluded.public_key_hash,enrolled_at=excluded.enrolled_at`, r.NodeID, keyHash[:], now.UnixMilli()); err != nil {
 		return EnrollmentResult{}, storeError(err)
 	}
+	if reclaim {
+		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET approved_at=NULL,approved_by=NULL,session_id=NULL,connected_at=NULL WHERE id=?`, r.NodeID); err != nil {
+			return EnrollmentResult{}, storeError(err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE node_certificates SET revoked_at=? WHERE node_id=? AND revoked_at IS NULL`, now.UnixMilli(), r.NodeID); err != nil {
+			return EnrollmentResult{}, storeError(err)
+		}
+	}
 	if enrolledKey != nil {
 		// Peers pin certificate fingerprints. The plan revision delivers the new one.
 		if _, err := tx.ExecContext(ctx, `UPDATE destination_revision SET revision=revision+1`); err != nil {
@@ -228,7 +242,11 @@ func (s *Store) EnrollAgent(ctx context.Context, r EnrollmentRequest, ca *pki.CA
 	if _, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET node_id=?,consumed_at=?,enrollment_request_id=?,csr_hash=?,certificate_id=? WHERE id=?`, r.NodeID, now.UnixMilli(), r.RequestID, hash[:], id, tokenID); err != nil {
 		return EnrollmentResult{}, storeError(err)
 	}
-	if err := audit(ctx, tx, "enrollment:"+tokenID.String(), r.RequestID.String(), "node.enrolled", r.NodeID, now); err != nil {
+	action := "node.enrolled"
+	if reclaim {
+		action = "node.reclaimed"
+	}
+	if err := audit(ctx, tx, "enrollment:"+tokenID.String(), r.RequestID.String(), action, r.NodeID, now); err != nil {
 		return EnrollmentResult{}, err
 	}
 	if err := storeCommit(tx); err != nil {

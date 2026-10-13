@@ -126,13 +126,30 @@ func TestDeviceRenewsWithBoundTokenAndKeepsItsKeyAndApproval(t *testing.T) {
 		t.Fatalf("the controller does not accept the renewed certificate: %v", err)
 	}
 
-	// A bound token does not let another key take over the device.
+	// An unbound token never takes the device.
+	stranger, err := enrollment.Open(filepath.Join(parent, "stranger"), enrollment.Options{Identity: identity, AllowCreate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stranger.Close()
+	if _, err := stranger.Submit(t.Context(), enrollment.Config{Endpoint: https.URL, TokenFile: token("stranger-token", false), RootCAs: roots, Attempts: 1}); !errors.Is(err, enrollment.ErrConflict) {
+		t.Fatalf("an unbound token took the device: %v", err)
+	}
+	// A device that lost its state reclaims its identity with an owner-issued device token.
+	// Its new key replaces the old one, and the owner approves it again.
 	other, err := enrollment.Open(filepath.Join(parent, "other"), enrollment.Options{Identity: identity, AllowCreate: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if _, err := other.Submit(t.Context(), enrollment.Config{Endpoint: https.URL, TokenFile: token("takeover", true), RootCAs: roots, Attempts: 1}); !errors.Is(err, enrollment.ErrConflict) {
-		t.Fatalf("another key took over the device: %v", err)
+	if _, err := other.Submit(t.Context(), enrollment.Config{Endpoint: https.URL, TokenFile: token("reclaim", true), RootCAs: roots, Attempts: 1}); err != nil {
+		t.Fatalf("a device token did not reclaim the device: %v", err)
+	}
+	if err := metadata.CheckAgentCertificate(t.Context(), identity.NodeID, renewed.Certificate.Leaf); err == nil {
+		t.Fatal("the replaced key still works")
+	}
+	node, err = metadata.GetNode(t.Context(), identity.NodeID)
+	if err != nil || node.ApprovedAt != nil {
+		t.Fatal("a reclaimed device kept its approval", err)
 	}
 }

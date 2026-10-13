@@ -294,6 +294,7 @@ Agents renew their certificates with the same key when less than 10 days remain.
 The controller adds the new fingerprint to the plan. The agent uses the new certificate two minutes later.
 The controller renews its own transport and API certificates the same way.
 A device that missed its renewal recovers with `synod node join-token --device DEVICE` and `synod agent renew TOKEN`.
+A device that lost its agent state joins again with a token from `synod node join-token --device DEVICE`. It keeps its device ID, destinations, and apps. Its new key replaces the old key, the certificates of the old key are revoked, and the owner approves the device again. An unbound join token cannot take an existing device ID, and a revoked device cannot rejoin.
 The service accepts at most eight requests at once.
 Each blob is limited to 64 MiB.
 Each directory listing is limited to 20,000 entries.

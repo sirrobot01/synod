@@ -270,6 +270,19 @@ Upgrade the controller device first.
 Do not run `server init` or `agent join` again. Your devices keep their identities.
 For an agent that runs in Docker, see [Run the agent in Docker](#run-the-agent-in-docker).
 
+## Replace a device's agent state
+
+A device can lose its agent state, for example after a disk failure or a reinstall.
+It can join again as the same device. Its destinations and apps keep working.
+On the controller, create a token for that device:
+
+```sh
+synod node join-token --device DEVICE
+```
+
+On the device, join with that token. Then approve the device again.
+The old key of the device stops working.
+
 ## Certificates
 
 Synod renews its certificates automatically.

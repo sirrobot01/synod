@@ -60,7 +60,7 @@ func newJoinTokenCommand(app *app) *cobra.Command {
 			return nil
 		}}
 	command.Flags().DurationVar(&ttl, "ttl", 24*time.Hour, "How long the token stays valid (1m to 168h)")
-	command.Flags().StringVar(&device, "device", "", "Device name or UUID: a recovered device to join again, or a device whose certificate expired (synod agent renew)")
+	command.Flags().StringVar(&device, "device", "", "Device name or UUID: a recovered device or a device that lost its agent state to join again, or a device whose certificate expired (synod agent renew)")
 	return command
 }
 
