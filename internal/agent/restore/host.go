@@ -3,6 +3,7 @@ package restore
 import (
 	"context"
 	"errors"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"net"
 	"net/netip"
 	"os"
@@ -103,7 +104,11 @@ func checkHost(ctx context.Context, api *client.Client, p *plan, replaced []stri
 				}
 				if m.Type == "volume" && p.Definition.Volumes[m.Source].Name == original.Name {
 					v, err := api.VolumeInspect(ctx, original.Name, client.VolumeInspectOptions{})
-					if err != nil || v.Volume.Driver != original.Driver || len(v.Volume.Options) > 0 {
+					// A network share volume keeps its mount options. The target must mount the same kind of share.
+					remote := slices.ContainsFunc(p.Snapshot.App.Definition.Paths, func(item *agentv1.DiscoveredPath) bool {
+						return item.ContainerId == c.ID && item.Target == m.Target && item.Status == "Remote"
+					})
+					if err != nil || v.Volume.Driver != original.Driver || (len(v.Volume.Options) > 0 && (!remote || !host.Remote(v.Volume.Options["type"]))) {
 						return &failure{Code: "mount_unavailable", Resource: original.Name, Cause: err}
 					}
 				}

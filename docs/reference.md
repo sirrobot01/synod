@@ -218,9 +218,12 @@ Each path has a proposed status:
 | --- | --- |
 | Included | App files or state selected for each backup. |
 | Large | Media or more than 20 GiB. Skipped unless the user includes it for the app. |
+| Remote | A network share (NFS, SMB/CIFS, 9p, Ceph, GlusterFS, sshfs, rclone, s3fs, gcsfuse, WebDAV). Skipped unless the user includes it for the app. |
 | Dumped | A detected database data path. A native dump replaces the live data copy. |
 | Never | A host system path or an unsupported mount. |
 
+Discovery reads the mount table of the device. A path or a local volume on a network filesystem is Remote, and discovery does not scan it for size. Local FUSE pools, such as mergerfs and the Unraid user share, are local.
+A filesystem that is mounted below an app path is listed as its own path of kind `mount`, with its own status. Size scans and backups stop at each mount point.
 Discovery checks host system exclusions before it scans files.
 It does not follow links during a directory scan.
 Media paths are not scanned for size.
@@ -454,7 +457,7 @@ Otherwise it shows `partial` and one limit code for each missing requirement:
 | Limit | Cause | Remove it |
 | --- | --- | --- |
 | `app_consistency_unverified` | The copy is not `filesystem_snapshot`. | Put the app data and the database data on one btrfs subvolume, ZFS pool, or LVM volume. |
-| `data_excluded` | The copy skipped Large paths, media folders, or files over 20 GiB. | Include the paths with `synod protect APP --include-large PATH`. |
+| `data_excluded` | The copy skipped Large paths, network shares, media folders, or files over 20 GiB. | Include the paths with `synod protect APP --include-large PATH`. |
 | `image_platforms_limited` | The registry was unavailable. The copy holds only the source architecture of a registry image. | Back up again with registry access. |
 | `host_requirements_unverified` | The agent could not record the host ports or devices of a host-network service. | Run the agent as root. |
 | `container_layer_data` | A container keeps more than 64 MiB in its writable layer. No backup copies that layer. | Move the data to a volume or bind mount. |
@@ -651,6 +654,9 @@ The `data` directory holds the saved bind paths.
 Each saved volume becomes a new volume named `synod-OPERATION_ID-volumeN`.
 Synod applies the saved owners, modes, and times.
 A Large or Dumped bind path becomes an empty path with its saved owner and mode.
+A Remote path that the backup did not copy stays attached at its original host path. The target device must provide that path, for example by mounting the same share. A Remote volume keeps its network mount options.
+A drill never attaches a network share. It gives an uncopied Remote path an empty path instead.
+A nested mount is restored inside its parent path. A nested mount that the backup did not copy becomes an empty directory there.
 A Never path keeps its original host path.
 Before it creates app resources, Synod checks each required device and Never mount.
 A bind source must exist with the saved type, permissions, and owner.

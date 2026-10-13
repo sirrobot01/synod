@@ -1,6 +1,7 @@
 package backup
 
 import (
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 	"strings"
 	"testing"
 )
@@ -25,5 +26,19 @@ func TestImageNamesItsRunningPlatformNotItsStoreID(t *testing.T) {
 	unnamed.SourceArchitecture = ""
 	if unnamed.Validate() == nil {
 		t.Fatal("an image without its running platform name was accepted")
+	}
+}
+
+func TestNetworkSharesCanBeIncludedLikeLargePaths(t *testing.T) {
+	app := &agentv1.DiscoveredApp{Paths: []*agentv1.DiscoveredPath{
+		{Source: "/srv/app", Status: "Included"},
+		{Source: "/mnt/nas/photos", Status: "Remote"},
+		{Source: "/srv/app/media", Kind: "mount", Status: "Remote"},
+	}}
+	if err := CheckIncluded(app, []string{"/mnt/nas/photos", "/srv/app/media"}); err != nil {
+		t.Fatalf("whole network shares were refused: %v", err)
+	}
+	if CheckIncluded(app, []string{"/mnt/nas/photos/2024"}) == nil {
+		t.Fatal("a folder inside a network share was accepted")
 	}
 }

@@ -37,6 +37,10 @@ type dataRoot struct {
 	Source, Archive, Relative, Volume string
 	Mode                              os.FileMode
 	UserID, GroupID                   uint32
+	// Into is the 1-based index of the root that holds this one. A nested mount is written
+	// at Subpath inside its parent, because no container mounts it on its own.
+	Into    int
+	Subpath string
 }
 
 type sourceMapping struct {
@@ -56,7 +60,9 @@ type plan struct {
 }
 
 // makePlan only reads the repository. Every writable path belongs to the new restore directory.
-func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapshot, operationID uuid.UUID, directory, architecture string) (*plan, error) {
+// A restore attaches an uncopied network share at its original host path. A drill uses an
+// empty path instead, so it never reads or writes a share.
+func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapshot, operationID uuid.UUID, directory, architecture string, drill bool) (*plan, error) {
 	p := &plan{Snapshot: saved, Sources: make(map[string]sourceMapping)}
 	if saved.App.Definition == nil || len(saved.App.Definition.Containers) == 0 || len(saved.Images) != len(saved.App.Definition.Containers) {
 		return nil, &failure{Code: "snapshot_invalid"}
@@ -155,7 +161,7 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 			}
 			key := volumes[m.Name]
 			volume := p.Definition.Volumes[key]
-			if item.Status != "Never" && volume.Name == m.Name {
+			if !attached(saved, item, drill) && volume.Name == m.Name {
 				volume.Name = "synod-" + operationID.String() + "-" + key
 				p.Sources[m.Source] = sourceMapping{Root: len(p.Data)}
 				p.Data = append(p.Data, dataRoot{Source: m.Source, Volume: volume.Name, Mode: os.ModeDir | 0755})
@@ -205,6 +211,11 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 		if covered {
 			continue
 		}
+		if parent, subpath, ok := mountParent(p, saved, copied.Source); ok {
+			p.Sources[copied.Source] = sourceMapping{Root: parent, Subpath: subpath}
+			p.Data = append(p.Data, dataRoot{Source: copied.Source, Archive: copied.Archive, Mode: info.Mode(), Into: parent + 1, Subpath: subpath})
+			continue
+		}
 		relative := filepath.Join("data", fmt.Sprintf("path%d", len(p.Data)))
 		if copied.Source == saved.App.Definition.ProjectDirectory && info.IsDir() {
 			relative = "project"
@@ -215,6 +226,26 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 		p.Sources[copied.Source] = sourceMapping{Root: len(p.Data)}
 		p.Data = append(p.Data, dataRoot{Source: copied.Source, Archive: copied.Archive, Relative: relative, Mode: info.Mode()})
 	}
+	// A nested mount that the backup skipped becomes an empty directory in its parent.
+	for _, item := range saved.App.Definition.Paths {
+		if item.Kind != "mount" {
+			continue
+		}
+		if _, ok := p.Sources[item.Source]; ok {
+			continue
+		}
+		parent, subpath, ok := mountParent(p, saved, item.Source)
+		if !ok {
+			continue
+		}
+		mode, userID, groupID := os.ModeDir|0o755, uint32(0), uint32(0)
+		if index := slices.IndexFunc(saved.MountSources, func(source backup.MountSource) bool { return source.Source == item.Source }); index >= 0 && os.FileMode(saved.MountSources[index].Mode).IsDir() {
+			source := saved.MountSources[index]
+			mode, userID, groupID = os.FileMode(source.Mode), source.UserID, source.GroupID
+		}
+		p.Sources[item.Source] = sourceMapping{Root: parent, Subpath: subpath}
+		p.Data = append(p.Data, dataRoot{Source: item.Source, Mode: mode, UserID: userID, GroupID: groupID, Into: parent + 1, Subpath: subpath})
+	}
 	for _, c := range p.Containers {
 		key := p.Services[c.ID]
 		service := p.Definition.Services[key]
@@ -223,12 +254,12 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 			if item == nil {
 				return nil, &failure{Code: "snapshot_invalid"}
 			}
-			if item.Status == "Never" {
+			if attached(saved, item, drill) {
 				continue
 			}
 			mapped, ok := p.Sources[item.Source]
 			if !ok {
-				if item.Status != "Large" && item.Status != "Dumped" {
+				if item.Status != "Large" && item.Status != "Dumped" && item.Status != "Remote" {
 					return nil, &failure{Code: "source_path_unavailable", Resource: m.Target}
 				}
 				index := slices.IndexFunc(saved.MountSources, func(source backup.MountSource) bool { return source.Source == item.Source })
@@ -285,4 +316,31 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 		p.Warnings = append(p.Warnings, "excluded_paths")
 	}
 	return p, nil
+}
+
+// attached reports whether a restore keeps a mount at its original host path. Never mounts
+// stay attached. A network share that the backup did not copy stays attached in a restore.
+func attached(saved backup.Snapshot, item *agentv1.DiscoveredPath, drill bool) bool {
+	if item.Status == "Never" {
+		return true
+	}
+	return item.Status == "Remote" && !drill && !slices.ContainsFunc(saved.Paths, func(path backup.Path) bool { return path.Source == item.Source })
+}
+
+// mountParent finds the restored directory that holds a nested mount.
+func mountParent(p *plan, saved backup.Snapshot, source string) (int, string, bool) {
+	if !slices.ContainsFunc(saved.App.Definition.Paths, func(item *agentv1.DiscoveredPath) bool { return item.Kind == "mount" && item.Source == source }) {
+		return 0, "", false
+	}
+	best, subpath := -1, ""
+	for i, root := range p.Data {
+		if root.Into != 0 || !root.Mode.IsDir() || !strings.HasPrefix(source, root.Source+string(filepath.Separator)) {
+			continue
+		}
+		if best < 0 || len(root.Source) > len(p.Data[best].Source) {
+			best = i
+			subpath, _ = filepath.Rel(root.Source, source)
+		}
+	}
+	return best, subpath, best >= 0
 }

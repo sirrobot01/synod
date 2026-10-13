@@ -20,7 +20,7 @@ func TestDirectorySizesAreReusedUntilTheyExpire(t *testing.T) {
 	size := func() int64 {
 		t.Helper()
 		path := &agentv1.DiscoveredPath{Source: directory, Kind: "bind"}
-		measure(t.Context(), path)
+		measure(t.Context(), path, nil)
 		if !path.SizeKnown {
 			t.Fatalf("size unknown: %s", path.Reason)
 		}

@@ -51,6 +51,14 @@ func prepareData(ctx context.Context, api *client.Client, r *repository.Reposito
 		if root.Volume != "" {
 			target, name = fmt.Sprintf("/synod-volume-%d", i), "."
 		}
+		// A nested mount goes inside its parent, which an earlier root wrote.
+		if root.Into != 0 {
+			parent := p.Data[root.Into-1]
+			target, name = helperPath, filepath.ToSlash(filepath.Join(parent.Relative, root.Subpath))
+			if parent.Volume != "" {
+				target, name = fmt.Sprintf("/synod-volume-%d", root.Into-1), filepath.ToSlash(root.Subpath)
+			}
+		}
 		if root.Archive != "" {
 			if err := copyArchive(ctx, api, r, helper.ID, target, p.Snapshot.ID, root.Archive, name, true); err != nil {
 				return helper.ID, &failure{Code: "file_restore_failed", Resource: root.Source, Cause: err}

@@ -14,6 +14,11 @@ func TestRefuseUnsafeAndAmbiguousInventory(t *testing.T) {
 	if err := Validate(valid); err != nil {
 		t.Fatal(err)
 	}
+	share := proto.Clone(valid).(*agentv1.AppInventory)
+	share.Apps[0].Paths = append(share.Apps[0].Paths, &agentv1.DiscoveredPath{Kind: "mount", Status: "Remote", Source: "/srv/notes/media", ContainerId: "abc", Reason: "Network share."})
+	if err := Validate(share); err != nil {
+		t.Fatalf("a nested network share was refused: %v", err)
+	}
 	for name, change := range map[string]func(*agentv1.AppInventory){
 		"duplicate app":     func(v *agentv1.AppInventory) { v.Apps = append(v.Apps, v.Apps[0]) },
 		"partial failure":   func(v *agentv1.AppInventory) { v.FailureCode = "docker_scan_failed" },

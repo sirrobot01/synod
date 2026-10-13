@@ -97,7 +97,7 @@ func BlockedCode(app inventory.App) string {
 }
 
 // CheckIncluded accepts a path only if restore can place it. It must be a whole discovered
-// Large path, or a path inside an Included path that the copy skips by default, such as a
+// Large or Remote path, or a path inside an Included path that the copy skips by default, such as a
 // media folder or a file over 20 GiB. Dumped and Never paths stay excluded.
 func CheckIncluded(app *agentv1.DiscoveredApp, paths []string) error {
 	if err := ValidateIncluded(paths); err != nil {
@@ -110,7 +110,7 @@ func CheckIncluded(app *agentv1.DiscoveredApp, paths []string) error {
 		allowed := false
 		for _, discovered := range app.Paths {
 			source := filepath.Clean(discovered.Source)
-			if discovered.Status == "Large" && p == source {
+			if (discovered.Status == "Large" || discovered.Status == "Remote") && p == source {
 				allowed = true
 			}
 			if discovered.Status == "Included" && strings.HasPrefix(p, source+string(filepath.Separator)) {

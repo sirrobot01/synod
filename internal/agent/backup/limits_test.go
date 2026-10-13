@@ -33,6 +33,13 @@ func TestSnapshotLimitsNameEachGapInCoverage(t *testing.T) {
 	if limits := snapshotLimits(withLarge, []string{"/srv/media"}, tree, inspected, full); len(limits) != 0 {
 		t.Fatalf("an included Large path is still a limit: %v", limits)
 	}
+	withShare := &agentv1.DiscoveredApp{Key: app.Key, Containers: app.Containers, Paths: []*agentv1.DiscoveredPath{app.Paths[0], {Source: "/mnt/nas/photos", Status: "Remote"}}}
+	if limits := snapshotLimits(withShare, nil, tree, inspected, full); !slices.Equal(limits, []string{backup.DataExcluded}) {
+		t.Fatalf("skipped network share: %v", limits)
+	}
+	if limits := snapshotLimits(withShare, []string{"/mnt/nas/photos"}, tree, inspected, full); len(limits) != 0 {
+		t.Fatalf("an included network share is still a limit: %v", limits)
+	}
 	offline := full
 	offline.Images = []backup.Image{{ContainerID: "web", LocalOnly: true, Architectures: []string{"arm64"}}, full.Images[1]}
 	if limits := snapshotLimits(app, nil, tree, inspected, offline); !slices.Equal(limits, []string{backup.ImagePlatformsLimited}) {

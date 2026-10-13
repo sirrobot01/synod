@@ -166,6 +166,7 @@ synod protect --all --destination peer
 
 The command shows a preview. Check that your app data is **Included** or **Dumped**.
 **Large** paths, such as media, are skipped. Add one with `--include-large PATH`.
+**Remote** paths are network shares, such as an NFS or SMB mount from a NAS. They are skipped, because their data already lives on the NAS. Add one with `--include-large PATH`. A restore attaches a skipped share at its original path, so mount the same share on the target device.
 Then confirm with the revision from the preview:
 
 ```sh

@@ -1,15 +1,14 @@
 package backup
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/sirrobot01/synod/internal/runtime/host"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -29,39 +28,12 @@ type mountEntry struct {
 
 // mounts reads the mount table of this process.
 func mounts() ([]mountEntry, error) {
-	file, err := os.Open("/proc/self/mountinfo")
-	if err != nil {
-		return nil, err
+	all, err := host.ReadMounts()
+	result := make([]mountEntry, 0, len(all))
+	for _, m := range all {
+		result = append(result, mountEntry{root: m.Root, point: m.Point, fstype: m.Type, source: m.Source})
 	}
-	defer file.Close()
-	var result []mountEntry
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64<<10), 1<<20)
-	for scanner.Scan() {
-		before, after, found := strings.Cut(scanner.Text(), " - ")
-		fields, tail := strings.Fields(before), strings.Fields(after)
-		if !found || len(fields) < 5 || len(tail) < 2 {
-			continue
-		}
-		result = append(result, mountEntry{root: unescape(fields[3]), point: unescape(fields[4]), fstype: tail[0], source: unescape(tail[1])})
-	}
-	return result, scanner.Err()
-}
-
-// unescape decodes the octal escapes of mountinfo, such as \040 for a space.
-func unescape(field string) string {
-	var b strings.Builder
-	for i := 0; i < len(field); i++ {
-		if field[i] == '\\' && i+3 < len(field) {
-			if v, err := strconv.ParseUint(field[i+1:i+4], 8, 8); err == nil {
-				b.WriteByte(byte(v))
-				i += 3
-				continue
-			}
-		}
-		b.WriteByte(field[i])
-	}
-	return b.String()
+	return result, err
 }
 
 func within(path, parent string) bool {

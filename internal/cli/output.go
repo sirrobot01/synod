@@ -226,8 +226,11 @@ func (a *app) finish(selected *cobra.Command, err error) int {
 			if a.result.ProtectionUpdate != nil && entry.App.Definition != nil {
 				for _, path := range entry.App.Definition.Paths {
 					status, reason := path.Status, path.Reason
-					if path.Status == "Large" && slices.Contains(entry.Settings.IncludeLarge, filepath.Clean(path.Source)) {
+					if (path.Status == "Large" || path.Status == "Remote") && slices.Contains(entry.Settings.IncludeLarge, filepath.Clean(path.Source)) {
 						status, reason = "Included", "You included this Large path."
+						if path.Status == "Remote" {
+							reason = "You included this network share."
+						}
 					}
 					fmt.Fprintf(&output, "  %-8s %s  %s\n", status, path.Source, reason)
 				}

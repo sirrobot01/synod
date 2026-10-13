@@ -32,7 +32,7 @@ func TestPathSafetyAndSizes(t *testing.T) {
 		{filepath.Join(dir, "missing"), "/config", "Included", false, 0},
 	} {
 		path := &agentv1.DiscoveredPath{Source: test.source, Target: test.target, Kind: "bind"}
-		measure(t.Context(), path)
+		measure(t.Context(), path, nil)
 		if path.Status != test.status || path.SizeKnown != test.known || path.SizeBytes != test.size || path.Reason == "" {
 			t.Fatalf("%s -> %s: %+v", test.source, test.target, path)
 		}
@@ -46,12 +46,12 @@ func TestPathSafetyAndSizes(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := &agentv1.DiscoveredPath{Source: large.Name(), Kind: "bind"}
-	measure(t.Context(), path)
+	measure(t.Context(), path, nil)
 	if path.Status != "Large" || path.SizeBytes != largeBytes+1 || !path.SizeKnown {
 		t.Fatalf("large file: %+v", path)
 	}
 	path = &agentv1.DiscoveredPath{Source: filepath.Dir(large.Name()), Kind: "bind"}
-	measure(t.Context(), path)
+	measure(t.Context(), path, nil)
 	if path.Status != "Large" || path.SizeBytes <= largeBytes || path.SizeKnown {
 		t.Fatalf("bounded size walk: %+v", path)
 	}

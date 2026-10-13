@@ -50,6 +50,18 @@ describe("protection confirmation", () => {
     await waitFor(() => expect(api.protect).toHaveBeenCalled());
     expect(vi.mocked(api.protect).mock.calls[0]?.[0].settings.include_large).toEqual(["/srv/media"]);
   });
+  it("offers a network share for inclusion and skips it by default", async () => {
+    vi.mocked(api.protect).mockResolvedValue({ id: "p1", revision: 4 });
+    const shared = { ...app, app: { ...app.app, definition: { ...app.app.definition, paths: [...(app.app.definition.paths ?? []), { source: "/mnt/nas/photos", kind: "bind", status: "Remote" as const, reason: "This path is on a network share (nfs4). Network shares are skipped by default." }] } } };
+    render(ProtectionDialog, { plan, apps: [shared], destinations: [destination], all: false, onClose: vi.fn(), onSaved: vi.fn() });
+    expect(screen.getByText("Large paths and network shares")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("checkbox", { name: "/mnt/nas/photos" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Review paths" }));
+    expect(screen.getByText("You included this network share.")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "Confirm plan" }));
+    await waitFor(() => expect(api.protect).toHaveBeenCalled());
+    expect(vi.mocked(api.protect).mock.calls[0]?.[0].settings.include_large).toEqual(["/mnt/nas/photos"]);
+  });
   it("never sends Large paths in the plan for all apps", async () => {
     vi.mocked(api.protect).mockResolvedValue({ id: "p1", revision: 4 });
     render(ProtectionDialog, { plan, apps: [app], destinations: [destination], all: true, onClose: vi.fn(), onSaved: vi.fn() });

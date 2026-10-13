@@ -199,7 +199,7 @@ func buildFixture(t *testing.T, database, media bool, sourceImage string, config
 func TestPrepareRestoredDataPreservesOverlappingMounts(t *testing.T) {
 	f := newFixture(t, false)
 	id := uuid.New()
-	p, err := makePlan(t.Context(), f.repo, f.saved, id, f.directory, f.worker.Architecture)
+	p, err := makePlan(t.Context(), f.repo, f.saved, id, f.directory, f.worker.Architecture, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestPrepareRestoredDataPreservesOverlappingMounts(t *testing.T) {
 		other = "arm64"
 	}
 	f.saved.Images[0].Architectures = []string{other}
-	if _, err := makePlan(t.Context(), f.repo, f.saved, uuid.New(), f.directory, f.worker.Architecture); err == nil {
+	if _, err := makePlan(t.Context(), f.repo, f.saved, uuid.New(), f.directory, f.worker.Architecture, false); err == nil {
 		t.Fatal("unsupported architecture accepted")
 	}
 }

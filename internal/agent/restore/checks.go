@@ -108,20 +108,26 @@ func checkData(ctx context.Context, api *client.Client, r *repository.Repository
 			checks = append(checks, check)
 			continue
 		}
-		restored := filepath.Join(directory, root.Relative)
-		if root.Volume != "" {
-			volume, err := api.VolumeInspect(ctx, root.Volume, client.VolumeInspectOptions{})
-			if err != nil || volume.Volume.Mountpoint == "" {
-				check.Status, check.Detail = proof.CheckUnchecked, "volume_unreadable"
-				checks = append(checks, check)
-				continue
+		restored, err := restoredPath(ctx, api, p, directory, root)
+		if err != nil {
+			check.Status, check.Detail = proof.CheckUnchecked, "volume_unreadable"
+			checks = append(checks, check)
+			continue
+		}
+		// A nested mount inside this root has its own archive and its own check.
+		var nested []string
+		for _, other := range p.Data {
+			if other.Into != 0 && p.Data[other.Into-1].Source == root.Source {
+				nested = append(nested, filepath.Join(restored, other.Subpath))
 			}
-			restored = volume.Volume.Mountpoint
 		}
 		var gotFiles, gotBytes int64
-		err = filepath.WalkDir(restored, func(_ string, entry fs.DirEntry, err error) error {
+		err = filepath.WalkDir(restored, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
+			}
+			if entry.IsDir() && slices.Contains(nested, path) {
+				return fs.SkipDir
 			}
 			if entry.Type().IsRegular() {
 				info, err := entry.Info()
@@ -143,6 +149,23 @@ func checkData(ctx context.Context, api *client.Client, r *repository.Repository
 		checks = append(checks, check)
 	}
 	return checks
+}
+
+// restoredPath is where a data root was written: the restore directory, a volume, or a
+// directory inside its parent root.
+func restoredPath(ctx context.Context, api *client.Client, p *plan, directory string, root dataRoot) (string, error) {
+	if root.Into != 0 {
+		parent, err := restoredPath(ctx, api, p, directory, p.Data[root.Into-1])
+		return filepath.Join(parent, root.Subpath), err
+	}
+	if root.Volume == "" {
+		return filepath.Join(directory, root.Relative), nil
+	}
+	volume, err := api.VolumeInspect(ctx, root.Volume, client.VolumeInspectOptions{})
+	if err != nil || volume.Volume.Mountpoint == "" {
+		return "", errors.Join(errors.New("volume unreadable"), err)
+	}
+	return volume.Volume.Mountpoint, nil
 }
 
 // checkApp waits for health checks, database content, and port answers of the running drill.

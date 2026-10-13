@@ -124,7 +124,7 @@ func (w *Worker) run(ctx context.Context, request restore.Request, state *progre
 		return err
 	}
 	directory := filepath.Join(w.Directory, request.ID.String())
-	p, err := makePlan(ctx, r, saved, request.ID, directory, w.Backup.Architecture)
+	p, err := makePlan(ctx, r, saved, request.ID, directory, w.Backup.Architecture, false)
 	if err != nil {
 		return err
 	}

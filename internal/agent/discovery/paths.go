@@ -3,12 +3,14 @@ package discovery
 import (
 	"context"
 	"errors"
+	"github.com/sirrobot01/synod/internal/runtime/host"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -54,7 +56,8 @@ func ReachesForbidden(directory string) bool {
 }
 
 // measure reads metadata only. It never follows a link during a directory walk.
-func measure(ctx context.Context, path *agentv1.DiscoveredPath) {
+// table is the mount table. A path on a network share is Remote and is not walked.
+func measure(ctx context.Context, path *agentv1.DiscoveredPath, table []host.Mount) {
 	if path.Status == "Never" {
 		return
 	}
@@ -79,6 +82,10 @@ func measure(ctx context.Context, path *agentv1.DiscoveredPath) {
 	}
 	if Forbidden(resolved, volume) {
 		path.Status, path.Reason = "Never", "This path resolves to a host system path."
+		return
+	}
+	if m, ok := host.Containing(table, resolved); ok && host.Remote(m.Type) && path.Status != "Dumped" {
+		path.Status, path.Reason = "Remote", "This path is on a network share ("+m.Type+"). Network shares are skipped by default."
 		return
 	}
 	if path.Status == "Large" {
@@ -142,6 +149,16 @@ func measureDirectory(ctx context.Context, path *agentv1.DiscoveredPath, resolve
 		entries++
 		if entries > 100000 || path.SizeBytes > largeBytes {
 			return fs.SkipAll
+		}
+		// Another filesystem below the path is listed and measured as its own path.
+		if entry.IsDir() && name != "." {
+			child, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if child.Sys().(*syscall.Stat_t).Dev != info.Sys().(*syscall.Stat_t).Dev {
+				return fs.SkipDir
+			}
 		}
 		if name != "." && Forbidden(filepath.Join(resolved, name), volume) {
 			return errors.New("directory contains a host system path")

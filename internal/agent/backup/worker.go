@@ -452,7 +452,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		Paths:        tree.Paths,
 	}
 	for _, path := range app.Paths {
-		if path.Kind != "bind" || path.Status == "Never" || slices.ContainsFunc(state.Metadata.MountSources, func(source backup.MountSource) bool { return source.Source == path.Source }) {
+		if (path.Kind != "bind" && path.Kind != "mount") || path.Status == "Never" || slices.ContainsFunc(state.Metadata.MountSources, func(source backup.MountSource) bool { return source.Source == path.Source }) {
 			continue
 		}
 		info, err := os.Stat(path.Source)
@@ -789,7 +789,7 @@ const containerLayerLimit = 64 << 20
 func snapshotLimits(app *agentv1.DiscoveredApp, include []string, tree *Tree, inspected []container.InspectResponse, saved backup.Snapshot) []string {
 	var limits []string
 	excluded := tree.skippedData.Load() || slices.ContainsFunc(app.Paths, func(path *agentv1.DiscoveredPath) bool {
-		return path.Status == "Large" && !slices.Contains(include, filepath.Clean(path.Source))
+		return (path.Status == "Large" || path.Status == "Remote") && !slices.Contains(include, filepath.Clean(path.Source))
 	})
 	if excluded {
 		limits = append(limits, backup.DataExcluded)

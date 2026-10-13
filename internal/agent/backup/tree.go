@@ -106,7 +106,7 @@ func NewTree(ctx context.Context, app *agentv1.DiscoveredApp, excluded []backup.
 		}
 	}
 	selected := func(item *agentv1.DiscoveredPath) bool {
-		return item.Status == "Included" || (item.Status == "Large" && slices.Contains(include, filepath.Clean(item.Source)))
+		return item.Status == "Included" || ((item.Status == "Large" || item.Status == "Remote") && slices.Contains(include, filepath.Clean(item.Source)))
 	}
 	ready := false
 	defer func() {
@@ -288,6 +288,10 @@ func (t *Tree) nest() {
 			}
 			info, err := child.root.Lstat(child.path)
 			if err != nil || (info.Mode().IsRegular() && info.Size() > largeFileBytes && !t.chosen(child.source)) {
+				walked = false
+			}
+			// A walk stops at a mount point, so a root on another filesystem stays separate.
+			if parentInfo, parentErr := parent.root.Lstat(parent.path); err == nil && (parentErr != nil || parentInfo.Sys().(*syscall.Stat_t).Dev != info.Sys().(*syscall.Stat_t).Dev) {
 				walked = false
 			}
 			if !walked {
@@ -778,6 +782,10 @@ func (d *sourceDirectory) list(ctx context.Context) (kfs.DirectoryIterator, erro
 		return nil, err
 	}
 	defer file.Close()
+	self, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
 	var children []os.DirEntry
 	for {
 		if err := ctx.Err(); err != nil {
@@ -827,6 +835,10 @@ func (d *sourceDirectory) list(ctx context.Context) (kfs.DirectoryIterator, erro
 			d.tree.skippedData.Store(true)
 		}
 		info := infos[i]
+		// Discovery lists another filesystem below a path as its own path with its own status.
+		if info.IsDir() && info.Sys().(*syscall.Stat_t).Dev != self.Sys().(*syscall.Stat_t).Dev {
+			reason = "Another filesystem is mounted here. It has its own path status."
+		}
 		if !info.Mode().IsRegular() && !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 			reason = "This path is not a regular file, directory, or link."
 		}

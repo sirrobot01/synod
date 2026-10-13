@@ -167,7 +167,7 @@ export interface CopySettings {
 }
 export interface SavedPath {
   source?: string; target?: string; volume?: string; kind: string;
-  status: "Included" | "Large" | "Dumped" | "Never";
+  status: "Included" | "Large" | "Remote" | "Dumped" | "Never";
   reason: string; size_bytes?: number; size_known?: boolean;
 }
 export interface App {

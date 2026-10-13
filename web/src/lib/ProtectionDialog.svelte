@@ -10,9 +10,9 @@
   let revision = $state(untrack(() => plan.revision));
   let settings = $state<CopySettings>(untrack(() => structuredClone($state.snapshot(all ? plan.defaults : apps[0]?.settings ?? plan.defaults))));
   let enabled = $state(untrack(() => all || (apps[0]?.enabled ?? true)));
-  // Large paths belong to one app. The default for all apps never includes them.
+  // Large paths and network shares belong to one app. The default for all apps never includes them.
   untrack(() => { if (all) delete settings.include_large; else settings.include_large ??= []; });
-  let large = $derived(all ? [] : [...new Set([...(apps[0]?.app.definition.paths ?? []).filter(item => item.status === "Large" && item.source).map(item => item.source!), ...(settings.include_large ?? [])])]);
+  let large = $derived(all ? [] : [...new Set([...(apps[0]?.app.definition.paths ?? []).filter(item => (item.status === "Large" || item.status === "Remote") && item.source).map(item => item.source!), ...(settings.include_large ?? [])])]);
   let incompatible = $derived(enabled && apps.some(item => item.app.present && settings.destinations.some(id => destinations.some(d => d.id === id && d.location.kind === "local" && d.node_id !== item.app.node_id))));
   let review = $state(false);
   let busy = $state(false);
@@ -51,7 +51,7 @@
         {#if settings.method === "stop"}<p class="callout">Stop stops the app briefly for each backup. Use it only if the app needs a stopped copy.</p>{/if}
         <div class="columns"><label>Daily time<input type="time" required bind:value={settings.at} /></label><label>Time zone<input required bind:value={settings.time_zone} placeholder="UTC" /></label></div>
         {#if large.length && enabled}
-          <fieldset class="stack"><legend class="label">Large paths</legend>
+          <fieldset class="stack"><legend class="label">Large paths and network shares</legend>
             <p class="note">Synod skips these by default. Include a path only if the destination has room for it.</p>
             {#each large as path (path)}<label class="check"><input type="checkbox" bind:group={settings.include_large} value={path} /><span class="mono wrap">{path}</span></label>{/each}
           </fieldset>
@@ -60,7 +60,7 @@
       </fieldset>
       {#if incompatible}<p class="callout">A selected local destination belongs to another device. Choose a shared destination or change the selection.</p>{/if}
       {#if review}
-        <p>{enabled ? "Check what each app will copy. Host system paths are always excluded. Large paths are excluded unless you include them." : "Future scheduled backups will stop. Saved snapshots remain in the repository."}</p>
+        <p>{enabled ? "Check what each app will copy. Host system paths are always excluded. Large paths and network shares are excluded unless you include them." : "Future scheduled backups will stop. Saved snapshots remain in the repository."}</p>
         {#each apps as item (item.app.id)}
           <section class="panel"><div class="panel-head"><strong>{item.app.definition.name}</strong><span class="note">{item.app.node_name}</span></div>
             {#if enabled && settings.destinations.length > 0 && settings.destinations.every(id => destinations.some(d => d.id === id && d.node_id === item.app.node_id))}<p class="callout">The only copies will be on the source device. A lost device can also lose these backups.</p>{/if}

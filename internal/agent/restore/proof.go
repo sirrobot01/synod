@@ -147,7 +147,7 @@ func (w *Worker) runProof(ctx context.Context, request proof.Request, result *pr
 	defer r.Close(context.Background())
 	result.SnapshotID, result.DestinationID = saved.ID, destinationID
 	directory := filepath.Join(w.Directory, request.ID.String())
-	p, err := makePlan(ctx, r, saved, request.ID, directory, b.Architecture)
+	p, err := makePlan(ctx, r, saved, request.ID, directory, b.Architecture, true)
 	if err != nil {
 		return err
 	}

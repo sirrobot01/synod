@@ -21,7 +21,8 @@ func (w *Worker) captureHost(ctx context.Context, containers []container.Inspect
 		}
 		for _, m := range c.Mounts {
 			if m.Type == "bind" && slices.ContainsFunc(app.Paths, func(p *agentv1.DiscoveredPath) bool {
-				return p.ContainerId == c.ID && p.Target == m.Destination && p.Source == m.Source && p.Status == "Never"
+				// A restore attaches Never and uncopied Remote mounts at their original host path.
+				return p.ContainerId == c.ID && p.Target == m.Destination && p.Source == m.Source && (p.Status == "Never" || p.Status == "Remote")
 			}) {
 				paths = append(paths, m.Source)
 			}

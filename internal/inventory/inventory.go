@@ -69,7 +69,7 @@ func Validate(report *agentv1.AppInventory) error {
 			}
 		}
 		for _, p := range app.Paths {
-			if p == nil || (p.Source != "" && !text(p.Source, 4096)) || (p.Target != "" && !text(p.Target, 4096)) || (p.Volume != "" && !text(p.Volume, 256)) || (p.ContainerId != "" && !containers[p.ContainerId]) || !slices.Contains([]string{"project", "compose", "env", "bind", "volume", "tmpfs", "npipe", "cluster", "image"}, p.Kind) || !slices.Contains([]string{"Included", "Large", "Dumped", "Never"}, p.Status) || !text(p.Reason, 512) || p.SizeBytes < 0 {
+			if p == nil || (p.Source != "" && !text(p.Source, 4096)) || (p.Target != "" && !text(p.Target, 4096)) || (p.Volume != "" && !text(p.Volume, 256)) || (p.ContainerId != "" && !containers[p.ContainerId]) || !slices.Contains([]string{"project", "compose", "env", "bind", "volume", "mount", "tmpfs", "npipe", "cluster", "image"}, p.Kind) || !slices.Contains([]string{"Included", "Large", "Remote", "Dumped", "Never"}, p.Status) || !text(p.Reason, 512) || p.SizeBytes < 0 {
 				return ErrInvalid
 			}
 		}

@@ -4,6 +4,7 @@ package discovery
 import (
 	"context"
 	"fmt"
+	"github.com/sirrobot01/synod/internal/runtime/host"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -23,6 +24,11 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 		return nil, fmt.Errorf("list Docker containers: %w", err)
 	}
 	inventory := &agentv1.AppInventory{ObservedAt: timestamppb.Now()}
+	// Without a mount table, no path is classified as a network share or a nested mount.
+	table, err := host.ReadMounts()
+	if err != nil {
+		table = nil
+	}
 	apps := make(map[string]*agentv1.DiscoveredApp)
 	for _, summary := range listed.Items {
 		if summary.Labels["io.synod.proof"] != "" || summary.Labels["io.synod.restore.role"] != "" {
@@ -146,6 +152,9 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 				if len(volume.Volume.Options) != 0 {
 					// Driver mounts can hide host paths behind a volume data directory.
 					path.Status, path.Reason = "Never", "Volumes with driver mount options need an explicit backup method."
+					if kind := volume.Volume.Options["type"]; host.Remote(kind) {
+						path.Status, path.Reason = "Remote", "This volume mounts a network share ("+kind+"). Network shares are skipped by default."
+					}
 				}
 			}
 			app.Paths = append(app.Paths, path)
@@ -170,11 +179,45 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			measure(ctx, path)
+			measure(ctx, path, table)
 		}
+		app.Paths = append(app.Paths, nestedMounts(ctx, app.Paths, table)...)
 		slices.Sort(app.Issues)
 		app.Issues = slices.Compact(app.Issues)
 	}
 	slices.SortFunc(inventory.Apps, func(a, b *agentv1.DiscoveredApp) int { return strings.Compare(a.Key, b.Key) })
 	return inventory, nil
+}
+
+// nestedMounts lists each filesystem that is mounted below a copied, Large, or Remote
+// path. A walk of the parent stops at it, so it gets its own path and status.
+func nestedMounts(ctx context.Context, paths []*agentv1.DiscoveredPath, table []host.Mount) []*agentv1.DiscoveredPath {
+	known := make(map[string]bool)
+	for _, path := range paths {
+		known[filepath.Clean(path.Source)] = true
+	}
+	var result []*agentv1.DiscoveredPath
+	for _, parent := range paths {
+		if !slices.Contains([]string{"Included", "Large", "Remote"}, parent.Status) || !slices.Contains([]string{"bind", "volume", "project"}, parent.Kind) {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(parent.Source)
+		if err != nil {
+			continue
+		}
+		for _, m := range host.Below(table, resolved) {
+			if known[m.Point] || ctx.Err() != nil {
+				continue
+			}
+			known[m.Point] = true
+			nested := &agentv1.DiscoveredPath{Source: m.Point, Kind: "mount", ContainerId: parent.ContainerId, ReadOnly: parent.ReadOnly}
+			if parent.Target != "" {
+				relative, _ := filepath.Rel(resolved, m.Point)
+				nested.Target = filepath.Join(parent.Target, relative)
+			}
+			measure(ctx, nested, table)
+			result = append(result, nested)
+		}
+	}
+	return result
 }
