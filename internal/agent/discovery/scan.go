@@ -31,7 +31,8 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 	}
 	apps := make(map[string]*agentv1.DiscoveredApp)
 	for _, summary := range listed.Items {
-		if summary.Labels["io.synod.proof"] != "" || summary.Labels["io.synod.restore.role"] != "" {
+		// Synod's own containers are not apps: drills, restore helpers, and the agent image.
+		if summary.Labels["io.synod.proof"] != "" || summary.Labels["io.synod.restore.role"] != "" || summary.Labels["io.synod.role"] == "agent" {
 			continue
 		}
 		inspected, err := api.ContainerInspect(ctx, summary.ID, client.ContainerInspectOptions{})

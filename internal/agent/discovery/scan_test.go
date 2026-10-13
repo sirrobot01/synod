@@ -36,7 +36,8 @@ func TestScanGroupsProjectsAndKeepsDataOutOfReports(t *testing.T) {
 			if r.URL.Query().Get("all") != "1" {
 				t.Error("stopped containers were excluded")
 			}
-			json.NewEncoder(w).Encode([]container.Summary{{ID: "web"}, {ID: "db"}, {ID: "solo"}})
+			// The agent container carries the agent label and is never an app.
+			json.NewEncoder(w).Encode([]container.Summary{{ID: "web"}, {ID: "db"}, {ID: "solo"}, {ID: "synod-agent", Labels: map[string]string{"io.synod.role": "agent"}}})
 		case strings.HasPrefix(path, "/containers/"):
 			id := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/json")
 			if broken.Load() && id == "db" {
