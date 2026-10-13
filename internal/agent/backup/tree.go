@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -577,25 +578,31 @@ func (t *Tree) digest(ctx context.Context, d *sourceDirectory) ([sha256.Size]byt
 	if err != nil {
 		return sum, false, err
 	}
-	h := sha256.New()
-	fmt.Fprintf(h, "%v %v\n", d.Mode(), d.Owner())
+	// A binary form with length-prefixed names costs far less than text on a slow CPU.
+	buffer := binary.BigEndian.AppendUint32(nil, uint32(d.Mode()))
+	buffer = binary.BigEndian.AppendUint32(buffer, d.Owner().UserID)
+	buffer = binary.BigEndian.AppendUint32(buffer, d.Owner().GroupID)
 	for _, entry := range entries {
-		fmt.Fprintf(h, "%q %v %v", entry.Name(), entry.Mode(), entry.Owner())
+		buffer = binary.AppendUvarint(buffer, uint64(len(entry.Name())))
+		buffer = append(buffer, entry.Name()...)
+		buffer = binary.BigEndian.AppendUint32(buffer, uint32(entry.Mode()))
+		buffer = binary.BigEndian.AppendUint32(buffer, entry.Owner().UserID)
+		buffer = binary.BigEndian.AppendUint32(buffer, entry.Owner().GroupID)
 		switch entry := entry.(type) {
 		case *sourceDirectory:
 			child, usable, err := t.digest(ctx, entry)
 			if err != nil || !usable {
 				return sum, false, err
 			}
-			h.Write(child[:])
+			buffer = append(buffer, child[:]...)
 		case *sourceFile, *liveFile:
-			fmt.Fprintf(h, " %d %d", entry.Size(), entry.ModTime().UnixNano())
+			buffer = binary.BigEndian.AppendUint64(buffer, uint64(entry.Size()))
+			buffer = binary.BigEndian.AppendUint64(buffer, uint64(entry.ModTime().UnixNano()))
 		default:
 			return sum, false, nil
 		}
-		h.Write([]byte{'\n'})
 	}
-	copy(sum[:], h.Sum(nil))
+	sum = sha256.Sum256(buffer)
 	t.mu.Lock()
 	if t.digests == nil {
 		t.digests = make(map[string][sha256.Size]byte)

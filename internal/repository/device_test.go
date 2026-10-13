@@ -9,11 +9,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -214,6 +216,55 @@ func TestDeviceRepositorySurvivesRestartAndKeepsLocalRecovery(t *testing.T) {
 	}
 	if err := r.Close(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+	// One listing request returns the same blobs as the shard directories, and ends with an end line.
+	stored := map[string]int64{}
+	if err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			return err
+		}
+		relative, err := filepath.Rel(directory, path)
+		info, infoErr := entry.Info()
+		if err := errors.Join(err, infoErr); err != nil {
+			return err
+		}
+		if id, ok := strings.CutSuffix(strings.ReplaceAll(relative, "/", ""), ".f"); ok {
+			stored[id] = info.Size()
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	listingClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{Certificates: []tls.Certificate{certificates[source]}, InsecureSkipVerify: true}}}
+	t.Cleanup(listingClient.CloseIdleConnections)
+	for _, prefix := range []string{"", "p", "q", "xn0_", "kopia.repository", "none"} {
+		response, err := listingClient.Get("https://" + address + "/v1/repositories/" + id.String() + "?blobs=" + prefix)
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("list blobs %q: %v %v", prefix, response, err)
+		}
+		listed := map[string]int64{}
+		ended := false
+		decoder := json.NewDecoder(response.Body)
+		for decoder.More() {
+			var line repository.DeviceBlob
+			if err := decoder.Decode(&line); err != nil {
+				t.Fatal(err)
+			}
+			if line.End {
+				ended = true
+				continue
+			}
+			listed[line.ID] = line.SizeBytes
+		}
+		response.Body.Close()
+		want := maps.Clone(stored)
+		maps.DeleteFunc(want, func(id string, _ int64) bool { return !strings.HasPrefix(id, prefix) })
+		if !ended || !maps.Equal(listed, want) || (prefix == "" && len(want) < 5) {
+			t.Fatalf("blobs with prefix %q: ended %v, listed %v, want %v", prefix, ended, listed, want)
+		}
+	}
+	if response, err := listingClient.Get("https://" + address + "/v1/repositories/" + id.String() + "?blobs=..%2F"); err != nil || response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("an invalid prefix was not refused: %v %v", response, err)
 	}
 	if err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {

@@ -82,11 +82,17 @@ func newBackupCommand(app *app) *cobra.Command {
 			return nil
 		}
 		fmt.Fprintf(app.stderr, "Backup operation %s. Interruption does not cancel it.\n", saved.ID)
+		// An unchanged backup ends in under a second, so the first seconds poll often.
+		started := time.Now()
 		for !saved.Status.Terminal() {
+			interval := time.Second
+			if time.Since(started) < 5*time.Second {
+				interval = 100 * time.Millisecond
+			}
 			select {
 			case <-cmd.Context().Done():
 				return cmd.Context().Err()
-			case <-time.After(250 * time.Millisecond):
+			case <-time.After(interval):
 			}
 			saved, err = app.api.GetOperation(cmd.Context(), saved.ID)
 			if err != nil {

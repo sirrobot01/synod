@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -100,17 +101,18 @@ func decodePassword(encoded string) (PasswordParameters, []byte, []byte, error) 
 }
 
 // decoyHash answers an unknown username with the same work as a wrong password.
-// Response timing must not report whether an account exists.
-var decoyHash = func() string {
+// Response timing must not report whether an account exists. It is computed on first use,
+// so a process that never signs anyone in does not pay for an Argon2 hash at start.
+var decoyHash = sync.OnceValue(func() string {
 	salt := make([]byte, saltBytes)
 	if _, err := rand.Read(salt); err != nil {
 		panic("auth: no randomness for the decoy hash")
 	}
 	return encodePassword(CurrentPasswordParameters, salt, derive(strings.Repeat("decoy", 8), salt, CurrentPasswordParameters))
-}()
+})
 
 // SpendUnknownUser performs the work that a real check would perform.
 // Call it when no account matches, then report the same failure as a wrong password.
 func SpendUnknownUser(password string) {
-	_, _ = CheckPassword(decoyHash, password)
+	_, _ = CheckPassword(decoyHash(), password)
 }

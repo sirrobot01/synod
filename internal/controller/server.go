@@ -180,6 +180,8 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		return fmt.Errorf("load the web application: %w", err)
 	}
 	handler.SetAssets(assets)
+	// The first unknown-user sign-in must not pay for the decoy hash, so compute it now.
+	auth.SpendUnknownUser("")
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", settings.Listen)
 	if err != nil {
 		return fmt.Errorf("listen for API requests on %s: %w", settings.Listen, err)

@@ -121,7 +121,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer root.Close()
 	if prefix, ok := r.URL.Query()["blobs"]; ok && r.Method == http.MethodGet && file == "" {
-		if len(prefix) != 1 || len(prefix[0]) > 255 || strings.ContainsFunc(prefix[0], invalidBlobRune) {
+		if len(prefix) != 1 || len(prefix[0]) > 255 || strings.ContainsFunc(prefix[0], func(r rune) bool { return r != '.' && invalidBlobRune(r) }) {
 			http.Error(w, "invalid blob prefix", http.StatusBadRequest)
 			return
 		}
