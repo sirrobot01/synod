@@ -149,7 +149,13 @@ type progress struct {
 	Metadata  backup.Snapshot `json:"metadata"`
 	// phases holds the milliseconds of each backup step for the backup_timing log.
 	phases []any
-	mark   time.Time
+	// discard closes the connection after the backup. A failed repository write can leave
+	// state in its memory that the destination does not hold.
+	discard bool
+	// retained is set when the copy session applied retention. retentionFailed reports that
+	// it could not decide, and nothing expired.
+	retained, retentionFailed bool
+	mark                      time.Time
 }
 
 func (p *progress) phase(name string) {
@@ -217,7 +223,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return w.finish(ctx, request, &state, nil)
 	}
 	// A failed backup can leave a broken connection. Only a clean result keeps it open.
-	defer func() { w.release(request.DestinationID, r, key, state.FailureCode == "") }()
+	defer func() { w.release(request.DestinationID, r, key, state.FailureCode == "" && !state.discard) }()
 	// The next save records this. A crash before it only repeats the repository check.
 	state.RepositoryOpened = true
 	if err := r.CheckInstallation(ctx, w.InstallationID); err != nil {
@@ -547,8 +553,8 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			describe()
 		}
 	} else {
-		var saved backup.Snapshot
-		state.Prepared, saved, err = tree.copyLive(final, r, root, source, previous, func(*snapshot.Manifest) (backup.Snapshot, error) {
+		var upload repository.Upload
+		upload, err = tree.copyLive(final, r, root, source, previous, request.Retention, func(*snapshot.Manifest) (backup.Snapshot, error) {
 			if snapshots != nil {
 				if err := snapshots.Check(final); err != nil {
 					if w.Logger != nil {
@@ -562,7 +568,8 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			return state.Metadata, nil
 		})
 		if err == nil {
-			state.Metadata, state.Published = saved, true
+			state.Prepared, state.Metadata, state.Published = upload.Files, *upload.Snapshot, true
+			state.retained, state.retentionFailed = request.Retention != nil, upload.RetentionErr != nil
 		}
 	}
 	state.phase("final_copy")
@@ -730,11 +737,14 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 			w.catalogs.Store(request.DestinationID, catalog.Generation)
 		}
 		state.phase("write_catalog")
-		if result.FailureCode == "" && request.Retention != nil {
+		if result.FailureCode == "" && request.Retention != nil && !state.retained {
 			if _, err := r.ApplyRetention(cleanup, w.InstallationID, request.AppID, request.DestinationID, *request.Retention, result.SnapshotID); err != nil {
-				result.WarningCodes = append(result.WarningCodes, "retention_failed")
+				state.retentionFailed, state.discard = true, true
 			}
 			state.phase("apply_retention")
+		}
+		if result.FailureCode == "" && state.retentionFailed {
+			result.WarningCodes = append(result.WarningCodes, "retention_failed")
 		}
 	}
 	if w.Logger != nil && len(state.phases) > 0 {

@@ -132,16 +132,16 @@ func (t *Tree) noteChanging(paths []string) {
 
 // copyLive copies a live tree in up to liveCopyPasses passes. A later pass reads only the
 // files that changed during the pass before it. The pass without changes, or the last
-// pass, publishes the snapshot that finish describes in its own write session, so the
-// repository writes its index once. Files that changed during every pass are saved as
-// read and reported by Changing.
-func (t *Tree) copyLive(ctx context.Context, r *repository.Repository, root func() (kfs.Directory, error), source snapshot.SourceInfo, previous *snapshot.Manifest, finish func(*snapshot.Manifest) (backup.Snapshot, error)) (*snapshot.Manifest, backup.Snapshot, error) {
+// pass, publishes the snapshot that finish describes in its own write session, and applies
+// retention there, so the repository writes its index once. Files that changed during every
+// pass are saved as read and reported by Changing.
+func (t *Tree) copyLive(ctx context.Context, r *repository.Repository, root func() (kfs.Directory, error), source snapshot.SourceInfo, previous *snapshot.Manifest, retention *backup.Retention, finish func(*snapshot.Manifest) (backup.Snapshot, error)) (repository.Upload, error) {
 	for pass := 1; ; pass++ {
 		directory, err := root()
 		if err != nil {
-			return nil, backup.Snapshot{}, err
+			return repository.Upload{}, err
 		}
-		prepared, published, err := r.UploadSnapshot(ctx, directory, source, previous, func(prepared *snapshot.Manifest) (backup.Snapshot, bool, error) {
+		result, err := r.UploadSnapshot(ctx, directory, source, previous, retention, func(prepared *snapshot.Manifest) (backup.Snapshot, bool, error) {
 			changed := t.takeRetries()
 			if len(changed) > 0 && pass < liveCopyPasses {
 				return backup.Snapshot{}, false, nil
@@ -150,12 +150,9 @@ func (t *Tree) copyLive(ctx context.Context, r *repository.Repository, root func
 			metadata, err := finish(prepared)
 			return metadata, err == nil, err
 		})
-		if err != nil {
-			return nil, backup.Snapshot{}, err
+		if err != nil || result.Snapshot != nil {
+			return result, err
 		}
-		if published != nil {
-			return prepared, *published, nil
-		}
-		previous = prepared
+		previous = result.Files
 	}
 }

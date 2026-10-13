@@ -3,7 +3,9 @@ package backup
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"github.com/sirrobot01/synod/internal/repository"
 	"io"
 	"os"
 	"path/filepath"
@@ -33,14 +35,14 @@ func liveCopy(t *testing.T, directory string) (string, *Tree) {
 	root := func() (kfs.Directory, error) { return tree.Root(t.Context(), nil) }
 	metadata := f.metadata
 	metadata.ID, metadata.StartedAt = uuid.New(), time.Now().UTC()
-	_, saved, err := tree.copyLive(t.Context(), f.r, root, source, nil, func(*snapshot.Manifest) (backup.Snapshot, error) {
+	upload, err := tree.copyLive(t.Context(), f.r, root, source, nil, nil, func(*snapshot.Manifest) (backup.Snapshot, error) {
 		metadata.CompletedAt, metadata.Paths = time.Now().UTC(), tree.Paths
 		return metadata, nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if listed, err := f.r.Snapshot(t.Context(), saved.ID); err != nil || listed.ID != metadata.ID {
+	if listed, err := f.r.Snapshot(t.Context(), upload.Snapshot.ID); err != nil || listed.ID != metadata.ID {
 		t.Fatal("the copy session did not publish the snapshot", err)
 	}
 	target := filepath.Join(t.TempDir(), "restore")
@@ -145,5 +147,41 @@ func TestLiveCopyRestoresOneVersionOfALargeFileReadInParts(t *testing.T) {
 	}
 	if !bytes.Equal(actual.Sum(nil), expected.Sum(nil)) || len(tree.Changing()) != 0 {
 		t.Fatalf("restored file mixes versions, or the settled file was reported: %v", tree.Changing())
+	}
+}
+
+func TestCopySessionAppliesRetention(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "state"), []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newIncrementalFixture(t, directory, true)
+	source := snapshot.SourceInfo{Host: "test", UserName: "test", Path: f.app.Key}
+	var ids []uuid.UUID
+	for range 2 {
+		tree, err := NewTree(t.Context(), f.app, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree.live = true
+		metadata := f.metadata
+		metadata.ID, metadata.StartedAt = uuid.New(), time.Now().UTC()
+		upload, err := tree.copyLive(t.Context(), f.r, func() (kfs.Directory, error) { return tree.Root(t.Context(), nil) }, source, nil, &backup.Retention{}, func(*snapshot.Manifest) (backup.Snapshot, error) {
+			metadata.CompletedAt, metadata.Paths = time.Now().UTC(), tree.Paths
+			return metadata, nil
+		})
+		tree.Close()
+		if err != nil || upload.RetentionErr != nil {
+			t.Fatal(err, upload.RetentionErr)
+		}
+		ids = append(ids, upload.Snapshot.ID)
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Zero counts keep only the newest snapshot. The second session expired the first.
+	if _, err := f.r.Snapshot(t.Context(), ids[0]); !errors.Is(err, repository.ErrSnapshotMissing) {
+		t.Fatalf("the older snapshot was kept: %v", err)
+	}
+	if _, err := f.r.Snapshot(t.Context(), ids[1]); err != nil {
+		t.Fatalf("the new snapshot was removed: %v", err)
 	}
 }

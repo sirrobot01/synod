@@ -123,38 +123,64 @@ func (r *Repository) PublishSnapshot(ctx context.Context, prepared *snapshot.Man
 	return metadata, nil
 }
 
+// Upload is the result of UploadSnapshot.
+type Upload struct {
+	Files *snapshot.Manifest
+	// Snapshot is the published snapshot, or nil when finish did not publish the copy.
+	Snapshot *backup.Snapshot
+	// RetentionErr reports that retention could not decide. The snapshot is published, and
+	// no snapshot expired.
+	RetentionErr error
+}
+
 // UploadSnapshot copies root and publishes the copy in the same write session when finish
-// returns true. The repository then writes its index once for the whole backup. When finish
-// returns false, the copy stays unpublished, as from UploadFiles. Content written in this
-// session needs no age check, because maintenance cannot remove it during the session.
-func (r *Repository) UploadSnapshot(ctx context.Context, root kfs.Entry, source snapshot.SourceInfo, previous *snapshot.Manifest, finish func(*snapshot.Manifest) (backup.Snapshot, bool, error)) (*snapshot.Manifest, *backup.Snapshot, error) {
+// returns true. With retention, the same session also expires older snapshots of the app at
+// this destination. The repository then writes its index once for the whole backup. When
+// finish returns false, the copy stays unpublished, as from UploadFiles. Content written in
+// this session needs no age check, because maintenance cannot remove it during the session.
+// The caller checks the installation on this connection first.
+func (r *Repository) UploadSnapshot(ctx context.Context, root kfs.Entry, source snapshot.SourceInfo, previous *snapshot.Manifest, retention *backup.Retention, finish func(*snapshot.Manifest) (backup.Snapshot, bool, error)) (Upload, error) {
 	r.write.Lock()
 	defer r.write.Unlock()
-	var prepared *snapshot.Manifest
-	var published *backup.Snapshot
+	var result Upload
 	err := repo.WriteSession(ctx, r.repo, repo.WriteSessionOptions{Purpose: "copy and publish app snapshot"}, func(ctx context.Context, w repo.RepositoryWriter) error {
 		var err error
-		if prepared, err = copyFiles(ctx, w, root, source, false, previous); err != nil {
+		if result.Files, err = copyFiles(ctx, w, root, source, false, previous); err != nil {
 			return err
 		}
-		metadata, publish, err := finish(prepared)
+		metadata, publish, err := finish(result.Files)
 		if err != nil || !publish {
 			return err
 		}
-		if metadata, err = checkPublication(prepared, metadata); err != nil {
+		if metadata, err = checkPublication(result.Files, metadata); err != nil {
 			return err
 		}
-		saved, err := saveSnapshot(ctx, w, prepared, metadata)
-		published = &saved
-		return err
+		saved, err := saveSnapshot(ctx, w, result.Files, metadata)
+		if err != nil {
+			return err
+		}
+		result.Snapshot = &saved
+		if retention == nil {
+			return nil
+		}
+		if err := retention.Validate(); err != nil {
+			result.RetentionErr = err
+			return nil
+		}
+		expired, err := planExpiry(ctx, w, saved.InstallationID, saved.App.ID, saved.DestinationID, *retention, saved.ID)
+		if err != nil {
+			result.RetentionErr = err
+			return nil
+		}
+		return expire(ctx, w, expired)
 	})
 	if fatal := r.fatal.Load(); fatal != nil {
 		err = errors.Join(err, *fatal)
 	}
 	if err != nil {
-		return nil, nil, &Error{Action: "copy app files", Cause: errors.Join(err, ctx.Err())}
+		return Upload{}, &Error{Action: "copy app files", Cause: errors.Join(err, ctx.Err())}
 	}
-	return prepared, published, nil
+	return result, nil
 }
 
 // saveSnapshot writes the Kopia snapshot and the Synod metadata that names it.
@@ -166,7 +192,9 @@ func saveSnapshot(ctx context.Context, w repo.RepositoryWriter, prepared *snapsh
 		return backup.Snapshot{}, err
 	}
 	metadata.FilesID = string(id)
-	_, err = w.PutManifest(ctx, map[string]string{"type": "synod.backup", "snapshot": metadata.ID.String(), "installation": metadata.InstallationID.String(), "app": metadata.App.ID.String(), "destination": metadata.DestinationID.String()}, metadata)
+	// Retention reads the completion time and the files manifest from the labels, so it does
+	// not read every snapshot's metadata.
+	_, err = w.PutManifest(ctx, map[string]string{"type": "synod.backup", "snapshot": metadata.ID.String(), "installation": metadata.InstallationID.String(), "app": metadata.App.ID.String(), "destination": metadata.DestinationID.String(), "completed": metadata.CompletedAt.UTC().Format(time.RFC3339Nano), "files": metadata.FilesID}, metadata)
 	return metadata, err
 }
 

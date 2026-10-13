@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/kopia/kopia/fs/localfs"
+	"github.com/kopia/kopia/repo"
 	"github.com/kopia/kopia/snapshot"
 	"github.com/sirrobot01/synod/internal/backup"
 )
@@ -153,5 +154,62 @@ func TestRetentionKeepsCalendarHistoryPinsAndOtherApps(t *testing.T) {
 	}
 	if _, err := r.Snapshot(t.Context(), newest); err != nil {
 		t.Fatalf("zero counts removed newest snapshot: %v", err)
+	}
+}
+
+func TestRetentionReadsSnapshotsWithoutLabels(t *testing.T) {
+	r, err := Create(t.Context(), Location{Kind: "local", Path: t.TempDir()}, Credentials{Password: "retention-label-password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close(context.Background())
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "state"), []byte("label-test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := localfs.NewEntry(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := testCatalog()
+	app, destination := catalog.Apps[0], uuid.New()
+	prepared, err := r.UploadFiles(t.Context(), root, snapshot.SourceInfo{Host: app.NodeID.String(), UserName: "synod", Path: app.ID.String()}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var older, newer uuid.UUID
+	for i, at := range []time.Time{time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC), time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)} {
+		metadata := backup.Snapshot{ID: uuid.New(), InstallationID: catalog.InstallationID, DestinationID: destination, App: app, Method: backup.Live, Architecture: "arm64", StartedAt: at.Add(-time.Minute), CompletedAt: at}
+		saved, err := r.PublishSnapshot(t.Context(), prepared.Clone(), metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			older = saved.ID
+			// Rewrite this snapshot's metadata as a build without the retention labels saved it.
+			err = repo.WriteSession(t.Context(), r.repo, repo.WriteSessionOptions{Purpose: "old labels"}, func(ctx context.Context, w repo.RepositoryWriter) error {
+				entries, err := w.FindManifests(ctx, map[string]string{"type": "synod.backup", "snapshot": saved.ID.String()})
+				if err != nil || len(entries) != 1 {
+					return errors.Join(err, errors.New("snapshot manifest not found"))
+				}
+				if err := w.DeleteManifest(ctx, entries[0].ID); err != nil {
+					return err
+				}
+				_, err = w.PutManifest(ctx, map[string]string{"type": "synod.backup", "snapshot": saved.ID.String(), "installation": saved.InstallationID.String(), "app": saved.App.ID.String(), "destination": saved.DestinationID.String()}, saved)
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			newer = saved.ID
+		}
+	}
+	removed, err := r.ApplyRetention(t.Context(), catalog.InstallationID, app.ID, destination, backup.Retention{}, newer)
+	if err != nil || len(removed) != 1 || removed[0] != older {
+		t.Fatalf("retention with an unlabelled snapshot removed %v: %v", removed, err)
+	}
+	if _, err := r.Snapshot(t.Context(), newer); err != nil {
+		t.Fatalf("the current snapshot was removed: %v", err)
 	}
 }
