@@ -122,7 +122,7 @@ A backup of an app fails with `source_unavailable` when one of its paths is not 
 The container needs these settings:
 
 - `privileged` lets the agent take filesystem snapshots and enter container namespaces for drill checks.
-- `pid: host` lets the agent find app processes and their listening ports.
+- `pid: host` lets the agent find the Docker daemon and app processes. Host checks read host paths as the Docker daemon sees them, through the daemon's process. Without `pid: host`, a restore of an app with host paths or published ports stops with `host_requirements_unverified`.
 - `network_mode: host` lets other agents reach a destination on this device and lets host checks see the host ports.
 
 To upgrade the agent, pull the new image and start the container again:

@@ -74,10 +74,13 @@ func checkHost(ctx context.Context, api *client.Client, p *plan, replaced []stri
 			}
 		}
 	}
+	var view *host.Local
 	if needsHost {
-		if err := host.CheckLocal(ctx, api); err != nil {
+		var err error
+		if view, err = host.CheckLocal(ctx, api); err != nil {
 			return &failure{Code: "host_requirements_unverified", Resource: "target Docker host", Cause: err}
 		}
+		defer view.Close()
 	}
 	for _, c := range p.Containers {
 		s := p.Definition.Services[p.Services[c.ID]]
@@ -88,7 +91,7 @@ func checkHost(ctx context.Context, api *client.Client, p *plan, replaced []stri
 			}
 		}
 		for _, device := range c.HostConfig.Devices {
-			if err := checkHostPath(required, device.PathOnHost, true); err != nil {
+			if err := checkHostPath(view, required, device.PathOnHost, true); err != nil {
 				return err
 			}
 		}
@@ -98,7 +101,7 @@ func checkHost(ctx context.Context, api *client.Client, p *plan, replaced []stri
 					continue
 				}
 				if m.Type == "bind" && original.Source == m.Source {
-					if err := checkHostPath(required, m.Source, false); err != nil {
+					if err := checkHostPath(view, required, m.Source, false); err != nil {
 						return err
 					}
 				}
@@ -209,12 +212,12 @@ func checkHost(ctx context.Context, api *client.Client, p *plan, replaced []stri
 	return nil
 }
 
-func checkHostPath(required backup.HostRequirements, name string, device bool) error {
+func checkHostPath(view *host.Local, required backup.HostRequirements, name string, device bool) error {
 	index := slices.IndexFunc(required.Paths, func(p backup.HostPath) bool { return p.Path == name })
 	if index < 0 || !required.Paths[index].Known {
 		return &failure{Code: "host_requirements_unverified", Resource: name}
 	}
-	want, got := required.Paths[index], host.Path(name)
+	want, got := required.Paths[index], view.Path(name)
 	if !got.Known || want.Mode != got.Mode || want.Device != got.Device || want.UserID != got.UserID || want.GroupID != got.GroupID || (device && os.FileMode(got.Mode)&os.ModeDevice == 0) {
 		code := "mount_unavailable"
 		if device {

@@ -1,6 +1,8 @@
 package host
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/moby/moby/api/types/container"
@@ -44,5 +46,40 @@ func TestHostNetworkIncludesJoinedServices(t *testing.T) {
 		if UsesHostNetwork(c, app) != (i < 2) {
 			t.Fatal("wrong host network scope", c.ID)
 		}
+	}
+}
+
+func TestLocalPathReadsTheDaemonRoot(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(directory, "srv", "app"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("app", filepath.Join(directory, "srv", "relative")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc", filepath.Join(directory, "srv", "absolute")); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := &Local{root: root}
+	defer view.Close()
+	if p := view.Path("/srv/app"); !p.Known || os.FileMode(p.Mode).Perm() != 0o750 || !os.FileMode(p.Mode).IsDir() {
+		t.Fatalf("daemon path: %+v", p)
+	}
+	if p := view.Path("/srv/relative"); !p.Known {
+		t.Fatal("a relative link inside the daemon root was not followed")
+	}
+	if p := view.Path("/srv/absolute"); p.Known {
+		t.Fatal("an absolute link left the daemon root")
+	}
+	if p := view.Path("/missing"); p.Known {
+		t.Fatal("a missing path is known")
+	}
+	var native *Local
+	if p := native.Path(directory); !p.Known {
+		t.Fatal("the agent's own view cannot read its paths")
 	}
 }

@@ -13,6 +13,8 @@ import (
 func (w *Worker) captureHost(ctx context.Context, containers []container.InspectResponse, app *agentv1.DiscoveredApp) []backup.HostRequirements {
 	var requirements []backup.HostRequirements
 	checked, local := false, false
+	var view *host.Local
+	defer func() { view.Close() }()
 	for _, c := range containers {
 		r := backup.HostRequirements{ContainerID: c.ID}
 		var paths []string
@@ -28,7 +30,9 @@ func (w *Worker) captureHost(ctx context.Context, containers []container.Inspect
 			}
 		}
 		if !checked && (host.UsesHostNetwork(c, containers) || len(paths) > 0) {
-			checked, local = true, host.CheckLocal(ctx, w.Docker) == nil
+			var err error
+			view, err = host.CheckLocal(ctx, w.Docker)
+			checked, local = true, err == nil
 		}
 		if host.UsesHostNetwork(c, containers) && local {
 			if sockets, err := host.ContainerSockets(ctx, w.Docker, c); err == nil {
@@ -44,7 +48,7 @@ func (w *Worker) captureHost(ctx context.Context, containers []container.Inspect
 		for _, path := range slices.Compact(paths) {
 			p := backup.HostPath{Path: path}
 			if local {
-				p = host.Path(path)
+				p = view.Path(path)
 			}
 			r.Paths = append(r.Paths, p)
 		}

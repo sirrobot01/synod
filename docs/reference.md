@@ -665,7 +665,10 @@ An external volume must exist with the saved driver and no custom driver options
 
 For host networking, the backup records TCP listeners and bound UDP sockets held by the app.
 This includes containers that share another app service's network namespace.
-The agent must run as root on the Docker host, in its network and mount namespaces.
+The agent must run as root and see the Docker daemon process (dockerd). It must share the daemon's network namespace.
+An agent on the host shares the daemon's mount namespace and reads host paths directly.
+An agent in a container needs `pid: host` and `network_mode: host`. It reads host paths through the daemon's root directory, so it sees what Docker sees. A link in such a path must be relative.
+If Synod cannot find exactly one dockerd process, the host checks remain unverified.
 If the app is stopped, or its processes cannot be read without a change, its port requirements remain unverified.
 Synod saves the backup but refuses a host-network restore with unverified port requirements.
 Before restore, Synod checks Docker port reservations and host sockets.

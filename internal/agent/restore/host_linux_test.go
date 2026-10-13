@@ -123,31 +123,31 @@ func TestRequiredDeviceAndMountTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	required := backup.HostRequirements{Paths: []backup.HostPath{host.Path(file), host.Path("/dev/null")}}
-	if err := checkHostPath(required, file, false); err != nil {
+	if err := checkHostPath(nil, required, file, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(file, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if failed, ok := errors.AsType[*failure](checkHostPath(required, file, false)); !ok || failed.Code != "mount_unavailable" {
+	if failed, ok := errors.AsType[*failure](checkHostPath(nil, required, file, false)); !ok || failed.Code != "mount_unavailable" {
 		t.Fatal("changed permissions accepted")
 	}
 	if err := os.Chmod(file, 0600); err != nil {
 		t.Fatal(err)
 	}
 	required.Paths[0].UserID++
-	if failed, ok := errors.AsType[*failure](checkHostPath(required, file, false)); !ok || failed.Code != "mount_unavailable" {
+	if failed, ok := errors.AsType[*failure](checkHostPath(nil, required, file, false)); !ok || failed.Code != "mount_unavailable" {
 		t.Fatal("changed owner accepted")
 	}
 	required.Paths[0].UserID--
-	if err := checkHostPath(required, "/dev/null", true); err != nil {
+	if err := checkHostPath(nil, required, "/dev/null", true); err != nil {
 		t.Fatal(err)
 	}
 	required.Paths[1].Device++
-	if failed, ok := errors.AsType[*failure](checkHostPath(required, "/dev/null", true)); !ok || failed.Code != "device_unavailable" {
+	if failed, ok := errors.AsType[*failure](checkHostPath(nil, required, "/dev/null", true)); !ok || failed.Code != "device_unavailable" {
 		t.Fatal("different device accepted")
 	}
-	if failed, ok := errors.AsType[*failure](checkHostPath(required, file, true)); !ok || failed.Code != "device_unavailable" {
+	if failed, ok := errors.AsType[*failure](checkHostPath(nil, required, file, true)); !ok || failed.Code != "device_unavailable" {
 		t.Fatal("regular file accepted as device")
 	}
 	if err := os.Remove(file); err != nil {
@@ -156,10 +156,10 @@ func TestRequiredDeviceAndMountTypes(t *testing.T) {
 	if err := os.Mkdir(file, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if failed, ok := errors.AsType[*failure](checkHostPath(required, file, false)); !ok || failed.Code != "mount_unavailable" {
+	if failed, ok := errors.AsType[*failure](checkHostPath(nil, required, file, false)); !ok || failed.Code != "mount_unavailable" {
 		t.Fatal("changed mount type accepted")
 	}
-	if failed, ok := errors.AsType[*failure](checkHostPath(required, file+"-unknown", false)); !ok || failed.Code != "host_requirements_unverified" {
+	if failed, ok := errors.AsType[*failure](checkHostPath(nil, required, file+"-unknown", false)); !ok || failed.Code != "host_requirements_unverified" {
 		t.Fatal("unknown mount requirement accepted")
 	}
 }

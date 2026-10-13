@@ -6,8 +6,10 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -18,30 +20,86 @@ import (
 
 var ErrUnverified = errors.New("host requirements cannot be verified")
 
-// CheckLocal refuses checks against a daemon outside the agent's Linux host.
-func CheckLocal(ctx context.Context, api *client.Client) error {
+// Local is the agent's view of the Docker daemon's host. An agent that runs on the host
+// reads host paths directly. An agent in a container, with pid: host and network: host,
+// reads them through the daemon's root directory, so it sees what Docker sees.
+type Local struct{ root *os.Root }
+
+// CheckLocal refuses checks against a daemon outside the agent's Linux host. The reference
+// is the dockerd process, because Docker resolves bind sources in its mount namespace.
+// The agent must share its network namespace, so host ports are the daemon's ports.
+func CheckLocal(ctx context.Context, api *client.Client) (*Local, error) {
 	if runtime.GOOS != "linux" || !strings.HasPrefix(api.DaemonHost(), "unix://") {
-		return ErrUnverified
+		return nil, ErrUnverified
 	}
 	name, err := os.Hostname()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	info, err := api.Info(ctx, client.InfoOptions{})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if info.Info.OSType != "linux" || info.Info.Name != name {
-		return ErrUnverified
+		return nil, ErrUnverified
 	}
-	for _, namespace := range []string{"net", "mnt"} {
-		self, err := os.Readlink("/proc/self/ns/" + namespace)
-		init, initErr := os.Readlink("/proc/1/ns/" + namespace)
-		if err != nil || initErr != nil || self != init {
-			return ErrUnverified
+	daemon, err := daemonProcess()
+	if err != nil {
+		return nil, err
+	}
+	namespace := func(pid, kind string) string {
+		link, _ := os.Readlink("/proc/" + pid + "/ns/" + kind)
+		return link
+	}
+	if network := namespace("self", "net"); network == "" || network != namespace(daemon, "net") {
+		return nil, ErrUnverified
+	}
+	if mounts := namespace("self", "mnt"); mounts != "" && mounts == namespace(daemon, "mnt") {
+		return &Local{}, nil
+	}
+	root, err := os.OpenRoot("/proc/" + daemon + "/root")
+	if err != nil {
+		return nil, errors.Join(ErrUnverified, err)
+	}
+	return &Local{root: root}, nil
+}
+
+// daemonProcess finds the one dockerd process that the agent can see. An agent in a
+// container sees it only with pid: host.
+func daemonProcess() (string, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return "", errors.Join(ErrUnverified, err)
+	}
+	var found []string
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		if comm, err := os.ReadFile("/proc/" + entry.Name() + "/comm"); err == nil && strings.TrimSpace(string(comm)) == "dockerd" {
+			found = append(found, entry.Name())
 		}
 	}
-	return nil
+	if len(found) != 1 {
+		return "", ErrUnverified
+	}
+	return found[0], nil
+}
+
+func (l *Local) Close() {
+	if l != nil && l.root != nil {
+		l.root.Close()
+	}
+}
+
+// Path reads a host path as the Docker daemon sees it. A link inside the daemon's root
+// directory must be relative, or the path is unknown.
+func (l *Local) Path(name string) backup.HostPath {
+	if l == nil || l.root == nil {
+		return Path(name)
+	}
+	info, err := l.root.Stat(strings.TrimPrefix(filepath.Clean(name), "/"))
+	return pathInfo(name, info, err)
 }
 
 // UsesHostNetwork follows namespace joins within the saved app.
@@ -66,9 +124,14 @@ func UsesHostNetwork(c container.InspectResponse, app []container.InspectRespons
 	return false
 }
 
+// Path reads a path in the agent's own mount namespace.
 func Path(name string) backup.HostPath {
-	p := backup.HostPath{Path: name}
 	info, err := os.Stat(name)
+	return pathInfo(name, info, err)
+}
+
+func pathInfo(name string, info os.FileInfo, err error) backup.HostPath {
+	p := backup.HostPath{Path: name}
 	if err != nil {
 		return p
 	}
