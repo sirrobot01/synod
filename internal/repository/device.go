@@ -16,6 +16,7 @@ import (
 	"path"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -62,6 +63,15 @@ func (f DeviceFile) Mode() os.FileMode {
 		return os.ModeDir | 0700
 	}
 	return 0600
+}
+
+// DeviceBlob is one line of a blob listing. The last line sets End, so a reader can tell
+// a complete listing from one that a failure cut short.
+type DeviceBlob struct {
+	ID         string    `json:"id,omitempty"`
+	SizeBytes  int64     `json:"size,omitempty"`
+	ModifiedAt time.Time `json:"modified_at,omitzero"`
+	End        bool      `json:"end,omitempty"`
 }
 
 // deviceOptions is held only in Kopia's private temporary connection file.
@@ -244,6 +254,32 @@ func (s *deviceStorage) DeleteBlobInPath(ctx context.Context, _, file string) er
 		return err
 	}
 	return response.Body.Close()
+}
+
+// ListBlobs lists the blobs that start with prefix in one request. The device walks its
+// shard directories locally. Kopia's sharded storage sends one request for each shard.
+func (s *deviceStorage) ListBlobs(ctx context.Context, prefix blob.ID, callback func(blob.Metadata) error) error {
+	response, err := s.request(ctx, http.MethodGet, "", url.Values{"blobs": {string(prefix)}}, nil)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	decoder := json.NewDecoder(response.Body)
+	for {
+		var listed DeviceBlob
+		if err := decoder.Decode(&listed); err != nil {
+			return errors.New("incomplete device blob listing")
+		}
+		if listed.End {
+			return nil
+		}
+		if !strings.HasPrefix(listed.ID, string(prefix)) {
+			return errors.New("invalid device blob listing")
+		}
+		if err := callback(blob.Metadata{BlobID: blob.ID(listed.ID), Length: listed.SizeBytes, Timestamp: listed.ModifiedAt}); err != nil {
+			return err
+		}
+	}
 }
 
 func (s *deviceStorage) ReadDir(ctx context.Context, path string) ([]os.FileInfo, error) {

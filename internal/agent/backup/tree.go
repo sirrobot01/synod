@@ -736,7 +736,7 @@ func (t *Tree) compareListings(ctx context.Context, current []kfs.Entry, stored 
 
 // statChildren reads the status of each child. A large directory uses several goroutines,
 // because each status read is one system call and a small CPU spends most time there.
-func statChildren(root *os.Root, children []os.DirEntry) ([]os.FileInfo, error) {
+func statChildren(root *os.Root, children []string) ([]os.FileInfo, error) {
 	infos := make([]os.FileInfo, len(children))
 	workers := 1
 	if len(children) > 256 {
@@ -752,7 +752,7 @@ func statChildren(root *os.Root, children []os.DirEntry) ([]os.FileInfo, error) 
 				if i >= len(children) || errs[w] != nil {
 					return
 				}
-				infos[i], errs[w] = root.Lstat(children[i].Name())
+				infos[i], errs[w] = root.Lstat(children[i])
 			}
 		})
 	}
@@ -786,12 +786,14 @@ func (d *sourceDirectory) list(ctx context.Context) (kfs.DirectoryIterator, erro
 	if err != nil {
 		return nil, err
 	}
-	var children []os.DirEntry
+	// Readdirnames does not stat. ReadDir in a Root stats each entry, and statChildren
+	// stats them again in parallel.
+	var children []string
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		batch, err := file.ReadDir(256)
+		batch, err := file.Readdirnames(256)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return nil, err
 		}
@@ -807,7 +809,7 @@ func (d *sourceDirectory) list(ctx context.Context) (kfs.DirectoryIterator, erro
 	hostBelow := discovery.ReachesForbidden(d.absolute)
 	names := make(map[string]bool, len(children))
 	for _, child := range children {
-		names[child.Name()] = true
+		names[child] = true
 	}
 	infos, err := statChildren(root, children)
 	if err != nil {
@@ -815,22 +817,22 @@ func (d *sourceDirectory) list(ctx context.Context) (kfs.DirectoryIterator, erro
 	}
 	var entries []kfs.Entry
 	for i, child := range children {
-		absolute := filepath.Join(d.absolute, child.Name())
+		absolute := filepath.Join(d.absolute, child)
 		if d.tree.skip(d.source.source, absolute) {
 			continue
 		}
 		reason := ""
-		sidecar, err := d.tree.sqliteSidecar(d.source, root, child.Name())
+		sidecar, err := d.tree.sqliteSidecar(d.source, root, child)
 		if err != nil {
 			return nil, err
 		}
 		if sidecar {
 			reason = "SQLite sidecars are excluded from live copies."
 		}
-		if strings.HasSuffix(child.Name(), ".sock") || (hostBelow && discovery.Forbidden(absolute, d.source.volume)) {
+		if strings.HasSuffix(child, ".sock") || (hostBelow && discovery.Forbidden(absolute, d.source.volume)) {
 			reason = "Host system paths are never copied."
 		}
-		if slices.Contains(mediaNames, strings.ToLower(child.Name())) && !d.tree.chosen(absolute) {
+		if slices.Contains(mediaNames, strings.ToLower(child)) && !d.tree.chosen(absolute) {
 			reason = "Media is skipped by default."
 			d.tree.skippedData.Store(true)
 		}
@@ -853,12 +855,12 @@ func (d *sourceDirectory) list(ctx context.Context) (kfs.DirectoryIterator, erro
 			continue
 		}
 		var wal os.FileInfo
-		if d.tree.live && !d.source.snapshot && info.Mode().IsRegular() && names[child.Name()+"-wal"] {
-			if wal, err = root.Lstat(child.Name() + "-wal"); err != nil {
+		if d.tree.live && !d.source.snapshot && info.Mode().IsRegular() && names[child+"-wal"] {
+			if wal, err = root.Lstat(child + "-wal"); err != nil {
 				return nil, err
 			}
 		}
-		entries = append(entries, newSourceEntry(d.tree, d.source, filepath.Join(d.path, child.Name()), absolute, child.Name(), info, wal))
+		entries = append(entries, newSourceEntry(d.tree, d.source, filepath.Join(d.path, child), absolute, child, info, wal))
 	}
 	kfs.Sort(entries)
 	return kfs.StaticIterator(entries, nil), nil

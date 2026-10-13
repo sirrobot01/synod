@@ -120,6 +120,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer root.Close()
+	if prefix, ok := r.URL.Query()["blobs"]; ok && r.Method == http.MethodGet && file == "" {
+		if len(prefix) != 1 || len(prefix[0]) > 255 || strings.ContainsFunc(prefix[0], invalidBlobRune) {
+			http.Error(w, "invalid blob prefix", http.StatusBadRequest)
+			return
+		}
+		listBlobs(w, root, prefix[0])
+		return
+	}
 	if file == "" {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -202,9 +210,7 @@ func validPath(file string, directory bool) bool {
 		return false
 	}
 	for part := range strings.SplitSeq(file, "/") {
-		if strings.HasPrefix(part, ".") || len(part) == 0 || len(part) > 255 || strings.ContainsFunc(part, func(r rune) bool {
-			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.')
-		}) {
+		if strings.HasPrefix(part, ".") || len(part) == 0 || len(part) > 255 || strings.ContainsFunc(part, func(r rune) bool { return r != '.' && invalidBlobRune(r) }) {
 			return false
 		}
 	}
@@ -212,6 +218,10 @@ func validPath(file string, directory bool) bool {
 		return !strings.HasPrefix(path.Base(file), ".")
 	}
 	return file == ".shards" || (!strings.HasPrefix(path.Base(file), ".") && strings.HasSuffix(file, ".f"))
+}
+
+func invalidBlobRune(r rune) bool {
+	return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_')
 }
 
 // openDirectory refuses a non-repository directory before it creates the service marker.
@@ -331,6 +341,62 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, root *os.Root, fil
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+// listBlobs streams each blob whose ID starts with prefix as one JSON line, and then an end
+// line. It walks the shard directories by the rule of Kopia's sharded storage: a directory
+// name adds to the ID, and a file name without its ".f" suffix completes it.
+func listBlobs(w http.ResponseWriter, root *os.Root, prefix string) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	encoder := json.NewEncoder(w)
+	var walk func(directory, current string) error
+	walk = func(directory, current string) error {
+		f, err := root.Open(directory)
+		if err != nil {
+			return err
+		}
+		entries, err := f.ReadDir(-1)
+		f.Close()
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.Type()&os.ModeSymlink != 0 || !validPath(entry.Name(), entry.IsDir()) {
+				continue
+			}
+			id := current + entry.Name()
+			if entry.IsDir() {
+				if strings.HasPrefix(id, prefix) || strings.HasPrefix(prefix, id) {
+					if err := walk(path.Join(directory, entry.Name()), id); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			id, ok := strings.CutSuffix(id, ".f")
+			if !ok || !strings.HasPrefix(id, prefix) {
+				continue
+			}
+			info, err := entry.Info()
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			if err := encoder.Encode(repository.DeviceBlob{ID: id, SizeBytes: info.Size(), ModifiedAt: info.ModTime().UTC()}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// Without the end line, the client reports an incomplete listing.
+	if walk(".", "") == nil {
+		encoder.Encode(repository.DeviceBlob{End: true})
+	}
 }
 
 func (s *Server) put(w http.ResponseWriter, r *http.Request, root *os.Root, file string) {
