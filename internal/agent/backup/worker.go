@@ -27,6 +27,7 @@ import (
 	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/runtime/compose"
+	"github.com/sirrobot01/synod/internal/runtime/host"
 	"github.com/sirrobot01/synod/internal/secret"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
@@ -801,7 +802,11 @@ func snapshotLimits(app *agentv1.DiscoveredApp, include []string, tree *Tree, in
 		}
 	}
 	for _, requirement := range saved.Host {
-		if !requirement.PortsKnown || slices.ContainsFunc(requirement.Paths, func(path backup.HostPath) bool { return !path.Known }) {
+		// Restore needs recorded ports only for a service on the host network.
+		hostNetwork := slices.ContainsFunc(inspected, func(c container.InspectResponse) bool {
+			return c.ID == requirement.ContainerID && host.UsesHostNetwork(c, inspected)
+		})
+		if (hostNetwork && !requirement.PortsKnown) || slices.ContainsFunc(requirement.Paths, func(path backup.HostPath) bool { return !path.Known }) {
 			limits = append(limits, backup.HostRequirementsUnverified)
 			break
 		}

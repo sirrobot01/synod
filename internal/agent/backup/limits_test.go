@@ -45,6 +45,17 @@ func TestSnapshotLimitsNameEachGapInCoverage(t *testing.T) {
 	if limits := snapshotLimits(app, nil, tree, inspected, offline); !slices.Equal(limits, []string{backup.ImagePlatformsLimited}) {
 		t.Fatalf("registry image saved without the registry: %v", limits)
 	}
+	// A service without host networking has no recorded ports, and restore needs none.
+	bridged := full
+	bridged.Host = []backup.HostRequirements{{ContainerID: "web"}}
+	webInspected := []container.InspectResponse{{ID: "web", SizeRw: &small, HostConfig: &container.HostConfig{NetworkMode: "bridge"}}}
+	if limits := snapshotLimits(app, nil, tree, webInspected, bridged); len(limits) != 0 {
+		t.Fatalf("a bridge service reported host requirements: %v", limits)
+	}
+	hostInspected := []container.InspectResponse{{ID: "web", SizeRw: &small, HostConfig: &container.HostConfig{NetworkMode: "host"}}}
+	if limits := snapshotLimits(app, nil, tree, hostInspected, bridged); !slices.Equal(limits, []string{backup.HostRequirementsUnverified}) {
+		t.Fatalf("a host-network service without recorded ports: %v", limits)
+	}
 	unknown := full
 	unknown.Host = []backup.HostRequirements{{ContainerID: "web", PortsKnown: true, Paths: []backup.HostPath{{Path: "/dev/null"}}}}
 	if limits := snapshotLimits(app, nil, tree, inspected, unknown); !slices.Equal(limits, []string{backup.HostRequirementsUnverified}) {
