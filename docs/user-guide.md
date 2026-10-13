@@ -249,7 +249,8 @@ For each other device, create a token on the controller:
 synod node join-token --device DEVICE
 ```
 
-Join each device again with a new agent directory. Do not reuse the old one:
+Join each device again with a new agent directory. Do not reuse the old one.
+Restored apps are in `/var/lib/synod/apps`, outside the agent directory, so they keep running:
 
 ```sh
 synod agent join 'TOKEN' --dir /var/lib/synod/recovered-agent

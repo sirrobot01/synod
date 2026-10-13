@@ -65,7 +65,7 @@ func TestRestoreRebuildsLostAppAndReplacesOnRequest(t *testing.T) {
 	}
 	f := newFixture(t, true)
 	api := f.worker.Docker
-	w := &Worker{Backup: f.worker, Directory: t.TempDir()}
+	w := &Worker{Backup: f.worker, Directory: t.TempDir(), Apps: t.TempDir()}
 	run := func(request restore.Request) restore.Result {
 		t.Helper()
 		t.Cleanup(func() { removeLabelled(context.Background(), api, request.ID, true) })
@@ -110,7 +110,7 @@ func TestRestoreRebuildsLostAppAndReplacesOnRequest(t *testing.T) {
 	removeFixture(api, f.name)
 	first := newRequest(f, false)
 	result := run(first)
-	if result.FailureCode != "" || result.SnapshotID != f.saved.ID || result.DestinationID != f.destinationID || result.TargetAppID != uuid.NewSHA1(f.worker.NodeID, []byte("compose:"+f.name)) || result.ProjectDirectory != filepath.Join(w.Directory, first.ID.String()) {
+	if result.FailureCode != "" || result.SnapshotID != f.saved.ID || result.DestinationID != f.destinationID || result.TargetAppID != uuid.NewSHA1(f.worker.NodeID, []byte("compose:"+f.name)) || result.ProjectDirectory != filepath.Join(w.Apps, f.name) {
 		t.Fatalf("restore result: %+v", result)
 	}
 	check(first.ID)
@@ -125,8 +125,11 @@ func TestRestoreRebuildsLostAppAndReplacesOnRequest(t *testing.T) {
 	if result := run(conflict); result.FailureCode != "app_conflict" || result.Resource == "" {
 		t.Fatalf("conflict result: %+v", result)
 	}
-	if _, err := os.Stat(filepath.Join(w.Directory, conflict.ID.String())); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(w.Apps, f.name+"-"+conflict.ID.String()[:8])); !os.IsNotExist(err) {
 		t.Fatal("refused restore left its directory", err)
+	}
+	if _, err := os.Stat(filepath.Join(w.Apps, f.name, "compose.json")); err != nil {
+		t.Fatal("refused restore removed the running app's files", err)
 	}
 	filters := make(client.Filters)
 	filters.Add("label", operationLabel+"="+conflict.ID.String())
@@ -137,8 +140,12 @@ func TestRestoreRebuildsLostAppAndReplacesOnRequest(t *testing.T) {
 
 	replace := newRequest(f, true)
 	result = run(replace)
-	if result.FailureCode != "" || result.SafetySnapshotID != backup.SafetyID(replace.ID) {
+	// The replaced app keeps its files, so the new project has its own directory.
+	if result.FailureCode != "" || result.SafetySnapshotID != backup.SafetyID(replace.ID) || result.ProjectDirectory != filepath.Join(w.Apps, f.name+"-"+replace.ID.String()[:8]) {
 		t.Fatalf("replace result: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(w.Apps, f.name, "compose.json")); err != nil {
+		t.Fatal("replace removed the replaced app's files", err)
 	}
 	if saved, err := f.repo.Snapshot(t.Context(), result.SafetySnapshotID); err != nil || saved.App.ID != f.app.ID {
 		t.Fatal("safety snapshot is missing", err)
@@ -163,7 +170,7 @@ func TestRestoreRebuildsLostAppAndReplacesOnRequest(t *testing.T) {
 func TestRestoreRecoversReplacedAppAfterInterruption(t *testing.T) {
 	f := newFixture(t, false)
 	api := f.worker.Docker
-	w := &Worker{Backup: f.worker, Directory: t.TempDir()}
+	w := &Worker{Backup: f.worker, Directory: t.TempDir(), Apps: t.TempDir()}
 	request := newRequest(f, true)
 	response, err := api.ContainerInspect(t.Context(), f.container, client.ContainerInspectOptions{})
 	if err != nil {
@@ -207,13 +214,20 @@ func TestRestorePlacesAnIncludedLargeMount(t *testing.T) {
 		t.Fatalf("the snapshot does not contain the included Large path: %+v", f.saved.Paths)
 	}
 	api := f.worker.Docker
-	w := &Worker{Backup: f.worker, Directory: t.TempDir()}
+	w := &Worker{Backup: f.worker, Directory: t.TempDir(), Apps: t.TempDir()}
 	removeFixture(api, f.name)
 	request := newRequest(f, false)
 	t.Cleanup(func() { removeLabelled(context.Background(), api, request.ID, true) })
 	result, err := w.Execute(t.Context(), request)
 	if err != nil || result.FailureCode != "" {
 		t.Fatalf("restore: %+v %v", result, err)
+	}
+	// The project lives in the apps directory, outside the agent state.
+	if result.ProjectDirectory != filepath.Join(w.Apps, f.name) {
+		t.Fatalf("project directory = %q", result.ProjectDirectory)
+	}
+	if entries, err := os.ReadDir(w.Directory); err != nil || len(entries) != 0 {
+		t.Fatalf("the restore wrote into the agent state: %v %v", entries, err)
 	}
 	var output bytes.Buffer
 	if err := execCommand(t.Context(), api, f.name, []string{"cat", "/media/movie"}, nil, &output); err != nil || output.String() != "private-included-media" {

@@ -21,7 +21,7 @@ import (
 
 func TestProofRestoresIsolatedDataChecksRunningContainersAndCleansUp(t *testing.T) {
 	f := newFixture(t, true)
-	w := &Worker{Backup: f.worker, Directory: t.TempDir()}
+	w := &Worker{Backup: f.worker, Directory: t.TempDir(), Apps: t.TempDir()}
 	api := f.worker.Docker
 	original, err := api.ContainerInspect(t.Context(), f.container, client.ContainerInspectOptions{})
 	if err != nil {
@@ -148,7 +148,7 @@ func TestProofRestoresIsolatedDataChecksRunningContainersAndCleansUp(t *testing.
 
 func TestProofRecoversAnInterruptedDrillWithoutTouchingTheSource(t *testing.T) {
 	f := newFixture(t, false)
-	w := &Worker{Backup: f.worker, Directory: t.TempDir()}
+	w := &Worker{Backup: f.worker, Directory: t.TempDir(), Apps: t.TempDir()}
 	request := proof.Request{Submission: proof.Submission{ID: uuid.New(), Kind: proof.Drill, NodeID: f.worker.NodeID, AppID: f.app.ID}, InstallationID: f.worker.InstallationID, RequestedAt: time.Now().UTC()}
 	input, _ := json.Marshal(request)
 	if _, err := f.worker.Journal.Admit(t.Context(), request.ID, input); err != nil {

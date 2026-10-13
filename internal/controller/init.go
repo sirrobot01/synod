@@ -234,7 +234,7 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 	complete = true
 
 	if options.FromRepository != "" {
-		joinNote += fmt.Sprintf("\n\nRecovered %d devices, %d apps, and %d destinations.\nNew controller keys were created. Stop old agents before recovery.\nUse a new agent --dir, then approve each device.\nFor each other saved device, run synod node join-token --device DEVICE.\nOld activity records and approval are not restored.", len(catalog.Devices), len(catalog.Apps), len(catalog.Destinations))
+		joinNote += fmt.Sprintf("\n\nRecovered %d devices, %d apps, and %d destinations.\nNew controller keys were created. Stop old agents before recovery.\nUse a new agent --dir, then approve each device.\nRestored apps live outside the agent directory and keep running.\nFor each other saved device, run synod node join-token --device DEVICE.\nOld activity records and approval are not restored.", len(catalog.Devices), len(catalog.Apps), len(catalog.Destinations))
 		if joinNode != uuid.Nil {
 			joinNote += fmt.Sprintf("\nThis join token reclaims device %s. Join it on the host with the repository directory.", joinNode)
 		}

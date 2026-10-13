@@ -301,7 +301,7 @@ func TestRestoreUsesSavedImagesWithEmptyCache(t *testing.T) {
 			if err := os.RemoveAll(f.project); err != nil {
 				t.Fatal(err)
 			}
-			w := &Worker{Backup: f.worker, Directory: t.TempDir()}
+			w := &Worker{Backup: f.worker, Directory: t.TempDir(), Apps: t.TempDir()}
 			request := newRequest(f, false)
 			t.Cleanup(func() { removeLabelled(context.Background(), api, request.ID, true) })
 			result, err := w.Execute(t.Context(), request)

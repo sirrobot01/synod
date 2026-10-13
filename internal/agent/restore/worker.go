@@ -37,8 +37,11 @@ const (
 // The caller must not run it at the same time as the backup worker.
 type Worker struct {
 	Backup *agentbackup.Worker
-	// Directory holds one private directory for each restore operation.
+	// Directory holds one private directory for each restore drill.
 	Directory string
+	// Apps holds the project directory of each restored app. It is outside the agent state,
+	// so an agent that joins again with a new directory keeps its restored apps.
+	Apps string
 }
 
 type progress struct {
@@ -49,6 +52,7 @@ type progress struct {
 	SnapshotID       uuid.UUID                   `json:"snapshot_id,omitzero"`
 	DestinationID    uuid.UUID                   `json:"destination_id,omitzero"`
 	Project          string                      `json:"project,omitempty"`
+	Directory        string                      `json:"directory,omitempty"`
 	ReplacedKey      string                      `json:"replaced_key,omitempty"`
 	Replaced         []container.InspectResponse `json:"replaced,omitempty"`
 	SafetySnapshotID uuid.UUID                   `json:"safety_snapshot_id,omitzero"`
@@ -61,7 +65,7 @@ type progress struct {
 // Execute starts admitted work once. A running record is recovered and never copied again.
 func (w *Worker) Execute(ctx context.Context, request restore.Request) (restore.Result, error) {
 	b := w.Backup
-	if request.Validate() != nil || request.NodeID != b.NodeID || request.InstallationID != b.InstallationID || !filepath.IsAbs(w.Directory) {
+	if request.Validate() != nil || request.NodeID != b.NodeID || request.InstallationID != b.InstallationID || !filepath.IsAbs(w.Apps) {
 		return restore.Result{}, restore.ErrInvalid
 	}
 	input, _ := json.Marshal(request)
@@ -123,7 +127,16 @@ func (w *Worker) run(ctx context.Context, request restore.Request, state *progre
 	if err := w.save(ctx, state); err != nil {
 		return err
 	}
-	directory := filepath.Join(w.Directory, request.ID.String())
+	// The directory is named after the project. A replaced app keeps its files for recovery,
+	// so a name in use gets the start of the operation ID.
+	name := saved.App.Definition.GetName()
+	if !filepath.IsLocal(name) || filepath.Base(name) != name {
+		name = request.ID.String()
+	}
+	directory := filepath.Join(w.Apps, name)
+	if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
+		directory += "-" + request.ID.String()[:8]
+	}
 	p, err := makePlan(ctx, r, saved, request.ID, directory, w.Backup.Architecture, false)
 	if err != nil {
 		return err
@@ -146,11 +159,16 @@ func (w *Worker) run(ctx context.Context, request restore.Request, state *progre
 	if err := createNetworks(ctx, api, p, request.ID); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(w.Directory, 0o700); err != nil {
-		return &failure{Code: "file_restore_failed", Resource: w.Directory, Cause: err}
+	if err := os.MkdirAll(w.Apps, 0o700); err != nil {
+		return &failure{Code: "file_restore_failed", Resource: w.Apps, Cause: err}
 	}
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return &failure{Code: "file_restore_failed", Resource: directory, Cause: err}
+	}
+	// A failed restore removes only a directory that it created.
+	state.Directory = directory
+	if err := w.save(ctx, state); err != nil {
+		return err
 	}
 	if err := os.Mkdir(filepath.Join(directory, "data"), 0o700); err != nil {
 		return &failure{Code: "file_restore_failed", Resource: directory, Cause: err}
@@ -302,13 +320,13 @@ func (w *Worker) finish(ctx context.Context, request restore.Request, state *pro
 				return restore.Result{}, errors.Join(ErrRecoveryPending, err)
 			}
 		}
-		if err := errors.Join(removeLabelled(cleanup, w.Backup.Docker, request.ID, true), os.RemoveAll(filepath.Join(w.Directory, request.ID.String()))); err != nil {
+		if err := errors.Join(removeLabelled(cleanup, w.Backup.Docker, request.ID, true), os.RemoveAll(state.Directory)); err != nil {
 			state.Warnings = append(state.Warnings, "cleanup_pending")
 		}
 		result.FailureCode, result.Resource = state.FailureCode, state.Resource
 	} else {
 		result.TargetAppID = uuid.NewSHA1(w.Backup.NodeID, []byte("compose:"+state.Project))
-		result.ProjectDirectory = filepath.Join(w.Directory, request.ID.String())
+		result.ProjectDirectory = state.Directory
 		result.Checks = state.Checks
 	}
 	for _, warning := range state.Warnings {

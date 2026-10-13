@@ -647,9 +647,11 @@ The temporary directory must have space for the target image archives.
 The file-copy container uses one of these images. This container stays stopped.
 No separate helper image is required.
 
-The agent writes the restore into a new private directory.
-The directory is `restores/OPERATION_ID` beside the agent enrollment directory.
-The default is `/var/lib/synod/agent/restores/OPERATION_ID`.
+The agent writes the restore into a new private project directory.
+The directory is `apps/PROJECT` beside the agent directory.
+The default is `/var/lib/synod/apps/PROJECT`.
+This directory is outside the agent state. An agent that joins again with a new `--dir` keeps its restored apps.
+If the directory exists, Synod adds the first eight characters of the operation ID, for example `PROJECT-1a2b3c4d`.
 The `project` directory holds the saved project files.
 The `data` directory holds the saved bind paths.
 Each saved volume becomes a new volume named `synod-OPERATION_ID-volumeN`.
@@ -699,6 +701,7 @@ With `--replace`, Synod first prepares the complete restore beside the running a
 It then takes a safety snapshot of the existing app in the same destination.
 It stops and removes the existing containers only after the safety snapshot succeeds.
 The volumes and bind paths of the replaced app stay on the device.
+The project directory of the replaced app also stays. The restored app gets its own directory.
 If the restored app does not start, Synod removes it.
 Synod then creates the replaced containers again from their saved settings and starts the containers that ran before.
 The result shows the safety snapshot ID.

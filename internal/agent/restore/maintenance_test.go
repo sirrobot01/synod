@@ -44,7 +44,7 @@ func TestScheduledMaintenanceRunsOnlyForThePlannedOwner(t *testing.T) {
 	if err := cache.SaveDestinationPlan(t.Context(), ring, plan); err != nil {
 		t.Fatal(err)
 	}
-	w := &Worker{Backup: &agentbackup.Worker{Journal: cache, Keyring: ring, InstallationID: installation, NodeID: node}, Directory: t.TempDir()}
+	w := &Worker{Backup: &agentbackup.Worker{Journal: cache, Keyring: ring, InstallationID: installation, NodeID: node}, Directory: t.TempDir(), Apps: t.TempDir()}
 	run := func(slot time.Time) (proof.Request, proof.Result) {
 		t.Helper()
 		request, err := schedule.Request(slot)

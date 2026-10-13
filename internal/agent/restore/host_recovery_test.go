@@ -53,7 +53,7 @@ func TestRestoreHostNetworkAndPublishedPorts(t *testing.T) {
 				t.Fatalf("host requirements not saved: %+v", f.saved.Host)
 			}
 			api := f.worker.Docker
-			w := &Worker{Backup: f.worker, Directory: t.TempDir()}
+			w := &Worker{Backup: f.worker, Directory: t.TempDir(), Apps: t.TempDir()}
 			removeFixture(api, f.name)
 			listener, err = net.Listen("tcp4", address)
 			if err != nil {
@@ -182,7 +182,7 @@ func TestImportHostNetworkRecovery(t *testing.T) {
 	f := &fixture{worker: b, app: catalog.Apps[0]}
 	request := newRequest(f, false)
 	t.Cleanup(func() { removeLabelled(context.Background(), api, request.ID, true) })
-	w := &Worker{Backup: b, Directory: t.TempDir()}
+	w := &Worker{Backup: b, Directory: t.TempDir(), Apps: t.TempDir()}
 	result, err := w.Execute(t.Context(), request)
 	if err != nil || result.FailureCode != "" {
 		t.Fatalf("cross-device restore: %+v %v", result, err)

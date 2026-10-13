@@ -229,7 +229,8 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 		logger.Warn("backup_snapshot_remove_failed", "error", err)
 	}
 	backupWorker := &agentbackup.Worker{Docker: api, Journal: cache, Keyring: ring, InstallationID: identity.Identity.InstallationID, NodeID: identity.Identity.NodeID, NodeName: hostname, Architecture: facts.architecture, Identity: deviceIdentity, PrivatePaths: []string{enrollmentPath, enrollmentPath + ".db", enrollmentPath + ".db-wal", enrollmentPath + ".db-shm"}, Logger: logger, CacheDirectory: filepath.Join(filepath.Dir(enrollmentPath), "cache")}
-	restoreWorker := &agentrestore.Worker{Backup: backupWorker, Directory: filepath.Join(filepath.Dir(enrollmentPath), "restores")}
+	// Restored apps live beside the agent directory, in apps, so a new agent directory keeps them.
+	restoreWorker := &agentrestore.Worker{Backup: backupWorker, Directory: filepath.Join(filepath.Dir(enrollmentPath), "restores"), Apps: filepath.Join(filepath.Dir(filepath.Dir(enrollmentPath)), "apps")}
 	var waiting atomic.Pointer[uuid.UUID]
 	reload := make(chan struct{})
 	worker.Go(func() {
