@@ -16,6 +16,7 @@ import (
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/client"
 	"github.com/sirrobot01/synod/internal/inventory"
+	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
 func TestScanGroupsProjectsAndKeepsDataOutOfReports(t *testing.T) {
@@ -98,6 +99,24 @@ func TestScanGroupsProjectsAndKeepsDataOutOfReports(t *testing.T) {
 	encoded, err := json.Marshal(report)
 	if err != nil || strings.Contains(string(encoded), "do-not-report") {
 		t.Fatal("file or environment contents reached inventory")
+	}
+	envListed := func(report *agentv1.AppInventory) bool {
+		for _, p := range report.Apps[0].Paths {
+			if p.Kind == "env" {
+				return true
+			}
+		}
+		return false
+	}
+	if !envListed(report) {
+		t.Fatal("the project's .env file is not listed")
+	}
+	// An absent .env is not listed as an app path with an unknown size.
+	if err := os.Remove(filepath.Join(project, ".env")); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := Scan(t.Context(), api, nil); err != nil || envListed(report) {
+		t.Fatalf("an absent .env is listed: %v", err)
 	}
 	broken.Store(true)
 	if report, err := Scan(t.Context(), api, nil); err == nil || report != nil {

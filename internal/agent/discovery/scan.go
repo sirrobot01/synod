@@ -3,8 +3,11 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/sirrobot01/synod/internal/runtime/host"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -112,7 +115,10 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 				}
 				app.ProjectDirectory = working
 				app.Paths = append(app.Paths, &agentv1.DiscoveredPath{Source: working, Kind: "project"})
-				app.Paths = append(app.Paths, &agentv1.DiscoveredPath{Source: filepath.Join(working, ".env"), Kind: "env"})
+				// Compose reads .env only when it exists. Each backup scans again, so a new file is copied.
+				if _, err := os.Lstat(filepath.Join(working, ".env")); !errors.Is(err, fs.ErrNotExist) {
+					app.Paths = append(app.Paths, &agentv1.DiscoveredPath{Source: filepath.Join(working, ".env"), Kind: "env"})
+				}
 			}
 			files := labels["com.docker.compose.project.config_files"]
 			if files == "" {
