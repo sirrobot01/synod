@@ -209,7 +209,7 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 	stopped := make(chan error, 2)
 	logger.Info("controller API listening", "address", listener.Addr().String(), "installation_id", settings.InstallationID)
 	if agentTLS != nil {
-		receiver := agentstream.Receiver{Store: metadata, Authority: authority}
+		receiver := agentstream.Receiver{Store: metadata, Authority: authority, Logger: logger}
 		agentServer, err := controlstream.New(controlstream.Config{
 			InstallationID: uuid.MustParse(settings.InstallationID), TLS: agentTLS, Logger: logger,
 			Authorize: func(ctx context.Context, _, nodeID uuid.UUID, certificate *x509.Certificate) error {

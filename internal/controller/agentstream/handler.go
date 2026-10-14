@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 
 	"github.com/google/uuid"
@@ -28,6 +29,8 @@ type Receiver struct {
 	Send  func(uuid.UUID, string, *agentv1.ControllerMessage) error
 	// Authority issues renewed agent certificates. Without it, renewal requests fail.
 	Authority *pki.CA
+	// Logger reports terminal events that the store refused. It can be nil.
+	Logger *slog.Logger
 }
 
 // Handle records one message. It returns nil only after the record commits.
@@ -50,7 +53,7 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 		if json.Unmarshal(value.ProofEvent.EventJson, &event) != nil {
 			return ErrUnsupportedMessage
 		}
-		if err := r.Store.RecordProofEvent(ctx, peer.NodeID, sessionID, event); err != nil {
+		if err := r.Store.RecordProofEvent(ctx, peer.NodeID, sessionID, event); err != nil && !r.keepFirst(peer, event.ID, event.Status, err) {
 			return err
 		}
 		if (event.Status == "succeeded" || event.Status == "failed") && r.Send != nil {
@@ -65,7 +68,7 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 		if json.Unmarshal(value.RestoreEvent.EventJson, &event) != nil {
 			return ErrUnsupportedMessage
 		}
-		if err := r.Store.RecordRestoreEvent(ctx, peer.NodeID, sessionID, event); err != nil {
+		if err := r.Store.RecordRestoreEvent(ctx, peer.NodeID, sessionID, event); err != nil && !r.keepFirst(peer, event.ID, event.Status, err) {
 			return err
 		}
 		if (event.Status == "succeeded" || event.Status == "failed") && r.Send != nil {
@@ -97,7 +100,7 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 		if json.Unmarshal(value.BackupEvent.EventJson, &event) != nil {
 			return ErrUnsupportedMessage
 		}
-		if err := r.Store.RecordBackupEvent(ctx, peer.NodeID, sessionID, event); err != nil {
+		if err := r.Store.RecordBackupEvent(ctx, peer.NodeID, sessionID, event); err != nil && !r.keepFirst(peer, event.ID, event.Status, err) {
 			return err
 		}
 		if (event.Status == "succeeded" || event.Status == "failed") && r.Send != nil {
@@ -125,4 +128,19 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 	default:
 		return fmt.Errorf("%w: node %s sent %T", ErrUnsupportedMessage, peer.NodeID, message.Message)
 	}
+}
+
+// keepFirst reports whether a refused event is a second terminal result for an operation
+// that already has one. The store keeps the first result. The caller acknowledges the event,
+// so the agent drops it. Otherwise the agent sends it again on each connection, and its later
+// messages wait behind it. An agent that lost its journal can run a scheduled job again.
+func (r Receiver) keepFirst(peer controlstream.Peer, id uuid.UUID, status string, err error) bool {
+	var refused *store.Error
+	if !errors.As(err, &refused) || refused.Code != store.OperationConflict || (status != "succeeded" && status != "failed") {
+		return false
+	}
+	if r.Logger != nil {
+		r.Logger.Warn("agent result conflicts with the saved result; the saved result stays", "node_id", peer.NodeID, "operation_id", id, "status", status)
+	}
+	return true
 }
