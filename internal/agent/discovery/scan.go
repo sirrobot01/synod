@@ -19,6 +19,9 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// ImageLabel holds the saved image name of a restored container, which runs from an image ID.
+const ImageLabel = "io.synod.image"
+
 // Scan returns a complete inventory. Filters can restrict a scan to test projects.
 // A Docker failure returns no inventory, so a partial scan cannot remove saved apps.
 func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*agentv1.AppInventory, error) {
@@ -58,7 +61,12 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 			apps[key] = app
 			inventory.Apps = append(inventory.Apps, app)
 		}
-		item := &agentv1.DiscoveredContainer{Id: c.ID, Name: strings.TrimPrefix(c.Name, "/"), Service: labels["com.docker.compose.service"], Image: c.Config.Image, ImageId: c.Image}
+		reference := c.Config.Image
+		// A restored container runs from an image ID. Restore saves the original image name.
+		if strings.HasPrefix(reference, "sha256:") && labels[ImageLabel] != "" {
+			reference = labels[ImageLabel]
+		}
+		item := &agentv1.DiscoveredContainer{Id: c.ID, Name: strings.TrimPrefix(c.Name, "/"), Service: labels["com.docker.compose.service"], Image: reference, ImageId: c.Image}
 		if c.State != nil {
 			item.State = string(c.State.Status)
 		}
@@ -73,7 +81,7 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 			}
 		}
 		databasePath := ""
-		imageName := strings.Split(strings.Split(filepath.Base(c.Config.Image), "@")[0], ":")[0]
+		imageName := strings.Split(strings.Split(filepath.Base(reference), "@")[0], ":")[0]
 		switch filepath.Base(imageName) {
 		case "postgres":
 			item.Database, databasePath = "postgres", "/var/lib/postgresql/data"

@@ -232,3 +232,55 @@ func TestScanClassifiesCustomDatabaseDirectories(t *testing.T) {
 		})
 	}
 }
+
+func TestScanDetectsTheDatabaseOfARestoredContainer(t *testing.T) {
+	data := t.TempDir()
+	var labelled atomic.Bool
+	labelled.Store(true)
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/v1.56")
+		switch {
+		case path == "/containers/json":
+			json.NewEncoder(w).Encode([]container.Summary{{ID: "db"}})
+		case strings.HasPrefix(path, "/containers/"):
+			// Restore starts the container from the saved image ID.
+			labels := map[string]string{}
+			if labelled.Load() {
+				labels[ImageLabel] = "postgres:16-alpine"
+			}
+			json.NewEncoder(w).Encode(container.InspectResponse{ID: "db", Name: "/db", Image: "sha256:test", Config: &container.Config{Image: "sha256:test", Labels: labels}, Mounts: []container.MountPoint{{Type: mount.TypeBind, Source: data, Destination: "/var/lib/postgresql/data"}}})
+		case strings.HasPrefix(path, "/images/"):
+			w.Write([]byte(`{"Id":"sha256:test","Os":"linux","Architecture":"arm64"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer apiServer.Close()
+	api, err := client.New(client.WithHost(apiServer.URL), client.WithVersion("1.56"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer api.Close()
+	scan := func() (*agentv1.DiscoveredContainer, string) {
+		t.Helper()
+		report, err := Scan(t.Context(), api, nil)
+		if err != nil || len(report.Apps) != 1 {
+			t.Fatalf("scan: %+v %v", report, err)
+		}
+		for _, p := range report.Apps[0].Paths {
+			if p.Source == data {
+				return report.Apps[0].Containers[0], p.Status
+			}
+		}
+		t.Fatal("the data path is missing")
+		return nil, ""
+	}
+	if c, status := scan(); c.Database != "postgres" || c.Image != "postgres:16-alpine" || status != "Dumped" {
+		t.Fatalf("restored database: kind %q, image %q, status %q", c.Database, c.Image, status)
+	}
+	// Without the label, an image ID names no database.
+	labelled.Store(false)
+	if c, status := scan(); c.Database != "" || status == "Dumped" {
+		t.Fatalf("unlabelled image ID: kind %q, status %q", c.Database, status)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
+	"github.com/sirrobot01/synod/internal/agent/discovery"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/repository"
 	"github.com/sirrobot01/synod/internal/runtime/compose"
@@ -150,6 +151,8 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 			service.Labels = make(map[string]string)
 		}
 		service.Labels[operationLabel] = operationID.String()
+		// Discovery reads the database kind from the image name, which an image ID does not have.
+		service.Labels[discovery.ImageLabel] = image.Reference
 		p.Definition.Services[p.Services[c.ID]] = service
 		for _, m := range c.Mounts {
 			if m.Type != "volume" {
