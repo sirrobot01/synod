@@ -280,7 +280,7 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		}
 		created := fmt.Sprintf("Synod installation %s created in %s.", res.id, absDir)
 		if options.FromRepository != "" {
-			created = fmt.Sprintf("Synod installation %s recovered in %s with %d devices, %d apps, and %d destinations.\nJoin each other device again with a token from synod node join-token --device DEVICE.", res.id, absDir, len(catalog.Devices), len(catalog.Apps), len(catalog.Destinations))
+			created = fmt.Sprintf("Synod installation %s recovered in %s.\nDevices: %d. Apps: %d. Destinations: %d.\nJoin each other device again with a token from synod node join-token --device DEVICE.", res.id, absDir, len(catalog.Devices), len(catalog.Apps), len(catalog.Destinations))
 		}
 		_, err = fmt.Fprintf(output, `%s
 
@@ -297,7 +297,7 @@ Open https://%s to create your account.
 	}
 
 	if options.FromRepository != "" {
-		joinNote += fmt.Sprintf("\n\nRecovered %d devices, %d apps, and %d destinations.\nNew controller keys were created. Stop old agents before recovery.\nUse a new agent --dir, then approve each device.\nRestored apps live outside the agent directory and keep running.\nFor each other saved device, run synod node join-token --device DEVICE.\nOld activity records and approval are not restored.", len(catalog.Devices), len(catalog.Apps), len(catalog.Destinations))
+		joinNote += fmt.Sprintf("\n\nRecovered devices: %d. Apps: %d. Destinations: %d.\nNew controller keys were created. Stop old agents before recovery.\nUse a new agent --dir, then approve each device.\nRestored apps live outside the agent directory and keep running.\nFor each other saved device, run synod node join-token --device DEVICE.\nOld activity records and approval are not restored.", len(catalog.Devices), len(catalog.Apps), len(catalog.Destinations))
 		if joinNode != uuid.Nil {
 			joinNote += fmt.Sprintf("\nThis join token reclaims device %s. Join it on the host with the repository directory.", joinNode)
 		}
