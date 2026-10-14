@@ -60,6 +60,9 @@ func newCheckCommand(app *app) *cobra.Command {
 			}
 			app.result.Operation = &saved
 		}
+		if saved.Status != operation.Succeeded && saved.FailureCode == "repository_uninitialized" {
+			return &client.Error{Code: "repository_uninitialized", Message: "No backup has used this destination yet. The first backup creates its repository."}
+		}
 		if saved.Status != operation.Succeeded {
 			return &client.Error{Code: "integrity_check_failed", Message: "The repository check failed. Inspect the operation's failure code."}
 		}

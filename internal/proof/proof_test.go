@@ -121,6 +121,11 @@ func TestEventsValidateDrillChecks(t *testing.T) {
 	if (Event{ID: integrity.ID, Status: "succeeded", Result: checked}).Validate(integrity) == nil {
 		t.Error("an integrity check reported drill checks")
 	}
+	// A check before the first backup finds no repository. That result must reach the controller.
+	empty := Result{DestinationID: integrity.DestinationID, StartedAt: now, CompletedAt: now, FailureCode: "repository_uninitialized"}
+	if err := (Event{ID: integrity.ID, Status: "failed", Result: empty}).Validate(integrity); err != nil {
+		t.Errorf("uninitialized repository result: %v", err)
+	}
 	if err := (Event{ID: drill.ID, Status: "queued"}).Validate(drill); err != nil {
 		t.Errorf("queued event: %v", err)
 	}

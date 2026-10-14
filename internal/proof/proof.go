@@ -222,7 +222,7 @@ func (e Event) Validate(request Request) error {
 			if r.FailureCode != "" || r.Resource != "" || r.DestinationID == uuid.Nil || (request.Kind == Integrity && r.Read == 0) || (request.Kind == Drill && (r.SnapshotID == uuid.Nil || r.Containers == 0)) || (request.Kind == Maintenance && r.Maintenance == "") {
 				return ErrInvalid
 			}
-		} else if !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "integrity_check_failed", "snapshot_not_found", "snapshot_invalid", "image_platform_unsupported", "image_archive_missing", "image_archive_invalid", "image_load_failed", "compose_unavailable", "definition_unsupported", "app_conflict", "source_path_unavailable", "file_restore_failed", "volume_restore_failed", "database_restore_failed", "compose_start_failed", "drill_container_stopped", "drill_isolation_failed", "drill_check_failed", "maintenance_not_owner", "maintenance_failed", "agent_interrupted"}, r.FailureCode) || r.Maintenance != "" {
+		} else if !slices.Contains([]string{"destination_unavailable", "repository_open_failed", "repository_uninitialized", "integrity_check_failed", "snapshot_not_found", "snapshot_invalid", "image_platform_unsupported", "image_archive_missing", "image_archive_invalid", "image_load_failed", "compose_unavailable", "definition_unsupported", "app_conflict", "source_path_unavailable", "file_restore_failed", "volume_restore_failed", "database_restore_failed", "compose_start_failed", "drill_container_stopped", "drill_isolation_failed", "drill_check_failed", "maintenance_not_owner", "maintenance_failed", "agent_interrupted"}, r.FailureCode) || r.Maintenance != "" {
 			return ErrInvalid
 		}
 	default:
