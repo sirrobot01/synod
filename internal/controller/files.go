@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/controlstream"
@@ -30,6 +31,17 @@ func readSnapshotFile(ctx context.Context, metadata *store.Store, stream *contro
 	listing, err := metadata.ListDestinations(ctx)
 	if err != nil {
 		return restore.FileHeader{}, nil, err
+	}
+	// Without a matching destination there is no snapshot to read. This is the normal
+	// state before the first destination, so it is an empty answer, not an agent fault.
+	if !slices.ContainsFunc(listing.Destinations, func(d destination.Destination) bool {
+		return request.DestinationID == uuid.Nil || d.ID == request.DestinationID
+	}) {
+		header := restore.FileHeader{}
+		if request.Action != restore.FileSnapshots {
+			header.FailureCode = "snapshot_not_found"
+		}
+		return header, io.NopCloser(strings.NewReader("")), nil
 	}
 	// Prefer the source. It can also read its local destinations.
 	source := catalog.Apps[index].NodeID
