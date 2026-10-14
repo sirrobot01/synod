@@ -57,14 +57,14 @@ Synod backs up the Docker apps in your home lab and restores them on any of your
 3. Open `https://DEVICE-ADDRESS:8443`. Create your account and save the recovery kit.
    The kit holds the password of your backups. Keep it away from your devices.
 
-4. In the web UI:
-   1. In **Devices**, approve your device.
-   2. In **Destinations**, add a destination on another device.
-   3. In **Apps**, select **Protect all**.
+4. In the web UI, **Overview** shows the **Setup** steps until all three are done:
+   1. **Add device**. Approve each device that joins.
+   2. **Add storage**. Select a type, for example **Another device**.
+   3. **Schedule backups**. Select the apps, review their paths, and select **Save schedule**.
 
-To add another device, select **Add device** in **Devices**. Run the Compose file that it shows on that device.
+To add another device, select **Add device**. Run the Compose file that the dialog shows on that device.
 
-To restore an app, open **Snapshots & restore**.
+To restore an app, open the app in **Apps** and select **Restore…**. Select a snapshot, then a device, then confirm.
 
 To install Synod without Docker, see the [user guide](docs/user-guide.md#install-without-docker).
 

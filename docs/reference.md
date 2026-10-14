@@ -179,7 +179,7 @@ Join installs and starts the `synod-agent` service.
 Without systemd, run `synod agent run --config /var/lib/synod/agent/agent.json`.
 If join fails, run it again with the same token and directory.
 
-In the web UI, **Devices → Add device** creates a token and shows a Compose file and commands with the token filled in. It shows the device when it joins, and approves it.
+In the web UI, **Add device** creates a token. The dialog shows a Compose file on the **With Docker Compose** tab and commands on the **As a Linux service** tab, with the token filled in. It shows the device when it joins, and approves it.
 
 Join tokens name the `address` setting of the controller with the API port.
 Without `address`, they name the listen address, or the host that the browser or CLI used.
@@ -250,6 +250,8 @@ Each path has a status:
 ## Destinations
 
 A destination is an encrypted repository.
+The web UI calls a destination **storage**.
+In the web UI, the types are **Another device** (`device`), **Local disk** (`local`), **SFTP** (`sftp`), and **S3** (`s3`).
 
 | Type | Stores backups | Example |
 | --- | --- | --- |

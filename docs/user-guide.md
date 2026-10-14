@@ -76,11 +76,14 @@ To remove it, trust `/var/lib/synod/controller/api-ca.crt` on your computer.
    Synod shows the kit only once. A copy stays in `/var/lib/synod/controller/recovery-kit.txt` until you delete it.
 3. In **Devices**, approve your device.
 
+**Overview** shows the **Setup** steps: add a device, add storage, and schedule backups.
+The steps go away when all three are done. Then **Overview** shows the recovery matrix: each app, the newest snapshot in each storage, and the last restore test.
+
 ## 3. Add your other devices
 
-1. In **Devices**, select **Add device**.
-2. On the other device, save the Compose file that the dialog shows as `compose.yaml`. Then run `docker compose up -d`.
-   The dialog also shows commands for a device without Docker.
+1. Select **Add device**. The button is on **Overview** and on **Devices**.
+2. On the other device, save the Compose file that the **With Docker Compose** tab shows as `compose.yaml`. Then run `docker compose up -d`.
+   For a device without Docker, use the **As a Linux service** tab.
 3. When the device joins, select **Approve** in the dialog.
 
 The token in the dialog joins one device and is valid for 24 hours.
@@ -89,10 +92,19 @@ With the CLI, run `docker exec synod synod node join-token` to create a token.
 You can do the next steps in the web UI or with the CLI.
 To run a CLI command on a controller in Docker, put `docker exec synod` before it.
 
-## 4. Add a destination
+## 4. Add storage
 
-A destination stores your encrypted backups.
-To store them in a directory on another device:
+Storage keeps the encrypted snapshots of your apps. The CLI calls it a destination.
+In the web UI, select **Add storage**. Select a type, and fill in the fields:
+
+| Type | Use |
+| --- | --- |
+| **Another device** | A folder on another Synod device. It survives the loss of the device that runs the apps. This is the recommended type. |
+| **Local disk** | A folder or USB disk on the device that runs the apps. You lose it with that device. |
+| **SFTP** | A path on a server that you reach over SSH, such as a NAS. |
+| **S3** | A bucket on an S3-compatible service, such as Backblaze B2 or MinIO. |
+
+With the CLI, to store the snapshots in a folder on another device:
 
 ```sh
 synod destination add peer --type device --device DEVICE --path /srv/synod-backups
@@ -100,9 +112,13 @@ synod destination add peer --type device --device DEVICE --path /srv/synod-backu
 
 For S3 or SFTP, see [Destinations](reference.md#destinations).
 
-## 5. Protect your apps
+## 5. Schedule backups
 
 Synod finds your apps within one minute.
+In the web UI, select **Schedule backups**. Select the apps, review the paths of each app, and select **Save schedule**.
+To change the schedule of one app, open the app in **Apps** and select **Edit schedule**.
+
+With the CLI:
 
 ```sh
 synod app list
@@ -136,11 +152,12 @@ See [Protection status](reference.md#protection-status).
 
 ## 6. Set up alerts (optional)
 
-1. In the web UI, open **Settings**.
-2. Enter a [Shoutrrr URL](https://shoutrrr.nickfedor.com/v0.20.0/services/overview/), for example for ntfy, Discord, or email.
-3. Send a test notification.
+1. In the web UI, open **Settings**, then the **Notifications** tab.
+2. Select **Configure**.
+3. Enter a [Shoutrrr URL](https://shoutrrr.nickfedor.com/v0.20.0/services/overview/), for example for ntfy, Discord, or email.
+4. Send a test notification.
 
-Synod alerts you about failed backups and restore tests, overdue backups, full destinations, and missing devices.
+Synod alerts you about failed backups and restore tests, overdue backups, full storage, and missing devices.
 
 ## Restore a file
 
@@ -149,7 +166,9 @@ synod file list APP
 synod file get APP /saved/path/config.yml --output ./config.yml
 ```
 
-For an older copy, add `--snapshot SNAPSHOT_ID`. List the copies with `synod snapshot list APP`.
+For an older snapshot, add `--snapshot SNAPSHOT_ID`. List the snapshots with `synod snapshot list APP`.
+
+In the web UI, open the app in **Apps** and select **Browse files**. Select a snapshot, open a folder, and select **Download**.
 
 ## Restore an app
 
@@ -166,7 +185,15 @@ The restored app goes into `/var/lib/synod/apps/APP` on the target.
 To replace an app that exists on the target, add `--replace`.
 Synod first takes a safety backup of that app.
 
-In the web UI, use **Snapshots & restore**.
+In the web UI:
+
+1. Open the app in **Apps**, and select **Restore…**. To restore one snapshot, select **Restore** next to that snapshot.
+2. Select a snapshot. The newest snapshot is selected.
+3. Select a device. You cannot select a device that is offline, that is not approved, or that has no image for its architecture in the snapshot.
+4. Read the steps, and confirm. To replace the app on its own device, type the app name.
+
+The dialog shows the progress and the result. **Activity** keeps the record.
+To test a restore without a change to the running app, select **Test restore**.
 
 ## Recover after you lose the controller
 
