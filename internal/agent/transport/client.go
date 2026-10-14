@@ -36,8 +36,8 @@ type Config struct {
 	HandshakeTimeout time.Duration
 	BackoffMin       time.Duration
 	BackoffMax       time.Duration
-	// Logger records why a connection ended. Run reconnects on its own, so a stream
-	// that fails repeatedly is otherwise invisible.
+	// Logger records connections, why a connection ended, and failed attempts.
+	// Run reconnects on its own, so a stream that fails repeatedly is otherwise invisible.
 	Logger *slog.Logger
 	// Handle receives each controller message after the Session and returns an optional response.
 	// Callbacks must honor cancellation.
@@ -57,6 +57,17 @@ type Client struct {
 	mu      sync.Mutex
 	active  *connection
 	running bool
+	// The reconnect loop alone uses these. A failure that repeats is logged again
+	// only when its reason changes or five minutes pass.
+	lastFailure   string
+	lastLogged    time.Time
+	failedQuiet   int
+	failedSinceUp int
+}
+
+type ending struct {
+	reason string
+	err    error
 }
 
 // New checks the transport settings and returns a client that is ready to run.
@@ -210,13 +221,26 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 	// out of here is a bare false, so without this the reason for a session that
 	// will not start is lost at the one place it is known.
 	var cause error
-	// failed names the type of the controller message whose handler ended the
-	// session. The handler error itself can carry private detail and is not logged.
+	// failed names the type of the controller message whose handler ended the session.
 	var failed string
+	var connectedAt time.Time
 	defer func() {
-		if parent.Err() == nil && c.config.Logger != nil {
-			c.config.Logger.Warn("agent_stream_ended", "session_id", sessionID, "reason", failure, "message", failed, "error", cause)
+		if parent.Err() != nil || c.config.Logger == nil {
+			return
 		}
+		if !connectedAt.IsZero() {
+			c.config.Logger.Warn("lost the connection to the controller; reconnecting", "controller", endpoint, "reason", failure, "message", failed, "connected_for", time.Since(connectedAt).Round(time.Second), "error", cause)
+			c.lastFailure, c.failedQuiet = "", 0
+			return
+		}
+		c.failedSinceUp++
+		key := failure + ": " + fmt.Sprint(cause)
+		if key == c.lastFailure && time.Since(c.lastLogged) < 5*time.Minute {
+			c.failedQuiet++
+			return
+		}
+		c.config.Logger.Warn("cannot connect to the controller; retrying", "controller", endpoint, "reason", failure, "error", cause, "failed_attempts", c.failedSinceUp, "not_logged", c.failedQuiet)
+		c.lastFailure, c.lastLogged, c.failedQuiet = key, time.Now(), 0
 	}()
 	deadline := time.AfterFunc(c.config.HandshakeTimeout, cancel)
 	defer deadline.Stop()
@@ -296,7 +320,12 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 		}
 		c.mu.Unlock()
 	}()
-	done := make(chan string, 2)
+	connectedAt = time.Now()
+	if c.config.Logger != nil {
+		c.config.Logger.Info("connected to the controller", "controller", endpoint, "session", sessionID, "failed_attempts", c.failedSinceUp)
+	}
+	c.failedSinceUp = 0
+	done := make(chan ending, 2)
 	handled := make(chan string, 1)
 	// One writer owns stream.Send. Queued messages and heartbeats share it.
 	go func() {
@@ -314,7 +343,7 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 				message = &agentv1.AgentMessage{Message: &agentv1.AgentMessage_Heartbeat{Heartbeat: &agentv1.Heartbeat{Sequence: sequence, ObservedAt: timestamppb.Now()}}}
 			}
 			if err := stream.Send(message); err != nil {
-				done <- "send_failed"
+				done <- ending{"send_failed", err}
 				return
 			}
 		}
@@ -323,17 +352,21 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 		for {
 			message, err := stream.Recv()
 			if err != nil {
-				done <- "receive_failed"
+				done <- ending{"receive_failed", err}
 				return
 			}
-			if message.GetSession() != nil || controlstream.CheckControllerMessage(message) != nil {
-				done <- "invalid_controller_message"
+			if message.GetSession() != nil {
+				done <- ending{"invalid_controller_message", errors.New("a second session offer")}
+				return
+			}
+			if err := controlstream.CheckControllerMessage(message); err != nil {
+				done <- ending{"invalid_controller_message", err}
 				return
 			}
 			response, err := c.config.Handle(ctx, message)
 			if err != nil {
 				handled <- fmt.Sprintf("%T", message.Message)
-				done <- "handler_failed"
+				done <- ending{"handler_failed", err}
 				return
 			}
 			if ctx.Err() != nil {
@@ -341,7 +374,7 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 			}
 			if response != nil {
 				if err := c.send(active, response); err != nil {
-					done <- "response_not_queued"
+					done <- ending{"response_not_queued", err}
 					return
 				}
 			}
@@ -352,7 +385,8 @@ func (c *Client) connect(parent context.Context, endpoint string) bool {
 	select {
 	case <-ctx.Done():
 		failure = "session_cancelled"
-	case failure = <-done:
+	case end := <-done:
+		failure, cause = end.reason, end.err
 	case <-expiry.C:
 		failure = "controller_certificate_expired"
 	}

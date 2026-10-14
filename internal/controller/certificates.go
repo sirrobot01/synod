@@ -159,7 +159,7 @@ func keepCertificates(ctx context.Context, renew []func(time.Time) error, logger
 	for {
 		for _, step := range renew {
 			if err := step(time.Now()); err != nil && ctx.Err() == nil {
-				logger.Warn("certificate_renewal_failed", "code", "certificate_renewal_failed", "error", err)
+				logger.Warn("controller certificate renewal failed; retrying tomorrow", "error", err)
 			}
 		}
 		select {

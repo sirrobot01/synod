@@ -29,7 +29,7 @@ func serveFile(ctx context.Context, request restore.FileRequest, worker *agentre
 	defer cancel()
 	files, err := stream.OpenFile(ctx)
 	if err != nil {
-		logger.Warn("file_request_failed", "request_id", request.ID, "code", "file_stream_unavailable")
+		logger.Warn("file request failed: no stream to the controller", "app", request.AppID, "path", request.Path, "request", request.ID, "error", err)
 		return
 	}
 	first := true
@@ -44,6 +44,6 @@ func serveFile(ctx context.Context, request restore.FileRequest, worker *agentre
 		_, err = files.CloseAndRecv()
 	}
 	if err != nil {
-		logger.Warn("file_request_failed", "request_id", request.ID, "code", "file_transfer_incomplete")
+		logger.Warn("file transfer incomplete", "app", request.AppID, "path", request.Path, "request", request.ID, "error", err)
 	}
 }

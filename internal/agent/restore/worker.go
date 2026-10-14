@@ -1,9 +1,11 @@
 package restore
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -101,7 +103,26 @@ func (w *Worker) Execute(ctx context.Context, request restore.Request) (restore.
 	if err := b.Journal.StartWithProgress(ctx, request.ID, raw); err != nil {
 		return restore.Result{}, err
 	}
+	if b.Logger != nil {
+		b.Logger.Info("restore started", "app", request.AppID, "snapshot", snapshotName(request.SnapshotID), "replace", request.Replace, "operation", request.ID)
+	}
 	return w.finish(ctx, request, &state, w.run(ctx, request, &state))
+}
+
+// snapshotName names the requested snapshot in the log.
+func snapshotName(id uuid.UUID) string {
+	if id == uuid.Nil {
+		return "newest"
+	}
+	return id.String()
+}
+
+// logCause returns the error behind a failure, which the failure code alone hides.
+func logCause(err error) error {
+	if failed, ok := errors.AsType[*failure](err); ok {
+		return failed.Cause
+	}
+	return err
 }
 
 func (w *Worker) save(ctx context.Context, state *progress) error {
@@ -347,7 +368,33 @@ func (w *Worker) finish(ctx context.Context, request restore.Request, state *pro
 		return restore.Result{}, err
 	}
 	w.releaseSafety(cleanup, request)
+	if logger := w.Backup.Logger; logger != nil {
+		attrs := []any{"app", cmp.Or(state.Project, request.AppID.String()), "snapshot", result.SnapshotID, "duration", result.CompletedAt.Sub(result.StartedAt).Round(time.Millisecond), "operation", request.ID}
+		if len(result.WarningCodes) > 0 {
+			attrs = append(attrs, "warnings", strings.Join(result.WarningCodes, ","))
+		}
+		if result.FailureCode != "" {
+			logger.Warn("restore failed", append(attrs, "code", result.FailureCode, "resource", result.Resource, "error", logCause(cause))...)
+		} else {
+			logger.Info("restore finished", append(attrs, "directory", result.ProjectDirectory, "checks", checkSummary(result.Checks))...)
+		}
+	}
 	return result, nil
+}
+
+// checkSummary counts the app checks for the log, such as "6 passed, 1 failed".
+func checkSummary(checks []proof.Check) string {
+	counts := map[string]int{}
+	for _, check := range checks {
+		counts[check.Status]++
+	}
+	var parts []string
+	for _, status := range []string{proof.CheckPassed, proof.CheckFailed, proof.CheckUnchecked} {
+		if counts[status] > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", counts[status], status))
+		}
+	}
+	return cmp.Or(strings.Join(parts, ", "), "none")
 }
 
 // WaitingResult exposes only safe progress fields while restore work runs or waits for recovery.

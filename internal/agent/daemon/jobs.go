@@ -26,6 +26,15 @@ func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agen
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	defer worker.CloseIdle(0)
+	// The loop retries a stuck record every 5 seconds. Its warning is logged once.
+	stuck := uuid.Nil
+	pending := func(id uuid.UUID, message string, err error) {
+		waiting.Store(new(id))
+		if stuck != id {
+			stuck = id
+			logger.Warn(message, "operation", id, "error", err)
+		}
+	}
 	for {
 		if ctx.Err() != nil {
 			return
@@ -35,11 +44,11 @@ func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agen
 		}
 		worker.CloseIdle(agentbackup.ConnectionIdle)
 		if _, err := worker.Journal.AdmitScheduled(ctx, worker.Keyring, time.Now()); err != nil && !errors.Is(err, journal.ErrNotFound) {
-			logger.Warn("backup_schedule_failed", "code", "schedule_admission_failed")
+			logger.Warn("scheduled backup not queued", "error", err)
 		}
 		records, err := worker.Journal.Pending(ctx)
 		if err != nil {
-			logger.Warn("backup_journal_failed", "code", "journal_read_failed")
+			logger.Warn("job journal unreadable", "error", err)
 		}
 		// Pending puts recovery first. A pending restart prevents another app from stopping.
 		for _, record := range records {
@@ -53,8 +62,7 @@ func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agen
 			var check proof.Request
 			if json.Unmarshal(record.Input, &check) == nil && check.Kind.Valid() {
 				if _, err := restorer.ExecuteProof(ctx, check); err != nil {
-					waiting.Store(new(record.ID))
-					logger.Warn("proof_recovery_pending", "operation_id", record.ID, "code", "inspect_drill_cleanup")
+					pending(record.ID, "restore test or check cannot finish; other jobs wait until it does", err)
 					break
 				}
 				continue
@@ -62,20 +70,18 @@ func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agen
 			var job restore.Request
 			if json.Unmarshal(record.Input, &job) == nil && job.Kind == "restore" {
 				if _, err := restorer.Execute(ctx, job); err != nil {
-					waiting.Store(new(record.ID))
-					logger.Warn("restore_recovery_pending", "operation_id", record.ID, "code", "inspect_restore_recovery")
+					pending(record.ID, "restore cannot finish its recovery; other jobs wait until it does", err)
 					break
 				}
 				continue
 			}
 			var request backup.Request
-			if json.Unmarshal(record.Input, &request) != nil || request.Validate() != nil {
-				logger.Warn("backup_journal_failed", "code", "journal_request_invalid")
+			if err := json.Unmarshal(record.Input, &request); err != nil || request.Validate() != nil {
+				pending(record.ID, "job journal holds an unreadable job; other jobs wait", errors.Join(err, request.Validate()))
 				break
 			}
 			if _, err := worker.Execute(ctx, request); err != nil {
-				waiting.Store(new(record.ID))
-				logger.Warn("backup_recovery_pending", "operation_id", record.ID, "code", "inspect_backup_recovery")
+				pending(record.ID, "backup cannot finish; other jobs wait until it does (often an app that did not restart)", err)
 				break
 			}
 		}
@@ -91,23 +97,31 @@ func executeJobs(ctx context.Context, worker *agentbackup.Worker, restorer *agen
 func reportJobs(ctx context.Context, cache *journal.Journal, stream *transport.Client, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+	// Reports repeat every second. A refused one is logged once for each operation.
+	refused := make(map[uuid.UUID]bool)
+	invalid := func(id uuid.UUID, kind string, err error) {
+		if !refused[id] {
+			refused[id] = true
+			logger.Error(kind+" result not reported: it fails validation, so the controller never receives it", "operation", id, "error", err)
+		}
+	}
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		records, err := cache.Records(ctx)
 		if err != nil {
-			logger.Warn("backup_report_failed", "code", "journal_read_failed")
+			logger.Warn("job journal unreadable", "error", err)
 		}
 		for _, record := range records {
 			var check proof.Request
 			if json.Unmarshal(record.Input, &check) == nil && check.Kind.Valid() {
-				reportProof(stream, record, check, waiting, logger)
+				reportProof(stream, record, check, waiting, logger, invalid)
 				continue
 			}
 			var job restore.Request
 			if json.Unmarshal(record.Input, &job) == nil && job.Kind == "restore" {
-				reportRestore(stream, record, job, waiting, logger)
+				reportRestore(stream, record, job, waiting, logger, invalid)
 				continue
 			}
 			var request backup.Request
@@ -141,8 +155,8 @@ func reportJobs(ctx context.Context, cache *journal.Journal, stream *transport.C
 					event.Status = "failed"
 				}
 			}
-			if event.Validate(request) != nil {
-				logger.Warn("backup_report_failed", "operation_id", record.ID, "code", "result_invalid")
+			if err := event.Validate(request); err != nil {
+				invalid(record.ID, "backup", err)
 				continue
 			}
 			raw, err := json.Marshal(event)
@@ -151,7 +165,7 @@ func reportJobs(ctx context.Context, cache *journal.Journal, stream *transport.C
 			}
 			err = stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_BackupEvent{BackupEvent: &agentv1.BackupEvent{EventJson: raw}}})
 			if err != nil && !errors.Is(err, controlstream.ErrDisconnected) && !errors.Is(err, controlstream.ErrBusy) {
-				logger.Warn("backup_report_failed", "code", "result_delivery_failed")
+				logger.Warn("backup result not sent to the controller; retrying", "operation", record.ID, "error", err)
 			}
 		}
 		select {
@@ -163,7 +177,7 @@ func reportJobs(ctx context.Context, cache *journal.Journal, stream *transport.C
 	}
 }
 
-func reportRestore(stream *transport.Client, record journal.Record, request restore.Request, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
+func reportRestore(stream *transport.Client, record journal.Record, request restore.Request, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger, invalid func(uuid.UUID, string, error)) {
 	event := restore.Event{ID: record.ID}
 	switch record.State {
 	case journal.Queued:
@@ -189,8 +203,8 @@ func reportRestore(stream *transport.Client, record journal.Record, request rest
 			event.Status = "failed"
 		}
 	}
-	if event.Validate(request) != nil {
-		logger.Warn("restore_report_failed", "operation_id", record.ID, "code", "result_invalid")
+	if err := event.Validate(request); err != nil {
+		invalid(record.ID, "restore", err)
 		return
 	}
 	raw, err := json.Marshal(event)
@@ -199,11 +213,11 @@ func reportRestore(stream *transport.Client, record journal.Record, request rest
 	}
 	err = stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_RestoreEvent{RestoreEvent: &agentv1.RestoreEvent{EventJson: raw}}})
 	if err != nil && !errors.Is(err, controlstream.ErrDisconnected) && !errors.Is(err, controlstream.ErrBusy) {
-		logger.Warn("restore_report_failed", "code", "result_delivery_failed")
+		logger.Warn("restore result not sent to the controller; retrying", "operation", record.ID, "error", err)
 	}
 }
 
-func reportProof(stream *transport.Client, record journal.Record, request proof.Request, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger) {
+func reportProof(stream *transport.Client, record journal.Record, request proof.Request, waiting *atomic.Pointer[uuid.UUID], logger *slog.Logger, invalid func(uuid.UUID, string, error)) {
 	event := proof.Event{ID: record.ID}
 	if request.ScheduleID != uuid.Nil {
 		event.Request = &request
@@ -230,8 +244,8 @@ func reportProof(stream *transport.Client, record journal.Record, request proof.
 			event.Status = "failed"
 		}
 	}
-	if event.Validate(request) != nil {
-		logger.Warn("proof_report_failed", "operation_id", record.ID, "code", "result_invalid")
+	if err := event.Validate(request); err != nil {
+		invalid(record.ID, string(request.Kind), err)
 		return
 	}
 	raw, err := json.Marshal(event)
@@ -240,6 +254,6 @@ func reportProof(stream *transport.Client, record journal.Record, request proof.
 	}
 	err = stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_ProofEvent{ProofEvent: &agentv1.ProofEvent{EventJson: raw}}})
 	if err != nil && !errors.Is(err, controlstream.ErrDisconnected) && !errors.Is(err, controlstream.ErrBusy) {
-		logger.Warn("proof_report_failed", "code", "result_delivery_failed")
+		logger.Warn("restore test or check result not sent to the controller; retrying", "operation", record.ID, "error", err)
 	}
 }

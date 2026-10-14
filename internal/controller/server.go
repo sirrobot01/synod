@@ -26,6 +26,7 @@ import (
 	"github.com/sirrobot01/synod/internal/controller/agentstream"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/jointoken"
+	"github.com/sirrobot01/synod/internal/logging"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/restore"
 	"github.com/sirrobot01/synod/internal/secret"
@@ -79,11 +80,10 @@ func Report(err error, stderr io.Writer) int {
 }
 
 func serve(ctx context.Context, settings config.Controller, output io.Writer) error {
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(settings.LogLevel)); err != nil {
-		return fmt.Errorf("invalid log level %q: %w", settings.LogLevel, err)
+	logger, err := logging.New(output, settings.LogLevel, settings.LogFormat)
+	if err != nil {
+		return err
 	}
-	logger := slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{Level: level}))
 	// Read through an open descriptor so checks apply to the bytes we use.
 	token, err := readStartupFile(settings.AdminTokenFile, 258, true)
 	if err != nil {

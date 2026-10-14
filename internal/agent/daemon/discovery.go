@@ -34,18 +34,18 @@ func discover(ctx context.Context, api *client.Client, stream *transport.Client,
 				return
 			}
 			if err != nil {
-				// Docker errors can contain container configuration. Log only a fixed code.
-				logger.Warn("app_discovery_failed", "code", "docker_scan_failed")
+				// Scan errors name containers, volumes, and Docker's reason, never configuration values.
+				logger.Warn("app discovery failed; the controller keeps the last app list", "code", "docker_scan_failed", "error", err)
 				report = &agentv1.AppInventory{ObservedAt: timestamppb.Now(), FailureCode: "docker_scan_failed"}
 			} else if inventory.Validate(report) != nil {
-				logger.Warn("app_discovery_failed", "code", "inventory_limit")
+				logger.Warn("app discovery found more than one report can hold (512 apps, 900 KiB); the controller keeps the last app list", "code", "inventory_limit")
 				report = &agentv1.AppInventory{ObservedAt: timestamppb.Now(), FailureCode: "inventory_limit"}
 			}
 			nextScan = time.Now().Add(time.Minute)
 		}
 		err := stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_Inventory{Inventory: report}})
 		if err != nil && !errors.Is(err, controlstream.ErrDisconnected) && !errors.Is(err, controlstream.ErrBusy) {
-			logger.Warn("app_inventory_send_failed", "error", err)
+			logger.Warn("app list not sent to the controller", "error", err)
 		}
 		select {
 		case <-ctx.Done():

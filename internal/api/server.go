@@ -262,7 +262,13 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		s.logger.Warn("write error response failed", "request_id", identity.requestID, "error", err)
 	}
-	s.logger.Info("API request rejected", "request_id", identity.requestID, "code", code, "status", status)
+	// The query is left out: it can hold a saved file path.
+	attrs := []any{"method", r.Method, "path", r.URL.Path, "status", status, "code", code, "reason", message, "actor", identity.actorID, "request", identity.requestID}
+	if status >= http.StatusInternalServerError {
+		s.logger.Warn("API request failed", attrs...)
+		return
+	}
+	s.logger.Info("API request refused", attrs...)
 }
 
 // SetAssets gives the server the built browser application.

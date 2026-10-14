@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"os"
@@ -57,8 +58,10 @@ func reportDestinationHealth(ctx context.Context, cache *journal.Journal, ring *
 			if len(report.Destinations) > 0 {
 				_ = stream.Send(&agentv1.AgentMessage{Message: &agentv1.AgentMessage_DestinationHealth{DestinationHealth: report}})
 			}
+		} else if errors.Is(err, journal.ErrNotFound) {
+			// No destination settings have arrived yet. That is normal before the first destination.
 		} else if ctx.Err() == nil {
-			logger.Warn("destination_health_failed", "code", "destination_cache_unavailable")
+			logger.Warn("destination space report failed: saved destination settings are unreadable", "error", err)
 		}
 		select {
 		case <-ctx.Done():

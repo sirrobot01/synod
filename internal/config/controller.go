@@ -40,6 +40,8 @@ type Controller struct {
 	APICAKeyFile  string `json:"api_ca_key_file"`
 	PublicOrigin  string `json:"public_origin"`
 	LogLevel      string `json:"log_level"`
+	// LogFormat is "text" (the default) or "json".
+	LogFormat string `json:"log_format"`
 	// SecretKeyFile holds the base64 of one 32-byte wrapping key, and SecretKeyID
 	// names it. Destination credentials are sealed with it.
 	SecretKeyFile string `json:"secret_key_file"`
@@ -71,6 +73,7 @@ func BindController(flags *pflag.FlagSet) func() (Controller, error) {
 	flags.StringVar(&override.SecretKeyID, "secret-key-id", "", "UUID naming the active credential wrapping key")
 	flags.StringVar(&override.PublicOrigin, "public-origin", "", "browser origin of this API, such as https://synod.example.com")
 	flags.StringVar(&override.LogLevel, "log-level", defaults.LogLevel, "debug, info, warn, or error")
+	flags.StringVar(&override.LogFormat, "log-format", "text", "text or json")
 	return func() (Controller, error) {
 		return loadController(flags, *path, defaults, override)
 	}
@@ -129,6 +132,7 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 		{"SYNOD_API_CA_KEY_FILE", &config.APICAKeyFile},
 		{"SYNOD_PUBLIC_ORIGIN", &config.PublicOrigin},
 		{"SYNOD_LOG_LEVEL", &config.LogLevel},
+		{"SYNOD_LOG_FORMAT", &config.LogFormat},
 		{"SYNOD_SECRET_KEY_FILE", &config.SecretKeyFile},
 		{"SYNOD_SECRET_KEY_ID", &config.SecretKeyID},
 	} {
@@ -174,6 +178,8 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 			config.PublicOrigin = override.PublicOrigin
 		case "log-level":
 			config.LogLevel = override.LogLevel
+		case "log-format":
+			config.LogFormat = override.LogFormat
 		}
 	})
 	_, port, err := net.SplitHostPort(config.Listen)

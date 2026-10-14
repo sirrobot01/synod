@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/sirrobot01/synod/internal/buildinfo"
 	"github.com/sirrobot01/synod/internal/controlstream"
 	"github.com/sirrobot01/synod/internal/destination"
+	"github.com/sirrobot01/synod/internal/logging"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/repository"
@@ -62,7 +64,10 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	if err := config.validate(); err != nil {
 		return err
 	}
-	logger := slog.New(slog.NewJSONHandler(diagnostics, nil))
+	logger, err := logging.New(diagnostics, config.LogLevel, config.LogFormat)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrConfiguration, err)
+	}
 	state, err := enrollment.Open(config.EnrollmentDir, enrollment.Options{Identity: enrollment.Identity{InstallationID: uuid.MustParse(config.InstallationID), NodeID: uuid.MustParse(config.NodeID)}})
 	if err != nil {
 		return fmt.Errorf("%w: open enrollment state %s: %w", ErrEnrollment, config.EnrollmentDir, err)
@@ -129,7 +134,7 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 				if _, err := cache.Admit(ctx, request.ID, raw); err != nil {
 					return nil, err
 				}
-				logger.Info("backup_job_received", "operation_id", request.ID)
+				logger.Info("backup queued", "app", request.SourceKey, "operation", request.ID)
 				return nil, nil
 			}
 			if file := message.GetFileRequest(); file != nil {
@@ -140,7 +145,7 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 				select {
 				case fileRequests <- request:
 				default:
-					logger.Warn("file_request_refused", "request_id", request.ID, "code", "file_queue_full")
+					logger.Warn("file request refused: too many file requests are waiting", "app", request.AppID, "request", request.ID)
 				}
 				return nil, nil
 			}
@@ -175,8 +180,12 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 			}
 			if update := message.GetDestinationPlan(); update != nil {
 				var plan destination.Plan
-				if json.Unmarshal(update.SettingsJson, &plan) != nil || cache.SaveDestinationPlan(ctx, ring, plan) != nil {
-					logger.Warn("destination_plan_failed", "code", "destination_cache_failed")
+				err := json.Unmarshal(update.SettingsJson, &plan)
+				if err == nil {
+					err = cache.SaveDestinationPlan(ctx, ring, plan)
+				}
+				if err != nil {
+					logger.Warn("destination settings not saved", "revision", plan.Revision, "error", err)
 					return nil, destination.ErrInvalid
 				}
 				return &agentv1.AgentMessage{Message: &agentv1.AgentMessage_DestinationAck{DestinationAck: &agentv1.DestinationAck{Revision: plan.Revision}}}, nil
@@ -187,15 +196,15 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 					err = state.Renew(id, issued.CertificatePem, issued.CaCertificatePem)
 				}
 				if err != nil {
-					logger.Warn("certificate_renewal_failed", "code", "certificate_invalid")
+					logger.Warn("certificate renewal failed: the controller sent an unusable certificate", "error", err)
 					return nil, nil
 				}
 				renewed.CompareAndSwap(nil, new(time.Now()))
-				logger.Info("certificate_renewed", "certificate_id", id)
+				logger.Info("certificate renewed", "certificate", id)
 				return nil, nil
 			}
 			if failure := message.GetError(); failure != nil {
-				logger.Warn("controller_error", "code", failure.Code, "message", failure.Message)
+				logger.Warn("controller refused a message from this agent", "code", failure.Code, "error", failure.Message)
 			}
 			return nil, nil
 		},
@@ -226,7 +235,7 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 	}
 	// No backup runs yet, so every Synod snapshot is left from an interrupted backup.
 	if err := agentbackup.RemoveStaleSnapshots(ctx); err != nil {
-		logger.Warn("backup_snapshot_remove_failed", "error", err)
+		logger.Warn("leftover filesystem snapshots not removed", "error", err)
 	}
 	backupWorker := &agentbackup.Worker{Docker: api, Journal: cache, Keyring: ring, InstallationID: identity.Identity.InstallationID, NodeID: identity.Identity.NodeID, NodeName: hostname, Architecture: facts.architecture, Identity: deviceIdentity, PrivatePaths: []string{enrollmentPath, enrollmentPath + ".db", enrollmentPath + ".db-wal", enrollmentPath + ".db-shm"}, Logger: logger, CacheDirectory: filepath.Join(filepath.Dir(enrollmentPath), "cache")}
 	// Restored apps live beside the agent directory, in apps, so a new agent directory keeps them.
@@ -252,7 +261,7 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 		worker.Go(func() { serveFiles(workerCtx, fileRequests, restoreWorker, stream, logger) })
 	}
 	defer func() { stopWorker(); worker.Wait() }()
-	logger.Info("agent_started", "node_id", config.NodeID, "architecture", facts.architecture, "runtime_version", facts.version)
+	logger.Info("agent started", "device", config.NodeID, "version", buildinfo.Version, "architecture", facts.architecture, "docker", facts.version, "controller", strings.Join(config.ControllerEndpoints, ","))
 	// A blob write waits for the disk. A slow disk can need minutes to make packs durable.
 	blobHTTP := &http.Server{Handler: blobHandler, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{identity.Certificate}, ClientCAs: roots, ClientAuth: tls.RequireAndVerifyClientCert}, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Minute, WriteTimeout: 10 * time.Minute, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn), BaseContext: func(net.Listener) context.Context { return workerCtx }}
 	stopped := make(chan error, 2)
@@ -280,7 +289,7 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 		return fmt.Errorf("%w: close enrollment state: %w", ErrEnrollment, err)
 	}
 	if errors.Is(err, errRenewed) {
-		logger.Info("agent_restarting", "code", "certificate_renewed")
+		logger.Info("agent restarting to use its renewed certificate")
 		return errRenewed
 	}
 	return nil
@@ -301,7 +310,7 @@ func requestRenewal(ctx context.Context, state *enrollment.State, stream *transp
 			if err != nil {
 				wait = 15 * time.Second
 				if !errors.Is(err, controlstream.ErrDisconnected) {
-					logger.Warn("certificate_renewal_failed", "code", "renewal_request_failed")
+					logger.Warn("certificate renewal request not sent; retrying in 15 seconds", "error", err)
 				}
 			}
 		}

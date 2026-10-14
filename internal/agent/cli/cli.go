@@ -40,7 +40,7 @@ func Command() *cobra.Command {
 			return nil
 		},
 	}
-	var configPath, joinToken, destinationAddress string
+	var configPath, joinToken, destinationAddress, logLevel, logFormat string
 	run := &cobra.Command{Use: "run", Short: "Run the agent of a joined device", Long: `Run starts the agent of a joined device.
 With --join-token, run first joins a device that has no configuration yet.
 $SYNOD_JOIN_TOKEN_FILE can name a file with the token instead. Run waits for that file,
@@ -53,6 +53,8 @@ The agent container image uses this, so one Compose file joins and runs the agen
 		if err != nil {
 			return err
 		}
+		config.LogLevel = cmp.Or(logLevel, os.Getenv("SYNOD_LOG_LEVEL"), config.LogLevel)
+		config.LogFormat = cmp.Or(logFormat, os.Getenv("SYNOD_LOG_FORMAT"), config.LogFormat)
 		if err := daemon.Run(cmd.Context(), config, cmd.ErrOrStderr()); err != nil {
 			return err
 		}
@@ -62,6 +64,8 @@ The agent container image uses this, so one Compose file joins and runs the agen
 	}}
 	run.Flags().StringVar(&configPath, "config", "", "Private agent JSON configuration file (required)")
 	run.Flags().StringVar(&joinToken, "join-token", "", "Join token to use when the device has not joined (default: $SYNOD_JOIN_TOKEN)")
+	run.Flags().StringVar(&logLevel, "log-level", "", "debug, info, warn, or error (default: $SYNOD_LOG_LEVEL, then info)")
+	run.Flags().StringVar(&logFormat, "log-format", "", "text or json (default: $SYNOD_LOG_FORMAT, then text)")
 	run.Flags().StringVar(&destinationAddress, "destination-address", "", "Reachable host:port for other agents when run joins the device (default: $SYNOD_DESTINATION_ADDRESS)")
 	root.AddCommand(joinCommand(), renewCommand(), run)
 	return root

@@ -296,6 +296,8 @@ Logs:
 | Agent in Docker | `docker logs --tail 100 synod-agent` |
 | macOS controller | `tail -n 100 "/Library/Application Support/Synod/controller/controller.log"` |
 
+For more detail, set `SYNOD_LOG_LEVEL: debug` on the service and start it again. See [Logs](reference.md#logs).
+
 | Problem | Action |
 | --- | --- |
 | A device does not connect | Check its address, port 8444, clock, and agent log. |

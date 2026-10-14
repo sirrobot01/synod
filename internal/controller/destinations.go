@@ -19,12 +19,19 @@ import (
 func deliverDestinations(ctx context.Context, installationID uuid.UUID, metadata *store.Store, ring *secret.Keyring, stream *controlstream.Server, logger *slog.Logger) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+	// The loop runs every second. A failure that repeats is logged once.
+	var last string
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := sendDestinationPlans(ctx, installationID, metadata, ring, stream); err != nil && ctx.Err() == nil {
-			logger.Warn("destination_delivery_failed", "code", "destination_delivery_unavailable")
+		err := sendDestinationPlans(ctx, installationID, metadata, ring, stream)
+		if err != nil && ctx.Err() == nil && err.Error() != last {
+			logger.Warn("destination settings not sent to agents; retrying", "error", err)
+		}
+		last = ""
+		if err != nil {
+			last = err.Error()
 		}
 		select {
 		case <-ctx.Done():

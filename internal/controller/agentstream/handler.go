@@ -2,16 +2,19 @@
 package agentstream
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/controlstream"
+	"github.com/sirrobot01/synod/internal/operation"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/restore"
@@ -29,7 +32,7 @@ type Receiver struct {
 	Send  func(uuid.UUID, string, *agentv1.ControllerMessage) error
 	// Authority issues renewed agent certificates. Without it, renewal requests fail.
 	Authority *pki.CA
-	// Logger reports terminal events that the store refused. It can be nil.
+	// Logger reports each operation result once, and terminal events that the store refused. It can be nil.
 	Logger *slog.Logger
 }
 
@@ -53,8 +56,13 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 		if json.Unmarshal(value.ProofEvent.EventJson, &event) != nil {
 			return ErrUnsupportedMessage
 		}
-		if err := r.Store.RecordProofEvent(ctx, peer.NodeID, sessionID, event); err != nil && !r.keepFirst(peer, event.ID, event.Status, err) {
-			return err
+		done := r.finished(ctx, event.ID)
+		if err := r.Store.RecordProofEvent(ctx, peer.NodeID, sessionID, event); err != nil {
+			if !r.keepFirst(peer, event.ID, event.Status, err) {
+				return err
+			}
+		} else if !done {
+			r.logResult(ctx, peer, event.ID)
 		}
 		if (event.Status == "succeeded" || event.Status == "failed") && r.Send != nil {
 			return r.Send(peer.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_OperationAck{OperationAck: &agentv1.OperationAck{OperationId: event.ID.String()}}})
@@ -68,8 +76,13 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 		if json.Unmarshal(value.RestoreEvent.EventJson, &event) != nil {
 			return ErrUnsupportedMessage
 		}
-		if err := r.Store.RecordRestoreEvent(ctx, peer.NodeID, sessionID, event); err != nil && !r.keepFirst(peer, event.ID, event.Status, err) {
-			return err
+		done := r.finished(ctx, event.ID)
+		if err := r.Store.RecordRestoreEvent(ctx, peer.NodeID, sessionID, event); err != nil {
+			if !r.keepFirst(peer, event.ID, event.Status, err) {
+				return err
+			}
+		} else if !done {
+			r.logResult(ctx, peer, event.ID)
 		}
 		if (event.Status == "succeeded" || event.Status == "failed") && r.Send != nil {
 			return r.Send(peer.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_OperationAck{OperationAck: &agentv1.OperationAck{OperationId: event.ID.String()}}})
@@ -100,8 +113,13 @@ func (r Receiver) Handle(ctx context.Context, peer controlstream.Peer, message *
 		if json.Unmarshal(value.BackupEvent.EventJson, &event) != nil {
 			return ErrUnsupportedMessage
 		}
-		if err := r.Store.RecordBackupEvent(ctx, peer.NodeID, sessionID, event); err != nil && !r.keepFirst(peer, event.ID, event.Status, err) {
-			return err
+		done := r.finished(ctx, event.ID)
+		if err := r.Store.RecordBackupEvent(ctx, peer.NodeID, sessionID, event); err != nil {
+			if !r.keepFirst(peer, event.ID, event.Status, err) {
+				return err
+			}
+		} else if !done {
+			r.logResult(ctx, peer, event.ID)
 		}
 		if (event.Status == "succeeded" || event.Status == "failed") && r.Send != nil {
 			return r.Send(peer.NodeID, peer.SessionID, &agentv1.ControllerMessage{Message: &agentv1.ControllerMessage_OperationAck{OperationAck: &agentv1.OperationAck{OperationId: event.ID.String()}}})
@@ -140,7 +158,52 @@ func (r Receiver) keepFirst(peer controlstream.Peer, id uuid.UUID, status string
 		return false
 	}
 	if r.Logger != nil {
-		r.Logger.Warn("agent result conflicts with the saved result; the saved result stays", "node_id", peer.NodeID, "operation_id", id, "status", status)
+		r.Logger.Warn("agent sent a second result for a finished operation; the first result stays", "device", peer.NodeID, "operation", id, "status", status)
 	}
 	return true
+}
+
+// finished reports whether the operation already has its result, so a resent result is logged once.
+func (r Receiver) finished(ctx context.Context, id uuid.UUID) bool {
+	op, err := r.Store.GetOperation(ctx, id)
+	return err == nil && op.Status.Terminal()
+}
+
+var resultName = map[string]string{"backup": "backup", "restore": "restore", "restore_drill": "restore test", "integrity_check": "repository check", "repository_maintenance": "repository maintenance"}
+
+// logResult writes one line when an operation gets its result: what ran, on which device, and how it ended.
+// The agent's own log holds the cause of a failure.
+func (r Receiver) logResult(ctx context.Context, peer controlstream.Peer, id uuid.UUID) {
+	if r.Logger == nil {
+		return
+	}
+	op, err := r.Store.GetOperation(ctx, id)
+	if err != nil || !op.Status.Terminal() {
+		return
+	}
+	device := peer.NodeID.String()
+	if node, err := r.Store.GetNode(ctx, peer.NodeID); err == nil && node.Name != "" {
+		device = node.Name
+	}
+	attrs := []any{"device", device, "operation", id}
+	if op.AppID != uuid.Nil {
+		app := op.AppID.String()
+		if catalog, err := r.Store.ListApps(ctx); err == nil {
+			for _, item := range catalog.Apps {
+				if item.ID == op.AppID && item.Definition != nil {
+					app = item.Definition.Name
+				}
+			}
+		}
+		attrs = append([]any{"app", app}, attrs...)
+	}
+	if op.FinishedAt != nil {
+		attrs = append(attrs, "duration", op.FinishedAt.Sub(op.CreatedAt).Round(time.Second))
+	}
+	name := cmp.Or(resultName[op.Kind], op.Kind)
+	if op.Status == operation.Succeeded {
+		r.Logger.Info(name+" succeeded", attrs...)
+		return
+	}
+	r.Logger.Warn(name+" failed; the device log has the cause", append(attrs, "code", op.FailureCode)...)
 }

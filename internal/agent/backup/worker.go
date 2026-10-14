@@ -147,7 +147,7 @@ type progress struct {
 	Published bool            `json:"published,omitzero"`
 	Limits    []string        `json:"limits,omitempty"`
 	Metadata  backup.Snapshot `json:"metadata"`
-	// phases holds the milliseconds of each backup step for the backup_timing log.
+	// phases holds the milliseconds of each backup step for the debug log.
 	phases []any
 	// discard closes the connection after the backup. A failed repository write can leave
 	// state in its memory that the destination does not hold.
@@ -156,7 +156,12 @@ type progress struct {
 	// it could not decide, and nothing expired.
 	retained, retentionFailed bool
 	mark                      time.Time
+	// cause is the error behind FailureCode. It is not saved: the log names it once.
+	cause error
 }
+
+// fail records the failure code. The cause stays in memory for the result log.
+func (p *progress) fail(code string, cause error) { p.FailureCode, p.cause = code, cause }
 
 func (p *progress) phase(name string) {
 	now := time.Now()
@@ -194,7 +199,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			return backup.Result{}, journal.ErrConflict
 		}
 		if state.Prepared == nil && state.FailureCode == "" {
-			state.FailureCode = "agent_interrupted"
+			state.fail("agent_interrupted", nil)
 		}
 		return w.finish(ctx, request, &state, nil)
 	}
@@ -205,21 +210,24 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if err := w.Journal.StartWithProgress(ctx, request.ID, initial); err != nil {
 		return backup.Result{}, err
 	}
+	if w.Logger != nil {
+		w.Logger.Info("backup started", "app", request.SourceKey, "destination", w.DestinationName(ctx, request.DestinationID), "method", request.Method, "operation", request.ID)
+	}
 	state.phase("")
 	plan, err := w.Journal.DestinationPlan(ctx, w.Keyring)
 	if err != nil {
-		state.FailureCode = "destination_unavailable"
+		state.fail("destination_unavailable", err)
 		return w.finish(ctx, request, &state, nil)
 	}
 	location, credentials, err := plan.Connection(request.DestinationID, w.Identity)
 	if err != nil {
-		state.FailureCode = "destination_unavailable"
+		state.fail("destination_unavailable", err)
 		return w.finish(ctx, request, &state, nil)
 	}
 	credentials.CacheDirectory = w.cache(request.DestinationID)
 	r, key, err := w.connect(ctx, request.DestinationID, location, credentials, request.Initialize)
 	if err != nil {
-		state.FailureCode = "repository_open_failed"
+		state.fail("repository_open_failed", err)
 		return w.finish(ctx, request, &state, nil)
 	}
 	// A failed backup can leave a broken connection. Only a clean result keeps it open.
@@ -227,9 +235,9 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	// The next save records this. A crash before it only repeats the repository check.
 	state.RepositoryOpened = true
 	if err := r.CheckInstallation(ctx, w.InstallationID); err != nil {
-		state.FailureCode = "repository_open_failed"
+		state.fail("repository_open_failed", err)
 		if errors.Is(err, repository.ErrCatalogConflict) {
-			state.FailureCode = "repository_installation_conflict"
+			state.fail("repository_installation_conflict", err)
 		}
 		return w.finish(ctx, request, &state, r)
 	}
@@ -243,7 +251,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	report, err := discovery.Scan(ctx, w.Docker, filters)
 	state.phase("discover_app")
 	if err != nil || len(report.Apps) != 1 || report.Apps[0].Key != request.SourceKey || inventory.Validate(report) != nil {
-		state.FailureCode = "app_scan_failed"
+		state.fail("app_scan_failed", err)
 		return w.finish(ctx, request, &state, r)
 	}
 	app := report.Apps[0]
@@ -261,11 +269,11 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		}
 	}
 	if method == backup.Dump && len(databases) == 0 {
-		state.FailureCode = "database_not_detected"
+		state.fail("database_not_detected", nil)
 		return w.finish(ctx, request, &state, r)
 	}
 	if len(app.Issues) > 0 {
-		state.FailureCode = "app_definition_incomplete"
+		state.fail("app_definition_incomplete", errors.New(strings.Join(app.Issues, ", ")))
 		return w.finish(ctx, request, &state, r)
 	}
 	var inspected, fileContainers []container.InspectResponse
@@ -273,16 +281,16 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		// The writable layer size shows data that no volume or bind mount holds.
 		response, err := w.Docker.ContainerInspect(ctx, item.Id, client.ContainerInspectOptions{Size: true})
 		if err != nil || response.Container.Config == nil || response.Container.HostConfig == nil || response.Container.State == nil {
-			state.FailureCode = "app_scan_failed"
+			state.fail("app_scan_failed", err)
 			return w.finish(ctx, request, &state, r)
 		}
 		c := response.Container
 		if databases[c.ID] != "" && (!c.State.Running || c.State.Paused) {
-			state.FailureCode = "database_unavailable"
+			state.fail("database_unavailable", nil)
 			return w.finish(ctx, request, &state, r)
 		}
 		if c.State.Restarting || c.State.Dead || c.State.Status == "removing" || (method == backup.Stop && (c.HostConfig.AutoRemove || (c.Config.StopTimeout != nil && (*c.Config.StopTimeout < 0 || *c.Config.StopTimeout > 600)))) {
-			state.FailureCode = "app_state_unsafe"
+			state.fail("app_state_unsafe", nil)
 			return w.finish(ctx, request, &state, r)
 		}
 		inspected = append(inspected, c)
@@ -292,14 +300,14 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	raw, err := json.Marshal(inspected)
 	if err != nil || len(raw) > 4<<20 {
-		state.FailureCode = "app_definition_limit"
+		state.fail("app_definition_limit", err)
 		return w.finish(ctx, request, &state, r)
 	}
 	definitions := map[string][]byte{"inspect.json": raw}
 	networks := make(map[string]network.Network)
 	for _, c := range inspected {
 		if c.NetworkSettings == nil {
-			state.FailureCode = "app_scan_failed"
+			state.fail("app_scan_failed", nil)
 			return w.finish(ctx, request, &state, r)
 		}
 		for name := range c.NetworkSettings.Networks {
@@ -308,7 +316,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			}
 			response, err := w.Docker.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
 			if err != nil {
-				state.FailureCode = "app_scan_failed"
+				state.fail("app_scan_failed", err)
 				return w.finish(ctx, request, &state, r)
 			}
 			// Container endpoints can describe other apps. Keep only network settings.
@@ -317,7 +325,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	raw, err = json.Marshal(networks)
 	if err != nil || len(raw) > 4<<20 {
-		state.FailureCode = "app_definition_limit"
+		state.fail("app_definition_limit", err)
 		return w.finish(ctx, request, &state, r)
 	}
 	definitions["networks.json"] = raw
@@ -332,7 +340,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	state.phase("read_previous")
 	archives, err := w.captureImages(ctx, r, app, prior, previous)
 	if err != nil {
-		state.FailureCode = "image_capture_failed"
+		state.fail("image_capture_failed", err)
 		return w.finish(ctx, request, &state, r)
 	}
 	defer archives.Close()
@@ -345,7 +353,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		if database := databases[c.ID]; database != "" {
 			stream, metadata, err := newDump(w.Docker, c, database)
 			if err != nil {
-				state.FailureCode = "database_dump_failed"
+				state.fail("database_dump_failed", err)
 				return w.finish(ctx, request, &state, r)
 			}
 			// A drill compares the restored database with this inventory. Without it,
@@ -353,7 +361,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			if inventory, err := DatabaseInventory(ctx, w.Docker, c, database); err == nil {
 				metadata.Inventory = inventory
 			} else if w.Logger != nil {
-				w.Logger.Warn("database_inventory_failed", "operation_id", request.ID, "container", c.ID)
+				w.Logger.Warn("database list unavailable; restore tests cannot compare database content", "app", request.SourceKey, "container", strings.TrimPrefix(c.Name, "/"), "operation", request.ID, "error", err)
 			}
 			dumps = append(dumps, stream)
 			streams = append(streams, stream)
@@ -364,12 +372,12 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if app.Kind == "container" {
 		definition, err := compose.FromContainer(inspected[0])
 		if err != nil {
-			state.FailureCode = "standalone_definition_unsupported"
+			state.fail("standalone_definition_unsupported", err)
 			return w.finish(ctx, request, &state, r)
 		}
 		encoded, err := compose.Encode(definition)
 		if err != nil {
-			state.FailureCode = "standalone_definition_unsupported"
+			state.fail("standalone_definition_unsupported", err)
 			return w.finish(ctx, request, &state, r)
 		}
 		definitions["compose.json"] = encoded
@@ -379,7 +387,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		dumps, err = stageDumps(capture, r, dumps, source)
 		cancel()
 		if err != nil {
-			state.FailureCode = "database_dump_failed"
+			state.fail("database_dump_failed", err)
 			return w.finish(ctx, request, &state, r)
 		}
 		defer func() {
@@ -398,10 +406,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	}
 	tree, err := NewTree(ctx, app, excluded, request.IncludeLarge)
 	if err != nil {
-		if w.Logger != nil {
-			w.Logger.Warn("backup_source_unavailable", "operation_id", request.ID, "error", err)
-		}
-		state.FailureCode = "source_unavailable"
+		state.fail("source_unavailable", err)
 		return w.finish(ctx, request, &state, r)
 	}
 	tree.live = method == backup.Live || method == backup.Dump
@@ -419,7 +424,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	var snapshots *fsSnapshots
 	if tree.live {
 		if snapshots, err = tree.useSnapshots(ctx, request.ID.String()); err != nil && w.Logger != nil {
-			w.Logger.Warn("backup_snapshot_unavailable", "operation_id", request.ID, "error", err)
+			w.Logger.Warn("filesystem snapshot unavailable; copying the live files", "app", request.SourceKey, "operation", request.ID, "error", err)
 		}
 		state.phase("snapshot")
 	}
@@ -430,12 +435,12 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		tree.Close()
 		if snapshots != nil {
 			if err := snapshots.Close(); err != nil && w.Logger != nil {
-				w.Logger.Warn("backup_snapshot_remove_failed", "operation_id", request.ID, "error", err)
+				w.Logger.Warn("filesystem snapshot removal failed; the agent removes it at its next start", "app", request.SourceKey, "operation", request.ID, "error", err)
 			}
 		}
 	}()
 	if app.Kind == "compose" && !slices.ContainsFunc(tree.Paths, func(path backup.Path) bool { return path.Kind == "compose" }) {
-		state.FailureCode = "app_definition_excluded"
+		state.fail("app_definition_excluded", nil)
 		return w.finish(ctx, request, &state, r)
 	}
 	state.Metadata = backup.Snapshot{
@@ -480,10 +485,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		previous = copied
 		state.phase("first_copy")
 		if err != nil {
-			if w.Logger != nil {
-				w.Logger.Warn("backup_copy_failed", "operation_id", request.ID, "error", err, "cause", errors.Unwrap(err))
-			}
-			state.FailureCode = "first_copy_failed"
+			state.fail("first_copy_failed", err)
 			return w.finish(ctx, request, &state, r)
 		}
 		for _, c := range fileContainers {
@@ -500,14 +502,14 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			state.Restart = append(state.Restart, restartIntent{ID: c.ID, Timeout: timeout})
 			if err := w.save(ctx, &state); err != nil {
 				state.Restart = state.Restart[:len(state.Restart)-1]
-				state.FailureCode = "journal_save_failed"
+				state.fail("journal_save_failed", err)
 				return w.finish(ctx, request, &state, r)
 			}
 			stop, cancel := context.WithTimeout(ctx, time.Duration(timeout+30)*time.Second)
 			_, err := w.Docker.ContainerStop(stop, c.ID, client.ContainerStopOptions{Timeout: new(timeout)})
 			cancel()
 			if err != nil {
-				state.FailureCode = "app_stop_failed"
+				state.fail("app_stop_failed", err)
 				return w.finish(ctx, request, &state, r)
 			}
 			state.Restart[len(state.Restart)-1].Confirmed = true
@@ -519,7 +521,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	if method == backup.Stop {
 		state.phase("stop_app")
 		if err := w.checkStopped(ctx, fileContainers); err != nil {
-			state.FailureCode = "app_changed_during_backup"
+			state.fail("app_changed_during_backup", err)
 			return w.finish(ctx, request, &state, r)
 		}
 	}
@@ -558,7 +560,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			if snapshots != nil {
 				if err := snapshots.Check(final); err != nil {
 					if w.Logger != nil {
-						w.Logger.Warn("backup_snapshot_invalid", "operation_id", request.ID, "error", err)
+						w.Logger.Warn("filesystem snapshot became invalid during the copy", "app", request.SourceKey, "operation", request.ID, "error", err)
 					}
 					return backup.Snapshot{}, err
 				}
@@ -577,21 +579,17 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		tree.sqliteMu.Lock()
 		sqliteErr := tree.sqliteErr
 		tree.sqliteMu.Unlock()
-		// The cause names a path or a destination error. It stays in the device log.
-		if w.Logger != nil {
-			w.Logger.Warn("backup_copy_failed", "operation_id", request.ID, "error", err, "cause", errors.Unwrap(err))
-		}
 		state.Prepared = nil
-		state.FailureCode = "final_copy_failed"
+		state.fail("final_copy_failed", err)
 		if sqliteErr != nil {
-			state.FailureCode = "sqlite_copy_failed"
+			state.fail("sqlite_copy_failed", errors.Join(err, sqliteErr))
 		}
 		if errors.Is(sqliteErr, ErrSQLitePlatform) {
-			state.FailureCode = "sqlite_copy_unavailable"
+			state.fail("sqlite_copy_unavailable", errors.Join(err, sqliteErr))
 		}
 		for _, stream := range streams {
 			if stream.failed.Load() {
-				state.FailureCode = "database_dump_failed"
+				state.fail("database_dump_failed", err)
 			}
 		}
 	}
@@ -599,10 +597,23 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	saveErr := w.save(durable, &state)
 	cancelSave()
 	if saveErr != nil {
-		state.FailureCode = "journal_save_failed"
+		state.fail("journal_save_failed", saveErr)
 		state.Prepared = nil
 	}
 	return w.finish(ctx, request, &state, r)
+}
+
+// DestinationName names a destination for the log. Without saved settings it is the ID.
+func (w *Worker) DestinationName(ctx context.Context, id uuid.UUID) string {
+	plan, err := w.Journal.DestinationPlan(ctx, w.Keyring)
+	if err == nil {
+		for _, entry := range plan.Destinations {
+			if entry.Destination.ID == id {
+				return entry.Destination.Name
+			}
+		}
+	}
+	return id.String()
 }
 
 func (w *Worker) cache(destinationID uuid.UUID) string {
@@ -684,14 +695,14 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 		}
 		saved, err := r.PublishSnapshot(cleanup, state.Prepared, state.Metadata)
 		if err != nil {
-			state.FailureCode = "snapshot_publish_failed"
+			state.fail("snapshot_publish_failed", err)
 		} else {
 			state.Metadata = saved
 		}
 		state.phase("publish")
 	}
 	if state.Prepared == nil && state.FailureCode == "" {
-		state.FailureCode = "agent_interrupted"
+		state.fail("agent_interrupted", nil)
 	}
 	result := backup.Result{DestinationID: request.DestinationID, StartedAt: state.StartedAt, CompletedAt: state.Metadata.CompletedAt, DowntimeMillis: state.Metadata.DowntimeMillis, RepositoryOpened: state.RepositoryOpened, FailureCode: state.FailureCode}
 	if result.FailureCode == "" {
@@ -747,12 +758,23 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 			result.WarningCodes = append(result.WarningCodes, "retention_failed")
 		}
 	}
-	if w.Logger != nil && len(state.phases) > 0 {
-		counts := []any{"operation_id", request.ID, "method", state.Metadata.Method}
-		if state.Prepared != nil {
-			counts = append(counts, "files_reused", state.Prepared.Stats.CachedFiles, "files_read", state.Prepared.Stats.NonCachedFiles)
+	if w.Logger != nil {
+		attrs := []any{"app", request.SourceKey, "destination", w.DestinationName(cleanup, request.DestinationID), "duration", time.Since(state.StartedAt).Round(time.Millisecond), "operation", request.ID}
+		if result.FailureCode != "" {
+			w.Logger.Warn("backup failed", append(attrs, "code", result.FailureCode, "error", state.cause)...)
+		} else {
+			attrs = append(attrs, "method", state.Metadata.Method, "bytes", result.FileBytes, "snapshot", result.SnapshotID)
+			if state.Prepared != nil {
+				attrs = append(attrs, "files_read", state.Prepared.Stats.NonCachedFiles, "files_unchanged", state.Prepared.Stats.CachedFiles)
+			}
+			if len(result.WarningCodes) > 0 {
+				attrs = append(attrs, "warnings", strings.Join(result.WarningCodes, ","))
+			}
+			w.Logger.Info("backup finished", attrs...)
 		}
-		w.Logger.Info("backup_timing", append(counts, state.phases...)...)
+		if len(state.phases) > 0 {
+			w.Logger.Debug("backup step times in milliseconds", append([]any{"operation", request.ID}, state.phases...)...)
+		}
 	}
 	raw, _ := json.Marshal(result)
 	if err := w.Journal.Complete(cleanup, request.ID, raw); err != nil {

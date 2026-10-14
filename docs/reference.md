@@ -19,6 +19,7 @@ For setup steps, read the [user guide](user-guide.md).
 - [Recover after controller loss](#recover-after-controller-loss)
 - [Repository](#repository)
 - [Accounts and API](#accounts-and-api)
+- [Logs](#logs)
 - [Limits](#limits)
 
 ## Components
@@ -595,6 +596,33 @@ Keep the administrator token from init private. Use it to recover access.
 For a browser on another address, set `--public-origin` on the controller.
 
 The API schema is in [api/openapi.json](../api/openapi.json). It does not yet describe accounts and sessions.
+
+## Logs
+
+The controller and each agent write one line for each event.
+
+| Event | Where |
+| --- | --- |
+| Start and result of each backup, restore, restore test, repository check, and maintenance run, with the app or destination, the duration, and on failure the code and its cause | Agent |
+| Each operation result, with the app, the device, and the code | Controller |
+| Connection to the controller: connected, lost, or cannot connect | Agent |
+| A refused or failed API request, with method, path, status, and reason | Controller |
+| Agent and controller start | Both |
+
+A failure that repeats, such as a controller that is not reachable, is logged again only when its reason changes or after five minutes.
+Logs never hold passwords, tokens, keys, notification URLs, or file contents.
+
+| Setting | Controller | Agent |
+| --- | --- | --- |
+| Level: `debug`, `info`, `warn`, or `error` | `--log-level`, `SYNOD_LOG_LEVEL`, `log_level` | `--log-level`, `SYNOD_LOG_LEVEL`, `log_level` in `agent.json` |
+| Format: `text` or `json` | `--log-format`, `SYNOD_LOG_FORMAT`, `log_format` | `--log-format`, `SYNOD_LOG_FORMAT`, `log_format` in `agent.json` |
+
+The default is `info` and `text`. The `debug` level adds the time of each backup step.
+A text line looks like this:
+
+```text
+time="2026-10-14 03:12:41" level=INFO msg="backup finished" app=compose:immich destination="odin disk" duration=41.2s operation=… method=dump bytes=197834112 files_read=12 files_unchanged=40211
+```
 
 ## Limits
 

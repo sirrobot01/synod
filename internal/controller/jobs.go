@@ -18,12 +18,19 @@ import (
 func deliverJobs(ctx context.Context, metadata *store.Store, stream *controlstream.Server, logger *slog.Logger) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
+	// A failure that repeats is logged once.
+	var last string
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := sendJobs(ctx, metadata, stream); err != nil && ctx.Err() == nil {
-			logger.Warn("job_delivery_failed", "code", "job_delivery_unavailable")
+		err := sendJobs(ctx, metadata, stream)
+		if err != nil && ctx.Err() == nil && err.Error() != last {
+			logger.Warn("jobs not sent to agents; retrying", "error", err)
+		}
+		last = ""
+		if err != nil {
+			last = err.Error()
 		}
 		select {
 		case <-ctx.Done():

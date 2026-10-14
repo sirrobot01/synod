@@ -32,6 +32,9 @@ type Config struct {
 	DockerSocket        string   `json:"docker_socket"`
 	DestinationListen   string   `json:"destination_listen,omitempty"`
 	DestinationAddress  string   `json:"destination_address,omitempty"`
+	// LogLevel is debug, info, warn, or error. LogFormat is text or json.
+	LogLevel  string `json:"log_level,omitempty"`
+	LogFormat string `json:"log_format,omitempty"`
 }
 
 // Load accepts one bounded, private JSON file. It does not create local state.

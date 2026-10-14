@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/moby/moby/client"
+	agentbackup "github.com/sirrobot01/synod/internal/agent/backup"
 	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/repository"
@@ -39,6 +40,7 @@ func (w *Worker) ExecuteProof(ctx context.Context, request proof.Request) (proof
 		return proof.Result{}, err
 	}
 	state := proofProgress{Version: 1, RequestID: request.ID, Result: proof.Result{StartedAt: time.Now().UTC()}}
+	var cause error
 	if record.State == journal.Terminal {
 		if len(record.Result) == 0 {
 			return proof.Result{}, nil
@@ -62,6 +64,9 @@ func (w *Worker) ExecuteProof(ctx context.Context, request proof.Request) (proof
 		if request.Kind == proof.Maintenance {
 			limit = repository.MaintenanceRunLimit
 		}
+		if b.Logger != nil {
+			b.Logger.Info(proofName[request.Kind]+" started", proofSubject(ctx, b, request)...)
+		}
 		run, cancel := context.WithTimeout(ctx, limit)
 		err := w.runProof(run, request, &state.Result)
 		cancel()
@@ -70,6 +75,7 @@ func (w *Worker) ExecuteProof(ctx context.Context, request proof.Request) (proof
 			if failed, ok := errors.AsType[*failure](err); ok {
 				state.Result.FailureCode, state.Result.Resource = failed.Code, failed.Resource
 			}
+			cause = logCause(err)
 		}
 	}
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
@@ -87,7 +93,27 @@ func (w *Worker) ExecuteProof(ctx context.Context, request proof.Request) (proof
 	if err := b.Journal.Complete(cleanup, request.ID, raw); err != nil {
 		return proof.Result{}, err
 	}
+	if b.Logger != nil {
+		attrs := append(proofSubject(cleanup, b, request), "duration", state.Result.CompletedAt.Sub(state.Result.StartedAt).Round(time.Millisecond))
+		if state.Result.FailureCode != "" {
+			b.Logger.Warn(proofName[request.Kind]+" failed", append(attrs, "code", state.Result.FailureCode, "resource", state.Result.Resource, "error", cause)...)
+		} else if request.Kind == proof.Drill {
+			b.Logger.Info(proofName[request.Kind]+" finished", append(attrs, "checks", checkSummary(state.Result.Checks))...)
+		} else {
+			b.Logger.Info(proofName[request.Kind]+" finished", attrs...)
+		}
+	}
 	return state.Result, nil
+}
+
+var proofName = map[proof.Kind]string{proof.Drill: "restore test", proof.Integrity: "repository check", proof.Maintenance: "repository maintenance"}
+
+// proofSubject names what a proof checks: an app, or a destination.
+func proofSubject(ctx context.Context, b *agentbackup.Worker, request proof.Request) []any {
+	if request.Kind == proof.Drill {
+		return []any{"app", request.AppID, "operation", request.ID}
+	}
+	return []any{"destination", b.DestinationName(ctx, request.DestinationID), "operation", request.ID}
 }
 
 func (w *Worker) runProof(ctx context.Context, request proof.Request, result *proof.Result) error {

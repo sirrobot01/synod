@@ -196,7 +196,7 @@ func TestControllerHTTPSAndShutdown(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	command := Command()
-	command.SetArgs([]string{"--listen", "127.0.0.1:0", "--database-path", databasePath, "--installation-id", installation.String(), "--ca-cert-file", caCertPath, "--ca-key-file", caKeyPath, "--agent-listen", "127.0.0.1:0", "--agent-tls-cert-file", agentCertPath, "--agent-tls-key-file", agentKeyPath, "--agent-ca-file", caCertPath, "--admin-token-file", tokenPath, "--tls-cert-file", certPath, "--tls-key-file", keyPath, "--secret-key-file", wrappingKeyPath, "--secret-key-id", wrappingKeyID.String()})
+	command.SetArgs([]string{"--log-format", "json", "--listen", "127.0.0.1:0", "--database-path", databasePath, "--installation-id", installation.String(), "--ca-cert-file", caCertPath, "--ca-key-file", caKeyPath, "--agent-listen", "127.0.0.1:0", "--agent-tls-cert-file", agentCertPath, "--agent-tls-key-file", agentKeyPath, "--agent-ca-file", caCertPath, "--admin-token-file", tokenPath, "--tls-cert-file", certPath, "--tls-key-file", keyPath, "--secret-key-file", wrappingKeyPath, "--secret-key-id", wrappingKeyID.String()})
 	command.SetErr(log)
 	go func() { done <- command.ExecuteContext(ctx) }()
 	var address, agentAddress string
