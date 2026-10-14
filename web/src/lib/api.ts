@@ -133,6 +133,9 @@ export const api = {
   approveNode: (id: string) => call<Node>("POST", `/v1/nodes/${encodeURIComponent(id)}/actions/approve`, {}),
   operations: () => call<Operation[]>("GET", "/v1/operations"),
   signIn: (username: string, password: string) => call<User>("POST", "/v1/sessions", { username, password }),
+  setupStatus: () => call<{ required: boolean }>("GET", "/v1/setup"),
+  /** Creates the first account and signs in. The kit appears in this response only. */
+  setup: (username: string, password: string) => call<{ user: User; recovery_kit: string }>("POST", "/v1/setup", { username, password }),
   currentSession: () => call<Session>("GET", "/v1/sessions/current"),
   signOut: () => call<void>("DELETE", "/v1/sessions/current"),
   operation: (id: string) => call<Operation>("GET", `/v1/operations/${encodeURIComponent(id)}`),

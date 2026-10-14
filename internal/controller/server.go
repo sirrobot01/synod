@@ -183,6 +183,14 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		return err
 	}
 	handler.CredentialKeyring = keyring
+	installation := uuid.MustParse(settings.InstallationID)
+	handler.RecoveryKit = func(ctx context.Context) (string, error) {
+		password, err := metadata.RepositoryPassword(ctx, installation, keyring)
+		if err != nil || password == "" {
+			return "", err
+		}
+		return recoveryKit(installation, password, time.Now().UTC()), nil
+	}
 	handler.EnrollmentAuthority = authority
 	handler.PublicOrigin = settings.PublicOrigin
 	handler.AgentListen = settings.AgentListen

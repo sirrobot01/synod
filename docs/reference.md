@@ -98,7 +98,7 @@ Later starts use the saved installation.
 The first start:
 
 - listens on all interfaces,
-- writes the recovery kit to `recovery-kit.txt`, but not to the log,
+- writes the recovery kit to `recovery-kit.txt`, but not to the log. The web UI shows it once when you create the first account.
 - writes a join token for one device to `join.token` and to the log.
 
 | Variable | Use on the first start |
@@ -564,6 +564,16 @@ One device runs maintenance for each destination:
 - For S3 and SFTP, the first approved device that connected in the last seven days. Another device takes over after seven days without a connection.
 
 ## Accounts and API
+
+### First account
+
+Until an account exists, the web UI shows a setup page to the first visitor.
+It creates an administrator account, signs in, and shows the recovery kit once.
+After that, the setup page refuses all requests.
+Anybody who reaches the controller before you can use the setup page. Start the controller on a private network.
+`synod user create` also creates the first account. The setup page then stays closed.
+
+### Other accounts and tokens
 
 ```sh
 synod user create alice

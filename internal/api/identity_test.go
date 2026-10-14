@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -371,5 +372,47 @@ func TestSignInHasItsOwnRateBudget(t *testing.T) {
 	// The shared budget still serves every other route.
 	if rec := call(t, server, "GET", "/v1/tokens", "", withBootstrap); rec.Code != 200 {
 		t.Fatalf("the sign-in limit reached another route: %d", rec.Code)
+	}
+}
+
+func TestFirstRunSetupCreatesOneAccountAndShowsTheKit(t *testing.T) {
+	server, _, _ := identityServer(t)
+	server.RecoveryKit = func(context.Context) (string, error) { return "SYNOD RECOVERY KIT\nprivate-kit-password\n", nil }
+	if rec := call(t, server, "GET", "/v1/setup", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"required":true`) {
+		t.Fatalf("setup status before setup: %d %s", rec.Code, rec.Body)
+	}
+	body := `{"username":"Admin","password":"` + operatorPassword + `"}`
+	// The setup sets a cookie, so it proves its origin like a sign-in.
+	if rec := call(t, server, "POST", "/v1/setup", body); rec.Code != 403 {
+		t.Fatalf("setup without an origin proof: %d %s", rec.Code, rec.Body)
+	}
+	rec := call(t, server, "POST", "/v1/setup", body, sameOriginFetch)
+	if rec.Code != 201 || !strings.Contains(rec.Body.String(), "private-kit-password") || !strings.Contains(rec.Body.String(), `"username":"admin"`) {
+		t.Fatalf("setup: %d %s", rec.Code, rec.Body)
+	}
+	var cookie string
+	for _, set := range rec.Result().Cookies() {
+		if set.Name == SessionCookie {
+			cookie = set.Value
+		}
+	}
+	if current := call(t, server, "GET", "/v1/sessions/current", "", withCookie(cookie)); current.Code != 200 || !strings.Contains(current.Body.String(), `"role":"admin"`) {
+		t.Fatalf("the setup did not sign the browser in: %d %s", current.Code, current.Body)
+	}
+	if rec := call(t, server, "GET", "/v1/setup", ""); !strings.Contains(rec.Body.String(), `"required":false`) {
+		t.Fatalf("setup status after setup: %s", rec.Body)
+	}
+	// A second setup cannot take over the installation or read the kit.
+	again := call(t, server, "POST", "/v1/setup", `{"username":"intruder","password":"`+operatorPassword+`"}`, sameOriginFetch)
+	if again.Code != 409 || strings.Contains(again.Body.String(), "private-kit-password") {
+		t.Fatalf("second setup: %d %s", again.Code, again.Body)
+	}
+}
+
+func TestFirstRunSetupRefusesWhenAnAccountExists(t *testing.T) {
+	server, _, _ := identityServer(t)
+	createOperator(t, server, "operator")
+	if rec := call(t, server, "POST", "/v1/setup", `{"username":"intruder","password":"`+operatorPassword+`"}`, sameOriginFetch); rec.Code != 409 {
+		t.Fatalf("setup after the CLI created an account: %d %s", rec.Code, rec.Body)
 	}
 }

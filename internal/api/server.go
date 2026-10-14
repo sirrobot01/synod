@@ -43,6 +43,9 @@ type Server struct {
 	ReadFile func(context.Context, restore.FileRequest) (restore.FileHeader, io.ReadCloser, error)
 	// EnrollmentAuthority must be configured before serving requests. Nil disables new issuance.
 	EnrollmentAuthority *pki.CA
+	// RecoveryKit returns the recovery kit text that the first-run setup shows once.
+	// An empty kit means that no kit password is saved. Set it before serving requests.
+	RecoveryKit func(context.Context) (string, error)
 	// CredentialKeyring wraps destination secrets. Set it before serving requests.
 	CredentialKeyring *secret.Keyring
 	verifiedDownloads chan struct{}
@@ -106,6 +109,10 @@ func NewServer(metadata *store.Store, admin *auth.AdminToken, installationID uui
 		// It still changes state and sets a cookie, so a cross-site form post
 		// could sign a browser in as somebody else. It proves its origin too.
 		v1.With(server.requireBrowserOrigin).Post("/sessions", server.createSession)
+		// The first-run setup creates the first account, so it cannot require a credential.
+		// It is open to the first visitor until an account exists.
+		v1.Get("/setup", server.readSetup)
+		v1.With(server.requireBrowserOrigin).Post("/setup", server.completeSetup)
 		v1.Group(func(signed chi.Router) {
 			signed.Use(server.authenticateAny, server.requireOrigin)
 			signed.Get("/sessions/current", server.readSession)

@@ -21,6 +21,9 @@ var ErrAccountDisabled = errors.New("account_disabled")
 // ErrUsernameTaken reports a username that the installation already uses.
 var ErrUsernameTaken = errors.New("username_taken")
 
+// ErrSetupComplete reports that an operator account already exists.
+var ErrSetupComplete = errors.New("setup_complete")
+
 // User is one operator account.
 type User struct {
 	ID                uuid.UUID `json:"id"`
@@ -75,6 +78,34 @@ func (s *Store) CreateUser(ctx context.Context, username, passwordHash, role str
  VALUES (?,?,?,?,?,?,?) RETURNING `+userColumns, uuid.New(), username, passwordHash, role, now, now, now).Scan(user.fields()...)
 	if isUnique(err) {
 		return User{}, ErrUsernameTaken
+	}
+	if err != nil {
+		return User{}, storeError(err)
+	}
+	return user, nil
+}
+
+// SetupRequired reports whether no operator account exists yet.
+func (s *Store) SetupRequired(ctx context.Context) (bool, error) {
+	var required bool
+	if err := s.db.QueryRowContext(ctx, `SELECT NOT EXISTS (SELECT 1 FROM users)`).Scan(&required); err != nil {
+		return false, storeError(err)
+	}
+	return required, nil
+}
+
+// CreateFirstUser creates the first operator account with the admin role.
+// It refuses with ErrSetupComplete once any account exists, so only one first-run setup succeeds.
+func (s *Store) CreateFirstUser(ctx context.Context, username, passwordHash string) (User, error) {
+	if username == "" || passwordHash == "" {
+		return User{}, &Error{Code: InvalidRequest}
+	}
+	now := s.now().UnixMilli()
+	var user User
+	err := s.db.QueryRowContext(ctx, `INSERT INTO users (id,username,password_hash,role,password_changed_at,created_at,updated_at)
+ SELECT ?,?,?,'admin',?,?,? WHERE NOT EXISTS (SELECT 1 FROM users) RETURNING `+userColumns, uuid.New(), username, passwordHash, now, now, now).Scan(user.fields()...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrSetupComplete
 	}
 	if err != nil {
 		return User{}, storeError(err)

@@ -201,6 +201,70 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("operator signed in", "actor_id", user.Username, "user_id", user.ID)
 }
 
+func (s *Server) readSetup(w http.ResponseWriter, r *http.Request) {
+	required, err := s.store.SetupRequired(r.Context())
+	if err != nil {
+		s.storeError(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, map[string]bool{"required": required})
+}
+
+// completeSetup creates the first operator account, signs the browser in, and returns
+// the recovery kit once. It refuses after any account exists.
+func (s *Server) completeSetup(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	if !s.signInLimit.Allow() {
+		w.Header().Set("Retry-After", "1")
+		s.writeError(w, r, http.StatusTooManyRequests, "rate_limited", "Retry after the indicated delay.")
+		return
+	}
+	username := strings.ToLower(body.Username)
+	if !validUsername(username) {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use 1 to 64 lowercase letters, digits, hyphen, underscore, or dot.")
+		return
+	}
+	hash, err := s.hashPassword(w, r, body.Password)
+	if err != nil {
+		return
+	}
+	user, err := s.store.CreateFirstUser(r.Context(), username, hash)
+	if errors.Is(err, store.ErrSetupComplete) {
+		s.writeError(w, r, http.StatusConflict, "setup_complete", "An account exists. Sign in.")
+		return
+	}
+	if err != nil {
+		s.storeError(w, r, err)
+		return
+	}
+	s.logger.Info("first operator account created", "actor_id", user.Username, "user_id", user.ID)
+	kit := ""
+	if s.RecoveryKit != nil {
+		if kit, err = s.RecoveryKit(r.Context()); err != nil {
+			s.logger.Error("recovery kit unavailable", "error", err)
+		}
+	}
+	secret, err := auth.NewSessionSecret()
+	if err != nil {
+		s.logger.Error("session secret unavailable", "user_id", user.ID, "error", err)
+		s.writeError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "The account exists, but the session could not be created. Sign in.")
+		return
+	}
+	if _, err := s.store.CreateSession(r.Context(), user.ID, secret.Verifier); err != nil {
+		s.storeError(w, r, err)
+		return
+	}
+	s.setSession(w, secret.Cookie)
+	w.WriteHeader(http.StatusCreated)
+	s.writeJSON(w, r, map[string]any{"user": user, "recovery_kit": kit})
+}
+
 func (s *Server) readSession(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(identityKey{}).(requestIdentity)
 	s.writeJSON(w, r, map[string]any{"actor_id": identity.actorID, "role": identity.role, "user_id": identity.userID})

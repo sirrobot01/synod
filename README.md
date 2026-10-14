@@ -54,20 +54,10 @@ Synod backs up the Docker apps in your home lab and restores them on any of your
    docker compose up -d
    ```
 
-3. Save the recovery kit. It holds the password of your backups. Keep it away from your devices:
+3. Open `https://DEVICE-ADDRESS:8443`. Create your account and save the recovery kit.
+   The kit holds the password of your backups. Keep it away from your devices.
 
-   ```sh
-   docker exec synod cat /var/lib/synod/controller/recovery-kit.txt
-   docker exec synod rm /var/lib/synod/controller/recovery-kit.txt
-   ```
-
-4. Create your account:
-
-   ```sh
-   docker exec -it synod synod user create admin
-   ```
-
-5. Open `https://DEVICE-ADDRESS:8443`. Then:
+4. In the web UI:
    1. In **Devices**, approve your device.
    2. In **Destinations**, add a destination on another device.
    3. In **Apps**, select **Protect all**.

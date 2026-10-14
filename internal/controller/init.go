@@ -289,9 +289,7 @@ Join token for one device (valid for 7 days):
   %s
 An agent in the same Compose file reads it from %s.
 
-Create an account with: synod user create NAME
-In a container, run: docker exec CONTAINER synod user create NAME
-Then open https://%s.
+Open https://%s to create your account.
 `, created, filepath.Join(absDir, "recovery-kit.txt"), encoded, tokenPath, net.JoinHostPort(address, "8443"))
 		return err
 	}
@@ -648,14 +646,15 @@ Without this password, nobody can read your backups, including Synod.
 Each destination that you add without its own password uses this password.
 
 To recover all apps after you lose the controller:
-1. Install Synod on a new device.
-2. Write the password into a private file:
-     umask 077; printf '%%s' 'PASSWORD' > "$HOME/repository-password"
-3. Rebuild the installation from a surviving repository:
-     synod server init --address ADDRESS \
-       --from-repository REPOSITORY --password-file "$HOME/repository-password"
+1. On a new device, write the password into a private file:
+     umask 077; printf '%%s' 'PASSWORD' > /root/repository-password
+2. Rebuild the installation from a surviving repository.
    REPOSITORY is the repository directory, or a private connection JSON file for S3 or SFTP.
-4. Join the devices again and restore each app with synod restore APP --to DEVICE.
+   - In Docker, start the controller with SYNOD_FROM_REPOSITORY=REPOSITORY and
+     SYNOD_PASSWORD_FILE=/root/repository-password. Mount both paths.
+   - Without Docker, install Synod and run:
+     synod server init --from-repository REPOSITORY --password-file /root/repository-password
+3. Join the devices again and restore each app.
 `, installationID, created.Format(time.RFC3339), password)
 }
 
@@ -663,7 +662,7 @@ To recover all apps after you lose the controller:
 // directory by itself, so only another directory needs the settings.
 func adminNote(dir, address string) string {
 	if dir == config.DefaultControllerDir {
-		return fmt.Sprintf("Run synod commands as root on this device. Open the web UI at https://%s after synod user create NAME.", net.JoinHostPort(address, "8443"))
+		return fmt.Sprintf("Open https://%s to create your account. Run synod commands as root on this device.", net.JoinHostPort(address, "8443"))
 	}
 	return fmt.Sprintf(`To administer this installation:
   export SYNOD_API_URL='%s'

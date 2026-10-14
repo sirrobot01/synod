@@ -64,31 +64,19 @@ docker compose up -d
 On its first start, the `synod` controller creates your installation.
 The `synod-agent` joins it with the token that the controller writes.
 
-## 2. Save the recovery kit
-
-The recovery kit holds the password of your backups.
-Without this password, nobody can read your backups.
-
-```sh
-docker exec synod cat /var/lib/synod/controller/recovery-kit.txt
-```
-
-1. Store the kit in a password manager or on paper.
-2. Delete the file: `docker exec synod rm /var/lib/synod/controller/recovery-kit.txt`
-
-## 3. Sign in to the web UI
-
-```sh
-docker exec -it synod synod user create admin
-```
+## 2. Create your account
 
 Open `https://192.168.0.20:8443`.
-The controller uses its own certificate authority.
-To remove the browser warning, trust `/var/lib/synod/controller/api-ca.crt`.
+The controller uses its own certificate authority, so the browser shows a warning.
+To remove it, trust `/var/lib/synod/controller/api-ca.crt` on your computer.
 
-In **Devices**, approve your device.
+1. Create the administrator account.
+2. Save the **recovery kit**. It holds the password of your backups. Without it, nobody can read your backups.
+   Store it in a password manager or on paper, away from your devices.
+   Synod shows the kit only once. A copy stays in `/var/lib/synod/controller/recovery-kit.txt` until you delete it.
+3. In **Devices**, approve your device.
 
-## 4. Add your other devices
+## 3. Add your other devices
 
 On the controller device, create a join token for each other device:
 
@@ -103,7 +91,7 @@ Then approve the device in **Devices**.
 You can do the next steps in the web UI or with the CLI.
 To run a CLI command on a controller in Docker, put `docker exec synod` before it.
 
-## 5. Add a destination
+## 4. Add a destination
 
 A destination stores your encrypted backups.
 To store them in a directory on another device:
@@ -114,7 +102,7 @@ synod destination add peer --type device --device DEVICE --path /srv/synod-backu
 
 For S3 or SFTP, see [Destinations](reference.md#destinations).
 
-## 6. Protect your apps
+## 5. Protect your apps
 
 Synod finds your apps within one minute.
 
@@ -148,7 +136,7 @@ An app shows **protected** when its last backup is complete and a restore test p
 Otherwise it shows **partial** and the reason.
 See [Protection status](reference.md#protection-status).
 
-## 7. Set up alerts (optional)
+## 6. Set up alerts (optional)
 
 1. In the web UI, open **Settings**.
 2. Enter a [Shoutrrr URL](https://shoutrrr.nickfedor.com/v0.20.0/services/overview/), for example for ntfy, Discord, or email.
@@ -262,7 +250,7 @@ Run these commands as root.
 
    For each other device, run `synod node join-token` on the controller.
 
-4. Create your account with `synod user create admin`. Then continue with [step 3](#3-sign-in-to-the-web-ui).
+4. Open the address that init printed and continue with [step 2](#2-create-your-account).
 
 Without Docker, run CLI commands directly on the controller.
 To upgrade, run the install command again on each device.

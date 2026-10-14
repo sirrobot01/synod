@@ -35,6 +35,11 @@ func (s *Store) SetRepositoryPassword(ctx context.Context, installationID uuid.U
 	return nil
 }
 
+// RepositoryPassword returns the recovery kit password, or an empty string when none is saved.
+func (s *Store) RepositoryPassword(ctx context.Context, installationID uuid.UUID, ring *secret.Keyring) (string, error) {
+	return repositoryPassword(ctx, s.db, installationID, ring)
+}
+
 // repositoryPassword returns the recovery kit password, or an empty string before init saves one.
 func repositoryPassword(ctx context.Context, db interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row

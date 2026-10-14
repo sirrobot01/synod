@@ -3,8 +3,9 @@
   import { errorView, type APIError } from "./lib/state";
   import ErrorPanel from "./lib/ErrorPanel.svelte";
   import Shell from "./lib/Shell.svelte";
+  import Setup from "./lib/Setup.svelte";
 
-  type Phase = "checking" | "signed-out" | "signed-in";
+  type Phase = "checking" | "setup" | "signed-out" | "signed-in";
 
   let phase = $state<Phase>("checking");
   let session = $state<Session | null>(null);
@@ -25,7 +26,12 @@
       phase = "signed-in";
     } catch {
       // No session is the ordinary first visit, not an error worth showing.
-      phase = "signed-out";
+      // Before any account exists, the first visit sets up the installation.
+      try {
+        phase = (await api.setupStatus()).required ? "setup" : "signed-out";
+      } catch {
+        phase = "signed-out";
+      }
     }
   }
 
@@ -94,6 +100,14 @@
       </div>
       {#if phase === "checking"}
         <p class="note">Checking the session.</p>
+      {:else if phase === "setup"}
+        <Setup
+          onDone={(created) => {
+            session = created;
+            phase = "signed-in";
+          }}
+          onSignIn={() => (phase = "signed-out")}
+        />
       {:else}
         <form onsubmit={submit} aria-labelledby="sign-in-heading">
           <h1 id="sign-in-heading">Sign in</h1>
