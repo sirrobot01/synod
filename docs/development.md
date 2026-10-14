@@ -1,9 +1,8 @@
-# Develop Synod
+# Development
 
-This page is for contributors. Users read the [user guide](user-guide.md).
-Read [AGENTS.md](../AGENTS.md) before you change code.
+This page is for contributors. Read [AGENTS.md](../AGENTS.md) before you change code.
 
-## Build and checks
+## Build and test
 
 Use the Go version in [go.mod](../go.mod).
 
@@ -13,13 +12,9 @@ go vet ./...
 go test -race -p 1 -count=1 ./...
 ```
 
-The controller tests use SQLite files in temporary directories.
-They need no external database.
-A test that needs Docker requires `SYNOD_TEST_DOCKER_HOST`.
-Set it to the Unix socket URL of your test daemon.
-Use disposable test resources.
+Always use `-p 1`. Docker tests fail on timing without it.
 
-Build and check the browser application:
+The web application is in `web/`:
 
 ```sh
 cd web
@@ -29,89 +24,67 @@ npx vitest run
 npm run build
 ```
 
-The build writes to `internal/web/dist`.
-Commit that output with a web change.
+The build writes to `internal/web/dist`. Commit that output with each web change.
 
-## Local development
+## Heavy tests
 
-[Task](https://taskfile.dev) runs the commands in [Taskfile.yml](../Taskfile.yml).
-Run `task` to list them.
+Docker and MinIO tests skip themselves unless you set their variables.
+Run them before a release.
 
-| Command | Action |
+| Test | Set |
 | --- | --- |
-| `task build` | Build the binary into `dist/`. |
-| `task build:web` | Build the web application. |
-| `task check` | Run Go vet and the web type check. |
-| `task test` | Run Go tests with race detection, one package at a time. |
-| `task test:web` | Run the web tests. |
-| `task dev` | Create a local installation and run its controller. |
-| `task dev:web` | Run the web development server. |
-| `task dev:user -- alice` | Create an operator account. |
-| `task cli -- node list` | List the joined devices. |
-| `task dev:reset` | Delete the local installation in `.dev/`. |
-| `task proto` | Generate Go code from the agent protocol. |
+| Docker | `SYNOD_TEST_DOCKER_HOST`, for example `unix:///var/run/docker.sock` |
+| S3 | `SYNOD_TEST_S3_ENDPOINT`, `SYNOD_TEST_S3_ACCESS_KEY`, `SYNOD_TEST_S3_SECRET_KEY` for a MinIO server |
 
-Run the controller in one terminal:
-
-```sh
-task dev
-```
-
-Create an account from another terminal:
-
-```sh
-task dev:user -- alice
-```
-
-Open `https://127.0.0.1:8443`.
-The local certificate uses a private CA.
-Check that this is your local controller before you accept a browser certificate warning.
-Sign in with the account that you created.
-
-The `.dev/` directory holds the SQLite database and the installation credentials.
-Git ignores this directory.
-Keep it private.
-
-For a focused Go test, pass the package list after the flags:
-
-```sh
-task test -- -run TestName ./internal/api/...
-```
-
-A changed migration causes a checksum error on an existing development database.
-Run `task dev:reset` only when you can delete that installation.
-Then run `task dev` to create a new one.
-
-## Tests
-
-GitHub Actions runs the checks in `.github/workflows/test.yml` on each push and pull request:
-
-- `gofmt`, `go vet`, and the Go tests.
-- The web type check, tests, and build. The committed `internal/web/dist` must match the build.
-- A snapshot release and an install with `install.sh` on Linux and macOS.
-- macOS controller tests, launchd setup, and an upgrade of the running controller.
-
-Docker and MinIO tests are slow. They skip themselves unless you set their variables.
-Run them when you need them, usually before a release:
-
-- In GitHub, run the **test** workflow by hand and select **heavy**.
-- On a Linux host, run them as root, because restore tests read named volumes in `/var/lib/docker`:
+The SFTP test starts its own SSH server.
+On Linux, run the Docker tests as root. Restore tests read volumes in `/var/lib/docker`.
 
 ```sh
 SYNOD_TEST_DOCKER_HOST=unix:///var/run/docker.sock go test -race -p 1 -count=1 ./...
 ```
 
-For S3 tests, start a MinIO server and set `SYNOD_TEST_S3_ENDPOINT`, `SYNOD_TEST_S3_ACCESS_KEY`, and `SYNOD_TEST_S3_SECRET_KEY`.
-The SFTP test starts its own SSH server.
+In GitHub, you can also run the **test** workflow by hand and select **heavy**.
+
+## Local controller
+
+[Task](https://taskfile.dev) runs the commands in [Taskfile.yml](../Taskfile.yml). Run `task` to list them.
+
+| Command | Does |
+| --- | --- |
+| `task build` | Build the binary into `dist/`. |
+| `task build:web` | Build the web application. |
+| `task check` | Run `go vet` and the web type check. |
+| `task test` | Run the Go tests. Add `-- -run TestName ./internal/api/...` for one test. |
+| `task test:web` | Run the web tests. |
+| `task dev` | Create a local installation in `.dev/` and run its controller. |
+| `task dev:web` | Run the web development server. |
+| `task dev:user -- alice` | Create an account. |
+| `task cli -- node list` | Run a CLI command against the local controller. |
+| `task dev:reset` | Delete the local installation. |
+| `task proto` | Generate Go code from the agent protocol. |
+
+1. Run `task dev`.
+2. In another terminal, run `task dev:user -- alice`.
+3. Open `https://127.0.0.1:8443` and sign in.
+
+`.dev/` holds the database and the installation keys. Keep it private.
+A changed migration fails the checksum check on an existing `.dev/` database. Run `task dev:reset`, then `task dev`.
+
+## Continuous integration
+
+On each push and pull request, `.github/workflows/test.yml` runs:
+
+- `gofmt`, `go vet`, and the Go tests.
+- The web checks and build. The committed `internal/web/dist` must match the build.
+- A snapshot release and an install with `install.sh` on Linux and macOS.
+- The macOS controller tests, the launchd setup, and an upgrade of a running controller.
 
 ## Release
 
-GoReleaser builds the release from `.goreleaser.yaml`.
-It builds Linux and macOS binaries for amd64 and arm64 from the committed web assets.
-The builds do not require cgo.
-The binaries report the tag and commit in `synod --version`.
+GoReleaser builds Linux and macOS binaries for amd64 and arm64 from `.goreleaser.yaml`.
+The builds do not use cgo.
 
-Build the release files locally without publishing:
+To build the release files without publishing them:
 
 ```sh
 task release:snapshot
@@ -124,5 +97,5 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The **release** workflow runs the tests. Then it publishes `synod-linux-amd64`, `synod-linux-arm64`, `synod-darwin-amd64`, `synod-darwin-arm64`, `SHA256SUMS`, and `install.sh` to the GitHub release.
-`install.sh` downloads these files and verifies their checksums.
+The **release** workflow runs the tests.
+Then it publishes the binaries, `SHA256SUMS`, `install.sh`, and the agent image.

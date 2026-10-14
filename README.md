@@ -1,22 +1,25 @@
 # Synod
 
-Synod backs up the Docker apps of your home lab and restores them on any of your devices.
+Synod backs up the Docker apps in your home lab and restores them on any of your devices.
 
-- **Finds your apps.** Synod discovers Compose projects and containers, with their files, volumes, and databases.
-- **Apps keep running by default.** It makes native dumps of PostgreSQL, MySQL, MariaDB, and Redis, and copies other data while apps run.
-- **Restores anywhere.** Restore an app on the same device or on another one, amd64 or arm64.
-- **Proves your backups.** Agents test a restore each month and check repository content each week.
-- **Fast and encrypted.** Later backups read only changed files, like rsync. Backups go to another device, a local disk, SFTP, or S3.
-- **Needs only a password.** The recovery kit and one surviving backup rebuild everything.
+- Finds your Compose projects and containers, with their files, volumes, and databases.
+- Backs up without stopping apps. PostgreSQL, MySQL, MariaDB, and Redis get native dumps.
+- Restores an app on the same device or on another one, amd64 or arm64.
+- Tests a restore of each app every month.
+- Encrypts every backup. Later backups copy only changed files.
+- Stores backups on another device, a local disk, SFTP, or S3.
+- Rebuilds everything from one backup and your recovery kit password.
 
-Synod agents run on Linux (amd64 and arm64) with Docker Engine and the Compose plugin.
-The controller also runs on macOS, on Intel and Apple silicon Macs. It needs no Docker.
-On a device without systemd, such as Unraid or Synology, run the agent as a container. See [Run the agent in Docker](docs/user-guide.md#run-the-agent-in-docker).
 v0.1 is not released yet.
+
+## Requirements
+
+- Linux devices (amd64 or arm64) with Docker Engine and the Docker Compose plugin.
+- One Linux device or Mac for the controller. A Mac controller does not need Docker.
 
 ## Quick start
 
-Run these commands as root (`sudo -i`).
+Run these commands as root.
 
 1. Install Synod on each device:
 
@@ -24,21 +27,21 @@ Run these commands as root (`sudo -i`).
    curl -fsSL https://synod.biodun.dev/install.sh | sh
    ```
 
-2. Create the controller on one device:
+2. On one device, create the controller:
 
    ```sh
    synod server init
    ```
 
-   Init starts the controller. Save the recovery kit that it prints, away from your devices. Copy the join token.
+   Save the recovery kit that it prints. Keep it away from your devices.
 
-3. Join each Linux Docker device. Include the controller device if it runs Linux apps:
+3. On each Linux device with apps, join the agent with the token from init:
 
    ```sh
    synod agent join 'TOKEN'
    ```
 
-   Join starts the agent. Each token joins one device. On the controller, run `synod node join-token` for the next one.
+   A token joins one device. Run `synod node join-token` on the controller to get the next one.
 
 4. On the controller, create your account:
 
@@ -46,14 +49,15 @@ Run these commands as root (`sudo -i`).
    synod user create admin
    ```
 
-5. Open the web UI address that init printed, such as `https://192.168.0.20:8443`, and sign in.
-   Approve your devices in **Devices**. Add a destination on another device in **Destinations**.
-   Then select **Apps → Protect all**.
+5. Open the address that init printed, for example `https://192.168.0.20:8443`. Then:
+   1. In **Devices**, approve your devices.
+   2. In **Destinations**, add a destination on another device.
+   3. In **Apps**, select **Protect all**.
 
-To restore an app, open **Snapshots & restore**. Select the app and a target device.
+To restore an app, open **Snapshots & restore**.
 
 ## Documentation
 
-- [User guide](docs/user-guide.md): install, protect, restore, and recover.
-- [Reference](docs/reference.md): full behaviour and limits of each feature.
+- [User guide](docs/user-guide.md): set up, protect, restore, and recover.
+- [Reference](docs/reference.md): all settings, behaviour, and limits.
 - [Development](docs/development.md): build, test, and release.
