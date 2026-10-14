@@ -13,24 +13,22 @@ Synod backs up the Docker apps in your home lab and restores them on any of your
 ## Requirements
 
 - Linux devices (amd64 or arm64) with Docker Engine and the Docker Compose plugin.
-- One Linux device or Mac for the controller. A Mac controller does not need Docker.
 
 ## Quick start
 
-1. On one device, install Synod and create the controller as root:
-
-   ```sh
-   curl -fsSL https://synod.biodun.dev/install.sh | sh
-   synod server init
-   ```
-
-   Save the recovery kit that init prints. Keep it away from your devices.
-
-2. On each Linux device with apps, start the agent with Docker Compose.
-   Use the join token from init for the first device. Run `synod node join-token` on the controller for each other device.
+1. On your first device, create `compose.yaml`:
 
    ```yaml
    services:
+     synod:
+       image: ghcr.io/sirrobot01/synod:latest
+       container_name: synod
+       command: server
+       restart: unless-stopped
+       network_mode: host
+       volumes:
+         - /var/lib/synod/controller:/var/lib/synod/controller
+
      synod-agent:
        image: ghcr.io/sirrobot01/synod:latest
        container_name: synod-agent
@@ -39,7 +37,7 @@ Synod backs up the Docker apps in your home lab and restores them on any of your
        pid: host
        network_mode: host
        environment:
-         SYNOD_JOIN_TOKEN: "TOKEN"
+         SYNOD_JOIN_TOKEN_FILE: /var/lib/synod/controller/join.token
        volumes:
          - /var/run/docker.sock:/var/run/docker.sock
          - /var/lib/docker:/var/lib/docker
@@ -48,24 +46,38 @@ Synod backs up the Docker apps in your home lab and restores them on any of your
          - /srv:/srv
    ```
 
+   `synod` is the controller. `synod-agent` backs up the apps on this device.
+
+2. Start it:
+
    ```sh
    docker compose up -d
    ```
 
-   To run the agent as a systemd service instead, install Synod on the device and run `synod agent join 'TOKEN'` as root.
-
-3. On the controller, create your account:
+3. Save the recovery kit. It holds the password of your backups. Keep it away from your devices:
 
    ```sh
-   synod user create admin
+   docker exec synod cat /var/lib/synod/controller/recovery-kit.txt
+   docker exec synod rm /var/lib/synod/controller/recovery-kit.txt
    ```
 
-4. Open the address that init printed, for example `https://192.168.0.20:8443`. Then:
-   1. In **Devices**, approve your devices.
+4. Create your account:
+
+   ```sh
+   docker exec -it synod synod user create admin
+   ```
+
+5. Open `https://DEVICE-ADDRESS:8443`. Then:
+   1. In **Devices**, approve your device.
    2. In **Destinations**, add a destination on another device.
    3. In **Apps**, select **Protect all**.
 
+To add another device, run `docker exec synod synod node join-token`.
+On that device, use the `synod-agent` service with `SYNOD_JOIN_TOKEN: "TOKEN"` in place of `SYNOD_JOIN_TOKEN_FILE`.
+
 To restore an app, open **Snapshots & restore**.
+
+To install Synod without Docker, see the [user guide](docs/user-guide.md#install-without-docker).
 
 ## Documentation
 

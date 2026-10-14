@@ -27,7 +27,7 @@ One `synod` binary holds the CLI, the controller, and the agent.
 
 | Component | Runs on | Does |
 | --- | --- | --- |
-| Controller | One Linux device or Mac | Stores settings, serves the web UI and API, and sends work to agents. |
+| Controller | One Linux device, in Docker or as a service, or a Mac | Stores settings, serves the web UI and API, and sends work to agents. |
 | Agent | Each Linux device with apps | Finds apps, backs them up, restores them, and can store backups for other devices. |
 | CLI | Any device | Talks to the controller API. |
 
@@ -87,6 +87,33 @@ If a stopped installer leaves `.synod-install.lock` in the install directory, ma
 
 ## Controller
 
+### Controller in Docker
+
+The image `ghcr.io/sirrobot01/synod` runs the controller with `command: server`.
+Mount `/var/lib/synod/controller` to keep its state.
+Use `network_mode: host`, so that the controller finds the device address and other devices reach ports 8443 and 8444.
+
+On its first start, the controller creates the installation in `/var/lib/synod/controller`.
+Later starts use the saved installation.
+The first start:
+
+- listens on all interfaces,
+- writes the recovery kit to `recovery-kit.txt`, but not to the log,
+- writes a join token for one device to `join.token` and to the log.
+
+| Variable | Use on the first start |
+| --- | --- |
+| `SYNOD_ADDRESS` | Address or hostname that devices use. The default is the address of the default route. Set it on a bridge network. |
+| `SYNOD_FROM_REPOSITORY` | Recover from this repository directory or connection file. See [Recover after controller loss](#recover-after-controller-loss). |
+| `SYNOD_PASSWORD_FILE` | The private file with the repository password, for a recovery. |
+| `SYNOD_REPOSITORY_DESTINATION` | The saved destination to recover from, when there are several. |
+
+If the first start stops before it completes, empty the directory and start again.
+
+`synod server` without options does the same on a host.
+
+### Controller as a service
+
 ```sh
 synod server init
 ```
@@ -117,6 +144,7 @@ Flags override environment variables. Environment variables override the configu
 
 ### CLI connection
 
+For a controller in Docker, run the CLI in its container: `docker exec synod synod COMMAND`.
 As root on the controller, the CLI reads `controller.json` from the default controller directory.
 On another device, or for another directory, set these variables:
 
@@ -179,6 +207,7 @@ The container needs:
 | App directories at the same path as on the host | Docker reads restored bind paths on the host, so the paths must agree. |
 
 `SYNOD_JOIN_TOKEN` joins the device on its first start. Later starts ignore it.
+`SYNOD_JOIN_TOKEN_FILE` names a file with the token instead. The agent waits until the file exists. An agent in the same Compose file as the controller uses `/var/lib/synod/controller/join.token`.
 
 ## App discovery
 
@@ -475,7 +504,10 @@ The URL is stored encrypted and never appears in status output or logs.
 You need the recovery kit password and one surviving destination.
 Stop the old controller and agents first, if they still run.
 
-For a `device` or `local` repository, run init on the device that has the repository files:
+For a controller in Docker, set `SYNOD_FROM_REPOSITORY` and `SYNOD_PASSWORD_FILE` on its first start. See [Controller in Docker](#controller-in-docker).
+The paths are paths inside the container, so mount the repository and the password file.
+
+For a controller as a service, run init on the device that has the repository files:
 
 ```sh
 synod server init --from-repository /srv/synod-backups --password-file /root/repository-password

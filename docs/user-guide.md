@@ -3,15 +3,13 @@
 This guide sets up Synod, protects your apps, and restores them.
 The [reference](reference.md) gives all settings and limits.
 
-Run all commands as root (`sudo -i`).
-The examples use `192.168.0.20` for the controller. Use your own address.
+The examples use `192.168.0.20` for the first device. Use your own address.
 
 ## Before you start
 
 You need:
 
 - Linux devices (amd64 or arm64) with Docker Engine and the Docker Compose plugin.
-- One Linux device or Mac for the controller. A Linux controller can also run apps.
 - A second device or a storage service for your backups. A backup on the same device does not survive the loss of that device.
 
 Open these ports on your private network:
@@ -22,66 +20,88 @@ Open these ports on your private network:
 | 8444 | Agent connections to the controller |
 | 8445 | Backups stored on another Synod device |
 
-## 1. Install
+## 1. Start Synod
 
-On the controller device, and on each device where the agent runs as a systemd service:
+On your first device, create `compose.yaml`:
 
-```sh
-curl -fsSL https://synod.biodun.dev/install.sh | sh
-synod --version
+```yaml
+services:
+  synod:
+    image: ghcr.io/sirrobot01/synod:latest
+    container_name: synod
+    command: server
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/lib/synod/controller:/var/lib/synod/controller
+
+  synod-agent:
+    image: ghcr.io/sirrobot01/synod:latest
+    container_name: synod-agent
+    restart: unless-stopped
+    privileged: true
+    pid: host
+    network_mode: host
+    environment:
+      SYNOD_JOIN_TOKEN_FILE: /var/lib/synod/controller/join.token
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker:/var/lib/docker
+      - /var/lib/synod:/var/lib/synod
+      # Add each directory with app files, at the same path.
+      - /srv:/srv
 ```
 
-The installer checks the download and installs `/usr/local/bin/synod`. It does not start a service.
+Mount each directory with Compose projects or bind mounts at the same path as on the host.
+For example, mount `/mnt/user/appdata` on Unraid or `/volume1/docker` on Synology.
 
-## 2. Create the controller
-
-On one device:
+Start it:
 
 ```sh
-synod server init
+docker compose up -d
 ```
 
-Init starts the controller as a service. The service starts again after a reboot.
-To use another address than the default route address, add `--address 192.168.0.20`.
+On its first start, the `synod` controller creates your installation.
+The `synod-agent` joins it with the token that the controller writes.
 
-Init prints a **recovery kit** with the repository password.
+## 2. Save the recovery kit
+
+The recovery kit holds the password of your backups.
 Without this password, nobody can read your backups.
 
+```sh
+docker exec synod cat /var/lib/synod/controller/recovery-kit.txt
+```
+
 1. Store the kit in a password manager or on paper.
-2. Delete `recovery-kit.txt` from the controller directory.
+2. Delete the file: `docker exec synod rm /var/lib/synod/controller/recovery-kit.txt`
 
-## 3. Join your devices
-
-Run an agent on each Linux device with apps.
-Use the token from init for the first device.
-For each other device, run `synod node join-token` on the controller.
-Each token joins one device.
-
-To run the agent in Docker Compose, see [Run the agent in Docker](#run-the-agent-in-docker).
-To run it as a systemd service, install Synod on the device and join:
+## 3. Sign in to the web UI
 
 ```sh
-synod agent join 'TOKEN'
+docker exec -it synod synod user create admin
 ```
 
-Then approve the devices on the controller:
-
-```sh
-synod node list
-synod node approve DEVICE
-```
-
-## 4. Sign in to the web UI
-
-```sh
-synod user create admin
-```
-
-Open the address that init printed, for example `https://192.168.0.20:8443`.
+Open `https://192.168.0.20:8443`.
 The controller uses its own certificate authority.
-To remove the browser warning, trust `api-ca.crt` from the controller directory.
+To remove the browser warning, trust `/var/lib/synod/controller/api-ca.crt`.
+
+In **Devices**, approve your device.
+
+## 4. Add your other devices
+
+On the controller device, create a join token for each other device:
+
+```sh
+docker exec synod synod node join-token
+```
+
+On the other device, use the `synod-agent` service from step 1.
+Replace `SYNOD_JOIN_TOKEN_FILE` with `SYNOD_JOIN_TOKEN: "TOKEN"`.
+Then approve the device in **Devices**.
 
 You can do the next steps in the web UI or with the CLI.
+To run a CLI command on a controller in Docker, put `docker exec synod` before it.
 
 ## 5. Add a destination
 
@@ -169,77 +189,85 @@ You need the recovery kit and one surviving destination.
 1. On the new controller device, write the password to a private file:
 
    ```sh
-   umask 077; printf '%s' 'PASSWORD' > "$HOME/repository-password"
+   umask 077; printf '%s' 'PASSWORD' > /root/repository-password
    ```
 
-2. Create the controller from the repository:
+2. In the `synod` service of `compose.yaml`, add the repository and the password:
 
-   ```sh
-   synod server init --from-repository /srv/synod-backups --password-file "$HOME/repository-password"
+   ```yaml
+       environment:
+         SYNOD_FROM_REPOSITORY: /srv/synod-backups
+         SYNOD_PASSWORD_FILE: /run/repository-password
+       volumes:
+         - /var/lib/synod/controller:/var/lib/synod/controller
+         - /srv/synod-backups:/srv/synod-backups
+         - /root/repository-password:/run/repository-password:ro
    ```
 
    For S3 or SFTP, see [Recover after controller loss](reference.md#recover-after-controller-loss).
 
-3. On the device with the repository, join with the token that init printed and a new agent directory:
-
-   ```sh
-   synod agent join 'TOKEN' --dir /var/lib/synod/recovered-agent
-   ```
-
-4. For each other device, run `synod node join-token --device DEVICE` on the controller. Join the device with that token and a new `--dir`.
+3. Start it with `docker compose up -d`.
+   The controller rebuilds the installation from the repository.
+   The `synod-agent` on this device joins again with its old device ID.
+4. For each other device, run `docker exec synod synod node join-token --device DEVICE`.
+   On that device, delete `/var/lib/synod/agent`, and start the agent with the new token.
 5. Approve each device. Then restore your apps.
 
 Restored apps keep running, because they are outside the agent directory.
+After the recovery, you can remove the recovery settings from `compose.yaml`.
 
 ## Upgrade
 
-Run the installer again on each device. Start with the controller device:
+On each device, start with the controller device:
 
 ```sh
-curl -fsSL https://synod.biodun.dev/install.sh | sh
+docker compose pull && docker compose up -d
 ```
 
-The installer restarts the Synod services.
-Do not run `server init` or `agent join` again.
+## Agent container settings
 
-## Run the agent in Docker
-
-The agent image needs no Synod install on the device. It also works without systemd, for example on Unraid or Synology.
-Create `compose.yaml`:
-
-```yaml
-services:
-  synod-agent:
-    image: ghcr.io/sirrobot01/synod:latest
-    container_name: synod-agent
-    restart: unless-stopped
-    privileged: true
-    pid: host
-    network_mode: host
-    environment:
-      SYNOD_JOIN_TOKEN: "TOKEN"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/lib/docker:/var/lib/docker
-      - /var/lib/synod:/var/lib/synod
-      # Add each directory with app files, at the same path.
-      - /srv:/srv
-```
-
-Replace `TOKEN` with a join token. Then start it and approve the device:
-
-```sh
-docker compose up -d
-```
-
-Mount each directory with Compose projects or bind mounts at the same path as on the host.
-For example, mount `/mnt/user/appdata` on Unraid or `/volume1/docker` on Synology.
-A backup fails with `source_unavailable` when a path is not mounted.
-
-Keep `privileged`, `pid: host`, and `network_mode: host`.
+Keep `privileged`, `pid: host`, and `network_mode: host` on the `synod-agent` service.
 The agent needs them for filesystem snapshots, host port checks, and restore tests.
 
-To upgrade, run `docker compose pull && docker compose up -d`.
+Mount each directory with Compose projects or bind mounts at the same path as on the host.
+Docker reads restored bind paths on the host, so the paths must agree.
+A backup fails with `source_unavailable` when a path is not mounted.
+
+## Install without Docker
+
+You can also install Synod as a binary with systemd services.
+A Mac can run the controller this way, but not the agent.
+Run these commands as root.
+
+1. Install Synod on each device:
+
+   ```sh
+   curl -fsSL https://synod.biodun.dev/install.sh | sh
+   ```
+
+2. On one device, create the controller. It runs as the `synod-server` service:
+
+   ```sh
+   synod server init
+   ```
+
+   Init prints the recovery kit and a join token.
+   To use another address than the default route address, add `--address 192.168.0.20`.
+
+3. On each device with apps, join the agent. It runs as the `synod-agent` service:
+
+   ```sh
+   synod agent join 'TOKEN'
+   ```
+
+   For each other device, run `synod node join-token` on the controller.
+
+4. Create your account with `synod user create admin`. Then continue with [step 3](#3-sign-in-to-the-web-ui).
+
+Without Docker, run CLI commands directly on the controller.
+To upgrade, run the install command again on each device.
+To recover, run `synod server init --from-repository /srv/synod-backups --password-file /root/repository-password`.
+Then join each device with `synod agent join 'TOKEN' --dir /var/lib/synod/recovered-agent`.
 
 ## Fix a device
 
@@ -259,7 +287,7 @@ synod agent renew 'TOKEN'
 For an agent in Docker:
 
 ```sh
-docker compose stop
+docker compose stop synod-agent
 docker compose run --rm synod-agent agent renew 'TOKEN'
 docker compose up -d
 ```
@@ -278,6 +306,7 @@ Logs:
 | --- | --- |
 | Linux agent | `journalctl -u synod-agent -n 100 --no-pager` |
 | Linux controller | `journalctl -u synod-server -n 100 --no-pager` |
+| Controller in Docker | `docker logs --tail 100 synod` |
 | Agent in Docker | `docker logs --tail 100 synod-agent` |
 | macOS controller | `tail -n 100 "/Library/Application Support/Synod/controller/controller.log"` |
 

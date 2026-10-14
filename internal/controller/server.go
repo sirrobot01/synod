@@ -46,6 +46,17 @@ func Command() *cobra.Command {
 		}}
 	load := config.BindController(command.Flags())
 	command.RunE = func(cmd *cobra.Command, _ []string) error {
+		// Without settings, the controller uses the default directory and creates the
+		// installation on its first start. The container image runs it this way.
+		if cmd.Flags().NFlag() == 0 && os.Getenv("SYNOD_CONFIG") == "" {
+			path, err := firstStart(cmd.Context(), config.DefaultControllerDir, cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			if err := cmd.Flags().Set("config", path); err != nil {
+				return err
+			}
+		}
 		settings, err := load()
 		if err != nil {
 			return err

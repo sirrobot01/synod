@@ -118,22 +118,28 @@ func TestRunJoinsOnceWithAToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(parent, "agent", "agent.json")
-	if err := joinIfNeeded(t.Context(), configPath, "", "", io.Discard); err != nil {
+	if err := joinIfNeeded(t.Context(), configPath, "", "", "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Dir(configPath)); !os.IsNotExist(err) {
 		t.Fatal("run without a token created agent state")
 	}
+	// A controller in the same Compose file writes the token file after the agent starts.
+	tokenFile := filepath.Join(t.TempDir(), "join.token")
+	time.AfterFunc(100*time.Millisecond, func() { os.WriteFile(tokenFile, []byte(jointoken.Encode(token)+"\n"), 0o600) })
 	var output bytes.Buffer
-	if err := joinIfNeeded(t.Context(), configPath, jointoken.Encode(token), "192.0.2.10:8445", &output); err != nil {
+	if err := joinIfNeeded(t.Context(), configPath, "", tokenFile, "192.0.2.10:8445", &output); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "join_token_waiting") {
+		t.Fatalf("the agent did not report that it waits for the token file: %s", output.String())
 	}
 	joined, err := daemon.Load(configPath)
 	if err != nil || joined.InstallationID != installation.String() || joined.DestinationAddress != "192.0.2.10:8445" || joined.DestinationListen != ":8445" {
 		t.Fatalf("joined config: %+v, %v", joined, err)
 	}
 	// A restart keeps the identity. The used token is ignored.
-	if err := joinIfNeeded(t.Context(), configPath, "spent-token", "", io.Discard); err != nil {
+	if err := joinIfNeeded(t.Context(), configPath, "spent-token", "", "", io.Discard); err != nil {
 		t.Fatalf("restart with a spent token: %v", err)
 	}
 	again, err := daemon.Load(configPath)

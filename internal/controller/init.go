@@ -50,6 +50,9 @@ type InitOptions struct {
 	FromRepository        string
 	PasswordFile          string
 	RepositoryDestination string
+	// firstStart creates the installation for a controller that starts without a
+	// configuration, such as the container image. See firstStart.
+	firstStart bool
 }
 
 type materialResult struct {
@@ -113,6 +116,30 @@ func hostAddress() string {
 	return connection.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
+// firstStart returns the configuration file in dir. When the file does not exist, it
+// creates the installation there first, as init does without a service: the controller
+// listens on all interfaces, and SYNOD_ADDRESS or the default route address names it.
+// SYNOD_FROM_REPOSITORY, SYNOD_PASSWORD_FILE, and SYNOD_REPOSITORY_DESTINATION recover
+// the installation from a repository instead. The recovery kit never reaches the log.
+func firstStart(ctx context.Context, dir string, output io.Writer) (string, error) {
+	path := filepath.Join(dir, "controller.json")
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		return path, err
+	}
+	options := InitOptions{
+		Directory:             dir,
+		Address:               cmp.Or(os.Getenv("SYNOD_ADDRESS"), hostAddress()),
+		FromRepository:        os.Getenv("SYNOD_FROM_REPOSITORY"),
+		PasswordFile:          os.Getenv("SYNOD_PASSWORD_FILE"),
+		RepositoryDestination: os.Getenv("SYNOD_REPOSITORY_DESTINATION"),
+		firstStart:            true,
+	}
+	if err := runInit(ctx, options, output); err != nil {
+		return "", fmt.Errorf("create the installation in %s: %w; if an earlier start stopped during setup, empty this directory and start again", dir, err)
+	}
+	return path, nil
+}
+
 func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 	dir := options.Directory
 	if dir == "" {
@@ -133,8 +160,11 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 			return err
 		}
 		options.InstallationID = catalog.InstallationID.String()
+		// A container mounts its directory, so an empty directory is also new.
 		if err := os.Mkdir(dir, 0o700); err != nil {
-			return fmt.Errorf("create recovery directory: %w; use a new --dir", err)
+			if entries, readErr := os.ReadDir(dir); !errors.Is(err, os.ErrExist) || readErr != nil || len(entries) != 0 {
+				return fmt.Errorf("create recovery directory: %w; use a new --dir", err)
+			}
 		}
 		defer func() {
 			if !complete {
@@ -154,10 +184,16 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		absDir = dir
 	}
 
+	listen := address
+	if options.firstStart {
+		// A container cannot bind the host address on a bridge network. Enrollment gives
+		// agents the address that they dialed.
+		listen = ""
+	}
 	cfg := controllerJSON{
 		InstallationID:   res.id.String(),
-		Listen:           net.JoinHostPort(address, "8443"),
-		AgentListen:      net.JoinHostPort(address, "8444"),
+		Listen:           net.JoinHostPort(listen, "8443"),
+		AgentListen:      net.JoinHostPort(listen, "8444"),
 		DatabasePath:     filepath.Join(absDir, "synod.db"),
 		AdminTokenFile:   filepath.Join(absDir, "admin.token"),
 		TLSCertFile:      filepath.Join(absDir, "api.crt"),
@@ -182,17 +218,19 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		return fmt.Errorf("write controller configuration: %w", err)
 	}
 
-	executable, err := os.Executable()
-	if err != nil {
-		executable = "synod"
-	}
-	serviceContent, err := controllerService(executable, configPath)
-	if err != nil {
-		return err
-	}
-	serviceLocalPath := filepath.Join(absDir, serviceFileName)
-	if err := os.WriteFile(serviceLocalPath, []byte(serviceContent), 0o644); err != nil {
-		return fmt.Errorf("write service file: %w", err)
+	var serviceContent, serviceLocalPath string
+	if !options.firstStart {
+		executable, err := os.Executable()
+		if err != nil {
+			executable = "synod"
+		}
+		if serviceContent, err = controllerService(executable, configPath); err != nil {
+			return err
+		}
+		serviceLocalPath = filepath.Join(absDir, serviceFileName)
+		if err := os.WriteFile(serviceLocalPath, []byte(serviceContent), 0o644); err != nil {
+			return fmt.Errorf("write service file: %w", err)
+		}
 	}
 
 	metadata, err := store.Open(ctx, cfg.DatabasePath)
@@ -232,6 +270,31 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 		return err
 	}
 	complete = true
+	if options.firstStart {
+		// An agent in the same Compose file reads the token from this file.
+		tokenPath := filepath.Join(absDir, "join.token")
+		if err := os.WriteFile(tokenPath, []byte(encoded+"\n"), 0o600); err != nil {
+			return fmt.Errorf("write the join token: %w", err)
+		}
+		created := fmt.Sprintf("Synod installation %s created in %s.", res.id, absDir)
+		if options.FromRepository != "" {
+			created = fmt.Sprintf("Synod installation %s recovered in %s with %d devices, %d apps, and %d destinations.\nJoin each other device again with a token from synod node join-token --device DEVICE.", res.id, absDir, len(catalog.Devices), len(catalog.Apps), len(catalog.Destinations))
+		}
+		_, err = fmt.Fprintf(output, `%s
+
+The recovery kit with the repository password is in %s.
+Copy it to a password manager or to paper, away from your Synod devices. Then delete the file.
+
+Join token for one device (valid for 7 days):
+  %s
+An agent in the same Compose file reads it from %s.
+
+Create an account with: synod user create NAME
+In a container, run: docker exec CONTAINER synod user create NAME
+Then open https://%s.
+`, created, filepath.Join(absDir, "recovery-kit.txt"), encoded, tokenPath, net.JoinHostPort(address, "8443"))
+		return err
+	}
 
 	if options.FromRepository != "" {
 		joinNote += fmt.Sprintf("\n\nRecovered %d devices, %d apps, and %d destinations.\nNew controller keys were created. Stop old agents before recovery.\nUse a new agent --dir, then approve each device.\nRestored apps live outside the agent directory and keep running.\nFor each other saved device, run synod node join-token --device DEVICE.\nOld activity records and approval are not restored.", len(catalog.Devices), len(catalog.Apps), len(catalog.Destinations))

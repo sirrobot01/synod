@@ -409,3 +409,53 @@ func TestServerInitWritesRecoveryKitAndDefaultPassword(t *testing.T) {
 		t.Fatalf("a destination without a password did not use the kit password: %v", err)
 	}
 }
+
+func TestFirstStartCreatesTheInstallationOnce(t *testing.T) {
+	t.Setenv("SYNOD_ADDRESS", "127.0.0.1")
+	dir := filepath.Join(t.TempDir(), "controller")
+	var out bytes.Buffer
+	path, err := firstStart(t.Context(), dir, &out)
+	if err != nil || path != filepath.Join(dir, "controller.json") {
+		t.Fatalf("first start: %q %v", path, err)
+	}
+	var cfg controllerJSON
+	if err := json.Unmarshal([]byte(readFile(t, dir, "controller.json")), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	// A container on a bridge network cannot bind the host address.
+	if cfg.Listen != ":8443" || cfg.AgentListen != ":8444" {
+		t.Fatalf("listen addresses: %q %q", cfg.Listen, cfg.AgentListen)
+	}
+	if _, err := os.Stat(filepath.Join(dir, serviceFileName)); !os.IsNotExist(err) {
+		t.Fatal("first start wrote a service file")
+	}
+	info, err := os.Stat(filepath.Join(dir, "join.token"))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("join token file: %v", err)
+	}
+	token, err := jointoken.Decode(strings.TrimSpace(readFile(t, dir, "join.token")))
+	if err != nil || token.Address != "127.0.0.1:8443" || !strings.Contains(out.String(), jointoken.Encode(token)) {
+		t.Fatalf("join token: %+v %v", token, err)
+	}
+	// The log keeps no repository password.
+	kit := readFile(t, dir, "recovery-kit.txt")
+	lines := strings.Split(kit, "\n")
+	password := strings.TrimSpace(lines[slices.Index(lines, "Repository password:")+1])
+	if password == "" || strings.Contains(out.String(), password) {
+		t.Fatal("first start printed the repository password")
+	}
+	before := readFile(t, dir, "installation-id")
+	out.Reset()
+	if again, err := firstStart(t.Context(), dir, &out); err != nil || again != path || out.Len() != 0 || readFile(t, dir, "installation-id") != before {
+		t.Fatalf("a restart created the installation again: %v %s", err, out.String())
+	}
+	// The server loads the written configuration.
+	flags := pflag.NewFlagSet("server", pflag.ContinueOnError)
+	load := config.BindController(flags)
+	if err := flags.Parse([]string{"--config", path}); err != nil {
+		t.Fatal(err)
+	}
+	if settings, err := load(); err != nil || settings.Listen != ":8443" {
+		t.Fatalf("load the first-start configuration: %+v %v", settings, err)
+	}
+}

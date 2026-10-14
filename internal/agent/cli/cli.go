@@ -6,10 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"time"
 
 	"github.com/sirrobot01/synod/internal/agent/daemon"
 	"github.com/sirrobot01/synod/internal/agent/enrollment"
@@ -40,8 +43,10 @@ func Command() *cobra.Command {
 	var configPath, joinToken, destinationAddress string
 	run := &cobra.Command{Use: "run", Short: "Run the agent of a joined device", Long: `Run starts the agent of a joined device.
 With --join-token, run first joins a device that has no configuration yet.
+$SYNOD_JOIN_TOKEN_FILE can name a file with the token instead. Run waits for that file,
+which a controller in the same Compose file writes on its first start.
 The agent container image uses this, so one Compose file joins and runs the agent.`, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if err := joinIfNeeded(cmd.Context(), configPath, cmp.Or(joinToken, os.Getenv("SYNOD_JOIN_TOKEN")), cmp.Or(destinationAddress, os.Getenv("SYNOD_DESTINATION_ADDRESS")), cmd.ErrOrStderr()); err != nil {
+		if err := joinIfNeeded(cmd.Context(), configPath, cmp.Or(joinToken, os.Getenv("SYNOD_JOIN_TOKEN")), os.Getenv("SYNOD_JOIN_TOKEN_FILE"), cmp.Or(destinationAddress, os.Getenv("SYNOD_DESTINATION_ADDRESS")), cmd.ErrOrStderr()); err != nil {
 			return err
 		}
 		config, err := daemon.Load(configPath)
@@ -62,11 +67,31 @@ The agent container image uses this, so one Compose file joins and runs the agen
 	return root
 }
 
-// joinIfNeeded joins the device when configPath does not exist and a token is given.
-// The token is used once. Later starts find the configuration and ignore it.
-func joinIfNeeded(ctx context.Context, configPath, token, destinationAddress string, output io.Writer) error {
-	if _, err := os.Lstat(configPath); token == "" || configPath == "" || !errors.Is(err, os.ErrNotExist) {
+// joinIfNeeded joins the device when configPath does not exist and a token or token file
+// is given. The token is used once. Later starts find the configuration and ignore it.
+func joinIfNeeded(ctx context.Context, configPath, token, tokenFile, destinationAddress string, output io.Writer) error {
+	if _, err := os.Lstat(configPath); (token == "" && tokenFile == "") || configPath == "" || !errors.Is(err, os.ErrNotExist) {
 		return nil
+	}
+	for waiting := false; token == ""; waiting = true {
+		data, err := os.ReadFile(tokenFile)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: read the join token file: %w", daemon.ErrConfiguration, err)
+		}
+		if token = strings.TrimSpace(string(data)); token != "" {
+			break
+		}
+		if !waiting {
+			_ = json.NewEncoder(output).Encode(struct {
+				Event string `json:"event"`
+				File  string `json:"file"`
+			}{Event: "join_token_waiting", File: tokenFile})
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
 	options := joinOptions{dir: filepath.Dir(configPath), dockerSocket: "/var/run/docker.sock", destinationListen: ":8445", destinationAddress: destinationAddress}
 	return join(ctx, token, options, output)

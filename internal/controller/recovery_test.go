@@ -103,6 +103,27 @@ func TestInitRecoversMovedRepositoryWithoutOldControllerFiles(t *testing.T) {
 	if _, err := os.Stat(options.Directory); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("wrong password left partial controller files")
 	}
+	// A controller container recovers on its first start into its empty mounted directory.
+	if err := os.WriteFile(password, []byte(credentials.Password+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mounted := filepath.Join(root, "mounted")
+	if err := os.Mkdir(mounted, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SYNOD_ADDRESS", "127.0.0.1")
+	t.Setenv("SYNOD_FROM_REPOSITORY", moved)
+	t.Setenv("SYNOD_PASSWORD_FILE", password)
+	out.Reset()
+	if _, err := firstStart(t.Context(), mounted, &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(readFile(t, mounted, "installation-id")) != installation.String() || !strings.Contains(out.String(), "recovered") || strings.Contains(out.String(), credentials.Password) {
+		t.Fatalf("first start did not recover the installation: %s", out.String())
+	}
+	if token, err := jointoken.Decode(strings.TrimSpace(readFile(t, mounted, "join.token"))); err != nil || token.NodeID != node {
+		t.Fatal("the local agent token does not reclaim the repository owner's ID", err)
+	}
 }
 
 func TestRecoverySelectsDestinationAndRollsBackInvalidImport(t *testing.T) {
