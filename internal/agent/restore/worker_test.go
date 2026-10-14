@@ -17,6 +17,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
+	"github.com/sirrobot01/synod/internal/agent/discovery"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/restore"
 )
@@ -238,5 +239,47 @@ func TestRestorePlacesAnIncludedLargeMount(t *testing.T) {
 	var output bytes.Buffer
 	if err := execCommand(t.Context(), api, f.name, []string{"cat", "/media/movie"}, nil, &output); err != nil || output.String() != "private-included-media" {
 		t.Fatalf("restored media = %q: %v", output.String(), err)
+	}
+}
+
+func TestRestoreOfARestoredAppLeavesOutSynodFiles(t *testing.T) {
+	f := newFixture(t, false)
+	api := f.worker.Docker
+	w := &Worker{Backup: f.worker, Directory: t.TempDir(), Apps: t.TempDir()}
+	removeFixture(api, f.name)
+	request := newRequest(f, false)
+	t.Cleanup(func() { removeLabelled(context.Background(), api, request.ID, true) })
+	if result, err := w.Execute(t.Context(), request); err != nil || result.FailureCode != "" {
+		t.Fatalf("restore: %+v %v", result, err)
+	}
+	// Restore starts Compose with /dev/null as the env file and with its own compose.json.
+	filters := make(client.Filters)
+	filters.Add("label", "com.docker.compose.project="+f.name)
+	report, err := discovery.Scan(t.Context(), api, filters)
+	if err != nil || len(report.Apps) != 1 {
+		t.Fatal("scan of the restored app failed", err)
+	}
+	generated := filepath.Join(w.Apps, f.name, "compose.json")
+	if slices.ContainsFunc(report.Apps[0].Paths, func(p *agentv1.DiscoveredPath) bool { return p.Source == os.DevNull }) {
+		t.Fatal("the restore env file is listed as an app path")
+	}
+	if !slices.ContainsFunc(report.Apps[0].Paths, func(p *agentv1.DiscoveredPath) bool { return p.Source == generated && p.Kind == "compose" }) {
+		t.Fatalf("the restored app has no Compose file: %+v", report.Apps[0].Paths)
+	}
+	result, err := f.worker.Execute(t.Context(), backup.Request{ID: uuid.New(), InstallationID: f.worker.InstallationID, AppID: f.app.ID, NodeID: f.worker.NodeID, SourceKey: f.app.Definition.Key, DestinationID: f.destinationID, Method: backup.Auto, RequestedAt: time.Now().UTC()})
+	if err != nil || result.FailureCode != "" {
+		t.Fatalf("backup of the restored app: %+v %v", result, err)
+	}
+	saved, err := f.repo.Snapshot(t.Context(), result.SnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := makePlan(t.Context(), f.repo, saved, uuid.New(), t.TempDir(), f.worker.Architecture, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The next restore writes a new compose.json, so the saved one does not come back as data.
+	if len(p.Data) != 1 || p.Data[0].Relative != "project" {
+		t.Fatalf("restore data of the restored app: %+v", p.Data)
 	}
 }

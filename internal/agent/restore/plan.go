@@ -173,6 +173,14 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 			p.Definition.Volumes[key] = volume
 		}
 	}
+	// A restored app runs from the compose.json that restore writes beside its project.
+	// The restore writes a new one from the saved containers, so the saved copy is not restored as data.
+	var generated string
+	for _, c := range p.Containers {
+		if c.Config != nil && c.Config.Labels[operationLabel] != "" && saved.App.Definition.ProjectDirectory != "" {
+			generated = filepath.Join(filepath.Dir(saved.App.Definition.ProjectDirectory), "compose.json")
+		}
+	}
 	copies := slices.Clone(saved.Paths)
 	slices.SortFunc(copies, func(a, b backup.Path) int {
 		if n := len(a.Source) - len(b.Source); n != 0 {
@@ -183,6 +191,9 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 	for _, copied := range copies {
 		if !filepath.IsAbs(copied.Source) || filepath.Clean(copied.Source) != copied.Source || copied.Source == "/" || !strings.HasPrefix(copied.Archive, "paths/") {
 			return nil, &failure{Code: "snapshot_invalid"}
+		}
+		if copied.Kind == "compose" && copied.Source == generated {
+			continue
 		}
 		info, err := r.Stat(ctx, saved.ID, copied.Archive)
 		if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
