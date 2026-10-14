@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"github.com/sirrobot01/synod/internal/config"
 	"github.com/sirrobot01/synod/internal/controller/agentstream"
 	"github.com/sirrobot01/synod/internal/controlstream"
+	"github.com/sirrobot01/synod/internal/jointoken"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/restore"
 	"github.com/sirrobot01/synod/internal/secret"
@@ -183,6 +185,10 @@ func serve(ctx context.Context, settings config.Controller, output io.Writer) er
 		return err
 	}
 	handler.CredentialKeyring = keyring
+	handler.JoinAddress, handler.APICAFingerprint, err = joinSettings(settings)
+	if err != nil {
+		return err
+	}
 	installation := uuid.MustParse(settings.InstallationID)
 	handler.RecoveryKit = func(ctx context.Context) (string, error) {
 		password, err := metadata.RepositoryPassword(ctx, installation, keyring)
@@ -342,4 +348,32 @@ func loadKeyring(path, id string) (*secret.Keyring, error) {
 		return nil, fmt.Errorf("build the credential keyring: %w", err)
 	}
 	return ring, nil
+}
+
+// joinSettings returns the address and the API CA pin that join tokens name.
+// Without an address, a specified listen host is the address. A wildcard listener
+// leaves it empty, so the API uses the host of each request.
+func joinSettings(settings config.Controller) (string, string, error) {
+	host, port, err := net.SplitHostPort(settings.Listen)
+	if err != nil {
+		return "", "", err
+	}
+	address := ""
+	if settings.Address != "" {
+		address = net.JoinHostPort(settings.Address, port)
+	} else if ip := net.ParseIP(host); host != "" && (ip == nil || !ip.IsUnspecified()) {
+		address = settings.Listen
+	}
+	if settings.APICACertFile == "" {
+		return address, "", nil
+	}
+	data, err := readStartupFile(settings.APICACertFile, 64<<10, false)
+	if err != nil {
+		return "", "", fmt.Errorf("read the API CA certificate: %w", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return "", "", errors.New("the API CA certificate file holds no certificate")
+	}
+	return address, jointoken.Fingerprint(block.Bytes), nil
 }

@@ -23,6 +23,7 @@ import (
 	"database/sql"
 
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/config"
 	"github.com/sirrobot01/synod/internal/pki"
 	"github.com/sirrobot01/synod/internal/store"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
@@ -384,5 +385,19 @@ func TestServerRefusesPositionalArgumentsWithoutRepeatingThem(t *testing.T) {
 	err := command.ExecuteContext(t.Context())
 	if err == nil || strings.Contains(err.Error(), "private-value") {
 		t.Fatalf("error = %v; want a refusal that does not repeat the argument", err)
+	}
+}
+
+func TestJoinSettingsNameTheAddressThatDevicesDial(t *testing.T) {
+	for _, item := range []struct{ address, listen, want string }{
+		{"192.0.2.20", ":8443", "192.0.2.20:8443"},
+		{"", "192.0.2.21:8443", "192.0.2.21:8443"},
+		{"", ":8443", ""},
+		{"", "0.0.0.0:8443", ""},
+	} {
+		address, fingerprint, err := joinSettings(config.Controller{Address: item.address, Listen: item.listen})
+		if err != nil || address != item.want || fingerprint != "" {
+			t.Fatalf("%+v: %q %q %v", item, address, fingerprint, err)
+		}
 	}
 }

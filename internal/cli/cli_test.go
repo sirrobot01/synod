@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -152,7 +151,7 @@ func TestNodeApproveResolvesAName(t *testing.T) {
 	}
 }
 
-// A join token names the API the CLI used and pins the API CA the CLI trusts.
+// A join token names the address that the controller reports and pins the API CA the CLI trusts.
 func TestNodeJoinTokenPinsTheAPICA(t *testing.T) {
 	for _, mode := range []string{"new", "recovered"} {
 		t.Run(mode, func(t *testing.T) {
@@ -163,7 +162,7 @@ func TestNodeJoinTokenPinsTheAPICA(t *testing.T) {
 				node.Name = "saved"
 				extra = []string{"--device", node.Name}
 			}
-			installation := client.Installation{InstallationID: uuid.New()}
+			installation := client.Installation{InstallationID: uuid.New(), JoinAddress: "192.0.2.20:8443"}
 			var registered map[string]any
 			flags := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.Method + " " + r.URL.Path {
@@ -193,9 +192,8 @@ func TestNodeJoinTokenPinsTheAPICA(t *testing.T) {
 				t.Fatal(err)
 			}
 			block, _ := pem.Decode(caData)
-			origin, _ := url.Parse(flags[slices.Index(flags, "--api-url")+1])
-			if joined.NodeID != node.ID || joined.Address != origin.Host || joined.InstallationID != installation.InstallationID || joined.Fingerprint != jointoken.Fingerprint(block.Bytes) {
-				t.Fatalf("token=%+v, want the API origin, installation, and API CA pin", joined)
+			if joined.NodeID != node.ID || joined.Address != installation.JoinAddress || joined.InstallationID != installation.InstallationID || joined.Fingerprint != jointoken.Fingerprint(block.Bytes) {
+				t.Fatalf("token=%+v, want the controller's join address, installation, and API CA pin", joined)
 			}
 			if registered["token"] != joined.Secret || registered["node_id"] != node.ID.String() || registered["ttl_seconds"] != float64(3600) {
 				t.Fatalf("registration=%v, want the token secret with no node", registered)

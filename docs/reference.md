@@ -103,7 +103,7 @@ The first start:
 
 | Variable | Use on the first start |
 | --- | --- |
-| `SYNOD_ADDRESS` | Address or hostname that devices use. The default is the address of the default route. Set it on a bridge network. |
+| `SYNOD_ADDRESS` | Address or hostname that devices use. The default is the address of the default route. Set it on a bridge network. The controller saves it as `address`. |
 | `SYNOD_FROM_REPOSITORY` | Recover from this repository directory or connection file. See [Recover after controller loss](#recover-after-controller-loss). |
 | `SYNOD_PASSWORD_FILE` | The private file with the repository password, for a recovery. |
 | `SYNOD_REPOSITORY_DESTINATION` | The saved destination to recover from, when there are several. |
@@ -176,6 +176,12 @@ synod node join-token
 Join installs and starts the `synod-agent` service.
 Without systemd, run `synod agent run --config /var/lib/synod/agent/agent.json`.
 If join fails, run it again with the same token and directory.
+
+In the web UI, **Devices → Add device** creates a token and shows a Compose file and commands with the token filled in. It shows the device when it joins, and approves it.
+
+Join tokens name the `address` setting of the controller with the API port.
+Without `address`, they name the listen address, or the host that the browser or CLI used.
+Set `address` in `controller.json`, or `SYNOD_ADDRESS`, when devices reach the controller at another address.
 
 A device must connect and report its facts before you can approve it.
 A token from `node join-token` joins one device. It is valid for 24 hours. Use `--ttl` to change this, up to 168 hours.

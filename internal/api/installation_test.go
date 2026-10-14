@@ -65,3 +65,24 @@ func TestInstallationRead(t *testing.T) {
 		t.Fatalf("controller build: %s", data)
 	}
 }
+
+// Join tokens name the configured address, or the host that reached the controller.
+func TestInstallationNamesTheJoinAddress(t *testing.T) {
+	server, _, _ := identityServer(t)
+	server.APICAFingerprint = "sha256:" + strings.Repeat("ab", 32)
+	read := func() map[string]string {
+		rec := call(t, server, "GET", "/v1/installation", "", withBootstrap, func(r *http.Request) { r.Host = "192.0.2.20:8443" })
+		var body map[string]string
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+			t.Fatalf("installation: %d %s", rec.Code, rec.Body)
+		}
+		return body
+	}
+	if body := read(); body["join_address"] != "192.0.2.20:8443" || body["api_ca_fingerprint"] != server.APICAFingerprint {
+		t.Fatalf("join settings from the request: %v", body)
+	}
+	server.JoinAddress = "synod.lan:8443"
+	if body := read(); body["join_address"] != "synod.lan:8443" {
+		t.Fatalf("configured join address: %v", body)
+	}
+}

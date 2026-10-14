@@ -12,6 +12,8 @@ type Installation struct {
 	InstallationID uuid.UUID `json:"installation_id"`
 	Version        string    `json:"version"`
 	Revision       string    `json:"revision"`
+	// JoinAddress is the host:port that join tokens name.
+	JoinAddress string `json:"join_address"`
 }
 
 // GetInstallation reads the installation identity.

@@ -78,15 +78,13 @@ To remove it, trust `/var/lib/synod/controller/api-ca.crt` on your computer.
 
 ## 3. Add your other devices
 
-On the controller device, create a join token for each other device:
+1. In **Devices**, select **Add device**.
+2. On the other device, save the Compose file that the dialog shows as `compose.yaml`. Then run `docker compose up -d`.
+   The dialog also shows commands for a device without Docker.
+3. When the device joins, select **Approve** in the dialog.
 
-```sh
-docker exec synod synod node join-token
-```
-
-On the other device, use the `synod-agent` service from step 1.
-Replace `SYNOD_JOIN_TOKEN_FILE` with `SYNOD_JOIN_TOKEN: "TOKEN"`.
-Then approve the device in **Devices**.
+The token in the dialog joins one device and is valid for 24 hours.
+With the CLI, run `docker exec synod synod node join-token` to create a token.
 
 You can do the next steps in the web UI or with the CLI.
 To run a CLI command on a controller in Docker, put `docker exec synod` before it.

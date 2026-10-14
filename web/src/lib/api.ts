@@ -62,6 +62,13 @@ export interface Operation {
   result?: WorkResult;
 }
 
+export interface Installation {
+  installation_id: string;
+  version: string;
+  join_address: string;
+  api_ca_fingerprint: string;
+}
+
 export interface Node {
   id: string;
   name: string;
@@ -74,8 +81,8 @@ export interface Node {
   last_seen_at: string | null;
 }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json" };
+async function call<T>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<T> {
+  const headers: Record<string, string> = { Accept: "application/json", ...extra };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(path, {
     method,
@@ -130,6 +137,10 @@ export const api = {
   configureNotifications: (body: NotificationUpdate) => call<{ id: string; revision: number }>("PUT", "/v1/notifications", body),
   testNotification: (body: { id: string; expected_revision: number }) => call<{ id: string; revision: number }>("POST", "/v1/notifications/test", body),
   nodes: () => call<Node[]>("GET", "/v1/nodes"),
+  installation: () => call<Installation>("GET", "/v1/installation"),
+  /** Registers the verifier of a join token secret. The key makes a retry safe. */
+  registerJoinToken: (secret: string, ttlSeconds: number, key: string) =>
+    call<{ id: string; expires_at: string }>("POST", "/v1/enrollment-tokens", { token: secret, ttl_seconds: ttlSeconds }, { "Idempotency-Key": key }),
   approveNode: (id: string) => call<Node>("POST", `/v1/nodes/${encodeURIComponent(id)}/actions/approve`, {}),
   operations: () => call<Operation[]>("GET", "/v1/operations"),
   signIn: (username: string, password: string) => call<User>("POST", "/v1/sessions", { username, password }),

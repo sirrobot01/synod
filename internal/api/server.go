@@ -43,6 +43,11 @@ type Server struct {
 	ReadFile func(context.Context, restore.FileRequest) (restore.FileHeader, io.ReadCloser, error)
 	// EnrollmentAuthority must be configured before serving requests. Nil disables new issuance.
 	EnrollmentAuthority *pki.CA
+	// JoinAddress is the host:port that join tokens name. An empty value uses the
+	// host of the request. Set it before serving requests.
+	JoinAddress string
+	// APICAFingerprint pins the API CA in join tokens. Set it before serving requests.
+	APICAFingerprint string
 	// RecoveryKit returns the recovery kit text that the first-run setup shows once.
 	// An empty kit means that no kit password is saved. Set it before serving requests.
 	RecoveryKit func(context.Context) (string, error)

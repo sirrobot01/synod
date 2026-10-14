@@ -65,6 +65,7 @@ type materialResult struct {
 
 type controllerJSON struct {
 	InstallationID   string `json:"installation_id"`
+	Address          string `json:"address"`
 	Listen           string `json:"listen"`
 	AgentListen      string `json:"agent_listen"`
 	DatabasePath     string `json:"database_path"`
@@ -192,6 +193,7 @@ func runInit(ctx context.Context, options InitOptions, output io.Writer) error {
 	}
 	cfg := controllerJSON{
 		InstallationID:   res.id.String(),
+		Address:          address,
 		Listen:           net.JoinHostPort(listen, "8443"),
 		AgentListen:      net.JoinHostPort(listen, "8444"),
 		DatabasePath:     filepath.Join(absDir, "synod.db"),

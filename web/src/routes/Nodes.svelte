@@ -5,12 +5,14 @@
   import { errorView, type APIError } from "../lib/state";
   import { follow, path } from "../lib/router.svelte";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
+  import AddDevice from "../lib/AddDevice.svelte";
   let { id, onOpen }: { id: string; onOpen: (id: string) => void } = $props();
   let nodes = $state<Node[]>([]);
   let now = $state(Date.now());
   let loaded = $state(false);
   let busy = $state(false);
   let failure = $state<APIError | null>(null);
+  let adding = $state(false);
   let shown = $derived(id === "" ? nodes : nodes.filter(node => node.id === id));
 
   async function read() {
@@ -34,10 +36,13 @@
 <header>
   <h1>Devices</h1>
   <p class="note">Joined devices and their last reported facts. A device can be offline between backups.</p>
-  <button onclick={read} disabled={busy}>{busy ? "Reading" : "Refresh"}</button>
+  <div class="actions">
+    <button class="primary" onclick={() => (adding = true)}>Add device</button>
+    <button onclick={read} disabled={busy}>{busy ? "Reading" : "Refresh"}</button>
+  </div>
   {#if id !== ""}<a href={path("nodes")} onclick={(event) => follow(event, () => onOpen(""))}>All devices</a>{/if}
-<p class="note">To join a device, create a join token with <code>synod node join-token</code>. Run <code>synod agent join TOKEN</code> on the device. Approve its identity here.</p>
 </header>
+{#if adding}<AddDevice onClose={() => (adding = false)} onChanged={read} />{/if}
 {#if failure}<ErrorPanel view={errorView(failure)} />{/if}
 {#each shown as node (node.id)}
   <article class="panel">
@@ -57,6 +62,7 @@
   {#if loaded}<p class="note">{id === "" ? "No devices have joined yet." : "This device was not found."}</p>{/if}
 {/each}
 <style>
+  .actions { display:flex; gap:8px; }
   header { display:flex; align-items:start; flex-direction:column; gap:10px; margin-bottom:22px; }
   article { padding:20px; margin-bottom:16px; }
   h2 { font-size:16px; }

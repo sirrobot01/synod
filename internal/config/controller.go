@@ -19,6 +19,9 @@ import (
 
 // Controller holds the resolved controller settings.
 type Controller struct {
+	// Address is the host that devices dial. Join tokens name it. An empty address
+	// uses the listen host, or the host that the browser or CLI used.
+	Address          string `json:"address"`
 	AgentListen      string `json:"agent_listen"`
 	AgentTLSCertFile string `json:"agent_tls_cert_file"`
 	AgentTLSKeyFile  string `json:"agent_tls_key_file"`
@@ -50,6 +53,7 @@ func BindController(flags *pflag.FlagSet) func() (Controller, error) {
 	defaults := Controller{Listen: "127.0.0.1:8443", ActorID: "bootstrap-admin", LogLevel: "info"}
 	override := defaults
 	path := flags.String("config", os.Getenv("SYNOD_CONFIG"), "JSON configuration file")
+	flags.StringVar(&override.Address, "address", "", "address or hostname that devices dial; join tokens name it")
 	flags.StringVar(&override.AgentListen, "agent-listen", "", "optional authenticated agent gRPC listen address")
 	flags.StringVar(&override.AgentTLSCertFile, "agent-tls-cert-file", "", "controller identity certificate for agent transport")
 	flags.StringVar(&override.AgentTLSKeyFile, "agent-tls-key-file", "", "protected controller identity private key")
@@ -107,6 +111,7 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 		name  string
 		value *string
 	}{
+		{"SYNOD_ADDRESS", &config.Address},
 		{"SYNOD_AGENT_LISTEN", &config.AgentListen},
 		{"SYNOD_AGENT_TLS_CERT_FILE", &config.AgentTLSCertFile},
 		{"SYNOD_AGENT_TLS_KEY_FILE", &config.AgentTLSKeyFile},
@@ -133,6 +138,8 @@ func loadController(flags *pflag.FlagSet, path string, config, override Controll
 	}
 	flags.Visit(func(value *pflag.Flag) {
 		switch value.Name {
+		case "address":
+			config.Address = override.Address
 		case "agent-listen":
 			config.AgentListen = override.AgentListen
 		case "agent-tls-cert-file":

@@ -62,8 +62,7 @@ Synod backs up the Docker apps in your home lab and restores them on any of your
    2. In **Destinations**, add a destination on another device.
    3. In **Apps**, select **Protect all**.
 
-To add another device, run `docker exec synod synod node join-token`.
-On that device, use the `synod-agent` service with `SYNOD_JOIN_TOKEN: "TOKEN"` in place of `SYNOD_JOIN_TOKEN_FILE`.
+To add another device, select **Add device** in **Devices**. Run the Compose file that it shows on that device.
 
 To restore an app, open **Snapshots & restore**.
 

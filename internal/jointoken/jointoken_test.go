@@ -38,3 +38,11 @@ func TestDecodeRejectsIncompleteTokens(t *testing.T) {
 		}
 	}
 }
+
+// The web UI builds join tokens in TypeScript. This token comes from its encoder.
+func TestDecodeAcceptsTheWebEncoding(t *testing.T) {
+	token, err := Decode("synod_join_eyJhZGRyZXNzIjoiMTkyLjAuMi4yMDo4NDQzIiwiaW5zdGFsbGF0aW9uX2lkIjoiN2QwZjBmNWUtOWY1ZS00YTM5LThkM2EtMmIzYTRjNWQ2ZTdmIiwiZmluZ2VycHJpbnQiOiJzaGEyNTY6YWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsInNlY3JldCI6IkFBRUNBd1FGQmdjSUNRb0xEQTBPRHhBUkVoTVVGUllYR0JrYUd4d2RIaDgifQ")
+	if err != nil || token.Address != "192.0.2.20:8443" || token.InstallationID.String() != "7d0f0f5e-9f5e-4a39-8d3a-2b3a4c5d6e7f" || token.NodeID != uuid.Nil {
+		t.Fatalf("decode the web token: %+v %v", token, err)
+	}
+}

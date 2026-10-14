@@ -4,7 +4,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"net"
-	"net/url"
 	"os"
 	"time"
 
@@ -31,19 +30,16 @@ func newJoinTokenCommand(app *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			origin, err := url.Parse(app.settings.Endpoint)
-			if err != nil || origin.Hostname() == "" {
-				return &client.Error{Code: "invalid_request", Message: "Use an HTTPS API origin with a host."}
-			}
-			address := origin.Host
-			if origin.Port() == "" {
-				address = net.JoinHostPort(origin.Hostname(), "443")
-			}
 			installation, err := app.api.GetInstallation(cmd.Context())
 			if err != nil {
 				return err
 			}
-			token := jointoken.Token{Address: address, InstallationID: installation.InstallationID, Fingerprint: fingerprint, Secret: jointoken.NewSecret()}
+			// The controller names the address that devices dial. The CLI can use a local
+			// address, such as 127.0.0.1 inside the controller container.
+			if _, _, err := net.SplitHostPort(installation.JoinAddress); err != nil {
+				return &client.Error{Code: "invalid_request", Message: "The controller reported no address for devices. Set address in the controller configuration."}
+			}
+			token := jointoken.Token{Address: installation.JoinAddress, InstallationID: installation.InstallationID, Fingerprint: fingerprint, Secret: jointoken.NewSecret()}
 			if device != "" {
 				node, err := app.api.ResolveNode(cmd.Context(), device)
 				if err != nil {
