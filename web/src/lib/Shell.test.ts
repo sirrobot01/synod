@@ -6,61 +6,63 @@ import Shell from "./Shell.svelte";
 // so each screen draws its waiting state and the shell is what is measured.
 vi.mock("./api", async () => {
   const real = await vi.importActual<typeof import("./api")>("./api");
-  return {
-    ...real,
-    api: {
-      operation: () => new Promise(() => {}),
-      operations: () => new Promise(() => {}),
-      nodes: () => new Promise(() => {}),
-      protection: () => new Promise(() => {}),
-      destinations: () => new Promise(() => {}),
-      notifications: () => new Promise(() => {}),
-      tokens: () => new Promise(() => {}),
-    },
-  };
+  const never = () => new Promise(() => {});
+  return { ...real, api: { operation: never, operations: never, nodes: never, protection: never, destinations: never, notifications: never, tokens: never, installation: never } };
 });
 
 const session = { actor_id: "root", role: "admin", user_id: "u1" };
 
 function at(pathname: string) {
   window.history.pushState({}, "", pathname);
-  render(Shell, { session, busy: false, onSignOut: () => {} });
+  render(Shell, { session, busy: false, theme: "dark", onTheme: () => {}, onSignOut: () => {} });
 }
 
 beforeEach(() => window.history.pushState({}, "", "/"));
 afterEach(cleanup);
 
 describe("the shell", () => {
-  it("draws the screen that the address names, so a deep link works", () => {
-    at("/operations/op_7c14f2a9");
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("op_7c14f2a9");
+  it("opens the overview first", () => {
+    at("/");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Overview");
+    expect(within(screen.getByLabelText("Screens")).getByRole("link", { name: "Overview" }).getAttribute("aria-current")).toBe("page");
+  });
+
+  it("names every screen in plain words", () => {
+    at("/");
+    const navigation = within(screen.getByLabelText("Screens"));
+    for (const name of ["Overview", "Apps", "Devices", "Storage", "Activity", "Settings"]) expect(navigation.getByRole("link", { name })).toBeTruthy();
   });
 
   it("keeps the section marked while a screen below it is open", () => {
-    at("/operations/abc");
-    // The breadcrumb names Operations too, so the mark is read from the navigation.
+    at("/activity/abc");
     const navigation = within(screen.getByLabelText("Screens"));
-    const operations = navigation.getByRole("link", { name: "Activity" });
-    // The mark says which part of the product the reader is in. An operation
-    // belongs to Operations, so the mark must not move to the dashboard.
-    expect(operations.getAttribute("aria-current")).toBe("page");
-    expect(navigation.getByRole("link", { name: "Apps" }).getAttribute("aria-current")).toBe(null);
-  });
-
-  it("names every step back to the dashboard in the breadcrumb", () => {
-    at("/operations/abc");
-    const trail = screen.getByLabelText("Breadcrumb");
-    expect(trail.textContent).toContain("Apps");
-    expect(trail.textContent).toContain("Activity");
-    expect(trail.textContent).toContain("abc");
+    expect(navigation.getByRole("link", { name: "Activity" }).getAttribute("aria-current")).toBe("page");
+    expect(navigation.getByRole("link", { name: "Overview" }).getAttribute("aria-current")).toBe(null);
   });
 
   it("changes the address when a screen is opened, so a reload returns to it", async () => {
     at("/");
     (within(screen.getByLabelText("Screens")).getByRole("link", { name: "Devices" }) as HTMLAnchorElement).click();
     await Promise.resolve();
-    expect(window.location.pathname).toBe("/nodes");
+    expect(window.location.pathname).toBe("/devices");
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Devices");
+  });
+
+  it("opens a deep link from an earlier build", () => {
+    at("/destinations");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Storage");
+  });
+
+  it("opens a Settings tab from the address and moves between tabs with the arrow keys", async () => {
+    at("/settings/accounts");
+    const accounts = screen.getByRole("tab", { name: "Accounts" });
+    expect(accounts.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe("tab-accounts");
+    accounts.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await vi.waitFor(() => expect(window.location.pathname).toBe("/settings/recovery-kit"));
+    expect(screen.getByRole("tab", { name: "Recovery kit" }).getAttribute("aria-selected")).toBe("true");
+    screen.getByRole("tab", { name: "General" }).click();
+    await vi.waitFor(() => expect(window.location.pathname).toBe("/settings"));
   });
 
   it("answers an address that names no screen without drawing a screen", () => {

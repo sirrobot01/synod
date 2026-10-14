@@ -14,11 +14,28 @@
   let busy = $state(false);
   // The failure stays anchored to the form that caused it. Conflicts are not toasts.
   let failure = $state<APIError | null>(null);
-  let theme = $state<"dark" | "light">("dark");
+  // The theme is a convenience of this browser. Storage can be absent, so a failure keeps the default.
+  function savedTheme(): "dark" | "light" {
+    try {
+      return localStorage.getItem("synod-theme") === "light" ? "light" : "dark";
+    } catch {
+      return "dark";
+    }
+  }
+  let theme = $state<"dark" | "light">(savedTheme());
 
   $effect(() => {
     document.documentElement.dataset["theme"] = theme;
+    try {
+      localStorage.setItem("synod-theme", theme);
+    } catch {
+      // The choice lasts until the page closes.
+    }
   });
+
+  function toggleTheme() {
+    theme = theme === "dark" ? "light" : "dark";
+  }
 
   async function resume() {
     try {
@@ -78,28 +95,27 @@
 
 <a class="skip" href="#main">Skip to content</a>
 
-<button
-  class="theme mono"
-  onclick={() => (theme = theme === "dark" ? "light" : "dark")}
-  aria-label={`Switch to the ${theme === "dark" ? "light" : "dark"} theme`}
->
-  {theme === "dark" ? "Light" : "Dark"}
-</button>
-
 {#if phase === "signed-in" && session}
-  <Shell {session} {busy} onSignOut={signOut} />
+  <Shell {session} {busy} {theme} onTheme={toggleTheme} onSignOut={signOut} />
   {#if failure}
     <div class="anchored"><ErrorPanel view={errorView(failure)} /></div>
   {/if}
 {:else}
+  <button
+    class="theme ghost small"
+    onclick={toggleTheme}
+    aria-label={`Switch to the ${theme === "dark" ? "light" : "dark"} theme`}
+  >
+    {theme === "dark" ? "Light theme" : "Dark theme"}
+  </button>
   <main id="main" tabindex="-1">
     <div class="gate">
       <div class="brand">
         <span class="mono name">synod</span>
-        <span class="mono tagline">Docker app backups</span>
+        <span class="tagline">Backups for Docker apps</span>
       </div>
       {#if phase === "checking"}
-        <p class="note">Checking the session.</p>
+        <p class="loading">Checking the session</p>
       {:else if phase === "setup"}
         <Setup
           onDone={(created) => {
@@ -111,10 +127,12 @@
       {:else}
         <form onsubmit={submit} aria-labelledby="sign-in-heading">
           <h1 id="sign-in-heading">Sign in</h1>
-          <label for="username" class="label">Username</label>
-          <input id="username" name="username" bind:value={username} autocomplete="username" required />
-          <label for="password" class="label">Password</label>
-          <input id="password" name="password" type="password" bind:value={password} autocomplete="current-password" required />
+          <label class="field">Username
+            <input id="username" name="username" bind:value={username} autocomplete="username" required />
+          </label>
+          <label class="field">Password
+            <input id="password" name="password" type="password" bind:value={password} autocomplete="current-password" required />
+          </label>
           {#if failure}
             <ErrorPanel view={errorView(failure)} />
           {/if}
@@ -136,15 +154,13 @@
     padding: 8px;
     background: var(--panel);
     border: 1px solid var(--line);
-    z-index: 2;
+    z-index: 50;
   }
-  /* The theme control sits above the shell, because it belongs to no screen. */
   .theme {
     position: fixed;
     right: 12px;
     top: 10px;
     z-index: 1;
-    background: var(--panel);
   }
   /* A failure of the shell itself stays anchored to the shell, not to a screen. */
   .anchored {
@@ -165,40 +181,37 @@
     outline: none;
   }
   .gate {
-    width: min(360px, 100%);
+    width: min(420px, 100%);
     border: 1px solid var(--line);
     background: var(--panel);
-    padding: 28px 26px;
+    padding: 32px 28px;
     display: flex;
     flex-direction: column;
-    gap: 22px;
+    gap: 24px;
   }
   .brand {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 2px;
   }
   .brand .name {
-    font-size: 16px;
+    font-size: 18px;
     font-weight: 600;
-    letter-spacing: 0.02em;
+    color: var(--ink);
   }
   .brand .tagline {
-    font-size: 10px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--ink-faint);
+    font-size: 13px;
+    color: var(--ink-muted);
   }
   h1 {
-    font-size: 18px;
-    margin: 0 0 4px;
+    font-size: 20px;
   }
   form {
-    display: grid;
-    gap: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
   }
   form button {
-    margin-top: 8px;
-    justify-self: start;
+    align-self: flex-start;
   }
 </style>

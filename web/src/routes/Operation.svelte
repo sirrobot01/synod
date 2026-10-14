@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { bytes, timestamp } from "../lib/format";
-  import { path } from "../lib/router.svelte";
-  import { api, detail, type Operation } from "../lib/api";
+  import { api, detail, type DestinationList, type Node, type Operation, type ProtectionPlan } from "../lib/api";
   import { errorView, finished, operationMark, type APIError } from "../lib/state";
+  import { activity, failureText, nilID, nodeName, took } from "../lib/model";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
+  import Link from "../lib/ui/Link.svelte";
   import Mark from "../lib/ui/Mark.svelte";
 
   let { id }: { id: string } = $props();
@@ -56,64 +57,102 @@
   });
 
   let mark = $derived(operation === null ? null : operationMark(operation.status));
+
+  // Names make the record readable. Without them the record still shows its identities.
+  let plan = $state<ProtectionPlan | null>(null);
+  let nodes = $state<Node[]>([]);
+  let listing = $state<DestinationList | null>(null);
+  onMount(async () => {
+    const [p, n, d] = await Promise.allSettled([api.protection(), api.nodes(), api.destinations()]);
+    if (p.status === "fulfilled") plan = p.value;
+    if (n.status === "fulfilled") nodes = n.value;
+    if (d.status === "fulfilled") listing = d.value;
+  });
+  let names = $derived({
+    app: (app: string) => plan?.apps.find((a) => a.app.id === app)?.app.definition.name ?? "app",
+    node: (node: string) => nodeName(nodes, node),
+    storage: (storage?: string) => listing?.destinations.find((d) => d.id === storage)?.name ?? "",
+  });
+  let row = $derived(operation ? activity(operation, names) : null);
+  let failureCode = $derived(operation?.failure_code || operation?.result?.failure_code || "");
+  const statusText: Record<string, string> = { pending: "Queued. Not started.", running: "Running.", waiting: "Outcome unknown. The device must inspect the work before it continues.", succeeded: "Finished.", cancelled: "Cancelled.", cancelling: "Stopping." };
 </script>
-<div class="screen">
-  <h1 class="mono">{id}</h1>
+
+<div class="page">
+  <header class="page-head">
+    <div>
+      <h1>{row ? `${row.kind.charAt(0).toUpperCase()}${row.kind.slice(1)}: ${row.subject}` : "Run"}</h1>
+      <p class="sub"><Link screen="activity">Activity</Link></p>
+    </div>
+    <button type="button" onclick={read} disabled={reading}>{reading ? "Loading" : "Reload"}</button>
+  </header>
   {#if failure}<ErrorPanel view={errorView(failure)} />{/if}
-  {#if operation && mark}
-    <section class="panel detail">
-      <div class="strip"><Mark {mark} /><span class="mono">{operation.kind}</span></div>
-      <div class="body">
-        {#if operation.status === "pending"}<p>The request is recorded. Work has not started.</p>{/if}
-        {#if operation.status === "waiting"}<p>The result is unknown. The device must inspect the work before it can continue.</p>{/if}
-        <dl class="facts mono">
-          <dt>Status</dt><dd>{operation.status}</dd>
-          <dt>Failure code</dt><dd>{operation.failure_code || "None"}</dd>
-          <dt>App</dt><dd>{#if operation.app_id && operation.app_id !== "00000000-0000-0000-0000-000000000000"}<a href={path("apps", operation.app_id)}>{operation.app_id}</a>{:else}Repository{/if}</dd>
-          <dt>Device</dt><dd><a href={path("nodes", operation.node_id)}>{operation.node_id}</a></dd>
-          <dt>Created</dt><dd>{operation.created_at}</dd>
-          <dt>Updated</dt><dd>{operation.updated_at}</dd>
-          <dt>Finished</dt><dd>{operation.finished_at ?? "Not finished"}</dd>
-        </dl>
-        {#if operation.result}
-          <section class="stack result">
-            <h2>Result</h2>
-            <dl class="facts mono">
-              {#if operation.result.snapshot_id}<dt>Snapshot</dt><dd><a href={path("snapshots", operation.app_id)}>{operation.result.snapshot_id}</a></dd>{/if}
-              {#if operation.result.destination_id}<dt>Destination</dt><dd><a href={path("destinations")}>{operation.result.destination_id}</a></dd>{/if}
-              {#if operation.result.file_bytes !== undefined}<dt>Saved size</dt><dd>{bytes(operation.result.file_bytes)}</dd>{/if}
-              {#if operation.result.downtime_ms !== undefined}<dt>Downtime</dt><dd>{operation.result.downtime_ms} ms</dd>{/if}
-              {#if operation.result.safety_snapshot_id}<dt>Safety snapshot</dt><dd>{operation.result.safety_snapshot_id}</dd>{/if}
-              {#if operation.result.target_app_id}<dt>Restored app</dt><dd><a href={path("apps", operation.result.target_app_id)}>{operation.result.target_app_id}</a></dd>{/if}
-              {#if operation.result.project_directory}<dt>Restored directory</dt><dd>{operation.result.project_directory}</dd>{/if}
-              {#if operation.result.read !== undefined}<dt>Verified content</dt><dd>{operation.result.read} of {operation.result.contents ?? "unknown"} blocks · {bytes(operation.result.bytes_read)}</dd>{/if}
-              {#if operation.result.containers !== undefined}<dt>Tested containers</dt><dd>{operation.result.containers}</dd>{/if}
-              {#if operation.result.resource}<dt>Affected resource</dt><dd>{operation.result.resource}</dd>{/if}
-              {#if operation.result.completed_at}<dt>Completed</dt><dd>{timestamp(operation.result.completed_at)}</dd>{/if}
-            </dl>
-            {#if operation.result.recovery_pending?.length}<p class="callout danger">Recovery needs attention: <span class="mono">{operation.result.recovery_pending.join(", ")}</span>. Inspect these resources on the device before a new restore.</p>{/if}
-            {#if operation.result.restart_pending?.length}<p class="callout danger">Containers still need a restart: <span class="mono">{operation.result.restart_pending.join(", ")}</span>.</p>{/if}
-            {#each operation.result.warning_codes ?? [] as warning}<p class="callout mono">{warning}</p>{/each}
-            {#if operation.result.checks?.length}
-              <h2>Checks</h2>
-              {#if operation.result.checks.some((check) => check.status !== "passed")}<p class="callout">Proof is incomplete or failed. Each line that did not pass names a requirement that Synod could not verify.</p>{/if}
-              <div class="scroll"><table><thead><tr><th>Status</th><th>Check</th><th>Resource</th><th>Detail</th></tr></thead><tbody>{#each operation.result.checks as check}<tr><td>{check.status}</td><td class="mono">{check.kind}</td><td class="mono wrap">{check.resource}</td><td class="mono">{check.detail ?? ""}</td></tr>{/each}</tbody></table></div>
-            {/if}
-          </section>
-        {/if}
-        <button onclick={read} disabled={reading}>{reading ? "Reading" : "Read again"}</button>
+  {#if operation && mark && row}
+    <div class="status">
+      <Mark {mark} shapeOnly />
+      <div class="stack tight">
+        <p>{operation.status === "failed" ? failureText(failureCode) || "Failed." : operation.status === "succeeded" && row.result === "passed" ? "Passed." : statusText[operation.status]}</p>
+        {#if failureCode}<span class="code">{failureCode}</span>{/if}
       </div>
-    </section>
-  {:else if !failure}<p class="note">Reading the operation.</p>{/if}
+    </div>
+    <dl class="facts">
+      <dt>App</dt><dd>{#if operation.app_id && operation.app_id !== nilID}<Link screen="apps" id={operation.app_id}>{names.app(operation.app_id)}</Link>{:else}<span class="dim">none (repository)</span>{/if}</dd>
+      <dt>Device</dt><dd><Link screen="devices" id={operation.node_id}>{names.node(operation.node_id)}</Link></dd>
+      <dt>Started by</dt><dd>{operation.actor_id.startsWith("schedule:") ? "schedule" : operation.actor_id || "synod"}</dd>
+      <dt>Created</dt><dd class="mono">{timestamp(operation.created_at)}</dd>
+      <dt>Finished</dt><dd class="mono">{operation.finished_at ? timestamp(operation.finished_at) : "not finished"}</dd>
+      {#if row.took !== undefined}<dt>Took</dt><dd class="mono">{took(row.took)}</dd>{/if}
+      {#if operation.result}
+        {#if operation.result.destination_id}<dt>Storage</dt><dd><Link screen="storage">{names.storage(operation.result.destination_id) || operation.result.destination_id}</Link></dd>{/if}
+        {#if operation.result.snapshot_id}<dt>Snapshot</dt><dd class="mono"><Link screen="apps" id={operation.app_id}>{operation.result.snapshot_id}</Link></dd>{/if}
+        {#if operation.result.file_bytes !== undefined}<dt>Size</dt><dd class="mono">{bytes(operation.result.file_bytes)}</dd>{/if}
+        {#if operation.result.downtime_ms !== undefined}<dt>Downtime</dt><dd class="mono">{operation.result.downtime_ms} ms</dd>{/if}
+        {#if operation.result.safety_snapshot_id}<dt>Safety snapshot</dt><dd class="mono">{operation.result.safety_snapshot_id}</dd>{/if}
+        {#if operation.result.target_app_id}<dt>Restored app</dt><dd><Link screen="apps" id={operation.result.target_app_id}>{names.app(operation.result.target_app_id)}</Link></dd>{/if}
+        {#if operation.result.project_directory}<dt>Project directory</dt><dd class="mono">{operation.result.project_directory}</dd>{/if}
+        {#if operation.result.read !== undefined}<dt>Verified</dt><dd class="mono">{operation.result.read}/{operation.result.contents ?? "?"} blocks, {bytes(operation.result.bytes_read)}</dd>{/if}
+        {#if operation.result.containers !== undefined}<dt>Containers tested</dt><dd class="mono">{operation.result.containers}</dd>{/if}
+        {#if operation.result.resource}<dt>Resource</dt><dd class="mono">{operation.result.resource}</dd>{/if}
+        {#if operation.result.completed_at}<dt>Completed</dt><dd class="mono">{timestamp(operation.result.completed_at)}</dd>{/if}
+      {/if}
+      <dt>Kind</dt><dd class="mono">{operation.kind}</dd>
+      <dt>ID</dt><dd class="mono">{operation.id}</dd>
+    </dl>
+    {#if operation.result?.recovery_pending?.length}<p class="callout danger">Inspect these resources on the device before another restore <span class="code">{operation.result.recovery_pending.join(", ")}</span></p>{/if}
+    {#if operation.result?.restart_pending?.length}<p class="callout danger">Containers still need a restart <span class="code">{operation.result.restart_pending.join(", ")}</span></p>{/if}
+    {#each operation.result?.warning_codes ?? [] as warning}<p class="callout attn">Finished with a warning <span class="code">{warning}</span></p>{/each}
+    {#if operation.result?.checks?.length}
+      <section class="section" aria-labelledby="checks">
+        <h2 id="checks">Checks</h2>
+        {#if operation.result.checks.some((check) => check.status !== "passed")}<p class="callout attn">Proof is incomplete or failed.</p>{/if}
+        <div class="scroll">
+          <table>
+            <thead><tr><th>Result</th><th>Check</th><th>Resource</th><th>Detail</th></tr></thead>
+            <tbody>{#each operation.result.checks as check}<tr><td class="result {check.status}">{check.status}</td><td class="mono">{check.kind}</td><td class="mono wrap">{check.resource}</td><td class="mono dim">{check.detail ?? ""}</td></tr>{/each}</tbody>
+          </table>
+        </div>
+      </section>
+    {/if}
+  {:else if !failure}<p class="loading">Loading</p>{/if}
 </div>
+
 <style>
- .screen { display:flex; flex-direction:column; gap:22px; }
- .strip { padding:16px; border-bottom:1px solid var(--line); display:flex; gap:16px; }
- .body { padding:16px; }
- .result { margin:22px 0; }
- h1 { overflow-wrap:anywhere; }
- h2 { margin:0; font-size:16px; }
- .facts { display:grid; grid-template-columns:auto 1fr; gap:10px; font-size:12px; }
- dt { color:var(--ink-muted); }
- dd { margin:0; overflow-wrap:anywhere; }
+  h1 {
+    overflow-wrap: anywhere;
+  }
+  .status {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    font-size: 15px;
+  }
+  .tight {
+    gap: 4px;
+  }
+  .facts {
+    font-size: 14px;
+  }
+  .result.passed { color: var(--ok); }
+  .result.failed { color: var(--fail); }
+  .result.unchecked { color: var(--unc); }
 </style>

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import Dialog from "./ui/Dialog.svelte";
   import ErrorPanel from "./ErrorPanel.svelte";
+  import Mark from "./ui/Mark.svelte";
   import { api, detail, type Node } from "./api";
   import { encodeJoinToken, newSecret } from "./jointoken";
   import { errorView, type APIError } from "./state";
@@ -15,6 +16,7 @@
   let joined = $state<Node | null>(null);
   let busy = $state(false);
   let copied = $state("");
+  let tab = $state<"compose" | "service">("compose");
 
   let compose = $derived(`services:
   synod-agent:
@@ -34,6 +36,7 @@
       - /srv:/srv
 `);
   let command = $derived(`curl -fsSL https://synod.biodun.dev/install.sh | sh\nsynod agent join '${token}'`);
+  let snippet = $derived(tab === "compose" ? compose : command);
 
   async function create() {
     try {
@@ -72,9 +75,9 @@
     }
   }
 
-  async function copy(name: string, text: string) {
-    await navigator.clipboard.writeText(text);
-    copied = name;
+  async function copy() {
+    await navigator.clipboard.writeText(snippet);
+    copied = tab;
   }
 
   onMount(() => {
@@ -84,41 +87,118 @@
   });
 </script>
 
-<Dialog label="Add device" title="Add device" note="Linux device with Docker" onClose={() => { if (!busy) onClose(); }}>
+<Dialog label="Add device" title="Add device" onClose={() => { if (!busy) onClose(); }}>
   {#if failure}<ErrorPanel view={errorView(failure)} />{/if}
-  {#if token === ""}
-    {#if !failure}<p class="note">Creating a join token.</p>{/if}
-  {:else if joined}
-    <section>
-      <h2>{joined.name || joined.id}</h2>
-      {#if joined.approved_at}
-        <p class="note">The device is approved. Synod finds its apps within one minute.</p>
-        <button type="button" class="primary" onclick={onClose}>Done</button>
-      {:else}
-        <p class="note">{joined.architecture ? `The device joined (${joined.architecture}). Approve it to back up its apps.` : "The device joined. Waiting for its first report."}</p>
-        <button type="button" class="primary" onclick={approve} disabled={busy || !joined.architecture}>{busy ? "Approving" : "Approve"}</button>
-      {/if}
-    </section>
+  {#if joined}
+    <div class="joined">
+      <Mark mark={joined.approved_at ? { glyph: "✓", shape: "circle", tone: "ok", label: "Approved" } : { glyph: "!", shape: "square-half", tone: "attn", label: "Not approved" }} shapeOnly />
+      <div class="stack tight">
+        <strong>{joined.name || joined.id} {joined.approved_at ? "approved" : "joined"}</strong>
+        {#if joined.architecture}
+          <dl class="facts"><dt>Architecture</dt><dd class="mono">{joined.architecture}</dd><dt>Docker</dt><dd class="mono">{joined.runtime_version || "unknown"}</dd><dt>Agent</dt><dd class="mono">{joined.agent_version || "unknown"}</dd></dl>
+        {:else}
+          <p class="loading">Waiting for the first report.</p>
+        {/if}
+        {#if joined.approved_at}<p class="note">Apps appear within a minute.</p>{/if}
+      </div>
+    </div>
   {:else}
-    <section>
-      <h2>Docker Compose</h2>
-      <p class="note">On the device, save this as <code>compose.yaml</code> and run <code>docker compose up -d</code>. Mount each directory with app files at the same path.</p>
-      <pre class="mono">{compose}</pre>
-      <button type="button" onclick={() => copy("compose", compose)}>{copied === "compose" ? "Copied" : "Copy Compose file"}</button>
-    </section>
-    <section>
-      <h2>Without Docker</h2>
-      <p class="note">Run these commands as root on the device.</p>
-      <pre class="mono">{command}</pre>
-      <button type="button" onclick={() => copy("command", command)}>{copied === "command" ? "Copied" : "Copy commands"}</button>
-    </section>
-    <p class="note">The token joins one device and is valid for 24 hours. Waiting for the device to join.</p>
+    <div class="tabs" role="tablist" aria-label="How to install the agent">
+      <button type="button" role="tab" id="tab-compose" aria-controls="panel-install" aria-selected={tab === "compose"} class:on={tab === "compose"} onclick={() => (tab = "compose")}>With Docker Compose</button>
+      <button type="button" role="tab" id="tab-service" aria-controls="panel-install" aria-selected={tab === "service"} class:on={tab === "service"} onclick={() => (tab = "service")}>As a Linux service</button>
+    </div>
+    <div class="stack" role="tabpanel" id="panel-install" aria-labelledby={`tab-${tab}`}>
+      {#if token === ""}
+        {#if !failure}<p class="loading">Creating a join token</p>{/if}
+      {:else}
+        <ol>
+          {#if tab === "compose"}
+            <li>Save as <code>compose.yaml</code> on the host. Mount each app data path at the same path.</li>
+            <li>Run <code>docker compose up -d</code>.</li>
+          {:else}
+            <li>Run as root on the host.</li>
+          {/if}
+        </ol>
+        <pre class="mono snippet">{snippet}</pre>
+        <div class="row">
+          <button type="button" onclick={copy}>{copied === tab ? "Copied" : tab === "compose" ? "Copy compose.yaml" : "Copy commands"}</button>
+          <span class="hint">The token joins one device and expires in 24 h.</span>
+        </div>
+        <p class="waiting">Waiting for the device to connect</p>
+      {/if}
+    </div>
   {/if}
+  {#snippet footer()}
+    {#if joined?.approved_at}
+      <button type="button" class="primary" onclick={onClose}>Done</button>
+    {:else if joined}
+      <button type="button" class="ghost" onclick={onClose} disabled={busy}>Later</button>
+      <button type="button" class="primary" onclick={approve} disabled={busy || !joined.architecture}>{busy ? "Approving" : "Approve"}</button>
+    {:else}
+      <button type="button" class="ghost" onclick={onClose}>Close</button>
+    {/if}
+  {/snippet}
 </Dialog>
 
 <style>
-  section { display: grid; gap: 8px; margin-bottom: 20px; }
-  section button { justify-self: start; }
-  h2 { font-size: 14px; margin: 0; }
-  pre { margin: 0; padding: 10px; border: 1px solid var(--line); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tabs {
+    display: flex;
+    border-bottom: 1px solid var(--line);
+    margin-top: -8px;
+  }
+  .tabs button {
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--ink-muted);
+    padding: 0 14px;
+  }
+  .tabs button.on {
+    color: var(--ink);
+    border-bottom-color: var(--ink);
+  }
+  ol {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--ink-body);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+  }
+  .snippet {
+    padding: 12px 14px;
+    background: var(--canvas);
+    border: 1px solid var(--line);
+    color: var(--ink-body);
+    max-height: 260px;
+    overflow: auto;
+    /* A YAML file keeps its indentation. A long line scrolls instead of wrapping. */
+    white-space: pre;
+    overflow-wrap: normal;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .waiting {
+    padding: 10px 12px;
+    border: 1px dashed var(--line-strong);
+    background-image: var(--hatch);
+    color: var(--ink-body);
+    font-size: 13px;
+  }
+  .joined {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 14px;
+    border: 1px solid var(--line-strong);
+  }
+  .tight {
+    gap: 8px;
+  }
 </style>

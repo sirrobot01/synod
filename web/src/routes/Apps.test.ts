@@ -6,44 +6,38 @@ import { plan, destinations, node } from "../test/fixtures";
 vi.mock("../lib/api", async () => ({ ...await vi.importActual<typeof import("../lib/api")>("../lib/api"), api: { protection: vi.fn(), destinations: vi.fn(), nodes: vi.fn() } }));
 beforeEach(() => { vi.mocked(api.protection).mockResolvedValue(plan); vi.mocked(api.destinations).mockResolvedValue(destinations); vi.mocked(api.nodes).mockResolvedValue([node]); });
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
-it("keeps the successful restore date beside a later failed drill", async () => {
-  render(Apps, { go: vi.fn() });
-  expect(await screen.findByText(/Tested Oct 1/)).toBeTruthy();
-  expect(screen.getByRole("link", { name: "Latest drill failed" }).getAttribute("href")).toBe("/operations/drill-failed");
-  expect(screen.getByText("Partial")).toBeTruthy();
-  expect(screen.getByText("App consistency unverified")).toBeTruthy();
-  expect(screen.queryByText("Protected")).toBeNull();
-});
-it("explains why a saved copy cannot give full protection", async () => {
-  render(Apps, { id: "a1", go: vi.fn() });
-  expect(await screen.findByText(/Full protection is unavailable/)).toBeTruthy();
-  expect(screen.getByText(/will not pause writes/)).toBeTruthy();
+
+it("shows the status word with its limit code, and a failed restore test", async () => {
+  render(Apps);
+  expect(await screen.findByText("Partial")).toBeTruthy();
+  expect(screen.getByText("app_consistency_unverified")).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Failed test" }).getAttribute("href")).toBe("/activity/drill-failed");
+  expect(screen.queryByText("Restorable")).toBeNull();
+  expect(screen.getByText("1 of 1 scheduled. New apps are scheduled automatically.")).toBeTruthy();
 });
 it("does not call a failed read an empty installation", async () => {
   vi.mocked(api.protection).mockRejectedValue(new TypeError("offline"));
-  render(Apps, { go: vi.fn() });
+  render(Apps);
   expect(await screen.findByRole("alert")).toBeTruthy();
-  expect(screen.queryByText(/No apps discovered/)).toBeNull();
+  expect(screen.queryByText("No apps found")).toBeNull();
 });
-it("keeps last known copies and marks a failed refresh", async () => {
-  render(Apps, { go: vi.fn() });
+it("keeps the last known apps and marks a failed refresh", async () => {
+  render(Apps);
   await screen.findByText("notes");
   vi.mocked(api.protection).mockRejectedValue(new TypeError("offline"));
   await fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  await waitFor(() => expect(screen.getByText(/This view could not refresh/)).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(/Not refreshed/)).toBeTruthy());
   expect(screen.getByText("notes")).toBeTruthy();
 });
 it("filters apps without treating no matches as no discovery", async () => {
-  render(Apps, { go: vi.fn() });
+  render(Apps);
   await screen.findByText("notes");
   await fireEvent.input(screen.getByRole("searchbox"), { target: { value: "not-here" } });
-  expect(screen.getByText("No apps match this filter.")).toBeTruthy();
+  expect(screen.getByText("No apps match.")).toBeTruthy();
 });
-it("names each missing requirement and how to remove it", async () => {
-  vi.mocked(api.protection).mockResolvedValue({ ...plan, apps: [{ ...plan.apps[0]!, limit_codes: ["data_excluded", "container_layer_data", "restore_unproven"] }] });
-  render(Apps, { id: "a1", go: vi.fn() });
-  expect(await screen.findByText(/skipped Large paths, media, or files over 20 GiB/)).toBeTruthy();
-  expect(screen.getByText(/Move it to a volume or bind mount/)).toBeTruthy();
-  expect(screen.getByText(/No restore drill has verified this app/)).toBeTruthy();
-  expect(screen.queryByText(/one filesystem snapshot/)).toBeNull();
+it("says what to do when no app was found", async () => {
+  vi.mocked(api.protection).mockResolvedValue({ ...plan, apps: [] });
+  render(Apps);
+  expect(await screen.findByText("No apps found")).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Devices" }).getAttribute("href")).toBe("/devices");
 });

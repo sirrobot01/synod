@@ -1,11 +1,12 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import type { Mark as MarkValue } from "./state";
+  import { path } from "./router.svelte";
   import Mark from "./ui/Mark.svelte";
 
   // An error is anchored to the form that caused it, never raised as a toast. The
-  // stable code is shown verbatim, because that is the string an operator greps
-  // for, and the request identity is never hidden.
+  // sentence comes first. The stable code and the request identity stay visible in
+  // small type, because that is what a support request needs.
   interface Props {
     view: { code: string; consequence: string; requestID: string; operationID?: string; mark: MarkValue };
     actions?: Snippet;
@@ -15,21 +16,15 @@
 </script>
 
 <div class="failure {view.mark.tone}" role="alert">
-  <p class="head">
+  <div class="head">
     <Mark mark={view.mark} text={false} />
-    <span class="code mono">{view.code}</span>
+    <p class="consequence">{view.consequence}</p>
+  </div>
+  <p class="support">
+    <span class="code">{view.code}</span>
+    {#if view.requestID}<span class="code">request {view.requestID}</span>{/if}
+    {#if view.operationID}<a class="code" href={path("operation", view.operationID)}>operation {view.operationID}</a>{/if}
   </p>
-  <p class="consequence">{view.consequence}</p>
-  {#if view.requestID || view.operationID}
-    <div class="facts mono">
-      {#if view.requestID}
-        <span class="key">request_id</span><span>{view.requestID}</span>
-      {/if}
-      {#if view.operationID}
-        <span class="key">operation_id</span><a href={`/operations/${encodeURIComponent(view.operationID)}`}>{view.operationID}</a>
-      {/if}
-    </div>
-  {/if}
   {#if actions}
     <div class="actions">{@render actions()}</div>
   {/if}
@@ -42,10 +37,10 @@
   .failure {
     border: 1px solid var(--error-color, var(--fail));
     background: var(--panel);
-    padding: 16px;
+    padding: 12px 14px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
   }
   .failure.ok { --error-color: var(--ok); }
   .failure.attn { --error-color: var(--attn); }
@@ -54,43 +49,24 @@
   .failure.unc { --error-color: var(--unc); }
   .failure.neutral { --error-color: var(--neutral); }
   .failure.dim { --error-color: var(--dim); }
-  .failure p {
-    margin: 0;
-  }
   .head {
     display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .code {
-    color: var(--error-color, var(--fail));
-    font-size: 12px;
-    font-weight: 500;
+    align-items: flex-start;
+    gap: 10px;
   }
   .consequence {
     font-size: 13px;
-    line-height: 1.6;
+    line-height: 1.5;
     color: var(--ink);
   }
-  .facts {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    row-gap: 4px;
-    column-gap: 12px;
-    font-size: 11px;
-    color: var(--ink-body);
-  }
-  .key {
-    color: var(--ink-faint);
-  }
-  .actions {
+  .support {
     display: flex;
-    gap: 8px;
     flex-wrap: wrap;
+    gap: 4px 14px;
+    padding-left: 34px;
   }
   .footnote {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--ink-dim);
-    line-height: 1.5;
   }
 </style>

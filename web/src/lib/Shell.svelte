@@ -2,61 +2,44 @@
   import { onDestroy } from "svelte";
   import { follow, Router, path, type ScreenName } from "./router.svelte";
   import type { Session } from "./api";
-  import Operations from "../routes/Operations.svelte";
+  import Overview from "../routes/Overview.svelte";
+  import Apps from "../routes/Apps.svelte";
+  import AppPage from "../routes/AppPage.svelte";
+  import Devices from "../routes/Devices.svelte";
+  import Storage from "../routes/Storage.svelte";
+  import Activity from "../routes/Activity.svelte";
   import Operation from "../routes/Operation.svelte";
   import Settings from "../routes/Settings.svelte";
-  import Apps from "../routes/Apps.svelte";
-  import Destinations from "../routes/Destinations.svelte";
-  import Snapshots from "../routes/Snapshots.svelte";
-  import Nodes from "../routes/Nodes.svelte";
 
-  let { session, busy, onSignOut }: { session: Session; busy: boolean; onSignOut: () => void } = $props();
+  let { session, busy, theme, onTheme, onSignOut }: { session: Session; busy: boolean; theme: "dark" | "light"; onTheme: () => void; onSignOut: () => void } = $props();
 
   const router = new Router();
   onDestroy(() => router.destroy());
 
-  const destinations: { screen: ScreenName; label: string }[] = [
+  const screens: { screen: ScreenName; label: string }[] = [
+    { screen: "overview", label: "Overview" },
     { screen: "apps", label: "Apps" },
-    { screen: "destinations", label: "Destinations" },
-    { screen: "snapshots", label: "Snapshots & restore" },
-    { screen: "nodes", label: "Devices" },
-    { screen: "operations", label: "Activity" },
+    { screen: "devices", label: "Devices" },
+    { screen: "storage", label: "Storage" },
+    { screen: "activity", label: "Activity" },
     { screen: "settings", label: "Settings" },
   ];
 
-  // A section stays marked while a screen below it is open, so an operator on an
+  // A section stays marked while a screen below it is open, so a reader on one
   // operation still sees which part of the product they are in.
-  const sections: Partial<Record<ScreenName, ScreenName>> = {
-    operation: "operations",
-    fleet: "apps",
-  };
-
   let route = $derived(router.current);
-  let section = $derived(sections[route.screen] ?? route.screen);
-  let titles: Record<ScreenName, string> = {
-    fleet: "Apps",
-    apps: "Apps",
-    destinations: "Destinations",
-    snapshots: "Snapshots & restore",
-    nodes: "Devices",
-    operations: "Activity",
-    operation: "Operation",
-    settings: "Settings",
-    unknown: "Not found",
-  };
+  let section = $derived(route.screen === "operation" ? "activity" : route.screen);
 
-  // The trail names every step back to the dashboard, so a deep link still says
-  // where the reader is. It is built from the route alone and reads nothing.
-  let trail = $derived.by(() => {
-    const steps: { label: string; screen: ScreenName; id: string }[] = [];
-    switch (route.screen) {
-      case "operation":
-        steps.push({ label: "Activity", screen: "operations", id: "" });
-        break;
-      default:
-        break;
-    }
-    return steps;
+  // A tab of Settings is part of its screen, so a tab change keeps the screen.
+  let key = $derived(route.screen === "settings" ? "settings" : `${route.screen}/${route.id}`);
+  let main = $state<HTMLElement | null>(null);
+  let first = true;
+  // A new screen moves focus to its content, so a keyboard reader starts there.
+  $effect(() => {
+    void key;
+    if (first) { first = false; return; }
+    main?.focus();
+    window.scrollTo?.(0, 0);
   });
 
   function navigate(event: MouseEvent, screen: ScreenName, id = "") {
@@ -65,204 +48,184 @@
 </script>
 
 <div class="shell">
+  <div class="rail">
   <nav aria-label="Screens">
-    <div class="brand">
-      <span class="mono name">synod</span>
-      <span class="mono where">Docker app backups</span>
-    </div>
+    <a class="brand mono" href={path("overview")} onclick={(event) => navigate(event, "overview")}>synod</a>
     <ul>
-      {#each destinations as destination (destination.screen)}
+      {#each screens as item (item.screen)}
         <li>
           <a
-            href={path(destination.screen)}
-            aria-current={section === destination.screen ? "page" : undefined}
-            onclick={(event) => navigate(event, destination.screen)}
-          >{destination.label}</a>
+            href={path(item.screen)}
+            aria-current={section === item.screen ? "page" : undefined}
+            onclick={(event) => navigate(event, item.screen)}
+          >{item.label}</a>
         </li>
       {/each}
     </ul>
     <div class="foot">
-      <p class="who mono">
-        {session.actor_id}<br /><span class="dim">{session.role}</span>
-      </p>
-      <button onclick={onSignOut} disabled={busy}>Sign out</button>
+      <span class="who"><span class="mono">{session.actor_id}</span>{#if session.role !== session.actor_id} <span class="role">({session.role})</span>{/if}</span>
+      <span class="tools">
+        <button type="button" class="small" onclick={onTheme} aria-label={`Switch to the ${theme === "dark" ? "light" : "dark"} theme`}>{theme === "dark" ? "Light" : "Dark"}</button>
+        <button type="button" class="small" onclick={onSignOut} disabled={busy}>Sign out</button>
+      </span>
     </div>
   </nav>
+  </div>
 
-  <main id="main" tabindex="-1">
-    <div class="bar">
-      <nav class="trail" aria-label="Breadcrumb">
-        <ol class="mono">
-          <li><a href={path("fleet")} onclick={(event) => navigate(event, "fleet")}>Apps</a></li>
-          {#each trail as step (step.screen + step.id)}
-            <li>
-              <a href={path(step.screen, step.id)} onclick={(event) => navigate(event, step.screen, step.id)}>{step.label}</a>
-            </li>
-          {/each}
-          {#if route.screen !== "fleet" && (route.screen !== "apps" || route.id !== "")}
-            <li aria-current="page">
-              {route.id === "" ? titles[route.screen] : route.id}
-            </li>
-          {/if}
-        </ol>
-      </nav>
-
-    </div>
-
-    <div class="screen">
-      {#key route.screen + route.id}
-      {#if route.screen === "fleet" || route.screen === "apps"}
-        <Apps id={route.id} go={(screen, id) => router.go(screen, id)} />
-      {:else if route.screen === "destinations"}
-        <Destinations onOperation={(id) => router.go("operation", id)} />
-      {:else if route.screen === "snapshots"}
-        <Snapshots id={route.id} onApp={(id) => router.go("snapshots", id)} onOperation={(id) => router.go("operation", id)} />
-      {:else if route.screen === "nodes"}
-        <Nodes id={route.id} onOpen={(id) => router.go("nodes", id)} />
-      {:else if route.screen === "operations"}
-        <Operations onOpen={(id) => router.go("operation", id)} />
+  <main id="main" tabindex="-1" bind:this={main}>
+    {#key key}
+      {#if route.screen === "overview"}
+        <Overview />
+      {:else if route.screen === "apps" && route.id === ""}
+        <Apps />
+      {:else if route.screen === "apps"}
+        <AppPage id={route.id} />
+      {:else if route.screen === "devices"}
+        <Devices id={route.id} />
+      {:else if route.screen === "storage"}
+        <Storage />
+      {:else if route.screen === "activity"}
+        <Activity />
       {:else if route.screen === "operation"}
         <Operation id={route.id} />
       {:else if route.screen === "settings"}
-        <Settings {session} />
+        <Settings {session} tab={route.id || "general"} {theme} {onTheme} />
       {:else}
-        <h1>Not found</h1>
-        <p class="note">This address does not name a screen.</p>
+        <div class="page">
+          <h1>Not found</h1>
+          <p class="note">No screen has this address. <a href={path("overview")} onclick={(event) => navigate(event, "overview")}>Open the overview</a></p>
+        </div>
       {/if}
-      {/key}
-    </div>
+    {/key}
   </main>
 </div>
 
 <style>
   .shell {
     display: grid;
-    grid-template-columns: 218px 1fr;
+    grid-template-columns: 218px minmax(0, 1fr);
     min-height: 100vh;
   }
-  nav[aria-label="Screens"] {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 18px 0 24px;
+  /* The rail paints the full height of the page. The nav inside it stays in view. */
+  .rail {
     border-right: 1px solid var(--line);
     background: var(--nav);
   }
-  .brand {
-    padding: 0 16px 18px;
+  nav[aria-label="Screens"] {
+    position: sticky;
+    top: 0;
+    height: 100vh;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    padding: 18px 0 16px;
+    overflow-y: auto;
   }
-  .brand .name {
-    font-size: 14px;
+  .brand {
+    padding: 0 16px 20px;
+    font-size: 15px;
     font-weight: 600;
     letter-spacing: 0.02em;
+    color: var(--ink);
+    text-decoration: none;
   }
-  .brand .where {
-    font-size: 10px;
-    color: var(--ink-faint);
-  }
-  nav ul {
+  ul {
     list-style: none;
     margin: 0;
     padding: 0;
-    display: grid;
-    gap: 2px;
+    display: flex;
+    flex-direction: column;
   }
-  nav ul a {
+  ul a {
     display: block;
-    padding: 8px 16px;
+    padding: 8px 16px 8px 14px;
     border-left: 2px solid transparent;
     color: var(--ink-muted);
     text-decoration: none;
-    font-family: "IBM Plex Mono", ui-monospace, monospace;
-    font-size: 12px;
+    font-size: 14px;
   }
-  nav ul a:hover {
+  ul a:hover {
     color: var(--ink);
+    background: var(--head);
   }
-  /* The open screen carries a bar and a ground as well as a colour, so the mark
-     is never colour alone. */
-  nav ul a[aria-current="page"] {
+  /* The open screen has a bar and a ground as well as a colour. */
+  ul a[aria-current="page"] {
     color: var(--ink);
     background: var(--head);
     border-left-color: var(--ink);
   }
   .foot {
     margin-top: auto;
-    padding: 18px 16px 0;
+    padding: 14px 16px 0;
+    border-top: 1px solid var(--line);
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    border-top: 1px solid var(--line);
+    gap: 10px;
   }
   .who {
-    font-size: 10px;
-    margin: 4px 0 0;
-    line-height: 1.5;
+    font-size: 13px;
+    overflow-wrap: anywhere;
   }
-  .dim {
-    color: var(--ink-faint);
+  .role {
+    color: var(--ink-muted);
   }
-  .foot button {
-    align-self: flex-start;
+  .tools {
+    display: flex;
+    gap: 6px;
   }
-
   main {
     min-width: 0;
-    display: flex;
-    flex-direction: column;
+    padding: 32px 40px 72px;
   }
   main:focus {
     outline: none;
   }
-  .bar {
-    border-bottom: 1px solid var(--line);
-    background: var(--nav);
-    /* The theme control is fixed to the top right corner, so the bar leaves it room. */
-    padding: 14px 92px 14px 24px;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-  .trail ol {
-    list-style: none;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin: 0;
-    padding: 0;
-    font-size: 12px;
-    color: var(--ink-muted);
-  }
-  .trail li + li::before {
-    content: "/";
-    margin-right: 8px;
-    color: var(--line-strong);
-  }
-  .trail a {
-    color: var(--ink-muted);
-    text-decoration: none;
-  }
-  .trail a:hover {
-    color: var(--ink);
-  }
-  .screen {
-    flex: 1;
-    min-width: 0;
-    padding: 26px 24px 80px;
-  }
-  @media (max-width: 760px) {
-    .shell { grid-template-columns: minmax(0, 1fr); }
-    nav[aria-label="Screens"] { border-right: 0; border-bottom: 1px solid var(--line); padding: 16px 0 0; }
-    .brand { padding-bottom: 12px; padding-right: 100px; }
-    nav ul { display: flex; flex-wrap: wrap; }
-    nav ul a { padding: 10px 14px; }
-    .foot { flex-direction: row; align-items: center; padding: 10px 16px; gap: 16px; }
-    .foot button { margin-left: auto; }
-    .screen { padding: 22px 16px 60px; }
-    .bar { padding: 12px 16px; }
+  @media (max-width: 860px) {
+    .shell {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .rail {
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    nav[aria-label="Screens"] {
+      position: static;
+      height: auto;
+      padding: 12px 0 0;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+    }
+    .brand {
+      padding: 0 16px;
+    }
+    ul {
+      grid-column: 1 / -1;
+      flex-direction: row;
+      overflow-x: auto;
+      margin-top: 10px;
+      border-top: 1px solid var(--line);
+    }
+    ul a {
+      white-space: nowrap;
+      padding: 10px 12px;
+      border-left: 0;
+      border-bottom: 2px solid transparent;
+    }
+    ul a[aria-current="page"] {
+      border-bottom-color: var(--ink);
+    }
+    .foot {
+      grid-row: 1;
+      grid-column: 2;
+      margin: 0;
+      padding: 0 16px;
+      border: 0;
+    }
+    .who {
+      display: none;
+    }
+    main {
+      padding: 24px 16px 48px;
+    }
   }
 </style>

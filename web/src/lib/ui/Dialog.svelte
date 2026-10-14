@@ -1,7 +1,5 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import Mark from "./Mark.svelte";
-  import type { Mark as MarkValue } from "../state";
 
   // Esc closes any dialog, which the keyboard contract in the design requires.
   // Focus enters the dialog on open and returns to the control that opened it,
@@ -10,28 +8,35 @@
     label,
     title,
     note = "",
-    mark = undefined,
-    placement = "side",
+    width = 640,
     danger = false,
+    head = undefined,
+    footer = undefined,
     onClose,
     children,
   }: {
     label: string;
     title: string;
     note?: string;
-    mark?: MarkValue;
-    placement?: "side" | "centre";
+    width?: number;
     danger?: boolean;
+    head?: Snippet;
+    footer?: Snippet;
     onClose: () => void;
     children: Snippet;
   } = $props();
 
+  const id = `dialog-${Math.random().toString(36).slice(2, 10)}`;
   let panel = $state<HTMLElement | null>(null);
 
   $effect(() => {
     const opener = document.activeElement as HTMLElement | null;
     panel?.focus();
-    return () => opener?.focus();
+    document.body.classList.add("modal-open");
+    return () => {
+      document.body.classList.remove("modal-open");
+      opener?.focus();
+    };
   });
 
   function key(event: KeyboardEvent) {
@@ -42,7 +47,7 @@
     }
     if (event.key !== "Tab" || !panel) return;
     const controls = Array.from(panel.querySelectorAll<HTMLElement>(
-      'a[href], button, input, select, textarea, [tabindex]',
+      'a[href], button, input, select, textarea, summary, [tabindex]',
     )).filter((control) => control.tabIndex >= 0 && !control.matches(":disabled, [hidden]"));
     const first = controls[0];
     const last = controls.at(-1);
@@ -61,25 +66,32 @@
 
 <svelte:window onkeydown={key} />
 
-<div class="scrim {placement}" role="presentation" onclick={(event) => event.target === event.currentTarget && onClose()}>
+<div class="scrim" role="presentation" onclick={(event) => event.target === event.currentTarget && onClose()}>
   <div
-    class="sheet {placement}"
+    class="sheet"
     class:danger
+    class:w480={width <= 480}
+    class:w720={width >= 720 && width < 900}
+    class:w900={width >= 900}
     role="dialog"
     aria-modal="true"
     aria-label={label}
+    aria-describedby={note ? `${id}-note` : undefined}
     tabindex="-1"
     bind:this={panel}
   >
     <header>
-      {#if mark}<Mark {mark} text={false} />{/if}
-      <span class="title mono" class:danger>{title}</span>
-      {#if note}<span class="note mono">{note}</span>{/if}
-      <button type="button" onclick={onClose} aria-label="Close">Esc</button>
+      <div class="titles">
+        <h2 id={`${id}-title`}>{title}</h2>
+        {#if note}<p class="note" id={`${id}-note`}>{note}</p>{/if}
+        {#if head}{@render head()}{/if}
+      </div>
+      <button type="button" class="ghost small" onclick={onClose} aria-label="Close" aria-keyshortcuts="Escape">Esc</button>
     </header>
     <div class="body">
       {@render children()}
     </div>
+    {#if footer}<footer>{@render footer()}</footer>{/if}
   </div>
 </div>
 
@@ -89,35 +101,25 @@
     inset: 0;
     background: rgba(6, 8, 10, 0.74);
     display: flex;
-    z-index: 40;
-  }
-  .scrim.side {
-    justify-content: flex-end;
-  }
-  .scrim.centre {
     align-items: flex-start;
     justify-content: center;
-    padding: 48px 20px;
+    padding: 56px 20px;
     overflow-y: auto;
+    z-index: 40;
   }
   .sheet {
-    background: var(--nav);
+    width: min(640px, 100%);
+    background: var(--panel);
+    border: 1px solid var(--line-strong);
     display: flex;
     flex-direction: column;
-    border: 1px solid var(--line);
+    margin: auto 0;
   }
+  .sheet.w480 { width: min(480px, 100%); }
+  .sheet.w720 { width: min(760px, 100%); }
+  .sheet.w900 { width: min(960px, 100%); }
   .sheet:focus {
     outline: none;
-  }
-  .sheet.side {
-    width: min(620px, 100%);
-    height: 100%;
-    overflow-y: auto;
-    border: none;
-    border-left: 1px solid var(--line);
-  }
-  .sheet.centre {
-    width: min(680px, 100%);
   }
   .sheet.danger {
     border-color: var(--danger-line);
@@ -126,30 +128,43 @@
     padding: 16px 20px;
     border-bottom: 1px solid var(--line);
     display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
   }
-  .title {
-    font-size: 13px;
-    font-weight: 600;
-  }
-  .title.danger {
-    font-size: 12px;
-    letter-spacing: 0.06em;
-    color: var(--fail);
-  }
-  header .note {
-    font-size: 11px;
-    color: var(--ink-faint);
-  }
-  header button {
-    margin-left: auto;
-  }
-  .body {
-    padding: 22px;
+  .titles {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 4px;
+    min-width: 0;
+  }
+  h2 {
+    font-size: 20px;
+  }
+  .body {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+  }
+  footer {
+    padding: 12px 20px;
+    border-top: 1px solid var(--line);
+    background: var(--nav);
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  @media (max-width: 600px) {
+    .scrim { padding: 0; }
+    .sheet { min-height: 100%; border: 0; }
+    .body { flex: 1; }
+    header, .body, footer { padding-left: 16px; padding-right: 16px; }
+  }
+  :global(body.modal-open) {
+    overflow: hidden;
   }
 </style>

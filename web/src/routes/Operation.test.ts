@@ -12,6 +12,9 @@ vi.mock("../lib/api", async () => {
   return {
     ...real,
     api: {
+      protection: () => new Promise(() => {}),
+      nodes: () => new Promise(() => {}),
+      destinations: () => new Promise(() => {}),
       operation: (id: string) => {
         reads.push(id);
         if (hold) return new Promise((resolve) => held.push(() => resolve(answers[id])));
@@ -88,7 +91,7 @@ describe("reading an operation", () => {
     // after it. Without the guard the stale answer wins, because it lands last.
     held.reverse().forEach((release) => release());
     await settle();
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("op_done");
+    expect(screen.getByText("op_done")).toBeTruthy();
     expect(screen.getByText("backup")).toBeTruthy();
     expect(screen.queryByText("restore")).toBe(null);
   });
@@ -111,6 +114,7 @@ describe("a failed operation", () => {
     open("op_failed");
     await settle();
     expect(screen.getByText("dependency_unavailable")).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Backup: app");
   });
 
   it("does not invent resources or offer unsupported actions", async () => {
@@ -122,11 +126,11 @@ describe("a failed operation", () => {
   });
   it("shows pending work without claiming completion", async () => {
     open("op_pending"); await settle();
-    expect(screen.getByText("The request is recorded. Work has not started.")).toBeTruthy();
+    expect(screen.getByText("Queued. Not started.")).toBeTruthy();
   });
   it("reports uncertainty when work needs inspection", async () => {
     open("op_waiting"); await settle();
-    expect(screen.getByText(/The result is unknown/)).toBeTruthy();
+    expect(screen.getByText(/Outcome unknown/)).toBeTruthy();
   });
 });
 

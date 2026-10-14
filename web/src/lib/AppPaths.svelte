@@ -1,19 +1,47 @@
 <script lang="ts">
   import type { App } from "./api";
   import { bytes } from "./format";
-  import Mark from "./ui/Mark.svelte";
+  import { paths } from "./model";
+
+  // Every discovered path of one app: what a backup does with it, and why.
   let { app, included = [] }: { app: App; included?: string[] } = $props();
-  const chosen = (item: { source?: string; status: string }) => (item.status === "Large" || item.status === "Remote") && !!item.source && included.includes(item.source);
+  let rows = $derived(paths(app, included));
 </script>
-{#if app.definition.issues?.length}<p class="callout">Discovery needs attention: <span class="mono">{app.definition.issues.join(", ")}</span></p>{/if}
+
+{#if app.definition.issues?.length}<p class="callout attn">Discovery incomplete <span class="code">{app.definition.issues.join(", ")}</span></p>{/if}
 <div class="scroll">
   <table>
-    <caption class="sr">Paths for {app.definition.name}</caption>
-    <thead><tr><th>Path</th><th>Copy</th><th>Size</th><th>Reason</th></tr></thead>
-    <tbody>{#each app.definition.paths ?? [] as item}
-      <tr><td class="mono wrap">{item.source || item.volume || item.target || item.kind}{#if item.target && item.target !== item.source}<small class="dim">→ {item.target}</small>{/if}</td>
-        <td>{#if chosen(item)}<Mark mark={{ glyph: "✓", shape: "square-open", tone: "attn", label: "Included" }} />{:else}<Mark mark={{ glyph: item.status === "Included" || item.status === "Dumped" ? "✓" : "–", shape: item.status === "Never" ? "square-slash" : "square-open", tone: item.status === "Large" || item.status === "Remote" ? "attn" : "neutral", label: item.status }} />{/if}</td>
-        <td class="mono">{bytes(item.size_known ? (item.size_bytes ?? 0) : undefined)}</td><td>{chosen(item) ? `You included this ${item.status === "Remote" ? "network share" : "Large path"}.` : item.reason}</td></tr>
-    {:else}<tr><td colspan="4">No data paths were reported.</td></tr>{/each}</tbody>
+    <caption class="sr">Paths of {app.definition.name}</caption>
+    <thead><tr><th>Status</th><th>Path</th><th class="num">Size</th><th>Reason</th></tr></thead>
+    <tbody>
+      {#each rows as row}
+        <tr>
+          <td class="status {row.status}" class:chosen={row.chosen}>{row.status}</td>
+          <td class="mono path" title={row.label}>{#each row.label.split("/") as part, index}{index ? "/" : ""}<wbr />{part}{/each}</td>
+          <td class="num mono">{row.sizeKnown ? bytes(row.size ?? 0) : ""}</td>
+          <td class="dim">{row.reason}</td>
+        </tr>
+      {:else}
+        <tr><td colspan="4" class="dim">No paths reported.</td></tr>
+      {/each}
+    </tbody>
   </table>
 </div>
+
+<style>
+  /* A path breaks only after a slash, and keeps room before the size column takes it. */
+  .path {
+    min-width: 24ch;
+    overflow-wrap: normal;
+    word-break: normal;
+  }
+  .status {
+    white-space: nowrap;
+    width: 1%;
+  }
+  .included { color: var(--ok); }
+  .dumped { color: var(--active); }
+  .excluded { color: var(--attn); }
+  .never { color: var(--ink-dim); }
+  .chosen { color: var(--attn); }
+</style>

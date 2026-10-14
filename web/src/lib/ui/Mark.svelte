@@ -21,8 +21,7 @@
   {#if shapeOnly}
     <span class="sr">{title || mark.label}</span>
   {:else}
-    <span class="glyph" aria-hidden="true">{mark.glyph}</span>
-    {#if text}<span class="text">{mark.label}</span>{:else if !decorative}<span class="sr">{mark.label}</span>{/if}
+    {#if text}<span class="text">{mark.label}</span>{:else}<span class="glyph" aria-hidden="true">{mark.glyph}</span>{#if !decorative}<span class="sr">{mark.label}</span>{/if}{/if}
   {/if}
 </span>
 
@@ -48,14 +47,13 @@
   }
   .glyph {
     font-family: "IBM Plex Mono", ui-monospace, monospace;
-    font-size: 13px;
+    font-size: 12px;
     width: 14px;
     text-align: center;
     flex-shrink: 0;
   }
   .text {
-    font-family: "IBM Plex Mono", ui-monospace, monospace;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
   }
 

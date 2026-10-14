@@ -21,6 +21,7 @@ it("shows a filled-in Compose file, then approves the device that joins", async 
   const [secret, ttl] = vi.mocked(api.registerJoinToken).mock.calls[0]!;
   expect(decoded).toMatchObject({ address: "192.0.2.20:8443", secret });
   expect(ttl).toBe(86400);
+  await fireEvent.click(screen.getByRole("tab", { name: "As a Linux service" }));
   expect(screen.getByText(new RegExp(`synod agent join '${token}'`))).toBeTruthy();
   // The device joins after the dialog opened. A known device is not the new one.
   vi.mocked(api.nodes).mockResolvedValue([existing, added]);
@@ -28,6 +29,6 @@ it("shows a filled-in Compose file, then approves the device that joins", async 
   await vi.advanceTimersByTimeAsync(3000);
   await fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
   expect(api.approveNode).toHaveBeenCalledWith("n2");
-  expect(await screen.findByText(/The device is approved/)).toBeTruthy();
+  expect(await screen.findByText("pi approved")).toBeTruthy();
   expect(onChanged).toHaveBeenCalled();
 });

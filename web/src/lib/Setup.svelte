@@ -73,12 +73,15 @@
   <form onsubmit={submit} aria-labelledby="setup-heading">
     <h1 id="setup-heading">Set up Synod</h1>
     <p class="note">Create the administrator account.</p>
-    <label for="setup-username" class="label">Username</label>
-    <input id="setup-username" name="username" bind:value={username} autocomplete="username" required />
-    <label for="setup-password" class="label">Password</label>
-    <input id="setup-password" name="password" type="password" bind:value={password} autocomplete="new-password" required />
-    <label for="setup-confirm" class="label">Repeat the password</label>
-    <input id="setup-confirm" name="confirm" type="password" bind:value={confirm} autocomplete="new-password" required />
+    <label class="field">Username
+      <input id="setup-username" name="username" bind:value={username} autocomplete="username" required />
+    </label>
+    <label class="field">Password
+      <input id="setup-password" name="password" type="password" bind:value={password} autocomplete="new-password" required />
+    </label>
+    <label class="field">Repeat the password
+      <input id="setup-confirm" name="confirm" type="password" bind:value={confirm} autocomplete="new-password" required />
+    </label>
     {#if failure}
       <ErrorPanel view={errorView(failure)} />
     {/if}
@@ -87,7 +90,7 @@
 {:else}
   <section aria-labelledby="kit-heading">
     <h1 id="kit-heading">Save your recovery kit</h1>
-    <p class="note">The kit holds the password of your backups. Without it, nobody can restore them. Synod shows it only now.</p>
+    <p class="note">The kit holds the repository password. It is shown once. Store it off every Synod device.</p>
     <pre class="mono kit">{kit}</pre>
     <div class="actions">
       <button type="button" onclick={download}>Download</button>
@@ -103,36 +106,28 @@
 
 <style>
   h1 {
-    font-size: 18px;
-    margin: 0 0 4px;
+    font-size: 20px;
   }
   form,
   section {
-    display: grid;
-    gap: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
   }
   form button,
   section > button {
-    margin-top: 8px;
-    justify-self: start;
+    align-self: flex-start;
   }
   .kit {
     margin: 0;
-    padding: 10px;
+    padding: 12px 14px;
     border: 1px solid var(--line);
-    font-size: 11px;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    background: var(--canvas);
+    font-size: 12px;
     max-height: 280px;
     overflow: auto;
   }
-  .actions {
-    display: flex;
-    gap: 8px;
-  }
   .check {
-    display: flex;
-    gap: 8px;
     align-items: flex-start;
   }
 </style>

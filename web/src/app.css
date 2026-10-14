@@ -64,6 +64,12 @@
   --link: #2b5697;
 }
 
+/* The console ---------------------------------------------------------
+   Square geometry. Structure comes from hairline rules, alignment, and space.
+   Plex Sans carries headings and prose. Plex Mono carries values only: paths,
+   times, sizes, IDs, codes, and versions. State colours appear only in marks,
+   and each mark pairs its colour with a shape. */
+
 * {
   box-sizing: border-box;
 }
@@ -71,178 +77,337 @@ body {
   margin: 0;
   background: var(--canvas);
   color: var(--ink);
-  /* The design names IBM Plex. A self-hosted installation may have no route to a
-     font CDN, so nothing here is fetched and the stack falls back to the host. */
-  font: 400 14px/1.5 "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  /* A self-hosted installation may have no route to a font CDN, so nothing is
+     fetched and the stack falls back to the host. */
+  font: 400 14px/1.45 "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
 }
 code,
 .mono {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+.mono {
+  font-size: 13px;
 }
 a {
   color: var(--link);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-
-/* 2px on both themes, per the keyboard contract in the design. */
 :focus-visible {
   outline: 2px solid var(--active);
   outline-offset: 1px;
 }
+h1 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+p {
+  margin: 0;
+}
+
+/* Controls -------------------------------------------------------------- */
 
 button,
-input,
-select {
-  font: inherit;
-  color: inherit;
+.button {
+  font: 500 13px/1 "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  color: var(--ink);
   background: transparent;
   border: 1px solid var(--line-strong);
   border-radius: 0;
-  padding: 7px 12px;
-}
-input,
-select {
-  background: var(--canvas);
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 13px;
-  padding: 9px 11px;
-}
-button {
+  padding: 0 14px;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   cursor: pointer;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 11px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+button:hover,
+.button:hover {
+  background: var(--head);
 }
 button[disabled] {
   cursor: not-allowed;
   border-style: dashed;
   color: var(--ink-dim);
+  background: transparent;
 }
-/* The one filled control on a screen. The design reserves it for the action that
-   carries the screen, and gives every other action an outline. */
-button.primary {
+/* The one filled control on a screen: ink on canvas, inverted. */
+button.primary,
+.button.primary {
   background: var(--ink);
   border-color: var(--ink);
   color: var(--invert-ink);
-  font-weight: 500;
-  font-size: 12px;
-  padding: 9px 14px;
+}
+button.primary:hover,
+.button.primary:hover {
+  background: var(--ink-body);
+  border-color: var(--ink-body);
 }
 button.destructive {
   background: var(--fail);
   border-color: var(--fail);
   color: var(--invert-ink);
-  font-weight: 500;
-  font-size: 12px;
-  padding: 9px 14px;
 }
-/* A filled control that cannot act loses its fill. The dashed border from
-   button[disabled] stays, the hatch replaces the solid fill, and the ink dims.
-   Shape carries the state, so it reads the same in both themes. */
+/* A filled control that cannot act loses its fill. The dashed border stays,
+   the hatch replaces the fill, and the ink dims. */
 button.primary:disabled,
 button.destructive:disabled {
   background: var(--hatch);
   border-color: var(--line-strong);
   color: var(--ink-dim);
 }
+button.ghost {
+  border-color: transparent;
+  color: var(--ink-body);
+}
 button.quiet {
   border-color: var(--danger-line);
   color: var(--danger-ink);
 }
-
-/* Shared surfaces ------------------------------------------------------- */
-
-.panel {
-  border: 1px solid var(--line);
-  background: var(--panel);
+button.small {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
 }
-.panel-head {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--line);
-  display: flex;
-  gap: 12px;
-  align-items: baseline;
-  flex-wrap: wrap;
+button.link {
+  border: 0;
+  background: none;
+  padding: 0;
+  min-height: 0;
+  color: var(--link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-weight: 400;
+  font-size: inherit;
+  white-space: normal;
+  text-align: left;
+  display: inline;
 }
-.panel-foot {
-  padding: 11px 16px;
-  border-top: 1px solid var(--line);
-  font-size: 11px;
+button.link:hover {
+  background: none;
+}
+
+input,
+select,
+textarea {
+  font: 400 14px/1.4 "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--canvas);
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  padding: 7px 10px;
+  min-height: 34px;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+}
+input.mono,
+select.mono,
+textarea {
+  font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+textarea {
+  min-height: 80px;
+  resize: vertical;
+}
+select option {
+  background: var(--canvas);
+  color: var(--ink);
+}
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--ink);
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  flex-shrink: 0;
+  padding: 0;
+}
+input:disabled,
+select:disabled,
+textarea:disabled {
   color: var(--ink-dim);
-  line-height: 1.5;
+  border-style: dashed;
+  cursor: not-allowed;
 }
-.row {
+fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+legend {
+  padding: 0;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+label.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--ink-muted);
+}
+label.check {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--ink-body);
+  cursor: pointer;
+}
+.hint {
+  font-size: 13px;
+  color: var(--ink-dim);
+}
+
+/* Page structure -------------------------------------------------------- */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  max-width: 1240px;
+}
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+/* A header followed by tabs lets the tab rule close it. */
+.page-head.tabbed {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.page-head .sub {
+  margin-top: 6px;
+  color: var(--ink-muted);
+  font-size: 15px;
+}
+.actions {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 11px 14px;
-  border-top: 1px solid var(--line);
+  gap: 8px;
+  flex-wrap: wrap;
 }
-.row.top {
-  align-items: flex-start;
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
 }
-
-/* A label is the only uppercase text in the product. */
-.label {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
+/* A section is a heading on a hairline, then its content. No box. */
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
 }
-.eyebrow {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  color: var(--ink-faint);
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+}
+.columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 32px;
 }
 .note {
-  font-size: 12px;
-  color: var(--ink-dim);
-  line-height: 1.5;
+  font-size: 13px;
+  color: var(--ink-muted);
 }
 .dim {
   color: var(--ink-dim);
 }
-
-/* A table is a grid whose 1px gaps show the ground through as rules. The column
-   template belongs to the screen, because only the screen knows its columns. */
-.scroll {
-  overflow-x: auto;
+.wrap {
+  overflow-wrap: anywhere;
 }
-.grid {
-  display: grid;
-  gap: 1px;
-  background: var(--line);
+/* A stable code: small, mono, and never the only message. */
+.code {
+  font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
 }
-.grid > .head {
-  background: var(--head);
-  padding: 8px 12px;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  color: var(--ink-faint);
-}
-.grid > .cell {
-  background: var(--panel);
+.callout {
   padding: 10px 12px;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 11px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--ink-body);
+  font-size: 13px;
 }
-.grid > .cell.stack {
+.callout.attn {
+  border-color: var(--attn-line);
+}
+.callout.danger {
+  border-color: var(--danger-line);
+}
+/* Empty: what is missing and the one action that fixes it. */
+.empty {
+  padding: 20px;
+  border: 1px dashed var(--line-strong);
+  display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 3px;
+  gap: 10px;
+  color: var(--ink-muted);
+  font-size: 13px;
 }
-
-/* An expired source hatches one strip, never every cell. Rare keeps it legible. */
+.empty strong {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+/* Definition pairs: label in muted sans, value in ink. */
+.facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 20px;
+  margin: 0;
+  font-size: 13px;
+}
+.facts dt {
+  color: var(--ink-muted);
+}
+.facts dd {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.loading {
+  color: var(--ink-muted);
+  font-size: 13px;
+}
 .hatched {
   background-image: var(--hatch);
 }
-
 .sr {
   position: absolute;
   width: 1px;
@@ -252,52 +417,120 @@ button.quiet {
   white-space: nowrap;
 }
 
-h1 {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+/* A choice is a large button that selects one option. The selected one gets the
+   strong rule and the head ground. */
+.pick {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 12px 14px;
+  text-align: left;
+  color: var(--ink);
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 4px;
+  width: 100%;
+  white-space: normal;
+  min-height: 0;
+  line-height: 1.4;
+}
+.pick:hover {
+  border-color: var(--line-strong);
+  background: var(--panel);
+}
+.pick[aria-pressed="true"] {
+  border-color: var(--ink-dim);
+  background: var(--head);
+  box-shadow: inset 3px 0 0 var(--ink);
+}
+.pick[disabled] {
+  border-style: dashed;
+  color: var(--ink-dim);
+  background: var(--panel);
 }
 
-/* Dense tables and forms use the same surfaces at every screen size. */
-.page { display: flex; flex-direction: column; gap: 22px; max-width: 1240px; }
-.page-head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
-.page-head p { margin: 6px 0 0; }
-.actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.page-head > .actions { margin-left: auto; }
-.stack { display: flex; flex-direction: column; gap: 16px; }
-.pad { padding: 16px; }
-.columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
-.metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); background: var(--line); gap: 1px; }
-.metric { background: var(--panel); padding: 16px; display: flex; flex-direction: column; gap: 8px; }
-.metric strong { font-size: 24px; font-weight: 500; }
-.callout { margin: 0; padding: 12px 16px; border: 1px solid var(--attn-line); color: var(--ink-body); }
-.callout.danger { border-color: var(--danger-line); }
-.wrap { overflow-wrap: anywhere; }
-.facts { display: grid; grid-template-columns: minmax(80px, auto) minmax(0, 1fr); gap: 8px 16px; margin: 0; font-size: 12px; }
-.facts dt { color: var(--ink-muted); }
-.facts dd { margin: 0; overflow-wrap: anywhere; }
-table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
-th { padding: 9px 12px; background: var(--head); color: var(--ink-muted); font: 400 10px "IBM Plex Mono", ui-monospace, monospace; text-transform: uppercase; letter-spacing: .07em; }
-td { padding: 12px; border-top: 1px solid var(--line); vertical-align: top; }
-td small { display: block; margin-top: 4px; }
-tr:hover td { background: var(--head); }
-fieldset { border: 1px solid var(--line); padding: 16px; margin: 0; min-width: 0; }
-fieldset:disabled { opacity: .8; }
-legend { padding: 0 6px; }
-form label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-soft); }
-form .check { flex-direction: row; align-items: center; }
-input[type="checkbox"] { accent-color: var(--active); margin: 0 6px 0 0; width: 16px; height: 16px; flex-shrink: 0; }
-textarea { border: 1px solid var(--line-strong); border-radius: 0; background: var(--canvas); color: var(--ink); padding: 10px; font: 12px "IBM Plex Mono", ui-monospace, monospace; min-height: 90px; resize: vertical; }
-input, select, textarea { min-width: 0; max-width: 100%; }
-select option { background: var(--canvas); color: var(--ink); }
-pre { overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
-@media (max-width: 760px) {
-  .columns { grid-template-columns: 1fr; }
-  .metrics { grid-template-columns: 1fr; }
-  .metric { display: grid; grid-template-columns: 1fr auto; align-items: center; }
-  .metric strong { white-space: nowrap; }
-  .metric .note { grid-column: 1 / -1; }
-  .page-head > .actions { margin-left: 0; }
-  td { min-width: 100px; }
+/* Tables -------------------------------------------------------------------
+   Column heads are the only uppercase text in the product. */
+.scroll {
+  position: relative;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+/* Links inside data read as data: ink, with a quiet rule that strengthens on hover. */
+td a,
+th a,
+td button.link,
+.facts a {
+  color: var(--ink);
+  text-decoration-color: var(--line-strong);
+}
+/* A long value wraps, but never below a readable width. The box scrolls instead. */
+td.wrap {
+  min-width: 22ch;
+}
+td a:hover,
+th a:hover,
+.facts a:hover {
+  text-decoration-color: var(--ink);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+th {
+  padding: 8px 12px;
+  background: var(--head);
+  color: var(--ink-dim);
+  font: 500 11px/1.2 "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+td {
+  padding: 9px 12px;
+  border-top: 1px solid var(--line);
+  vertical-align: top;
+}
+tbody tr:first-child td {
+  border-top: 0;
+}
+td.num,
+th.num {
+  text-align: right;
+  white-space: nowrap;
+}
+table.nowrap td,
+table.nowrap td button.link {
+  white-space: nowrap;
+}
+td.end,
+th.end {
+  text-align: right;
+}
+pre {
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+details > summary {
+  cursor: pointer;
+  color: var(--ink-body);
+  font-size: 13px;
+}
+
+@media (max-width: 860px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+  h1 {
+    font-size: 22px;
+  }
 }

@@ -3,10 +3,11 @@ import { follow, match, path, type ScreenName } from "./router.svelte";
 
 describe("routing", () => {
   it("reads every screen from its path", () => {
-    expect(match("/")).toEqual({ screen: "fleet", id: "" });
-    expect(match("/nodes")).toEqual({ screen: "nodes", id: "" });
+    expect(match("/")).toEqual({ screen: "overview", id: "" });
+    expect(match("/devices")).toEqual({ screen: "devices", id: "" });
+    expect(match("/storage")).toEqual({ screen: "storage", id: "" });
     expect(match("/backups")).toEqual({ screen: "unknown", id: "" });
-    expect(match("/operations")).toEqual({ screen: "operations", id: "" });
+    expect(match("/activity")).toEqual({ screen: "activity", id: "" });
     expect(match("/settings")).toEqual({ screen: "settings", id: "" });
     expect(match("/nowhere")).toEqual({ screen: "unknown", id: "" });
   });
@@ -15,22 +16,23 @@ describe("routing", () => {
   it("keeps an operation identity in the path", () => {
     const id = "0f9c1a2b-4d5e-4f60-8a71-2b3c4d5e6f70";
     const address = path("operation", id);
-    expect(address).toBe(`/operations/${id}`);
+    expect(address).toBe(`/activity/${id}`);
     expect(match(address)).toEqual({ screen: "operation", id });
   });
 
   it("round-trips every screen through its own address", () => {
     const cases: [ScreenName, string][] = [
-      ["fleet", ""],
+      ["overview", ""],
       ["apps", ""],
       ["apps", "a1"],
-      ["snapshots", "a1"],
-      ["destinations", ""],
-      ["nodes", ""],
-      ["nodes", "node-1"],
-      ["operations", ""],
+      ["storage", ""],
+      ["devices", ""],
+      ["devices", "node-1"],
+      ["activity", ""],
       ["operation", "op-1"],
       ["settings", ""],
+      ["settings", "accounts"],
+      ["settings", "recovery-kit"],
     ];
     for (const [screen, id] of cases) {
       expect(match(path(screen, id))).toEqual({ screen, id });
@@ -38,7 +40,7 @@ describe("routing", () => {
   });
 
   it("survives a trailing slash and an encoded identity", () => {
-    expect(match("/nodes/node-1/")).toEqual({ screen: "nodes", id: "node-1" });
+    expect(match("/devices/node-1/")).toEqual({ screen: "devices", id: "node-1" });
     expect(match(path("operation", "op 1/2"))).toEqual({ screen: "operation", id: "op 1/2" });
   });
 });
@@ -47,6 +49,16 @@ it("rejects malformed and extra path segments", () => {
   expect(match("/apps/%ZZ").screen).toBe("unknown");
   expect(match("/apps/a1/more").screen).toBe("unknown");
   expect(match("/settings/extra").screen).toBe("unknown");
+  expect(path("settings", "general")).toBe("/settings");
+  expect(path("apps", "a1", "storage=d1")).toBe("/apps/a1?storage=d1");
+});
+
+// Links from earlier builds still open the screen that replaced theirs.
+it("reads the addresses of earlier builds", () => {
+  expect(match("/nodes/n1")).toEqual({ screen: "devices", id: "n1" });
+  expect(match("/destinations")).toEqual({ screen: "storage", id: "" });
+  expect(match("/operations/op-1")).toEqual({ screen: "operation", id: "op-1" });
+  expect(match("/snapshots/a1")).toEqual({ screen: "apps", id: "a1" });
 });
 
 describe("follow", () => {

@@ -5,12 +5,11 @@
 // path outside /v1, so a deep link and a reload both reach the same screen.
 
 export type ScreenName =
-  | "fleet"
+  | "overview"
   | "apps"
-  | "destinations"
-  | "snapshots"
-  | "nodes"
-  | "operations"
+  | "devices"
+  | "storage"
+  | "activity"
   | "operation"
   | "settings"
   | "unknown";
@@ -28,66 +27,99 @@ export function match(pathname: string): Route {
   catch { return { screen: "unknown", id: "" }; }
   if (parts.length > 2) return { screen: "unknown", id: "" };
   const [first, second] = parts;
-  if (first === undefined) return { screen: "fleet", id: "" };
+  if (first === undefined) return { screen: "overview", id: "" };
   switch (first) {
+    // Earlier builds used /snapshots/{app} for the copies of an app. The app page holds them now.
     case "apps": case "snapshots":
-      return { screen: first, id: second ?? "" };
-    case "destinations":
-      return { screen: second ? "unknown" : "destinations", id: "" };
-    case "devices":
-    case "nodes":
-      return { screen: "nodes", id: second ?? "" };
-    case "activity":
-    case "operations":
-      if (second === undefined) return { screen: "operations", id: "" };
+      return { screen: "apps", id: second ?? "" };
+    case "devices": case "nodes":
+      return { screen: "devices", id: second ?? "" };
+    case "storage": case "destinations":
+      return { screen: second ? "unknown" : "storage", id: "" };
+    case "activity": case "operations":
+      if (second === undefined) return { screen: "activity", id: "" };
       return { screen: "operation", id: second };
     case "settings":
-      return { screen: second ? "unknown" : "settings", id: "" };
+      if (second === undefined) return { screen: "settings", id: "" };
+      return settingsTabs.includes(second) ? { screen: "settings", id: second } : { screen: "unknown", id: "" };
     default:
       return { screen: "unknown", id: "" };
   }
 }
 
-/** path builds the address of one screen, so no screen writes a literal path. */
-export function path(screen: ScreenName, id = ""): string {
+/** The tabs of Settings. The first one opens at /settings. */
+export const settingsTabs = ["general", "notifications", "accounts", "recovery-kit"];
+
+/** path builds the address of one screen, so no screen writes a literal path. A query narrows the screen. */
+export function path(screen: ScreenName, id = "", query = ""): string {
+  return address(screen, id) + (query ? `?${query}` : "");
+}
+
+function address(screen: ScreenName, id: string): string {
   const encoded = encodeURIComponent(id);
   switch (screen) {
-    case "fleet":
+    case "overview":
       return "/";
-    case "apps": case "snapshots":
-      return id === "" ? `/${screen}` : `/${screen}/${encoded}`;
-    case "destinations": return "/destinations";
-    case "nodes":
-      return id === "" ? "/nodes" : `/nodes/${encoded}`;
-    case "operations":
-      return "/operations";
+    case "apps":
+      return id === "" ? "/apps" : `/apps/${encoded}`;
+    case "devices":
+      return id === "" ? "/devices" : `/devices/${encoded}`;
+    case "storage":
+      return "/storage";
+    case "activity":
+      return "/activity";
     case "operation":
-      return `/operations/${encoded}`;
+      return `/activity/${encoded}`;
     case "settings":
-      return "/settings";
+      return id === "" || id === "general" ? "/settings" : `/settings/${encoded}`;
     default:
       return "/";
   }
 }
 
+// The shell owns one router. A link anywhere moves through it.
+let active: Router | null = null;
+
+/** go opens one screen through the shell's router, or loads the address without one. */
+export function go(screen: ScreenName, id = "", query = "") {
+  if (active) active.go(screen, id, query);
+  else window.location.assign(path(screen, id, query));
+}
+
+/** swap changes the address in place, without a history entry. */
+export function swap(screen: ScreenName, id = "") {
+  if (active) active.replace(screen, id);
+  else window.history.replaceState({}, "", path(screen, id));
+}
+
 /** Router holds the current route and keeps it in the address bar. */
 export class Router {
-  current = $state<Route>({ screen: "fleet", id: "" });
+  current = $state<Route>({ screen: "overview", id: "" });
 
   constructor() {
     this.current = match(window.location.pathname);
     window.addEventListener("popstate", this.onPopState);
+    active = this;
   }
 
   private onPopState = () => { this.current = match(window.location.pathname); };
 
-  destroy() { window.removeEventListener("popstate", this.onPopState); }
+  destroy() {
+    window.removeEventListener("popstate", this.onPopState);
+    if (active === this) active = null;
+  }
 
   /** go moves to one screen and records the move, so the back button works. */
-  go(screen: ScreenName, id = "") {
-    const target = path(screen, id);
-    if (target !== window.location.pathname) window.history.pushState({}, "", target);
-    this.current = match(target);
+  go(screen: ScreenName, id = "", query = "") {
+    const target = path(screen, id, query);
+    if (target !== window.location.pathname + window.location.search) window.history.pushState({}, "", target);
+    this.current = match(window.location.pathname);
+  }
+
+  /** replace changes the address without a new history entry, as a tab change does. */
+  replace(screen: ScreenName, id = "") {
+    window.history.replaceState({}, "", path(screen, id));
+    this.current = match(window.location.pathname);
   }
 }
 
