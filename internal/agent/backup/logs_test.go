@@ -39,7 +39,7 @@ func TestBackupLogsItsFailureCause(t *testing.T) {
 		t.Fatalf("backup without destination settings: %+v %v", result, err)
 	}
 	log := out.String()
-	for _, want := range []string{`msg="backup started" app=compose:notes`, `msg="backup failed" app=compose:notes`, "code=destination_unavailable", "error="} {
+	for _, want := range []string{`msg="backup started" app=notes`, `msg="backup failed" app=notes`, "code=destination_unavailable", "error="} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log lacks %s:\n%s", want, log)
 		}

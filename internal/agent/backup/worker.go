@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -158,6 +159,8 @@ type progress struct {
 	mark                      time.Time
 	// cause is the error behind FailureCode. It is not saved: the log names it once.
 	cause error
+	// app is the discovered app name for the log.
+	app string
 }
 
 // fail records the failure code. The cause stays in memory for the result log.
@@ -211,7 +214,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return backup.Result{}, err
 	}
 	if w.Logger != nil {
-		w.Logger.Info("backup started", "app", request.SourceKey, "destination", w.DestinationName(ctx, request.DestinationID), "method", request.Method, "operation", request.ID)
+		w.Logger.Info("backup started", "app", AppName(request.SourceKey), "destination", w.DestinationName(ctx, request.DestinationID), "method", request.Method, "operation", request.ID)
 	}
 	state.phase("")
 	plan, err := w.Journal.DestinationPlan(ctx, w.Keyring)
@@ -255,6 +258,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		return w.finish(ctx, request, &state, r)
 	}
 	app := report.Apps[0]
+	state.app = app.Name
 	databases := make(map[string]string)
 	for _, item := range app.Containers {
 		if item.Database != "" {
@@ -361,7 +365,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			if inventory, err := DatabaseInventory(ctx, w.Docker, c, database); err == nil {
 				metadata.Inventory = inventory
 			} else if w.Logger != nil {
-				w.Logger.Warn("database list unavailable; restore tests cannot compare database content", "app", request.SourceKey, "container", strings.TrimPrefix(c.Name, "/"), "operation", request.ID, "error", err)
+				w.Logger.Warn("database list unavailable; restore tests cannot compare database content", "app", AppName(request.SourceKey), "container", strings.TrimPrefix(c.Name, "/"), "operation", request.ID, "error", err)
 			}
 			dumps = append(dumps, stream)
 			streams = append(streams, stream)
@@ -424,7 +428,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 	var snapshots *fsSnapshots
 	if tree.live {
 		if snapshots, err = tree.useSnapshots(ctx, request.ID.String()); err != nil && w.Logger != nil {
-			w.Logger.Warn("filesystem snapshot unavailable; copying the live files", "app", request.SourceKey, "operation", request.ID, "error", err)
+			w.Logger.Warn("filesystem snapshot unavailable; copying the live files", "app", AppName(request.SourceKey), "operation", request.ID, "error", err)
 		}
 		state.phase("snapshot")
 	}
@@ -435,7 +439,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		tree.Close()
 		if snapshots != nil {
 			if err := snapshots.Close(); err != nil && w.Logger != nil {
-				w.Logger.Warn("filesystem snapshot removal failed; the agent removes it at its next start", "app", request.SourceKey, "operation", request.ID, "error", err)
+				w.Logger.Warn("filesystem snapshot removal failed; the agent removes it at its next start", "app", AppName(request.SourceKey), "operation", request.ID, "error", err)
 			}
 		}
 	}()
@@ -560,7 +564,7 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 			if snapshots != nil {
 				if err := snapshots.Check(final); err != nil {
 					if w.Logger != nil {
-						w.Logger.Warn("filesystem snapshot became invalid during the copy", "app", request.SourceKey, "operation", request.ID, "error", err)
+						w.Logger.Warn("filesystem snapshot became invalid during the copy", "app", AppName(request.SourceKey), "operation", request.ID, "error", err)
 					}
 					return backup.Snapshot{}, err
 				}
@@ -601,6 +605,15 @@ func (w *Worker) Execute(ctx context.Context, request backup.Request) (backup.Re
 		state.Prepared = nil
 	}
 	return w.finish(ctx, request, &state, r)
+}
+
+// AppName names an app for the log: the Compose project, or a short container ID.
+func AppName(sourceKey string) string {
+	if name, ok := strings.CutPrefix(sourceKey, "compose:"); ok {
+		return name
+	}
+	id := strings.TrimPrefix(sourceKey, "container:")
+	return "container " + id[:min(12, len(id))]
 }
 
 // DestinationName names a destination for the log. Without saved settings it is the ID.
@@ -759,7 +772,7 @@ func (w *Worker) finish(ctx context.Context, request backup.Request, state *prog
 		}
 	}
 	if w.Logger != nil {
-		attrs := []any{"app", request.SourceKey, "destination", w.DestinationName(cleanup, request.DestinationID), "duration", time.Since(state.StartedAt).Round(time.Millisecond), "operation", request.ID}
+		attrs := []any{"app", cmp.Or(state.app, AppName(request.SourceKey)), "destination", w.DestinationName(cleanup, request.DestinationID), "duration", time.Since(state.StartedAt).Round(time.Millisecond), "operation", request.ID}
 		if result.FailureCode != "" {
 			w.Logger.Warn("backup failed", append(attrs, "code", result.FailureCode, "error", state.cause)...)
 		} else {

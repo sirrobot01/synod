@@ -134,7 +134,7 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 				if _, err := cache.Admit(ctx, request.ID, raw); err != nil {
 					return nil, err
 				}
-				logger.Info("backup queued", "app", request.SourceKey, "operation", request.ID)
+				logger.Info("backup queued", "app", agentbackup.AppName(request.SourceKey), "operation", request.ID)
 				return nil, nil
 			}
 			if file := message.GetFileRequest(); file != nil {
@@ -261,7 +261,7 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 		worker.Go(func() { serveFiles(workerCtx, fileRequests, restoreWorker, stream, logger) })
 	}
 	defer func() { stopWorker(); worker.Wait() }()
-	logger.Info("agent started", "device", config.NodeID, "version", buildinfo.Version, "architecture", facts.architecture, "docker", facts.version, "controller", strings.Join(config.ControllerEndpoints, ","))
+	logger.Info("agent started", "device", hostname, "device_id", config.NodeID, "version", buildinfo.Version, "architecture", facts.architecture, "docker", facts.version, "controller", strings.Join(config.ControllerEndpoints, ","))
 	// A blob write waits for the disk. A slow disk can need minutes to make packs durable.
 	blobHTTP := &http.Server{Handler: blobHandler, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{identity.Certificate}, ClientCAs: roots, ClientAuth: tls.RequireAndVerifyClientCert}, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Minute, WriteTimeout: 10 * time.Minute, IdleTimeout: time.Minute, MaxHeaderBytes: 16 << 10, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn), BaseContext: func(net.Listener) context.Context { return workerCtx }}
 	stopped := make(chan error, 2)

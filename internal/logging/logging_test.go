@@ -16,7 +16,7 @@ func TestNewWritesReadableTextAndJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	var missing error
-	logger.Info("backup finished", "app", "compose:immich", "error", missing)
+	logger.Info("backup finished", "app", "compose:immich", "error", missing, "resource", "")
 	logger.Debug("hidden at info")
 	line := text.String()
 	if !regexp.MustCompile(`^time="\d{4}-\d\d-\d\d \d\d:\d\d:\d\d" level=INFO msg="backup finished" app=compose:immich\n$`).MatchString(line) {

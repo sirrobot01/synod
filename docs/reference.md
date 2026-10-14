@@ -621,7 +621,7 @@ The default is `info` and `text`. The `debug` level adds the time of each backup
 A text line looks like this:
 
 ```text
-time="2026-10-14 03:12:41" level=INFO msg="backup finished" app=compose:immich destination="odin disk" duration=41.2s operation=… method=dump bytes=197834112 files_read=12 files_unchanged=40211
+time="2026-10-14 03:12:41" level=INFO msg="backup finished" app=immich destination="odin disk" duration=41.2s operation=… method=dump bytes=197834112 files_read=12 files_unchanged=40211
 ```
 
 ## Limits

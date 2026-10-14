@@ -10,7 +10,7 @@ import (
 
 // New returns a logger that writes text lines, or JSON lines when format is "json".
 // An empty level is "info", and an empty format is "text".
-// A nil error or other nil value is left out, so a line never shows error=<nil>.
+// A nil value or an empty string is left out, so a line never shows error=<nil> or resource="".
 func New(w io.Writer, level, format string) (*slog.Logger, error) {
 	var min slog.Level
 	if level != "" {
@@ -19,7 +19,7 @@ func New(w io.Writer, level, format string) (*slog.Logger, error) {
 		}
 	}
 	options := &slog.HandlerOptions{Level: min, ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-		if a.Value.Kind() == slog.KindAny && a.Value.Any() == nil {
+		if (a.Value.Kind() == slog.KindAny && a.Value.Any() == nil) || (a.Value.Kind() == slog.KindString && a.Value.String() == "" && a.Key != slog.MessageKey) {
 			return slog.Attr{}
 		}
 		if len(groups) == 0 && a.Key == slog.TimeKey && format != "json" {
