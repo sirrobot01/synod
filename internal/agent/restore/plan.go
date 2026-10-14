@@ -57,14 +57,18 @@ type plan struct {
 	Networks   map[string]network.Network
 	Data       []dataRoot
 	Sources    map[string]sourceMapping
-	Warnings   []string
+	// Attached holds CONTAINER_ID:TARGET of each mount that keeps its original host path.
+	// The target must provide that path. A copied mount can have the same path, because
+	// a restore of a restored app on another device uses the same apps directory.
+	Attached map[string]bool
+	Warnings []string
 }
 
 // makePlan only reads the repository. Every writable path belongs to the new restore directory.
 // A restore attaches an uncopied network share at its original host path. A drill uses an
 // empty path instead, so it never reads or writes a share.
 func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapshot, operationID uuid.UUID, directory, architecture string, drill bool) (*plan, error) {
-	p := &plan{Snapshot: saved, Sources: make(map[string]sourceMapping)}
+	p := &plan{Snapshot: saved, Sources: make(map[string]sourceMapping), Attached: make(map[string]bool)}
 	if saved.App.Definition == nil || len(saved.App.Definition.Containers) == 0 || len(saved.Images) != len(saved.App.Definition.Containers) {
 		return nil, &failure{Code: "snapshot_invalid"}
 	}
@@ -269,6 +273,7 @@ func makePlan(ctx context.Context, r *repository.Repository, saved backup.Snapsh
 				return nil, &failure{Code: "snapshot_invalid"}
 			}
 			if attached(saved, item, drill) {
+				p.Attached[c.ID+":"+m.Target] = true
 				continue
 			}
 			mapped, ok := p.Sources[item.Source]

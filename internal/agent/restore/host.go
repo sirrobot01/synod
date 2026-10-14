@@ -66,12 +66,7 @@ func checkHost(ctx context.Context, api *client.Client, p *plan, replaced []stri
 		s := p.Definition.Services[p.Services[c.ID]]
 		needsHost = needsHost || host.UsesHostNetwork(c, p.Containers) || len(s.Devices) > 0
 		for _, m := range s.Volumes {
-			if m.Type == "bind" {
-				// Copied mounts already point into the new restore directory.
-				for _, original := range c.Mounts {
-					needsHost = needsHost || (original.Destination == m.Target && original.Source == m.Source)
-				}
-			}
+			needsHost = needsHost || (m.Type == "bind" && p.Attached[c.ID+":"+m.Target])
 		}
 	}
 	var view *host.Local
@@ -100,7 +95,7 @@ func checkHost(ctx context.Context, api *client.Client, p *plan, replaced []stri
 				if original.Destination != m.Target {
 					continue
 				}
-				if m.Type == "bind" && original.Source == m.Source {
+				if m.Type == "bind" && p.Attached[c.ID+":"+m.Target] {
 					if err := checkHostPath(view, required, m.Source, false); err != nil {
 						return err
 					}

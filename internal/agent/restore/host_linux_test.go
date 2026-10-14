@@ -105,7 +105,7 @@ func TestHostPreflightBeforeMutation(t *testing.T) {
 				c.Mounts = []container.MountPoint{{Type: "bind", Source: missing, Destination: "/required"}}
 				s.Volumes = []compose.Mount{{Type: "bind", Source: missing, Target: "/required"}}
 			}
-			p := &plan{Containers: []container.InspectResponse{c}, Services: map[string]string{"app": "app"}, Definition: &compose.Definition{Name: "test", Services: map[string]compose.Service{"app": s}}, Snapshot: backup.Snapshot{Host: []backup.HostRequirements{{ContainerID: "app", Paths: []backup.HostPath{required}}}}}
+			p := &plan{Containers: []container.InspectResponse{c}, Services: map[string]string{"app": "app"}, Definition: &compose.Definition{Name: "test", Services: map[string]compose.Service{"app": s}}, Snapshot: backup.Snapshot{Host: []backup.HostRequirements{{ContainerID: "app", Paths: []backup.HostPath{required}}}}, Attached: map[string]bool{"app:/required": true}}
 			_, _, err := findConflicts(t.Context(), api, p, false)
 			if failed, ok := errors.AsType[*failure](err); !ok || failed.Code != kind+"_unavailable" || failed.Resource != missing {
 				t.Fatal("missing requirement reached mutation:", err)

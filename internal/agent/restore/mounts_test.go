@@ -4,8 +4,10 @@ import (
 	"os"
 	"testing"
 
+	"github.com/moby/moby/api/types/container"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/inventory"
+	"github.com/sirrobot01/synod/internal/runtime/compose"
 	agentv1 "github.com/sirrobot01/synod/proto/agent/v1"
 )
 
@@ -52,5 +54,16 @@ func TestNestedMountsGoInsideTheirDeepestParent(t *testing.T) {
 	}
 	if _, _, ok := mountParent(p, saved, "/srv/other"); ok {
 		t.Fatal("a path that is not a nested mount was grafted")
+	}
+}
+
+// A restored app restores on another device into the same apps directory, so a copied
+// bind mount can keep its saved path. It is restore data, not a host requirement.
+func TestCopiedBindWithItsSavedPathNeedsNoHostRecord(t *testing.T) {
+	source := "/var/lib/synod/apps/web/project/html"
+	c := container.InspectResponse{ID: "app", HostConfig: &container.HostConfig{NetworkMode: "none"}, Mounts: []container.MountPoint{{Type: "bind", Source: source, Destination: "/html"}}}
+	p := &plan{Containers: []container.InspectResponse{c}, Services: map[string]string{"app": "app"}, Definition: &compose.Definition{Name: "web", Services: map[string]compose.Service{"app": {ContainerName: "app", NetworkMode: "none", Volumes: []compose.Mount{{Type: "bind", Source: source, Target: "/html"}}}}}}
+	if err := checkHost(t.Context(), nil, p, nil, nil); err != nil {
+		t.Fatalf("a copied bind needed a host record: %v", err)
 	}
 }
