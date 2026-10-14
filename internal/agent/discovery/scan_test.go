@@ -47,7 +47,7 @@ func TestScanGroupsProjectsAndKeepsDataOutOfReports(t *testing.T) {
 			}
 			c := container.InspectResponse{ID: id, Name: "/" + id, Image: "sha256:test", Config: &container.Config{Image: "nginx:stable", Env: []string{"PASSWORD=do-not-report"}}}
 			if id != "solo" {
-				c.Config.Labels = map[string]string{"com.docker.compose.project": "notes", "com.docker.compose.project.working_dir": project, "com.docker.compose.project.config_files": "compose.yaml", "com.docker.compose.service": id}
+				c.Config.Labels = map[string]string{"com.docker.compose.project": "notes", "com.docker.compose.project.working_dir": project, "com.docker.compose.project.config_files": "compose.yaml", "com.docker.compose.project.environment_file": os.DevNull, "com.docker.compose.service": id}
 			}
 			if id == "db" {
 				c.Config.Image = "registry.example:5000/team/postgres:18"
@@ -111,7 +111,7 @@ func TestScanGroupsProjectsAndKeepsDataOutOfReports(t *testing.T) {
 	if !envListed(report) {
 		t.Fatal("the project's .env file is not listed")
 	}
-	// An absent .env is not listed as an app path with an unknown size.
+	// An absent .env and the /dev/null env file of a restored app are not listed as app paths.
 	if err := os.Remove(filepath.Join(project, ".env")); err != nil {
 		t.Fatal(err)
 	}

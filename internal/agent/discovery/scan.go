@@ -142,7 +142,8 @@ func Scan(ctx context.Context, api *client.Client, filters client.Filters) (*age
 				app.Paths = append(app.Paths, &agentv1.DiscoveredPath{Source: file, Kind: "compose"})
 			}
 			for _, file := range strings.Split(labels["com.docker.compose.project.environment_file"], ",") {
-				if file != "" {
+				// Restore starts Compose with /dev/null as the env file, so the app's .env cannot change it.
+				if file != "" && file != os.DevNull {
 					if !filepath.IsAbs(file) && filepath.IsAbs(working) {
 						file = filepath.Join(working, file)
 					}
