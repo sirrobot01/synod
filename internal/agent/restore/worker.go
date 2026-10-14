@@ -394,6 +394,10 @@ func (w *Worker) openSnapshot(ctx context.Context, appID, snapshotID, destinatio
 			continue
 		}
 		r, err := repository.Open(ctx, location, credentials)
+		if errors.Is(err, repository.ErrUninitialized) {
+			opened = true
+			continue
+		}
 		if err != nil {
 			unavailable, code = true, "repository_open_failed"
 			continue

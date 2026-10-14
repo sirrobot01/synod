@@ -128,6 +128,9 @@ func (w *Worker) runProof(ctx context.Context, request proof.Request, result *pr
 			return &failure{Code: "destination_unavailable", Cause: err}
 		}
 		r, err := repository.Open(ctx, location, credentials)
+		if errors.Is(err, repository.ErrUninitialized) {
+			return &failure{Code: "repository_uninitialized", Cause: err}
+		}
 		if err != nil {
 			return &failure{Code: "repository_open_failed", Cause: err}
 		}

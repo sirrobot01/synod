@@ -60,7 +60,15 @@ func Open(ctx context.Context, location Location, credentials Credentials) (*Rep
 		return nil, &Error{Action: "open storage", Cause: errors.Join(err, ctx.Err())}
 	}
 	defer st.Close(context.WithoutCancel(ctx))
-	return open(ctx, st, credentials, "synod", nil)
+	r, err := open(ctx, st, credentials, "synod", nil)
+	// The first backup creates the repository. Before that, the storage holds no format blob.
+	// A missing directory stays an error, because it can be an unmounted disk.
+	if err != nil {
+		if _, metaErr := st.GetMetadata(ctx, format.KopiaRepositoryBlobID); errors.Is(metaErr, blob.ErrBlobNotFound) {
+			return nil, ErrUninitialized
+		}
+	}
+	return r, err
 }
 
 // open confines Kopia's connection file to a private temporary directory.
@@ -114,6 +122,7 @@ func (r *Repository) Close(ctx context.Context) error {
 	return nil
 }
 
+// ErrUninitialized reports storage that holds no repository yet. The first backup creates it.
 var ErrUninitialized = errors.New("repository is not initialized")
 
 // newRepositoryOptions selects ChaCha20-Poly1305. Arm devices without AES instructions encrypt

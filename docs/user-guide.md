@@ -301,6 +301,7 @@ Logs:
 | A device does not connect | Check its address, port 8444, clock, and agent log. |
 | `source_unavailable` | Run the agent as root. In Docker, mount the missing path. |
 | `repository_open_failed` | Check that the destination is online. Then back up again. |
+| `repository_uninitialized` | No backup has used this destination yet. The first backup creates its repository. |
 | `files_changed_during_copy` | Files changed during the copy and were saved as read. If the app needs an exact copy, use `synod protect APP --method stop`. |
 | `repository_installation_conflict` | The directory holds another installation's repository. Use an empty directory. |
 | `image_platform_unsupported` | Restore on a device with a supported architecture. |

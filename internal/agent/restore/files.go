@@ -175,6 +175,11 @@ func (w *Worker) snapshots(ctx context.Context, appID, destinationID uuid.UUID) 
 			continue
 		}
 		r, err := repository.Open(ctx, location, credentials)
+		if errors.Is(err, repository.ErrUninitialized) {
+			// No backup has created this repository yet, so it holds no snapshots.
+			opened = true
+			continue
+		}
 		if err != nil {
 			unavailable = true
 			continue

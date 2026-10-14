@@ -267,3 +267,25 @@ func TestLocalStorageOpensKopiaFilesystemRepositories(t *testing.T) {
 		t.Fatalf("Kopia filesystem storage cannot read a catalog written through local storage: %v", err)
 	}
 }
+
+// Before the first backup, a destination holds no repository. Open says so, and only then.
+func TestOpenReportsAnUninitializedRepository(t *testing.T) {
+	credentials := Credentials{Password: "private-uninitialized-password"}
+	empty := Location{Kind: "local", Path: t.TempDir()}
+	if _, err := Open(t.Context(), empty, credentials); !errors.Is(err, ErrUninitialized) {
+		t.Fatalf("empty directory: %v", err)
+	}
+	// A missing directory can be an unmounted disk, so it stays an open failure.
+	missing := Location{Kind: "local", Path: filepath.Join(t.TempDir(), "missing")}
+	if _, err := Open(t.Context(), missing, credentials); err == nil || errors.Is(err, ErrUninitialized) {
+		t.Fatalf("missing directory: %v", err)
+	}
+	r, err := Create(t.Context(), empty, credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close(t.Context())
+	if _, err := Open(t.Context(), empty, Credentials{Password: "a-different-private-password"}); err == nil || errors.Is(err, ErrUninitialized) {
+		t.Fatalf("wrong password: %v", err)
+	}
+}
