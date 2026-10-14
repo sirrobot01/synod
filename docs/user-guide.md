@@ -24,7 +24,7 @@ Open these ports on your private network:
 
 ## 1. Install
 
-On each device:
+On the controller device, and on each device where the agent runs as a systemd service:
 
 ```sh
 curl -fsSL https://synod.biodun.dev/install.sh | sh
@@ -52,15 +52,17 @@ Without this password, nobody can read your backups.
 
 ## 3. Join your devices
 
-On each Linux device with apps, join with a token:
+Run an agent on each Linux device with apps.
+Use the token from init for the first device.
+For each other device, run `synod node join-token` on the controller.
+Each token joins one device.
+
+To run the agent in Docker Compose, see [Run the agent in Docker](#run-the-agent-in-docker).
+To run it as a systemd service, install Synod on the device and join:
 
 ```sh
 synod agent join 'TOKEN'
 ```
-
-Use the token from init for the first device.
-For each other device, run `synod node join-token` on the controller.
-Each token joins one device.
 
 Then approve the devices on the controller:
 
@@ -68,8 +70,6 @@ Then approve the devices on the controller:
 synod node list
 synod node approve DEVICE
 ```
-
-To run the agent in a container, for example on Unraid or Synology, see [Run the agent in Docker](#run-the-agent-in-docker).
 
 ## 4. Sign in to the web UI
 
@@ -204,7 +204,7 @@ Do not run `server init` or `agent join` again.
 
 ## Run the agent in Docker
 
-Use the agent image on a device without systemd, such as Unraid or Synology.
+The agent image needs no Synod install on the device. It also works without systemd, for example on Unraid or Synology.
 Create `compose.yaml`:
 
 ```yaml

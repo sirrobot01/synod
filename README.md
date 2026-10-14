@@ -17,37 +17,50 @@ Synod backs up the Docker apps in your home lab and restores them on any of your
 
 ## Quick start
 
-Run these commands as root.
-
-1. Install Synod on each device:
+1. On one device, install Synod and create the controller as root:
 
    ```sh
    curl -fsSL https://synod.biodun.dev/install.sh | sh
-   ```
-
-2. On one device, create the controller:
-
-   ```sh
    synod server init
    ```
 
-   Save the recovery kit that it prints. Keep it away from your devices.
+   Save the recovery kit that init prints. Keep it away from your devices.
 
-3. On each Linux device with apps, join the agent with the token from init:
+2. On each Linux device with apps, start the agent with Docker Compose.
+   Use the join token from init for the first device. Run `synod node join-token` on the controller for each other device.
 
-   ```sh
-   synod agent join 'TOKEN'
+   ```yaml
+   services:
+     synod-agent:
+       image: ghcr.io/sirrobot01/synod:latest
+       container_name: synod-agent
+       restart: unless-stopped
+       privileged: true
+       pid: host
+       network_mode: host
+       environment:
+         SYNOD_JOIN_TOKEN: "TOKEN"
+       volumes:
+         - /var/run/docker.sock:/var/run/docker.sock
+         - /var/lib/docker:/var/lib/docker
+         - /var/lib/synod:/var/lib/synod
+         # Add each directory with app files, at the same path.
+         - /srv:/srv
    ```
 
-   A token joins one device. Run `synod node join-token` on the controller to get the next one.
+   ```sh
+   docker compose up -d
+   ```
 
-4. On the controller, create your account:
+   To run the agent as a systemd service instead, install Synod on the device and run `synod agent join 'TOKEN'` as root.
+
+3. On the controller, create your account:
 
    ```sh
    synod user create admin
    ```
 
-5. Open the address that init printed, for example `https://192.168.0.20:8443`. Then:
+4. Open the address that init printed, for example `https://192.168.0.20:8443`. Then:
    1. In **Devices**, approve your devices.
    2. In **Destinations**, add a destination on another device.
    3. In **Apps**, select **Protect all**.
