@@ -690,6 +690,8 @@ Synod writes `compose.json` from the saved container settings.
 The file keeps the project name, the service names, the container names, and the published ports.
 It uses the saved image ID and the target platform.
 Docker Compose then starts the project without a build or a pull.
+Compose uses the `project` directory as the project directory. A later restore of this app then keeps the same layout.
+Compose does not read the app's `.env` file, because `compose.json` holds every setting.
 Synod creates each missing network with its saved driver and options.
 It keeps a saved subnet only when a container uses a static address on that network.
 A container must run, or exit with code 0, three seconds after the start.

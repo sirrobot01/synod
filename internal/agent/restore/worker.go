@@ -205,7 +205,14 @@ func (w *Worker) run(ctx context.Context, request restore.Request, state *progre
 	if err := w.save(ctx, state); err != nil {
 		return err
 	}
-	if err := dockerCLI(ctx, api, "compose", "--project-name", p.Definition.Name, "--project-directory", directory, "--file", file, "up", "--detach", "--no-build", "--pull", "never"); err != nil {
+	// The project directory is the saved project, so a backup of the restored app records the
+	// same layout and a later restore does not nest it. compose.json holds every setting, so
+	// the app's own .env must not change it.
+	project := filepath.Join(directory, "project")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		return &failure{Code: "file_restore_failed", Resource: project, Cause: err}
+	}
+	if err := dockerCLI(ctx, api, "compose", "--project-name", p.Definition.Name, "--project-directory", project, "--env-file", os.DevNull, "--file", file, "up", "--detach", "--no-build", "--pull", "never"); err != nil {
 		return &failure{Code: "compose_start_failed", Resource: p.Definition.Name, Cause: err}
 	}
 	if err := checkStarted(ctx, api, p, request.ID); err != nil {

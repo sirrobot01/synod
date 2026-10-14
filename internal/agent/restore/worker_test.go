@@ -229,6 +229,12 @@ func TestRestorePlacesAnIncludedLargeMount(t *testing.T) {
 	if entries, err := os.ReadDir(w.Directory); err != nil || len(entries) != 0 {
 		t.Fatalf("the restore wrote into the agent state: %v %v", entries, err)
 	}
+	// Discovery reads the project directory from this label. The saved project keeps the
+	// layout of the next backup equal, so a restore of this app does not nest the project.
+	restored, err := api.ContainerInspect(t.Context(), f.name, client.ContainerInspectOptions{})
+	if err != nil || restored.Container.Config.Labels["com.docker.compose.project.working_dir"] != filepath.Join(w.Apps, f.name, "project") {
+		t.Fatalf("restored project directory label: %v %v", restored.Container.Config.Labels["com.docker.compose.project.working_dir"], err)
+	}
 	var output bytes.Buffer
 	if err := execCommand(t.Context(), api, f.name, []string{"cat", "/media/movie"}, nil, &output); err != nil || output.String() != "private-included-media" {
 		t.Fatalf("restored media = %q: %v", output.String(), err)
