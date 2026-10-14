@@ -10,8 +10,6 @@ Synod backs up the Docker apps in your home lab and restores them on any of your
 - Stores backups on another device, a local disk, SFTP, or S3.
 - Rebuilds everything from one backup and your recovery kit password.
 
-v0.1 is not released yet.
-
 ## Requirements
 
 - Linux devices (amd64 or arm64) with Docker Engine and the Docker Compose plugin.
