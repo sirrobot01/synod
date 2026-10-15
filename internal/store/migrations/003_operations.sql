@@ -11,6 +11,8 @@ CREATE TABLE operations (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     finished_at INTEGER,
+    -- removed_at hides a finished operation from the activity list. Protection status still reads it.
+    removed_at INTEGER CHECK (removed_at IS NULL OR finished_at IS NOT NULL),
     CHECK ((status IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)),
     CHECK ((status = 'failed') = (failure_code <> ''))
 );

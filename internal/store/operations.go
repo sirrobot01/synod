@@ -72,9 +72,27 @@ func (s *Store) GetOperation(ctx context.Context, id uuid.UUID) (operation.Opera
 	return op, nil
 }
 
-// ListOperations returns at most 100 recent operations, newest first.
-func (s *Store) ListOperations(ctx context.Context) ([]operation.Operation, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+operationColumns+` FROM operations ORDER BY created_at DESC,id LIMIT 100`)
+// OperationActive refuses to remove an operation that has not finished.
+const OperationActive ErrorCode = "operation_active"
+
+// ListOperations returns at most limit operations that activity still shows, newest first.
+// A nonzero before returns only operations older than that one, for the next page.
+func (s *Store) ListOperations(ctx context.Context, limit int, before uuid.UUID) ([]operation.Operation, error) {
+	if limit < 1 || limit > 200 {
+		return nil, &Error{Code: InvalidRequest}
+	}
+	query := `SELECT ` + operationColumns + ` FROM operations WHERE removed_at IS NULL`
+	args := []any{}
+	if before != uuid.Nil {
+		var created int64
+		if err := s.db.QueryRowContext(ctx, `SELECT created_at FROM operations WHERE id=?`, before).Scan(&created); err != nil {
+			return nil, storeError(err)
+		}
+		// The list orders by created_at descending, then by id, so the cursor follows that order.
+		query += ` AND (created_at<? OR (created_at=? AND id>?))`
+		args = append(args, created, created, before)
+	}
+	rows, err := s.db.QueryContext(ctx, query+` ORDER BY created_at DESC,id LIMIT ?`, append(args, limit)...)
 	if err != nil {
 		return nil, storeError(err)
 	}
@@ -91,6 +109,40 @@ func (s *Store) ListOperations(ctx context.Context) ([]operation.Operation, erro
 		return nil, storeError(err)
 	}
 	return ops, nil
+}
+
+// RemoveOperation hides one finished operation from the activity list.
+func (s *Store) RemoveOperation(ctx context.Context, id uuid.UUID) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE operations SET removed_at=coalesce(removed_at,?) WHERE id=? AND finished_at IS NOT NULL`, s.now().UnixMilli(), id)
+	if err != nil {
+		return storeError(err)
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return storeError(err)
+	} else if changed == 1 {
+		return nil
+	}
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM operations WHERE id=?)`, id).Scan(&exists); err != nil {
+		return storeError(err)
+	}
+	if !exists {
+		return &Error{Code: NotFound}
+	}
+	return &Error{Code: OperationActive}
+}
+
+// ClearOperations hides every finished operation from the activity list and returns how many it hid.
+func (s *Store) ClearOperations(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE operations SET removed_at=? WHERE finished_at IS NOT NULL AND removed_at IS NULL`, s.now().UnixMilli())
+	if err != nil {
+		return 0, storeError(err)
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, storeError(err)
+	}
+	return removed, nil
 }
 
 // TransitionOperation changes state only when the saved state matches from.

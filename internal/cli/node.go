@@ -33,6 +33,21 @@ func newNodeCommand(app *app) *cobra.Command {
 			}
 			return err
 		}}
-	group.AddCommand(list, approve, newJoinTokenCommand(app))
+	rename := &cobra.Command{Use: "rename NODE NAME", Short: "Rename a device; the agent's host name no longer replaces the name", Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := app.connect(cmd, nil); err != nil {
+				return err
+			}
+			node, err := app.api.ResolveNode(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			node, err = app.api.RenameNode(cmd.Context(), node.ID, args[1])
+			if err == nil {
+				app.result.Node = &node
+			}
+			return err
+		}}
+	group.AddCommand(list, approve, rename, newJoinTokenCommand(app))
 	return group
 }

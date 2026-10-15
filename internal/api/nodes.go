@@ -1,10 +1,12 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/sirrobot01/synod/internal/store"
 )
 
 func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
@@ -65,4 +67,28 @@ func (s *Server) nodeID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool
 		return uuid.Nil, false
 	}
 	return id, true
+}
+
+// renameNode gives a device a unique name. The agent's host name no longer replaces it.
+func (s *Server) renameNode(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.nodeID(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if !s.decodeJSON(w, r, &body) {
+		return
+	}
+	node, err := s.store.RenameNode(r.Context(), id, body.Name)
+	if failure, ok := errors.AsType[*store.Error](err); ok && failure.Code == store.InvalidRequest {
+		s.writeError(w, r, http.StatusBadRequest, "invalid_request", "Use 1 to 63 letters, digits, hyphens, underscores, or dots. Do not start with a hyphen.")
+		return
+	}
+	if err != nil {
+		s.storeError(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, node)
 }

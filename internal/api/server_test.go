@@ -146,7 +146,7 @@ func TestHTTPSNodes(t *testing.T) {
 		{"GET", "/v1/nodes/not-an-id", 400},
 		{"GET", "/v1/nodes/" + uuid.NewString(), 404},
 		{"GET", "/v1/unknown", 404},
-		{"PATCH", "/v1/nodes/" + node.String(), 405},
+		{"PUT", "/v1/nodes/" + node.String(), 405},
 		{"GET", "/v1/apps", 200},
 	} {
 		if got, data := send(test.method, test.path, token); got != test.status {

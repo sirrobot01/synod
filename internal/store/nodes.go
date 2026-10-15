@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -541,6 +542,45 @@ func (s *Store) ApproveNode(ctx context.Context, nodeID uuid.UUID, actorID, requ
 
 // NodeFactsUnavailable reports an approval before the agent ever connected.
 const NodeFactsUnavailable ErrorCode = "node_facts_unavailable"
+
+// NameTaken refuses a device name that another device has.
+const NameTaken ErrorCode = "name_taken"
+
+// validNodeName allows letters, digits, hyphen, underscore, and dot, as in host names.
+var validNodeName = regexp.MustCompile(`^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,62}$`)
+
+// RenameNode gives a device a name that no other device has. The agent's host name
+// fills an empty name only, so the new name stays after the agent reconnects.
+func (s *Store) RenameNode(ctx context.Context, nodeID uuid.UUID, name string) (Node, error) {
+	if nodeID == uuid.Nil || !validNodeName.MatchString(name) {
+		return Node{}, &Error{Code: InvalidRequest}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Node{}, storeError(err)
+	}
+	defer tx.Rollback()
+	var taken bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM nodes WHERE name=? AND id<>? AND revoked_at IS NULL)`, name, nodeID).Scan(&taken); err != nil {
+		return Node{}, storeError(err)
+	}
+	if taken {
+		return Node{}, &Error{Code: NameTaken}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET name=? WHERE id=? AND revoked_at IS NULL`, name, nodeID)
+	if err != nil {
+		return Node{}, storeError(err)
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return Node{}, storeError(err)
+	} else if changed == 0 {
+		return Node{}, &Error{Code: NotFound}
+	}
+	if err := tx.Commit(); err != nil {
+		return Node{}, storeError(err)
+	}
+	return s.GetNode(ctx, nodeID)
+}
 
 // ResolveNodeName finds the one node with a name. Two nodes with one name are ambiguous.
 func (s *Store) ResolveNodeName(ctx context.Context, name string) (uuid.UUID, error) {

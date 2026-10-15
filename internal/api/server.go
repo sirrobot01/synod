@@ -144,9 +144,12 @@ func NewServer(metadata *store.Store, admin *auth.AdminToken, installationID uui
 				admin.Put("/protection", server.updateProtection)
 				admin.Get("/operations", server.listOperations)
 				admin.Get("/operations/{id}", server.getOperation)
+				admin.Delete("/operations/{id}", server.removeOperation)
+				admin.Post("/operations/actions/clear", server.clearOperations)
 				admin.Get("/nodes", server.listNodes)
 				admin.Get("/nodes/by-name/{name}", server.getNodeByName)
 				admin.Get("/nodes/{id}", server.getNode)
+				admin.Patch("/nodes/{id}", server.renameNode)
 				admin.Post("/nodes/{id}/actions/approve", server.approveNode)
 				admin.Get("/installation", server.getInstallation)
 				admin.Post("/enrollment-tokens", server.registerEnrollmentToken)
@@ -237,6 +240,10 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 			status, message = http.StatusConflict, "The protection plan changed. Read the plan and confirm its current revision."
 		case store.OperationConflict:
 			status, message = http.StatusConflict, "The operation state or device approval conflicts with this request. Read the current state."
+		case store.OperationActive:
+			status, message = http.StatusConflict, "The operation has not finished. Remove it from activity after it finishes."
+		case store.NameTaken:
+			status, message = http.StatusConflict, "Another device has this name. Choose another name."
 		case store.NodeFactsUnavailable:
 			status, message = http.StatusConflict, "The node has not connected yet. Start its agent, then approve it."
 		}

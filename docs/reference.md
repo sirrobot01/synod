@@ -18,6 +18,7 @@ For setup steps, read the [user guide](user-guide.md).
 - [Notifications](#notifications)
 - [Recover after controller loss](#recover-after-controller-loss)
 - [Repository](#repository)
+- [Activity](#activity)
 - [Accounts and API](#accounts-and-api)
 - [Logs](#logs)
 - [Limits](#limits)
@@ -186,6 +187,10 @@ Set `address` in `controller.json`, or `SYNOD_ADDRESS`, when devices reach the c
 
 A device must connect and report its facts before you can approve it.
 A token from `node join-token` joins one device. It is valid for 24 hours. Use `--ttl` to change this, up to 168 hours.
+
+A device takes its host name when it first connects. An agent in a container on a bridge network reports the container ID.
+To change the name, run `synod node rename DEVICE NAME`, or use **Rename** in the web UI.
+A name is unique and has 1 to 63 letters, digits, hyphens, underscores, or dots. The agent does not change it again.
 
 ### Rejoin and renew
 
@@ -569,6 +574,19 @@ One device runs maintenance for each destination:
 
 - For `device` and `local`, the device that holds the repository.
 - For S3 and SFTP, the first approved device that connected in the last seven days. Another device takes over after seven days without a connection.
+
+## Activity
+
+```sh
+synod operation list --limit 50
+synod operation list --limit 50 --before OPERATION_ID
+synod operation remove OPERATION_ID
+synod operation clear
+```
+
+`list` shows the newest operations first. `--before` shows the next, older page.
+`remove` and `clear` take finished operations out of the activity list.
+They do not delete the records: app status still uses them for the last good backup and the last restore test.
 
 ## Accounts and API
 

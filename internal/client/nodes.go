@@ -50,3 +50,12 @@ func (c *Client) ApproveNode(ctx context.Context, id uuid.UUID) (Node, error) {
 	}
 	return node, err
 }
+
+// RenameNode gives a device a unique name.
+func (c *Client) RenameNode(ctx context.Context, id uuid.UUID, name string) (Node, error) {
+	var node Node
+	err := c.request(ctx, http.MethodPatch, "/v1/nodes/"+id.String(), struct {
+		Name string `json:"name"`
+	}{name}, "", http.StatusOK, &node)
+	return node, err
+}
