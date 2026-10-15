@@ -189,7 +189,7 @@ A device must connect and report its facts before you can approve it.
 A token from `node join-token` joins one device. It is valid for 24 hours. Use `--ttl` to change this, up to 168 hours.
 
 A device takes its host name when it first connects. An agent in a container on a bridge network reports the container ID.
-To change the name, run `synod node rename DEVICE NAME`, or use **Rename** in the web UI.
+To change the name, run `synod node rename DEVICE NAME`, or select **Rename** in **Devices** in the web UI.
 A name is unique and has 1 to 63 letters, digits, hyphens, underscores, or dots. The agent does not change it again.
 
 ### Rejoin and renew
@@ -590,6 +590,9 @@ synod operation clear
 `remove` and `clear` take finished operations out of the activity list.
 They do not delete the records: app status still uses them for the last good backup and the last restore test.
 
+In the web UI, **Activity** shows 50 operations on each page. Select a row to open its record.
+To remove one finished operation, select the remove button on its row. To remove all finished operations, select **Clear finished**.
+
 ## Accounts and API
 
 ### First account
@@ -611,6 +614,7 @@ synod token list
 synod token revoke TOKEN_ID
 ```
 
+In the web UI, use **Settings**. The **Accounts** tab manages accounts. The **API tokens** tab creates and revokes tokens.
 A token secret is shown once.
 Keep the administrator token from init private. Use it to recover access.
 For a browser on another address, set `--public-origin` on the controller.
