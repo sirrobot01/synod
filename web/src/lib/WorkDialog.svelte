@@ -2,7 +2,7 @@
   import { untrack } from "svelte";
   import { api, detail, uncertain, type AppPlan, type Destination, type Node, type WorkSubmission, type Method } from "./api";
   import { errorView, type APIError } from "./state";
-  import { online } from "./model";
+  import { label, online } from "./model";
   import Dialog from "./ui/Dialog.svelte";
   import ErrorPanel from "./ErrorPanel.svelte";
 
@@ -72,7 +72,7 @@
         <label class="field">Run on
           <select required bind:value={nodeID}>
             <option value="" disabled>Choose a device</option>
-            {#each allowedNodes as node (node.id)}<option value={node.id}>{node.name || node.id} ({node.architecture || "unknown"}){online(node, now) ? "" : ", offline"}</option>{/each}
+            {#each allowedNodes as node (node.id)}<option value={node.id}>{label(node)} ({node.architecture || "unknown"}){online(node, now) ? "" : ", offline"}</option>{/each}
           </select>
         </label>
       {/if}

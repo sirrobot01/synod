@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api, detail, uncertain, type Destination, type DestinationEntry, type Node } from "./api";
   import { errorView, type APIError } from "./state";
-  import { storageTypes } from "./model";
+  import { label, storageTypes } from "./model";
   import Dialog from "./ui/Dialog.svelte";
   import ErrorPanel from "./ErrorPanel.svelte";
 
@@ -63,7 +63,7 @@
           <label class="field">{kind === "device" ? "Device that stores the snapshots" : "Device with the disk"}
             <select required bind:value={nodeID}>
               <option value="" disabled>{approved.length ? "Choose a device" : "No approved device"}</option>
-              {#each approved as node (node.id)}<option value={node.id}>{node.name || node.id} · {node.architecture}</option>{/each}
+              {#each approved as node (node.id)}<option value={node.id}>{label(node)} ({node.architecture})</option>{/each}
             </select>
           </label>
         {/if}
@@ -84,13 +84,13 @@
         {#if kind !== "s3"}
           <label class="field">Path<input class="mono" required bind:value={directory} placeholder="/srv/synod-backups" pattern="/.*" title="An absolute path, such as /srv/synod-backups" /></label>
         {/if}
-        <label class="field" class:full={kind !== "device" && kind !== "local" && kind !== "sftp"}>Name<input required maxlength="128" bind:value={name} placeholder={owner ? `${owner.name}-disk` : kind === "s3" ? "b2-homelab" : "nas"} /></label>
+        <label class="field" class:full={kind !== "device" && kind !== "local" && kind !== "sftp"}>Name<input required maxlength="128" bind:value={name} placeholder={owner ? `${label(owner)}-disk` : kind === "s3" ? "b2-homelab" : "nas"} /></label>
         {#if kind === "sftp"}
           <label class="field full">known_hosts line<textarea required bind:value={knownHosts} placeholder="nas.home.arpa ssh-ed25519 AAAA…"></textarea></label>
           <label class="field full">SSH private key<textarea required bind:value={sshKey} spellcheck="false"></textarea></label>
         {/if}
       </div>
-      {#if kind === "local"}<p class="callout attn">Only {owner?.name || "this device"} can read or write this storage. It is lost with that device.</p>{/if}
+      {#if kind === "local"}<p class="callout attn">Only {owner ? label(owner) : "this device"} can read or write this storage. It is lost with that device.</p>{/if}
       <details>
         <summary>Custom repository password</summary>
         <div class="stack inset">

@@ -74,11 +74,19 @@ export function deviceState(node: Node, now: number): { label: string; mark: Mar
   return { label, mark: { glyph: "–", shape: "circle-open", tone: "neutral", label } };
 }
 
+/** label names a device by its name. A device without a name shows the start of its ID. */
+export function label(node: Pick<Node, "id" | "name">): string {
+  return node.name || node.id.slice(0, 8);
+}
+
 export function nodeName(nodes: Node[], id: string | undefined): string {
   if (!id) return "";
   const node = nodes.find((n) => n.id === id);
-  return node?.name || node?.id || "unknown device";
+  return node ? label(node) : id.slice(0, 8);
 }
+
+/** A device name: 1 to 63 letters, digits, hyphens, underscores, or dots, not starting with a hyphen. */
+export const deviceNamePattern = "[A-Za-z0-9_.][A-Za-z0-9_.\\-]{0,62}";
 
 // Apps ------------------------------------------------------------------
 
@@ -313,12 +321,12 @@ export function problems(plan: ProtectionPlan | null, nodes: Node[], listing: De
       list.push({ key: `drill-${item.app.id}`, tone: "fail", subject: label, condition: item.last_drill.result.failure_code ?? "restore test failed", code: !!item.last_drill.result.failure_code, detail: `Restore test failed. ${failureText(item.last_drill.result.failure_code)}`.trim(), link: { label: "Open test", screen: "operation", id: item.last_drill.id } });
     }
     if (item.only_on_source) {
-      list.push({ key: `source-${item.app.id}`, tone: "attn", subject: label, condition: "single device", code: false, detail: `Every snapshot is on ${item.app.node_name}, the host of the app.`, link: { label: "Storage", screen: "storage", id: "" } });
+      list.push({ key: `source-${item.app.id}`, tone: "attn", subject: label, condition: "single device", code: false, detail: `Every snapshot is on ${nodeName(nodes, item.app.node_id)}, the host of the app.`, link: { label: "Storage", screen: "storage", id: "" } });
     }
   }
   for (const node of nodes) {
     if (!node.approved_at) {
-      list.push({ key: `node-${node.id}`, tone: "attn", subject: node.name || node.id, condition: "not approved", code: false, detail: node.architecture ? `${node.architecture}, Docker ${node.runtime_version || "unknown"}.` : "Waiting for the first report.", link: { label: "Review", screen: "devices", id: node.id } });
+      list.push({ key: `node-${node.id}`, tone: "attn", subject: label(node), condition: "not approved", code: false, detail: node.architecture ? `${node.architecture}, Docker ${node.runtime_version || "unknown"}.` : "Waiting for the first report.", link: { label: "Review", screen: "devices", id: node.id } });
       continue;
     }
     if (online(node, now) || !valid(node.last_seen_at)) continue;
@@ -327,7 +335,7 @@ export function problems(plan: ProtectionPlan | null, nodes: Node[], listing: De
     const oldest = copies.filter((c) => c.at).sort((a, b) => Date.parse(a.at!) - Date.parse(b.at!))[0];
     const last = oldest ? short(oldest.at, now) : "none";
     const detail = mine.length === 0 ? "No scheduled apps." : mine.length === 1 ? `${copies[0]!.name} last snapshot ${last}.` : `${mine.length} apps, oldest last snapshot ${last}.`;
-    list.push({ key: `node-${node.id}`, tone: "neutral", subject: node.name, condition: `offline ${span(now - Date.parse(node.last_seen_at!))}`, code: false, detail, link: { label: "Open", screen: "devices", id: node.id } });
+    list.push({ key: `node-${node.id}`, tone: "neutral", subject: label(node), condition: `offline ${span(now - Date.parse(node.last_seen_at!))}`, code: false, detail, link: { label: "Open", screen: "devices", id: node.id } });
   }
   for (const check of listing?.checks ?? []) {
     if (check.state !== "failed") continue;

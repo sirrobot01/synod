@@ -3,7 +3,7 @@
   import { api, detail, uncertain, type AppPlan, type CopySettings, type Destination, type Node, type ProtectionPlan, type ProtectionUpdate } from "./api";
   import { errorView, type APIError } from "./state";
   import { bytes } from "./format";
-  import { paths } from "./model";
+  import { nodeName, paths } from "./model";
   import Dialog from "./ui/Dialog.svelte";
   import ErrorPanel from "./ErrorPanel.svelte";
   import AppPaths from "./AppPaths.svelte";
@@ -87,6 +87,7 @@
           <legend class="sr">Apps</legend>
           <div class="scroll list">
             <table>
+              <colgroup><col class="c-act" /><col /><col class="c-device" /><col /><col class="c-num" /></colgroup>
               <thead><tr><th><span class="sr">Select</span></th><th>App</th><th>Device</th><th>Paths</th><th class="num">Size</th></tr></thead>
               <tbody>
                 {#each apps as item (item.app.id)}
@@ -100,7 +101,7 @@
                       {/if}
                     </td>
                     <td>{item.app.definition.name}</td>
-                    <td>{item.app.node_name}</td>
+                    <td>{nodeName(nodes, item.app.node_id)}</td>
                     <td class="dim">{item.enabled ? "scheduled" : ready ? counts(item) : "device not approved"}</td>
                     <td class="num mono">{size(item)}</td>
                   </tr>
@@ -137,8 +138,8 @@
     <div class="review">
       {#each picked as item (item.app.id)}
         <section class="stack">
-          <h3>{item.app.definition.name} <span class="dim">on {item.app.node_name}</span></h3>
-          {#if settings.destinations.length > 0 && settings.destinations.every((id) => destinations.some((d) => d.id === id && d.node_id === item.app.node_id))}<p class="callout attn">Every snapshot would be on {item.app.node_name}, the host of the app.</p>{/if}
+          <h3>{item.app.definition.name} <span class="dim">on {nodeName(nodes, item.app.node_id)}</span></h3>
+          {#if settings.destinations.length > 0 && settings.destinations.every((id) => destinations.some((d) => d.id === id && d.node_id === item.app.node_id))}<p class="callout attn">Every snapshot would be on {nodeName(nodes, item.app.node_id)}, the host of the app.</p>{/if}
           <AppPaths app={item.app} />
         </section>
       {/each}

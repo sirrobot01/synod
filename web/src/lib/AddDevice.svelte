@@ -3,6 +3,7 @@
   import Dialog from "./ui/Dialog.svelte";
   import ErrorPanel from "./ErrorPanel.svelte";
   import Mark from "./ui/Mark.svelte";
+  import Icon from "./ui/Icon.svelte";
   import { api, detail, type Node } from "./api";
   import { encodeJoinToken, newSecret } from "./jointoken";
   import { errorView, type APIError } from "./state";
@@ -121,7 +122,7 @@
         </ol>
         <pre class="mono snippet">{snippet}</pre>
         <div class="row">
-          <button type="button" onclick={copy}>{copied === tab ? "Copied" : tab === "compose" ? "Copy compose.yaml" : "Copy commands"}</button>
+          <button type="button" onclick={copy}><Icon name={copied === tab ? "check" : "copy"} />{copied === tab ? "Copied" : tab === "compose" ? "Copy compose.yaml" : "Copy commands"}</button>
           <span class="hint">The token joins one device and expires in 24 h.</span>
         </div>
         <p class="waiting">Waiting for the device to connect</p>

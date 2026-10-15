@@ -196,6 +196,7 @@ button.link {
   text-underline-offset: 2px;
   font-weight: 400;
   font-size: inherit;
+  font-family: inherit;
   white-space: normal;
   text-align: left;
   display: inline;
@@ -483,7 +484,8 @@ table {
   text-align: left;
 }
 th {
-  padding: 8px 12px;
+  height: 36px;
+  padding: 0 12px;
   background: var(--head);
   color: var(--ink-dim);
   font: 500 11px/1.2 "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -492,10 +494,18 @@ th {
   white-space: nowrap;
   border-bottom: 1px solid var(--line);
 }
+/* Every row is at least 40px high and every cell has the same padding, so rows line up across tables. */
 td {
-  padding: 9px 12px;
+  height: 40px;
+  padding: 8px 12px;
   border-top: 1px solid var(--line);
-  vertical-align: top;
+  vertical-align: middle;
+}
+td small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ink-dim);
 }
 tbody tr:first-child td {
   border-top: 0;
@@ -513,6 +523,69 @@ td.end,
 th.end {
   text-align: right;
 }
+/* Column widths shared by every table, so the same kind of value lines up on every screen. */
+col.c-time { width: 150px; }
+col.c-kind { width: 120px; }
+col.c-result { width: 200px; }
+col.c-num { width: 96px; }
+col.c-by { width: 110px; }
+col.c-act { width: 1%; }
+col.c-id { width: 100px; }
+col.c-device { width: 140px; }
+col.c-status { width: 230px; }
+col.c-reason { width: 34%; }
+col.c-state { width: 150px; }
+td.end,
+th.end {
+  white-space: nowrap;
+}
+/* Row actions sit at the right edge, in a column only as wide as they need. */
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+td.end {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+/* A row that opens a record shows that it is a target. */
+tr.link {
+  cursor: pointer;
+}
+tr.link:hover td {
+  background: var(--head);
+}
+/* A long name stays on one line and shows in full on hover. */
+.truncate {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A search or filter field carries its icon inside the field. */
+label.search,
+label.select {
+  position: relative;
+  display: block;
+}
+label.search > .icon,
+label.select > .icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--ink-dim);
+  pointer-events: none;
+}
+label.search input,
+label.select select {
+  padding-left: 32px;
+}
+
 pre {
   margin: 0;
   overflow-x: auto;

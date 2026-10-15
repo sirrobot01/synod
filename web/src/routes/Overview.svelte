@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, detail, type DestinationList, type Node, type Operation, type ProtectionPlan } from "../lib/api";
-  import { errorView, type APIError } from "../lib/state";
+  import { errorView, operationMark, type APIError } from "../lib/state";
   import { bytes } from "../lib/format";
-  import { activity, cell, deviceState, nodeName, problemMark, problems, setup, short, summary, tested, took, when, type Step } from "../lib/model";
+  import { activity, cell, deviceState, label, nodeName, problemMark, problems, setup, short, summary, tested, took, when, type Step } from "../lib/model";
   import Link from "../lib/ui/Link.svelte";
+  import { go } from "../lib/router.svelte";
   import Mark from "../lib/ui/Mark.svelte";
+  import Icon from "../lib/ui/Icon.svelte";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
   import AddDevice from "../lib/AddDevice.svelte";
   import StorageDialog from "../lib/StorageDialog.svelte";
@@ -24,7 +26,7 @@
   async function read() {
     if (busy) return;
     busy = true;
-    const [p, d, n, o] = await Promise.allSettled([api.protection(), api.destinations(), api.nodes(), api.operations()]);
+    const [p, d, n, o] = await Promise.allSettled([api.protection(), api.destinations(), api.nodes(), api.operations({ limit: 8 })]);
     if (p.status === "fulfilled") plan = p.value;
     if (d.status === "fulfilled") listing = d.value;
     if (n.status === "fulfilled") nodes = n.value;
@@ -73,9 +75,9 @@
       {/if}
     </div>
     <div class="actions">
-      <button type="button" onclick={() => (modal = "device")}>Add device</button>
-      <button type="button" onclick={() => (modal = "storage")} disabled={!listing}>Add storage</button>
-      <button type="button" class="primary" onclick={() => (modal = "schedule")} disabled={!plan || !destinations.length}>Schedule backups</button>
+      <button type="button" onclick={() => (modal = "device")}><Icon name="plus" />Add device</button>
+      <button type="button" onclick={() => (modal = "storage")} disabled={!listing}><Icon name="plus" />Add storage</button>
+      <button type="button" class="primary" onclick={() => (modal = "schedule")} disabled={!plan || !destinations.length} title={plan && !destinations.length ? "Add storage first" : undefined}>Schedule backups</button>
     </div>
   </header>
 
@@ -138,7 +140,7 @@
             <tbody>
               <tr class="group">
                 <th scope="rowgroup" colspan={destinations.length + 2}>
-                  <Link screen="devices" id={group.node.id}>{group.node.name || group.node.id}</Link>
+                  <Link screen="devices" id={group.node.id}>{label(group.node)}</Link>
                   {#if group.state.label !== "Online"}<span class="state"><Mark mark={group.state.mark} shapeOnly />{group.state.label.toLowerCase()}</span>{/if}
                 </th>
               </tr>
@@ -176,16 +178,19 @@
       {#if operations.length}
         <div class="scroll">
           <table class="nowrap">
+            <colgroup><col class="c-time" /><col class="c-kind" /><col /><col /><col class="c-result" /><col class="c-num" /><col class="c-num" /></colgroup>
             <thead><tr><th>Time</th><th>Kind</th><th>App</th><th>Target</th><th>Result</th><th class="num">Took</th><th class="num">Size</th></tr></thead>
             <tbody>
               {#each operations.slice(0, 8) as op (op.id)}
                 {@const row = activity(op, names)}
-                <tr>
-                  <td class="mono">{short(op.finished_at ?? op.created_at, now)}</td>
-                  <td><Link screen="operation" id={op.id}>{row.kind}</Link></td>
-                  <td>{row.subject}</td>
-                  <td>{row.target}</td>
-                  <td class="result {row.tone}">{row.result}</td>
+                <!-- The first cell holds the real link for the keyboard. The row click is a larger target for the pointer. -->
+                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+                <tr class="link" onclick={(event) => { if (!(event.target as HTMLElement).closest("a, button")) go("operation", op.id); }}>
+                  <td class="mono"><Link screen="operation" id={op.id} label={`${row.kind}: ${row.subject}`}>{short(op.finished_at ?? op.created_at, now)}</Link></td>
+                  <td>{row.kind}</td>
+                  <td class="truncate" title={row.subject}>{row.subject}</td>
+                  <td class="truncate" title={row.target}>{row.target}</td>
+                  <td><span class="result {row.tone}"><Mark mark={operationMark(op.status)} shapeOnly />{row.result}</span></td>
                   <td class="num mono">{row.took !== undefined ? took(row.took) : ""}</td>
                   <td class="num mono">{op.result?.file_bytes !== undefined ? bytes(op.result.file_bytes) : ""}</td>
                 </tr>
@@ -359,6 +364,11 @@
     gap: 8px;
     color: var(--ink);
     text-decoration: none;
+  }
+  .result {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
   }
   .result.ok { color: var(--ok); }
   .result.fail { color: var(--fail); }

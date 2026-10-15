@@ -3,10 +3,11 @@
   import { api, detail, uncertain, type AppPlan, type Destination, type Node, type Operation, type Snapshot, type WorkSubmission } from "./api";
   import { errorView, finished, operationMark, type APIError } from "./state";
   import { bytes } from "./format";
-  import { failureText, targets, when } from "./model";
+  import { failureText, label, nodeName, targets, when } from "./model";
   import { path } from "./router.svelte";
   import Dialog from "./ui/Dialog.svelte";
   import Mark from "./ui/Mark.svelte";
+  import Icon from "./ui/Icon.svelte";
   import ErrorPanel from "./ErrorPanel.svelte";
 
   // A guided restore: pick a snapshot, pick a device, confirm, then follow the work.
@@ -101,7 +102,7 @@
         {#each copies as c (c.id)}
           <button type="button" class="pick" aria-pressed={c.id === copyID} onclick={() => (copyID = c.id)}>
             <span class="row"><span class="mono">{when(c.completed_at, now)}</span><span class="mono dim">{bytes(c.file_bytes)}</span></span>
-            <span class="row small"><span class="dim">{storageNames(c.destination_ids)}</span><span class="mono dim">{c.source_node_name} {c.architecture}</span></span>
+            <span class="row small"><span class="dim">{storageNames(c.destination_ids)}</span><span class="mono dim">{nodes.some((n) => n.id === c.source_node_id) ? nodeName(nodes, c.source_node_id) : c.source_node_name} {c.architecture}</span></span>
             {#if c.limits?.length}<span class="code">{c.limits.join(", ")}</span>{/if}
           </button>
         {/each}
@@ -112,7 +113,7 @@
     <div class="choices" role="group" aria-label="Devices">
       {#each choices as c (c.node.id)}
         <button type="button" class="pick" aria-pressed={c.node.id === nodeID} disabled={c.disabled} onclick={() => (nodeID = c.node.id)}>
-          <span class="row"><strong>{c.node.name || c.node.id}</strong><span class="mono dim">{c.node.architecture || "unknown"}</span></span>
+          <span class="row"><strong>{label(c.node)}</strong><span class="mono dim">{c.node.architecture || "unknown"}</span></span>
           <span class="note small">{c.note}</span>
         </button>
       {:else}
@@ -123,7 +124,7 @@
     <dl class="facts">
       <dt>Snapshot</dt><dd class="mono">{when(copy.completed_at, now)}</dd>
       <dt>From</dt><dd>{storageNames([choice.destinationID])}</dd>
-      <dt>To</dt><dd>{choice.node.name} <span class="mono dim">{choice.node.architecture}</span></dd>
+      <dt>To</dt><dd>{label(choice.node)} <span class="mono dim">{choice.node.architecture}</span></dd>
     </dl>
     <ol class="plan">
       <li>Preflight: ports, container names, images.</li>
@@ -140,7 +141,7 @@
     {/if}
     {#if choice.same}
       <div class="callout danger stack">
-        <p>Replaces the running {name} on {choice.node.name}. If the safety snapshot fails, nothing changes.</p>
+        <p>Replaces the running {name} on {label(choice.node)}. If the safety snapshot fails, nothing changes.</p>
         <label class="field">Type {name} to confirm<input class="mono" autocomplete="off" bind:value={confirmation} /></label>
       </div>
     {/if}
@@ -151,7 +152,7 @@
       <Mark {mark} shapeOnly />
       <div class="stack tight">
         {#if operation.status === "succeeded"}
-          <strong>{name} restored on {nodes.find((n) => n.id === operation!.node_id)?.name ?? "the device"}</strong>
+          <strong>{name} restored on {nodeName(nodes, operation.node_id)}</strong>
           {#if operation.result?.project_directory}<p class="mono">{operation.result.project_directory}</p>{/if}
         {:else if operation.status === "failed"}
           <strong>Restore failed</strong>
@@ -177,8 +178,8 @@
     {#if step === 4}
       <button type="button" class="primary" onclick={onClose}>Close</button>
     {:else}
-      <button type="button" class="ghost" disabled={busy || (step > 1 && submitted !== null)} onclick={() => (step === 1 ? onClose() : (step -= 1))}>{step === 1 ? "Cancel" : "Back"}</button>
-      <button type="button" class={step === 3 && choice?.same ? "destructive" : "primary"} disabled={busy || !ready} onclick={next}>{busy ? "Starting" : step < 3 ? "Next" : submitted ? "Retry same request" : `Restore ${name} on ${choice?.node.name ?? "device"}`}</button>
+      <button type="button" class="ghost" disabled={busy || (step > 1 && submitted !== null)} onclick={() => (step === 1 ? onClose() : (step -= 1))}>{#if step > 1}<Icon name="left" />{/if}{step === 1 ? "Cancel" : "Back"}</button>
+      <button type="button" class={step === 3 && choice?.same ? "destructive" : "primary"} disabled={busy || !ready} onclick={next}>{#if step === 3}<Icon name="restore" />{/if}{busy ? "Starting" : step < 3 ? "Next" : submitted ? "Retry same request" : `Restore ${name} on ${choice ? label(choice.node) : "device"}`}{#if step < 3}<Icon name="right" />{/if}</button>
     {/if}
   {/snippet}
 </Dialog>

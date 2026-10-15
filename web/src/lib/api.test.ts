@@ -29,3 +29,19 @@ it("normalizes a fresh protection plan before it reaches a form", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ revision: 1, auto_protect: false, defaults: { destinations: null, method: "auto", at: "03:00", time_zone: "UTC", retention: { daily: 7, weekly: 4, monthly: 6 } }, apps: [] }))));
   expect((await api.protection()).defaults.destinations).toEqual([]);
 });
+
+it("pages operations and sends removals and renames to their routes", async () => {
+  const { api } = await import("./api");
+  const fetch = vi.fn().mockImplementation(() => Promise.resolve(new Response("[]")));
+  vi.stubGlobal("fetch", fetch);
+  await api.operations({ limit: 51, before: "op 1" });
+  expect(fetch.mock.calls[0]?.[0]).toBe("/v1/operations?limit=51&before=op+1");
+  await api.operations();
+  expect(fetch.mock.calls[1]?.[0]).toBe("/v1/operations");
+  fetch.mockImplementation(() => Promise.resolve(new Response(null, { status: 204 })));
+  await api.removeOperation("op1");
+  expect(fetch.mock.calls[2]?.slice(0, 2)).toEqual(["/v1/operations/op1", expect.objectContaining({ method: "DELETE" })]);
+  fetch.mockImplementation(() => Promise.resolve(new Response('{"id":"n1","name":"odin"}')));
+  await api.renameNode("n1", "odin");
+  expect(fetch.mock.calls[3]?.[1]).toEqual(expect.objectContaining({ method: "PATCH", body: '{"name":"odin"}' }));
+});

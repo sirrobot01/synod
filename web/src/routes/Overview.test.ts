@@ -42,7 +42,8 @@ it("lists what needs action with its code, and recent runs as rows", async () =>
   expect(attention.getByText("drill_container_stopped")).toBeTruthy();
   expect(attention.getByText("app_consistency_unverified")).toBeTruthy();
   const activity = section("Activity");
-  expect(activity.getByRole("link", { name: "backup" }).getAttribute("href")).toBe("/activity/op1");
+  expect(activity.getByRole("link", { name: "backup: notes" }).getAttribute("href")).toBe("/activity/op1");
+  expect(api.operations).toHaveBeenCalledWith({ limit: 8 });
   expect(activity.getByText("41s")).toBeTruthy();
 });
 it("shows restorable apps and the newest snapshot in the header line", async () => {

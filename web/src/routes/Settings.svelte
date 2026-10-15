@@ -6,6 +6,9 @@
   import { when } from "../lib/model";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
   import Notifications from "../lib/Notifications.svelte";
+  import Icon from "../lib/ui/Icon.svelte";
+  import IconButton from "../lib/ui/IconButton.svelte";
+  import { toast } from "../lib/toast.svelte";
 
   let { session, tab = "general", theme = "dark", onTheme = () => {} }: { session: Session; tab?: string; theme?: "dark" | "light"; onTheme?: () => void } = $props();
 
@@ -13,6 +16,7 @@
     { id: "general", label: "General" },
     { id: "notifications", label: "Notifications" },
     { id: "accounts", label: "Accounts" },
+    { id: "api-tokens", label: "API tokens" },
     { id: "recovery-kit", label: "Recovery kit" },
   ];
   let current = $derived(tabs.some((t) => t.id === tab) ? tab : "general");
@@ -178,7 +182,7 @@
         <dt>Version</dt><dd class="mono">{installation?.version ?? ""}</dd>
         <dt>Controller address</dt><dd class="mono">{installation?.join_address ?? ""}</dd>
         <dt>API CA fingerprint</dt><dd class="mono">{installation?.api_ca_fingerprint ?? ""}</dd>
-        <dt>Theme</dt><dd><span class="segmented" role="group" aria-label="Theme"><button type="button" class="small" aria-pressed={theme === "dark"} onclick={() => theme !== "dark" && onTheme()}>Dark</button><button type="button" class="small" aria-pressed={theme === "light"} onclick={() => theme !== "light" && onTheme()}>Light</button></span></dd>
+        <dt>Theme</dt><dd><span class="segmented" role="group" aria-label="Theme"><button type="button" class="small" aria-pressed={theme === "dark"} onclick={() => theme !== "dark" && onTheme()}><Icon name="moon" />Dark</button><button type="button" class="small" aria-pressed={theme === "light"} onclick={() => theme !== "light" && onTheme()}><Icon name="sun" />Light</button></span></dd>
       </dl>
     {:else if current === "notifications"}
       <Notifications />
@@ -212,7 +216,7 @@
           <input id="new-account-password" type="password" bind:value={newPassword} autocomplete="new-password" required />
           <p class="hint">1 to 64 of a-z, 0-9, hyphen, underscore, dot.</p>
           {#if created}<p class="done" role="status">Created. User ID <span class="mono">{created}</span></p>{/if}
-          <button type="submit" disabled={accountBusy}>{accountBusy ? "Saving" : "Create operator"}</button>
+          <button type="submit" disabled={accountBusy}><Icon name="plus" />{accountBusy ? "Saving" : "Create operator"}</button>
         </form>
         <form onsubmit={disable}>
           <label for="disable-id">Disable user ID</label>
@@ -223,14 +227,15 @@
         </form>
       </section>
 
+    {:else if current === "api-tokens"}
       <section class="section" aria-labelledby="tokens">
-        <h2 id="tokens">API tokens</h2>
+        <h2 id="tokens" class="sr">API tokens</h2>
         {#if tokenFailure}<ErrorPanel view={errorView(tokenFailure)} />{/if}
         {#if minted}
           <!-- The plaintext appears once. The server keeps a verifier only. -->
           <div class="callout once" role="status">
             <p>Shown once. Copy it now.</p>
-            <p class="mono plaintext">{minted.token}</p>
+            <p class="plaintext"><span class="mono">{minted.token}</span><IconButton icon="copy" label="Copy token" onclick={() => navigator.clipboard.writeText(minted!.token).then(() => toast.show("Token copied"))} /></p>
           </div>
         {/if}
         <form onsubmit={createToken}>
@@ -241,11 +246,12 @@
           <label for="token-expires">Expires</label>
           <input id="token-expires" type="datetime-local" bind:value={tokenExpires} />
           <p class="hint">Empty actor: you. Empty expiry: never; revoke to end it.</p>
-          <button type="submit" disabled={tokenBusy}>{tokenBusy ? "Saving" : "Create token"}</button>
+          <button type="submit" disabled={tokenBusy}><Icon name="plus" />{tokenBusy ? "Saving" : "Create token"}</button>
         </form>
         <div class="scroll">
           <table class="nowrap">
-            <thead><tr><th>Name</th><th>Actor</th><th>Created</th><th>Last used</th><th>Expires</th><th>State</th><th><span class="sr">Actions</span></th></tr></thead>
+            <colgroup><col /><col class="c-device" /><col class="c-time" /><col class="c-time" /><col class="c-time" /><col class="c-kind" /><col class="c-act" /></colgroup>
+            <thead><tr><th>Name</th><th>Actor</th><th>Created</th><th>Last used</th><th>Expires</th><th>State</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
             <tbody>
               {#each tokens as token (token.id)}
                 <tr>
@@ -255,7 +261,7 @@
                   <td class="mono">{when(token.last_used_at, now)}</td>
                   <td class="mono">{when(token.expires_at, now)}</td>
                   <td>{token.revoked_at === null ? "live" : "revoked"}</td>
-                  <td class="end">{#if token.revoked_at === null}<button type="button" class="small quiet" onclick={() => revoke(token.id)} disabled={tokenBusy}>Revoke</button>{/if}</td>
+                  <td class="end">{#if token.revoked_at === null}<IconButton icon="trash" tone="danger" label={`Revoke ${token.name}`} onclick={() => revoke(token.id)} disabled={tokenBusy} />{/if}</td>
                 </tr>
               {:else}
                 <tr><td colspan="7" class="dim">No tokens.</td></tr>
@@ -309,7 +315,6 @@
     display: flex;
     flex-direction: column;
     gap: 36px;
-    max-width: 880px;
   }
   .panel:focus {
     outline: none;
@@ -350,6 +355,9 @@
   .plaintext {
     overflow-wrap: anywhere;
     margin-top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
   .segmented {
     display: inline-flex;

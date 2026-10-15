@@ -48,7 +48,7 @@ export function match(pathname: string): Route {
 }
 
 /** The tabs of Settings. The first one opens at /settings. */
-export const settingsTabs = ["general", "notifications", "accounts", "recovery-kit"];
+export const settingsTabs = ["general", "notifications", "accounts", "api-tokens", "recovery-kit"];
 
 /** path builds the address of one screen, so no screen writes a literal path. A query narrows the screen. */
 export function path(screen: ScreenName, id = "", query = ""): string {

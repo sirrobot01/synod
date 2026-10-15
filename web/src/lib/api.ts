@@ -142,7 +142,17 @@ export const api = {
   registerJoinToken: (secret: string, ttlSeconds: number, key: string) =>
     call<{ id: string; expires_at: string }>("POST", "/v1/enrollment-tokens", { token: secret, ttl_seconds: ttlSeconds }, { "Idempotency-Key": key }),
   approveNode: (id: string) => call<Node>("POST", `/v1/nodes/${encodeURIComponent(id)}/actions/approve`, {}),
-  operations: () => call<Operation[]>("GET", "/v1/operations"),
+  /** Lists operations newest first. `before` pages to operations older than that one. */
+  operations: (page: { limit?: number; before?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (page.limit) query.set("limit", String(page.limit));
+    if (page.before) query.set("before", page.before);
+    return call<Operation[]>("GET", `/v1/operations${query.size ? `?${query}` : ""}`);
+  },
+  /** Hides a finished operation from Activity. The app status keeps its history. */
+  removeOperation: (id: string) => call<void>("DELETE", `/v1/operations/${encodeURIComponent(id)}`),
+  clearOperations: () => call<{ removed: number }>("POST", "/v1/operations/actions/clear", {}),
+  renameNode: (id: string, name: string) => call<Node>("PATCH", `/v1/nodes/${encodeURIComponent(id)}`, { name }),
   signIn: (username: string, password: string) => call<User>("POST", "/v1/sessions", { username, password }),
   setupStatus: () => call<{ required: boolean }>("GET", "/v1/setup"),
   /** Creates the first account and signs in. The kit appears in this response only. */

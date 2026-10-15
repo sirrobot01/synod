@@ -7,6 +7,8 @@
   import { go } from "../lib/router.svelte";
   import Link from "../lib/ui/Link.svelte";
   import Mark from "../lib/ui/Mark.svelte";
+  import Icon from "../lib/ui/Icon.svelte";
+  import IconButton from "../lib/ui/IconButton.svelte";
   import Dialog from "../lib/ui/Dialog.svelte";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
   import StorageDialog from "../lib/StorageDialog.svelte";
@@ -67,8 +69,8 @@
       {#if listing}<p class="sub">{listing.destinations.length === 1 ? "1 encrypted repository" : `${listing.destinations.length} encrypted repositories`}</p>{/if}
     </div>
     <div class="actions">
-      <button type="button" onclick={read} disabled={busy}>Refresh</button>
-      <button type="button" class="primary" onclick={() => (add = true)} disabled={!listing}>Add storage</button>
+      <IconButton icon="refresh" label="Refresh" onclick={read} disabled={busy} />
+      <button type="button" class="primary" onclick={() => (add = true)} disabled={!listing}><Icon name="plus" />Add storage</button>
     </div>
   </header>
   {#if failure}
@@ -78,7 +80,7 @@
   {#if !listing && !failure}<p class="loading" role="status">Loading</p>{/if}
   {#if listing}
     {#if listing.destinations.length === 0}
-      <div class="empty"><strong>No storage</strong><span>Snapshots need a place to go. A folder on a second device is the simplest start.</span><button type="button" class="primary" onclick={() => (add = true)}>Add storage</button></div>
+      <div class="empty"><strong>No storage</strong><span>Snapshots need a place to go. A folder on a second device is the simplest start.</span><button type="button" class="primary" onclick={() => (add = true)}><Icon name="plus" />Add storage</button></div>
     {/if}
     {#each listing.destinations as destination (destination.id)}
       {@const place = where(destination, nodes)}
@@ -91,8 +93,8 @@
         <div class="section-head">
           <h2 id={`s-${destination.id}`}>{destination.name} <span class="kind">{kindNames[destination.location.kind]}</span></h2>
           <div class="actions">
-            <button type="button" class="small" onclick={() => (check = destination)}>Check now</button>
-            <button type="button" class="small quiet" onclick={() => { remove = destination; removalFailure = null; }}>Remove</button>
+            <button type="button" class="small" onclick={() => (check = destination)}><Icon name="check" />Check now</button>
+            <IconButton icon="trash" tone="danger" label={`Remove ${destination.name}`} onclick={() => { remove = destination; removalFailure = null; }} />
           </div>
         </div>
         <div class="body">
@@ -138,10 +140,11 @@
         <div class="section-head"><h2 id="delivery">Storage list on devices</h2><span class="mono dim">revision {listing.revision}</span></div>
         <div class="scroll">
           <table>
+            <colgroup><col /><col class="c-result" /><col class="c-time" /></colgroup>
             <thead><tr><th>Device</th><th>State</th><th>Acknowledged</th></tr></thead>
             <tbody>
               {#each listing.delivery as delivery (delivery.node_id)}
-                <tr><td><Link screen="devices" id={delivery.node_id}>{delivery.node_name}</Link></td><td>{delivery.current ? "current" : "pending"}</td><td class="mono">{when(delivery.acknowledged_at, now)}</td></tr>
+                <tr><td><Link screen="devices" id={delivery.node_id}>{nodeName(nodes, delivery.node_id)}</Link></td><td>{delivery.current ? "current" : "pending"}</td><td class="mono">{when(delivery.acknowledged_at, now)}</td></tr>
               {/each}
             </tbody>
           </table>
@@ -157,7 +160,7 @@
     {#if removalFailure}<ErrorPanel view={errorView(removalFailure)} />{/if}
     {#snippet footer()}
       <button type="button" class="ghost" onclick={() => (remove = null)} disabled={removing}>Cancel</button>
-      <button type="button" class="destructive" onclick={confirmRemove} disabled={removing}>{removing ? "Removing" : "Remove storage"}</button>
+      <button type="button" class="destructive" onclick={confirmRemove} disabled={removing}><Icon name="trash" />{removing ? "Removing" : "Remove storage"}</button>
     {/snippet}
   </Dialog>
 {/if}

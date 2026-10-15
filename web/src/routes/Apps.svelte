@@ -3,9 +3,11 @@
   import { api, detail, type DestinationList, type Node, type ProtectionPlan } from "../lib/api";
   import { errorView, type APIError } from "../lib/state";
   import { protectionMark } from "../lib/format";
-  import { newest, tested, when } from "../lib/model";
+  import { newest, nodeName, tested, when } from "../lib/model";
   import Link from "../lib/ui/Link.svelte";
   import Mark from "../lib/ui/Mark.svelte";
+  import Icon from "../lib/ui/Icon.svelte";
+  import IconButton from "../lib/ui/IconButton.svelte";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
   import ScheduleBackups from "../lib/ScheduleBackups.svelte";
 
@@ -57,7 +59,7 @@
       {#if plan}<p class="sub">{scheduled} of {plan.apps.length} scheduled{plan.auto_protect ? ". New apps are scheduled automatically." : ""}</p>{/if}
     </div>
     <div class="actions">
-      <button type="button" onclick={read} disabled={busy}>Refresh</button>
+      <IconButton icon="refresh" label="Refresh" onclick={read} disabled={busy} />
       <button type="button" class="primary" onclick={() => (scheduling = true)} disabled={!plan || !listing?.destinations.length}>Schedule backups</button>
     </div>
   </header>
@@ -72,9 +74,10 @@
       <div class="empty"><strong>No apps found</strong><span>Approved devices report their Compose projects and containers within a minute.</span><Link screen="devices">Devices</Link></div>
     {:else}
       <section class="section">
-        <label class="search"><span class="sr">Filter apps</span><input type="search" placeholder="Filter by app, device, or status" bind:value={filter} bind:this={filterInput} aria-keyshortcuts="/" /></label>
+        <label class="search"><span class="sr">Filter apps</span><Icon name="search" /><input type="search" placeholder="Filter by app, device, or status" bind:value={filter} bind:this={filterInput} aria-keyshortcuts="/" /></label>
         <div class="scroll">
           <table>
+            <colgroup><col /><col class="c-device" /><col class="c-status" /><col class="c-time" /><col class="c-result" /><col class="c-time" /></colgroup>
             <thead><tr><th>App</th><th>Device</th><th>Status</th><th>Newest snapshot</th><th>Restore test</th><th>Schedule</th></tr></thead>
             <tbody>
               {#each shown as item (item.app.id)}
@@ -83,7 +86,7 @@
                 {@const codes = (item.limit_codes ?? []).filter((c) => c !== "restore_unproven")}
                 <tr>
                   <td><Link screen="apps" id={item.app.id} class="name">{item.app.definition.name}</Link>{#if !item.app.present}<small>not in last scan</small>{/if}</td>
-                  <td>{item.app.node_name}</td>
+                  <td>{nodeName(nodes, item.app.node_id)}</td>
                   <td>
                     <Mark mark={protectionMark(item.state)} />
                     {#if codes.length}<small class="code">{codes.join(", ")}</small>{/if}

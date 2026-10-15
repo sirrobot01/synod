@@ -7,6 +7,11 @@
   import ErrorPanel from "../lib/ErrorPanel.svelte";
   import Link from "../lib/ui/Link.svelte";
   import Mark from "../lib/ui/Mark.svelte";
+  import Icon from "../lib/ui/Icon.svelte";
+  import IconButton from "../lib/ui/IconButton.svelte";
+  import Dialog from "../lib/ui/Dialog.svelte";
+  import { go } from "../lib/router.svelte";
+  import { toast } from "../lib/toast.svelte";
 
   let { id }: { id: string } = $props();
 
@@ -75,6 +80,21 @@
   });
   let row = $derived(operation ? activity(operation, names) : null);
   let failureCode = $derived(operation?.failure_code || operation?.result?.failure_code || "");
+  let removing = $state(false);
+  let removeBusy = $state(false);
+  let removeFailure = $state<APIError | null>(null);
+  async function remove() {
+    removeBusy = true;
+    try {
+      await api.removeOperation(id);
+      toast.show("Removed from Activity");
+      go("activity");
+    } catch (error) {
+      removeFailure = detail(error);
+    } finally {
+      removeBusy = false;
+    }
+  }
   const statusText: Record<string, string> = { pending: "Queued. Not started.", running: "Running.", waiting: "Outcome unknown. The device must inspect the work before it continues.", succeeded: "Finished.", cancelled: "Cancelled.", cancelling: "Stopping." };
 </script>
 
@@ -84,7 +104,10 @@
       <h1>{row ? `${row.kind.charAt(0).toUpperCase()}${row.kind.slice(1)}: ${row.subject}` : "Run"}</h1>
       <p class="sub"><Link screen="activity">Activity</Link></p>
     </div>
-    <button type="button" onclick={read} disabled={reading}>{reading ? "Loading" : "Reload"}</button>
+    <div class="actions">
+      <IconButton icon="refresh" label="Reload" onclick={read} disabled={reading} />
+      {#if operation && finished(operation.status)}<button type="button" class="quiet" onclick={() => { removing = true; removeFailure = null; }}><Icon name="trash" />Remove from Activity</button>{/if}
+    </div>
   </header>
   {#if failure}<ErrorPanel view={errorView(failure)} />{/if}
   {#if operation && mark && row}
@@ -135,6 +158,17 @@
     {/if}
   {:else if !failure}<p class="loading">Loading</p>{/if}
 </div>
+
+{#if removing}
+  <Dialog label="Remove from Activity" title="Remove from Activity" width={480} onClose={() => { if (!removeBusy) removing = false; }}>
+    <p>Hides this run from Activity. App status and restore-test dates keep their history.</p>
+    {#if removeFailure}<ErrorPanel view={errorView(removeFailure)} />{/if}
+    {#snippet footer()}
+      <button type="button" class="ghost" onclick={() => (removing = false)} disabled={removeBusy}>Cancel</button>
+      <button type="button" class="destructive" onclick={remove} disabled={removeBusy}><Icon name="trash" />{removeBusy ? "Removing" : "Remove"}</button>
+    {/snippet}
+  </Dialog>
+{/if}
 
 <style>
   h1 {

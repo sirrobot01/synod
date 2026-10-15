@@ -12,6 +12,7 @@
 <div class="scroll">
   <table>
     <caption class="sr">Paths of {app.definition.name}</caption>
+    <colgroup><col class="c-kind" /><col /><col class="c-num" /><col class="c-reason" /></colgroup>
     <thead><tr><th>Status</th><th>Path</th><th class="num">Size</th><th>Reason</th></tr></thead>
     <tbody>
       {#each rows as row}

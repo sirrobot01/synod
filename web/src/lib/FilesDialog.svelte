@@ -6,6 +6,7 @@
   import { when } from "./model";
   import Dialog from "./ui/Dialog.svelte";
   import ErrorPanel from "./ErrorPanel.svelte";
+  import Icon from "./ui/Icon.svelte";
 
   // Opens the saved files of one copy, and downloads a file or a folder from it.
   let { item, copies, start = undefined, destinations, via = "", onClose }: {
@@ -111,7 +112,7 @@
               </td>
               <td class="dim">{entry.type}</td>
               <td class="num mono">{entry.type === "file" ? bytes(entry.size) : ""}</td>
-              <td class="end">{#if entry.type === "file" || entry.type === "directory"}<button type="button" class="small" disabled={downloading} onclick={() => get(child(entry.name), entry.name)} aria-label={`Download ${entry.name}`}>Download</button>{/if}</td>
+              <td class="end">{#if entry.type === "file" || entry.type === "directory"}<button type="button" class="small" disabled={downloading} onclick={() => get(child(entry.name), entry.name)} aria-label={`Download ${entry.name}`} title={`Download ${entry.name}`}><Icon name="download" /></button>{/if}</td>
             </tr>
           {:else}
             <tr><td colspan="4" class="dim">Empty folder.</td></tr>
@@ -122,7 +123,7 @@
   {/if}
   {#snippet footer()}
     {#if downloading}<button type="button" class="ghost" onclick={() => controller?.abort()}>Cancel download</button>{/if}
-    <button type="button" onclick={() => get(listedPath, listedPath.split("/").at(-1) || "copy")} disabled={downloading || browsing || !files}>{downloading ? "Downloading" : "Download folder"}</button>
+    <button type="button" onclick={() => get(listedPath, listedPath.split("/").at(-1) || "copy")} disabled={downloading || browsing || !files}><Icon name="download" />{downloading ? "Downloading" : "Download folder"}</button>
     <button type="button" class="primary" onclick={onClose} disabled={downloading}>Done</button>
   {/snippet}
 </Dialog>

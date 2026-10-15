@@ -3,10 +3,12 @@
   import { api, detail, type DestinationList, type FileHeader, type Node, type ProtectionPlan, type Snapshot } from "../lib/api";
   import { errorView, type APIError } from "../lib/state";
   import { bytes, limits, protectionMark } from "../lib/format";
-  import { ago, blocked, failureText, nextRun, newest, nodeName, stateWords, when } from "../lib/model";
+  import { ago, blocked, failureText, label, nextRun, newest, nodeName, stateWords, when } from "../lib/model";
   import { go } from "../lib/router.svelte";
   import Link from "../lib/ui/Link.svelte";
   import Mark from "../lib/ui/Mark.svelte";
+  import Icon from "../lib/ui/Icon.svelte";
+  import IconButton from "../lib/ui/IconButton.svelte";
   import ErrorPanel from "../lib/ErrorPanel.svelte";
   import AppPaths from "../lib/AppPaths.svelte";
   import EditSchedule from "../lib/EditSchedule.svelte";
@@ -90,13 +92,13 @@
     <header class="page-head">
       <div>
         <h1>{item.app.definition.name}</h1>
-        <p class="sub">{item.app.definition.kind === "compose" ? "Compose project" : "Container"} on <Link screen="devices" id={item.app.node_id}>{item.app.node_name}</Link>{#if item.app.definition.project_directory}, <span class="mono">{item.app.definition.project_directory}</span>{/if}</p>
+        <p class="sub">{item.app.definition.kind === "compose" ? "Compose project" : "Container"} on <Link screen="devices" id={item.app.node_id}>{nodeName(nodes, item.app.node_id)}</Link>{#if item.app.definition.project_directory}, <span class="mono">{item.app.definition.project_directory}</span>{/if}</p>
       </div>
       <div class="actions">
-        <button type="button" onclick={() => open("backup")} disabled={!item.app.present || !destinations.length}>Back up now</button>
-        <button type="button" class="primary" onclick={() => open("restore")} disabled={!copies.length}>Restore…</button>
-        <button type="button" onclick={() => open("files")} disabled={!copies.length}>Browse files</button>
-        <button type="button" onclick={() => open("drill")} disabled={!copies.length}>Test restore</button>
+        <button type="button" onclick={() => open("backup")} disabled={!item.app.present || !destinations.length} title={!destinations.length ? "Add storage first" : !item.app.present ? "The app is not on its device" : undefined}><Icon name="backup" />Back up now</button>
+        <button type="button" class="primary" onclick={() => open("restore")} disabled={!copies.length} title={copies.length ? undefined : "No snapshot yet"}><Icon name="restore" />Restore…</button>
+        <button type="button" onclick={() => open("files")} disabled={!copies.length} title={copies.length ? undefined : "No snapshot yet"}><Icon name="folder" />Browse files</button>
+        <button type="button" onclick={() => open("drill")} disabled={!copies.length} title={copies.length ? undefined : "No snapshot yet"}><Icon name="test" />Test restore</button>
       </div>
     </header>
 
@@ -124,7 +126,7 @@
               {#if item.blocked_code}<tr><td class="code">{item.blocked_code}</td><td>{blocked[item.blocked_code] ?? stateWords("blocked").text}</td></tr>{/if}
               {#if item.state === "overdue"}<tr><td class="code">overdue</td><td>{stateWords("overdue").text}</td></tr>{/if}
               {#each item.targets.filter((t) => t.failure_code) as target}<tr><td class="code">{target.failure_code}</td><td>{failureText(target.failure_code)} Storage {destinations.find((d) => d.id === target.destination_id)?.name ?? "unknown"}.{#if target.last_operation_id} <Link screen="operation" id={target.last_operation_id}>Run details</Link>{/if}</td></tr>{/each}
-              {#if item.only_on_source}<tr><td class="code">single device</td><td>Every snapshot is on {item.app.node_name}, the host of this app. Add storage on another device.</td></tr>{/if}
+              {#if item.only_on_source}<tr><td class="code">single device</td><td>Every snapshot is on {nodeName(nodes, item.app.node_id)}, the host of this app. Add storage on another device.</td></tr>{/if}
               {#each codes as code}<tr><td class="code">{code}</td><td>{limits[code]?.text ?? ""}</td></tr>{/each}
             </tbody>
           </table>
@@ -132,7 +134,7 @@
       </section>
     {/if}
 
-    <div class="columns">
+    <div class="stack wide">
       <section class="section" aria-labelledby="snapshots">
         <div class="section-head">
           <h2 id="snapshots">Snapshots</h2>
@@ -146,7 +148,7 @@
             <label><span class="sr">Read through</span>
               <select bind:value={via} disabled={reading} onchange={readCopies} title="Device that reads the repository">
                 <option value="">Any device</option>
-                {#each nodes.filter((n) => n.approved_at) as node (node.id)}<option value={node.id}>via {node.name}</option>{/each}
+                {#each nodes.filter((n) => n.approved_at) as node (node.id)}<option value={node.id}>via {label(node)}</option>{/each}
               </select>
             </label>
           </form>
@@ -158,14 +160,15 @@
         {#if copies.length}
           <div class="scroll">
             <table class="nowrap">
-              <thead><tr><th>Time</th><th>Storage</th><th class="num">Size</th><th><span class="sr">Actions</span></th></tr></thead>
+              <colgroup><col class="c-time" /><col /><col class="c-num" /><col class="c-act" /></colgroup>
+              <thead><tr><th>Time</th><th>Storage</th><th class="num">Size</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
               <tbody>
                 {#each copies as copy (copy.id)}
                   <tr>
                     <td class="mono"><button type="button" class="link" onclick={() => open("files", copy)} title="Browse files">{when(copy.completed_at, now)}</button></td>
                     <td>{storageNames(copy.destination_ids)}</td>
                     <td class="num mono">{bytes(copy.file_bytes)}</td>
-                    <td class="end"><button type="button" class="small" onclick={() => open("restore", copy)} aria-label={`Restore the snapshot of ${when(copy.completed_at, now)}`}>Restore</button></td>
+                    <td class="end"><span class="row-actions"><IconButton icon="folder" label={`Browse files of the snapshot of ${when(copy.completed_at, now)}`} onclick={() => open("files", copy)} /><button type="button" class="small" onclick={() => open("restore", copy)} aria-label={`Restore the snapshot of ${when(copy.completed_at, now)}`}><Icon name="restore" />Restore</button></span></td>
                   </tr>
                 {/each}
               </tbody>
@@ -174,7 +177,7 @@
         {:else if copiesRead && !copiesFailure}
           <div class="empty">
             <strong>No snapshots{storage ? " in this storage" : ""}</strong>
-            {#if destinations.length}<button type="button" onclick={() => open("backup")} disabled={!item.app.present}>Back up now</button>{:else}<Link screen="storage">Add storage</Link>{/if}
+            {#if destinations.length}<button type="button" onclick={() => open("backup")} disabled={!item.app.present}><Icon name="backup" />Back up now</button>{:else}<Link screen="storage">Add storage</Link>{/if}
           </div>
         {/if}
       </section>
@@ -226,12 +229,11 @@
     font-size: 13px;
     width: auto;
   }
-  .columns {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  .wide {
+    gap: 32px;
   }
   @media (max-width: 860px) {
-    .summary,
-    .columns {
+    .summary {
       grid-template-columns: 1fr;
     }
   }

@@ -10,19 +10,22 @@
   import Activity from "../routes/Activity.svelte";
   import Operation from "../routes/Operation.svelte";
   import Settings from "../routes/Settings.svelte";
+  import Icon, { type IconName } from "./ui/Icon.svelte";
+  import IconButton from "./ui/IconButton.svelte";
+  import { toast } from "./toast.svelte";
 
   let { session, busy, theme, onTheme, onSignOut }: { session: Session; busy: boolean; theme: "dark" | "light"; onTheme: () => void; onSignOut: () => void } = $props();
 
   const router = new Router();
   onDestroy(() => router.destroy());
 
-  const screens: { screen: ScreenName; label: string }[] = [
-    { screen: "overview", label: "Overview" },
-    { screen: "apps", label: "Apps" },
-    { screen: "devices", label: "Devices" },
-    { screen: "storage", label: "Storage" },
-    { screen: "activity", label: "Activity" },
-    { screen: "settings", label: "Settings" },
+  const screens: { screen: ScreenName; label: string; icon: IconName }[] = [
+    { screen: "overview", label: "Overview", icon: "overview" },
+    { screen: "apps", label: "Apps", icon: "apps" },
+    { screen: "devices", label: "Devices", icon: "device" },
+    { screen: "storage", label: "Storage", icon: "storage" },
+    { screen: "activity", label: "Activity", icon: "activity" },
+    { screen: "settings", label: "Settings", icon: "settings" },
   ];
 
   // A section stays marked while a screen below it is open, so a reader on one
@@ -58,15 +61,15 @@
             href={path(item.screen)}
             aria-current={section === item.screen ? "page" : undefined}
             onclick={(event) => navigate(event, item.screen)}
-          >{item.label}</a>
+          ><Icon name={item.icon} />{item.label}</a>
         </li>
       {/each}
     </ul>
     <div class="foot">
       <span class="who"><span class="mono">{session.actor_id}</span>{#if session.role !== session.actor_id} <span class="role">({session.role})</span>{/if}</span>
       <span class="tools">
-        <button type="button" class="small" onclick={onTheme} aria-label={`Switch to the ${theme === "dark" ? "light" : "dark"} theme`}>{theme === "dark" ? "Light" : "Dark"}</button>
-        <button type="button" class="small" onclick={onSignOut} disabled={busy}>Sign out</button>
+        <IconButton icon={theme === "dark" ? "sun" : "moon"} label={`Switch to the ${theme === "dark" ? "light" : "dark"} theme`} onclick={onTheme} />
+        <IconButton icon="signout" label="Sign out" onclick={onSignOut} disabled={busy} />
       </span>
     </div>
   </nav>
@@ -98,6 +101,9 @@
       {/if}
     {/key}
   </main>
+</div>
+<div class="toast" role="status" aria-live="polite">
+  {#if toast.message}<span><Icon name="check" />{toast.message}</span><IconButton icon="close" label="Dismiss" onclick={() => toast.hide()} />{/if}
 </div>
 
 <style>
@@ -136,7 +142,9 @@
     flex-direction: column;
   }
   ul a {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 10px;
     padding: 8px 16px 8px 14px;
     border-left: 2px solid transparent;
     color: var(--ink-muted);
@@ -170,11 +178,44 @@
   }
   .tools {
     display: flex;
-    gap: 6px;
+    gap: 2px;
   }
+  .foot {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .toast {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 50;
+  }
+  .toast:not(:empty) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 6px 6px 14px;
+    background: var(--panel);
+    border: 1px solid var(--line-strong);
+    font-size: 13px;
+  }
+  .toast span {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .toast :global(.icon) {
+    color: var(--ok);
+  }
+  /* The content column is centred in the space right of the nav, so a wide screen
+     keeps equal margins on both sides. */
   main {
     min-width: 0;
-    padding: 32px 40px 72px;
+    padding: 32px clamp(24px, 4vw, 64px) 72px;
+  }
+  main > :global(.page) {
+    margin: 0 auto;
   }
   main:focus {
     outline: none;

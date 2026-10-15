@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import IconButton from "./IconButton.svelte";
 
   // Esc closes any dialog, which the keyboard contract in the design requires.
   // Focus enters the dialog on open and returns to the control that opened it,
@@ -86,7 +87,7 @@
         {#if note}<p class="note" id={`${id}-note`}>{note}</p>{/if}
         {#if head}{@render head()}{/if}
       </div>
-      <button type="button" class="ghost small" onclick={onClose} aria-label="Close" aria-keyshortcuts="Escape">Esc</button>
+      <span class="close"><IconButton icon="close" label="Close" shortcut="Escape" onclick={onClose} /></span>
     </header>
     <div class="body">
       {@render children()}
@@ -131,6 +132,9 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
+  }
+  .close {
+    margin: -4px -8px 0 0;
   }
   .titles {
     display: flex;

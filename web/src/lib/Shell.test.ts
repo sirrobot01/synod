@@ -59,8 +59,8 @@ describe("the shell", () => {
     expect(accounts.getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe("tab-accounts");
     accounts.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    await vi.waitFor(() => expect(window.location.pathname).toBe("/settings/recovery-kit"));
-    expect(screen.getByRole("tab", { name: "Recovery kit" }).getAttribute("aria-selected")).toBe("true");
+    await vi.waitFor(() => expect(window.location.pathname).toBe("/settings/api-tokens"));
+    expect(screen.getByRole("tab", { name: "API tokens" }).getAttribute("aria-selected")).toBe("true");
     screen.getByRole("tab", { name: "General" }).click();
     await vi.waitFor(() => expect(window.location.pathname).toBe("/settings"));
   });

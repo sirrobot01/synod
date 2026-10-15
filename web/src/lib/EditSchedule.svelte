@@ -65,8 +65,8 @@
       {#if incompatible}<p class="callout attn">A selected local disk belongs to another device and cannot take this app.</p>{/if}
       {#if review}
         {#if !enabled}<p class="callout attn">Daily backups of {item.app.definition.name} stop. Existing snapshots stay in storage.</p>{/if}
-        {#if enabled && settings.destinations.length > 0 && settings.destinations.every((id) => destinations.some((d) => d.id === id && d.node_id === item.app.node_id))}<p class="callout attn">Every snapshot would be on {item.app.node_name}, the host of the app.</p>{/if}
-        {#if !item.app.present}<p class="callout attn">Not in the last scan of {item.app.node_name}.</p>{/if}
+        {#if enabled && settings.destinations.length > 0 && settings.destinations.every((id) => destinations.some((d) => d.id === id && d.node_id === item.app.node_id))}<p class="callout attn">Every snapshot would be on {item.app.node_name || item.app.node_id.slice(0, 8)}, the host of the app.</p>{/if}
+        {#if !item.app.present}<p class="callout attn">Not in the last scan of {item.app.node_name || item.app.node_id.slice(0, 8)}.</p>{/if}
         {#if enabled}<AppPaths app={item.app} included={settings.include_large ?? []} />{/if}
         <p class="hint">Offline devices get the schedule when they reconnect. Revision <span class="mono">{revision}</span>.</p>
       {/if}
