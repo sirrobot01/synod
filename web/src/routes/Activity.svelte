@@ -153,7 +153,7 @@
     {#if !loaded && !failure}<p class="loading" role="status">Loading</p>{/if}
     {#if loaded}
       <div class="scroll">
-        <table class="runs">
+        <table class="runs nowrap">
           <colgroup><col class="c-time" /><col class="c-kind" /><col /><col /><col class="c-result" /><col class="c-num" /><col class="c-num" /><col class="c-by" /><col class="c-act" /></colgroup>
           <thead><tr><th>Started</th><th>Kind</th><th>App</th><th>Target</th><th>Result</th><th class="num">Took</th><th class="num">Size</th><th>By</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
           <tbody>
