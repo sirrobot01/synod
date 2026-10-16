@@ -134,7 +134,7 @@ func run(ctx context.Context, config Config, diagnostics io.Writer) error {
 				if _, err := cache.Admit(ctx, request.ID, raw); err != nil {
 					return nil, err
 				}
-				logger.Info("backup queued", "app", agentbackup.AppName(request.SourceKey), "operation", request.ID)
+				logger.Debug("backup request received", "app", agentbackup.AppName(request.SourceKey), "operation", request.ID)
 				return nil, nil
 			}
 			if file := message.GetFileRequest(); file != nil {
