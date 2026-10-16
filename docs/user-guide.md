@@ -331,6 +331,7 @@ For more detail, set `SYNOD_LOG_LEVEL: debug` on the service and start it again.
 | `source_unavailable` | Run the agent as root. In Docker, mount the missing path. |
 | `repository_open_failed` | Check that the destination is online. Then back up again. |
 | `repository_uninitialized` | No backup has used this destination yet. The first backup creates its repository. |
+| `agent_result_invalid` | The agent could not report a valid check result. Cleanup finished. Update Synod on the controller and the device, then run the check again. |
 | `files_changed_during_copy` | Files changed during the copy and were saved as read. If the app needs an exact copy, use `synod protect APP --method stop`. |
 | `repository_installation_conflict` | The directory holds another installation's repository. Use an empty directory. |
 | `image_platform_unsupported` | Restore on a device with a supported architecture. |

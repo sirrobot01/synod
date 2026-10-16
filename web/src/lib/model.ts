@@ -159,6 +159,7 @@ const failures: Record<string, string> = {
   sqlite_copy_failed: "SQLite copy failed.",
   sqlite_copy_unavailable: "SQLite database could not be copied safely.",
   agent_interrupted: "Agent stopped before the work finished.",
+  agent_result_invalid: "Agent returned an invalid result. Update Synod and retry.",
   snapshot_publish_failed: "Snapshot could not be written to storage.",
   snapshot_not_found: "Snapshot no longer exists.",
   snapshot_invalid: "Snapshot is damaged.",

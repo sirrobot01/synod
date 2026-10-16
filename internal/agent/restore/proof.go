@@ -89,6 +89,20 @@ func (w *Worker) ExecuteProof(ctx context.Context, request proof.Request) (proof
 		}
 	}
 	state.Result.CompletedAt = time.Now().UTC()
+	status := "succeeded"
+	if state.Result.FailureCode != "" {
+		status = "failed"
+	}
+	if err := (proof.Event{ID: request.ID, Request: &request, Status: status, Result: state.Result}).Validate(request); err != nil {
+		// Cleanup has finished. Report a safe failure instead of blocking the queue
+		// with a result that neither the journal nor the controller can accept.
+		started := state.Result.StartedAt
+		if started.IsZero() || started.After(state.Result.CompletedAt) {
+			started = state.Result.CompletedAt
+		}
+		state.Result = proof.Result{DestinationID: request.DestinationID, StartedAt: started, CompletedAt: state.Result.CompletedAt, FailureCode: "agent_result_invalid"}
+		cause = errors.Join(cause, err)
+	}
 	raw, _ := json.Marshal(state.Result)
 	if err := b.Journal.Complete(cleanup, request.ID, raw); err != nil {
 		return proof.Result{}, err

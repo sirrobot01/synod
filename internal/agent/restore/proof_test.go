@@ -8,16 +8,59 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
+	agentbackup "github.com/sirrobot01/synod/internal/agent/backup"
 	"github.com/sirrobot01/synod/internal/agent/discovery"
+	"github.com/sirrobot01/synod/internal/agent/journal"
 	"github.com/sirrobot01/synod/internal/proof"
 	"github.com/sirrobot01/synod/internal/runtime/compose"
 )
+
+func TestProofInvalidProgressCompletesAsFailure(t *testing.T) {
+	for name, result := range map[string]proof.Result{
+		"resource": {StartedAt: time.Now().UTC(), Resource: strings.Repeat("x", 2049)},
+		"counts":   {StartedAt: time.Now().UTC(), Contents: 1, Read: 2},
+		"time":     {StartedAt: time.Now().Add(time.Hour).UTC()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			installation, node := uuid.New(), uuid.New()
+			cache, err := journal.Open(t.Context(), filepath.Join(t.TempDir(), "agent.db"), installation, node)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { cache.Close() })
+			w := &Worker{Backup: &agentbackup.Worker{Journal: cache, InstallationID: installation, NodeID: node}, Directory: t.TempDir()}
+			request := proof.Request{Submission: proof.Submission{ID: uuid.New(), Kind: proof.Integrity, NodeID: node, DestinationID: uuid.New()}, InstallationID: installation, RequestedAt: time.Now().UTC()}
+			input, _ := json.Marshal(request)
+			if _, err := cache.Admit(t.Context(), request.ID, input); err != nil {
+				t.Fatal(err)
+			}
+			progress, _ := json.Marshal(proofProgress{Version: 1, RequestID: request.ID, Result: result})
+			if err := cache.StartWithProgress(t.Context(), request.ID, progress); err != nil {
+				t.Fatal(err)
+			}
+			got, err := w.ExecuteProof(t.Context(), request)
+			if err != nil || got.FailureCode != "agent_result_invalid" || (proof.Event{ID: request.ID, Status: "failed", Result: got}).Validate(request) != nil {
+				t.Fatalf("invalid progress did not become a reportable failure: %+v, %v", got, err)
+			}
+			if repeated, err := w.ExecuteProof(t.Context(), request); err != nil || !reflect.DeepEqual(got, repeated) {
+				t.Fatalf("failed proof ran again: %+v, %v", repeated, err)
+			}
+			if err := cache.Acknowledge(t.Context(), request.ID); err != nil {
+				t.Fatal(err)
+			}
+			if pending, err := cache.Pending(t.Context()); err != nil || len(pending) != 0 {
+				t.Fatalf("invalid proof still blocks pending work: %v, %v", pending, err)
+			}
+		})
+	}
+}
 
 func TestProofRestoresIsolatedDataChecksRunningContainersAndCleansUp(t *testing.T) {
 	f := newFixture(t, true)
