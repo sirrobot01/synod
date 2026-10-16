@@ -4,6 +4,7 @@
    state. Colour only reinforces what a shape already says. */
 :root,
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --canvas: #0b0d10;
   --panel: #0f1216;
   --nav: #0d0f13;
@@ -34,6 +35,7 @@
   --link: #7fa8e8;
 }
 :root[data-theme="light"] {
+  color-scheme: light;
   --canvas: #f6f6f4;
   --panel: #ffffff;
   --nav: #ffffff;

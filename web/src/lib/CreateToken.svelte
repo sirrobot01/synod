@@ -20,7 +20,7 @@
     busy = true;
     failure = null;
     try {
-      minted = await api.createToken(name.trim(), tokenActor.trim(), expires ? new Date(expires).toISOString() : null);
+      minted = await api.createToken(name.trim(), tokenActor.trim(), expires ? new Date(`${expires}T23:59:59.999`).toISOString() : null);
       onCreated(minted);
     } catch (error) {
       failure = detail(error);
@@ -54,8 +54,8 @@
         <label class="field">Name<input bind:value={name} placeholder="ci-backup" maxlength="64" required /></label>
         <label class="field">Actor<input bind:value={tokenActor} placeholder={actor} maxlength="256" /></label>
         <p class="hint">Leave empty to use your username.</p>
-        <label class="field">Expires<input type="datetime-local" bind:value={expires} /></label>
-        <p class="hint">Leave empty for no expiry.</p>
+        <label class="field">Expires<input type="date" bind:value={expires} aria-describedby="token-expiry-hint" /></label>
+        <p id="token-expiry-hint" class="hint">Expires at the end of this day in your local time. Leave empty for no expiry.</p>
       </fieldset>
       {#if failure}<ErrorPanel view={errorView(failure)} />{/if}
     </form>

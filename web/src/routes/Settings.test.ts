@@ -110,6 +110,29 @@ it("shows a token only in its creation dialog, including a clipboard failure", a
   expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("");
 });
 
+it.each([
+  { selected: "2030-03-10", end: new Date(2030, 2, 10, 23, 59, 59, 999) },
+  { selected: "2030-12-31", end: new Date(2030, 11, 31, 23, 59, 59, 999) },
+])("expires a token at the local end of $selected and lists only the date", async ({ selected, end }) => {
+  const expiringToken = { ...token, expires_at: end.toISOString() };
+  vi.mocked(api.createToken).mockResolvedValue({ ...expiringToken, token: "private-token-value" });
+  render(Settings, { session, tab: "api-tokens" });
+  await screen.findByText("No tokens.");
+  await fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Create API token" }));
+  const expiry = dialog.getByLabelText("Expires") as HTMLInputElement;
+  expect(expiry.type).toBe("date");
+  await fireEvent.input(dialog.getByLabelText("Name"), { target: { value: "backup" } });
+  await fireEvent.input(expiry, { target: { value: selected } });
+  vi.mocked(api.tokens).mockResolvedValue([expiringToken]);
+  await fireEvent.click(dialog.getByRole("button", { name: "Create token" }));
+  await screen.findByRole("dialog", { name: "API token created" });
+  expect(api.createToken).toHaveBeenCalledWith("backup", "", end.toISOString());
+  await fireEvent.click(screen.getByRole("button", { name: "Done" }));
+  const row = (await screen.findByText("backup")).closest("tr")!;
+  expect(within(row).getAllByRole("cell")[4]!.textContent).toBe(end.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }));
+});
+
 it("distinguishes expired tokens from active and revoked tokens", async () => {
   vi.mocked(api.tokens).mockResolvedValue([
     token,

@@ -223,7 +223,7 @@
                   <td class="mono">{token.actor_id}</td>
                   <td class="mono">{when(token.created_at, now)}</td>
                   <td class="mono">{when(token.last_used_at, now)}</td>
-                  <td class="mono">{token.expires_at ? when(token.expires_at, now) : "Never"}</td>
+                  <td class="mono">{token.expires_at ? new Date(token.expires_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "Never"}</td>
                   <td>{token.revoked_at !== null ? "Revoked" : token.expires_at && Date.parse(token.expires_at) <= now ? "Expired" : "Active"}</td>
                   <td class="end">{#if token.revoked_at === null}<IconButton icon="trash" tone="danger" label={`Revoke ${token.name}`} onclick={() => revoke(token.id)} disabled={tokenBusy} />{/if}</td>
                 </tr>
