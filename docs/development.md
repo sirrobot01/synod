@@ -106,6 +106,7 @@ git push origin v0.1.0
 
 The **release** workflow requires all jobs of the **test** workflow, with **heavy** enabled.
 These jobs check the Go code, web build, installers, Docker, MinIO, and filesystem snapshots.
+The Go job also checks for known vulnerabilities with `govulncheck`.
 Only then does it publish the binaries, `SHA256SUMS`, `install.sh`, and the agent image.
 
 Before the first release, complete the real-host restore and controller recovery checks.
