@@ -47,7 +47,7 @@ func TestRestoreHostNetworkAndPublishedPorts(t *testing.T) {
 					host.PortBindings = network.PortMap{network.MustParsePort("8080/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: port}}}
 				}
 				host.Devices = []container.DeviceMapping{{PathOnHost: "/dev/null", PathInContainer: "/dev/synod-null", CgroupPermissions: "rwm"}}
-				config.Cmd = []string{"nc", "-lk", "-s", bindIP, "-p", bindPort, "-e", "sh", "-ec", `test -c /dev/synod-null; printf 'HTTP/1.0 200 OK\r\nContent-Length: 22\r\nConnection: close\r\n\r\n'; cat /config/state`}
+				config.Cmd = []string{"nc", "-lk", "-s", bindIP, "-p", bindPort, "-e", "sh", "-ec", `test -c /dev/synod-null; while IFS= read -r line; do [ "$line" = "$(printf '\r')" ] && break; done; printf 'HTTP/1.0 200 OK\r\nContent-Length: 22\r\nConnection: close\r\n\r\n'; cat /config/state`}
 			})
 			if len(f.saved.Host) != 1 || (mode == "host" && (!f.saved.Host[0].PortsKnown || len(f.saved.Host[0].Ports) != 1)) || len(f.saved.Host[0].Paths) != 1 || !f.saved.Host[0].Paths[0].Known {
 				t.Fatalf("host requirements not saved: %+v", f.saved.Host)
@@ -112,7 +112,7 @@ func TestExportHostNetworkRecovery(t *testing.T) {
 		host.NetworkMode = "host"
 		host.Devices = []container.DeviceMapping{{PathOnHost: "/dev/null", PathInContainer: "/dev/synod-null", CgroupPermissions: "rwm"}}
 		config.User = strconv.Itoa(os.Getuid())
-		config.Cmd = []string{"nc", "-lk", "-s", "127.0.0.1", "-p", port, "-e", "sh", "-ec", `test -c /dev/synod-null; printf 'HTTP/1.0 200 OK\r\nContent-Length: 22\r\nConnection: close\r\n\r\n'; cat /config/state`}
+		config.Cmd = []string{"nc", "-lk", "-s", "127.0.0.1", "-p", port, "-e", "sh", "-ec", `test -c /dev/synod-null; while IFS= read -r line; do [ "$line" = "$(printf '\r')" ] && break; done; printf 'HTTP/1.0 200 OK\r\nContent-Length: 22\r\nConnection: close\r\n\r\n'; cat /config/state`}
 	})
 	if len(f.saved.Host) != 1 || !f.saved.Host[0].PortsKnown || len(f.saved.Host[0].Ports) != 1 || len(f.saved.Images[0].Variants) != 2 {
 		t.Fatalf("cross-device requirements not saved: %+v", f.saved.Host)

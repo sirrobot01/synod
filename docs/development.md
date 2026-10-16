@@ -44,7 +44,7 @@ On Linux, run the Docker tests as root. Restore tests read volumes in `/var/lib/
 Pull the pinned test images listed in the **heavy** job of `.github/workflows/test.yml` first.
 
 ```sh
-SYNOD_TEST_DOCKER_HOST=unix:///var/run/docker.sock go test -race -p 1 -count=1 ./...
+SYNOD_TEST_DOCKER_HOST=unix:///var/run/docker.sock go test -race -p 1 -count=1 -timeout=90m ./...
 ```
 
 In GitHub, you can also run the **test** workflow by hand and select **heavy**.

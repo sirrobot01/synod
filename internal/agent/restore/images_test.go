@@ -31,6 +31,7 @@ import (
 	"github.com/kopia/kopia/fs/virtualfs"
 	"github.com/kopia/kopia/snapshot"
 	"github.com/moby/moby/client"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirrobot01/synod/internal/backup"
 	"github.com/sirrobot01/synod/internal/inventory"
 	"github.com/sirrobot01/synod/internal/repository"
@@ -190,7 +191,7 @@ func TestRestoreUsesSavedImagesWithEmptyCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input, err := api.ImageSave(t.Context(), []string{inspected.ID})
+	input, err := api.ImageSave(t.Context(), []string{inspected.ID}, client.ImageSaveWithPlatforms(ocispec.Platform{OS: "linux", Architecture: inspected.Architecture}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +201,11 @@ func TestRestoreUsesSavedImagesWithEmptyCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer base.Close()
-	baseImage, err := imagecheck.CheckArchive(t.Context(), base, inspected.ID, inspected.Architecture)
+	configID, err := imagecheck.ArchiveConfig(t.Context(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseImage, err := imagecheck.CheckArchive(t.Context(), base, configID, inspected.Architecture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +225,7 @@ func TestRestoreUsesSavedImagesWithEmptyCache(t *testing.T) {
 				t.Fatal(err)
 			}
 			var archive bytes.Buffer
-			ref, _ := name.NewDigest("synod.invalid/image@" + id.String())
+			ref, _ := name.NewTag("synod-test-" + uuid.NewString() + ":latest")
 			if err := tarball.Write(ref, img, &archive); err != nil {
 				t.Fatal(err)
 			}
@@ -233,8 +238,12 @@ func TestRestoreUsesSavedImagesWithEmptyCache(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { api.ImageRemove(context.Background(), id.String(), client.ImageRemoveOptions{Force: true}) })
-			sourceImage := id.String()
+			loadedImage, err := api.ImageInspect(t.Context(), ref.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { api.ImageRemove(context.Background(), loadedImage.ID, client.ImageRemoveOptions{Force: true}) })
+			sourceImage := loadedImage.ID
 			var registryServer *httptest.Server
 			if source == "registry" {
 				registryServer = httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
@@ -292,11 +301,13 @@ func TestRestoreUsesSavedImagesWithEmptyCache(t *testing.T) {
 			if registryServer != nil {
 				registryServer.Close()
 			}
-			if _, err := api.ImageRemove(t.Context(), id.String(), client.ImageRemoveOptions{Force: true}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := api.ImageInspect(t.Context(), id.String()); !errdefs.IsNotFound(err) {
-				t.Fatal("fixture image cache is not empty", err)
+			for _, imageID := range []string{loadedImage.ID, f.saved.Images[0].SourceID} {
+				if _, err := api.ImageRemove(t.Context(), imageID, client.ImageRemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
+					t.Fatal(err)
+				}
+				if _, err := api.ImageInspect(t.Context(), imageID); !errdefs.IsNotFound(err) {
+					t.Fatal("fixture image cache is not empty", err)
+				}
 			}
 			if err := os.RemoveAll(f.project); err != nil {
 				t.Fatal(err)
@@ -309,8 +320,12 @@ func TestRestoreUsesSavedImagesWithEmptyCache(t *testing.T) {
 				t.Fatalf("recover after source and cache loss: %+v %v", result, err)
 			}
 			actual, err := api.ContainerInspect(t.Context(), f.name, client.ContainerInspectOptions{})
-			if err != nil || !actual.Container.State.Running || actual.Container.Image != id.String() {
+			if err != nil || !actual.Container.State.Running {
 				t.Fatal("restored image is not running", err)
+			}
+			restoredImage, err := api.ImageInspect(t.Context(), actual.Container.Image)
+			if err != nil || restoredImage.Config.Labels["synod.test"] != config.Config.Labels["synod.test"] {
+				t.Fatal("restored image identity changed", err)
 			}
 			var output bytes.Buffer
 			if err := execCommand(t.Context(), api, f.name, []string{"cat", "/config/state"}, nil, &output); err != nil || output.String() != "private-restored-value" {

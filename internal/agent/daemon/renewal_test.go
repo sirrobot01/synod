@@ -204,7 +204,7 @@ func TestAgentRenewsItsCertificateAndReconnectsWithIt(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("the agent did not stop cleanly: %v", err)
 	}
-	if !strings.Contains(logs.String(), "certificate_renewed") || !strings.Contains(logs.String(), "agent_restarting") {
+	if !strings.Contains(logs.String(), "certificate renewed") || !strings.Contains(logs.String(), "agent restarting to use its renewed certificate") {
 		t.Fatalf("the agent did not report its renewal\n%s", logs.String())
 	}
 	reopened, err := enrollment.Open(stateDir, enrollment.Options{Identity: enrollment.Identity{InstallationID: installation, NodeID: node}})

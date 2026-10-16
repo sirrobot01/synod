@@ -56,7 +56,7 @@ func newFixture(t *testing.T, database bool) *fixture {
 // serveStatus answers HTTP on port 80 with the status line in /config/status, or 200 OK.
 // A drill can make the restored copy fail while its container keeps running.
 func serveStatus(config *container.Config, _ *container.HostConfig) {
-	config.Cmd = []string{"sh", "-c", `exec nc -lk -p 80 -e sh -c 'read -r line; status=$(cat /config/status 2>/dev/null || echo "200 OK"); printf "HTTP/1.1 %s\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" "$status"'`}
+	config.Cmd = []string{"sh", "-c", `exec nc -lk -p 80 -e sh -c 'while IFS= read -r line; do [ "$line" = "$(printf "\r")" ] && break; done; status=$(cat /config/status 2>/dev/null || echo "200 OK"); printf "HTTP/1.1 %s\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" "$status"'`}
 }
 
 // buildFixture can also mount a media directory. Discovery marks it Large, and the backup includes it.
@@ -76,6 +76,13 @@ func buildFixture(t *testing.T, database, media bool, sourceImage string, config
 		t.Fatal(err)
 	}
 	f := &fixture{project: t.TempDir(), directory: t.TempDir()}
+	if root := os.Getenv("SYNOD_TEST_SNAPSHOT_DIR"); root != "" {
+		f.project, err = os.MkdirTemp(root, "synod-project-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(f.project) })
+	}
 	for name, data := range map[string]string{"compose.yaml": "services: {}\n", "state": "private-restored-value", ".env": "SECRET=private-restored-env"} {
 		if err := os.WriteFile(filepath.Join(f.project, name), []byte(data), 0640); err != nil {
 			t.Fatal(err)

@@ -26,7 +26,6 @@ func TestFilesystemSnapshotRestoresLinkedDatabaseAndFiles(t *testing.T) {
 	if top == "" {
 		t.Skip("set SYNOD_TEST_SNAPSHOT_DIR for whole-app snapshot recovery")
 	}
-	t.Setenv("TMPDIR", top)
 	f := newFixture(t, false)
 	f.worker.Logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	api := f.worker.Docker
