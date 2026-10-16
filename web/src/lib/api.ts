@@ -164,6 +164,7 @@ export const api = {
   createToken: (name: string, actorID: string, expiresAt: string | null) =>
     call<MintedToken>("POST", "/v1/tokens", { name, actor_id: actorID, expires_at: expiresAt }),
   revokeToken: (id: string) => call<void>("POST", `/v1/tokens/${encodeURIComponent(id)}/actions/revoke`),
+  users: () => call<User[]>("GET", "/v1/users"),
   createUser: (username: string, password: string) => call<User>("POST", "/v1/users", { username, password }),
   disableUser: (id: string) => call<void>("POST", `/v1/users/${encodeURIComponent(id)}/actions/disable`),
   setPassword: (id: string, currentPassword: string, password: string) =>

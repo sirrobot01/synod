@@ -57,6 +57,27 @@ type APIToken struct {
 
 const userColumns = `id,username,role,disabled_at IS NOT NULL,password_changed_at,created_at`
 
+// ListUsers returns all operator accounts in username order, including disabled accounts.
+func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+userColumns+` FROM users ORDER BY username,id`)
+	if err != nil {
+		return nil, storeError(err)
+	}
+	defer rows.Close()
+	users := make([]User, 0)
+	for rows.Next() {
+		var user User
+		if err := rows.Scan(user.fields()...); err != nil {
+			return nil, storeError(err)
+		}
+		users = append(users, user)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, storeError(err)
+	}
+	return users, nil
+}
+
 func (u *User) fields() []any {
 	return []any{&u.ID, &u.Username, &u.Role, &u.Disabled, millis{&u.PasswordChangedAt}, millis{&u.CreatedAt}}
 }

@@ -32,7 +32,7 @@ describe("routing", () => {
       ["operation", "op-1"],
       ["settings", ""],
       ["settings", "accounts"],
-      ["settings", "recovery-kit"],
+      ["settings", "api-tokens"],
     ];
     for (const [screen, id] of cases) {
       expect(match(path(screen, id))).toEqual({ screen, id });
@@ -49,6 +49,7 @@ it("rejects malformed and extra path segments", () => {
   expect(match("/apps/%ZZ").screen).toBe("unknown");
   expect(match("/apps/a1/more").screen).toBe("unknown");
   expect(match("/settings/extra").screen).toBe("unknown");
+  expect(match("/settings/recovery-kit").screen).toBe("unknown");
   expect(path("settings", "general")).toBe("/settings");
   expect(path("apps", "a1", "storage=d1")).toBe("/apps/a1?storage=d1");
 });

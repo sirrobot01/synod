@@ -92,7 +92,7 @@
       {:else if route.screen === "operation"}
         <Operation id={route.id} />
       {:else if route.screen === "settings"}
-        <Settings {session} tab={route.id || "general"} {theme} {onTheme} />
+        <Settings {session} tab={route.id || "general"} />
       {:else}
         <div class="page">
           <h1>Not found</h1>

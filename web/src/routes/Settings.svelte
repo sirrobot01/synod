@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { api, detail, type APIToken, type Installation, type MintedToken, type Session } from "../lib/api";
+  import { api, detail, type APIToken, type Installation, type Session, type User } from "../lib/api";
   import { errorView, type APIError } from "../lib/state";
   import { swap } from "../lib/router.svelte";
   import { when } from "../lib/model";
@@ -8,16 +8,18 @@
   import Notifications from "../lib/Notifications.svelte";
   import Icon from "../lib/ui/Icon.svelte";
   import IconButton from "../lib/ui/IconButton.svelte";
+  import CreateOperator from "../lib/CreateOperator.svelte";
+  import CreateToken from "../lib/CreateToken.svelte";
+  import Dialog from "../lib/ui/Dialog.svelte";
   import { toast } from "../lib/toast.svelte";
 
-  let { session, tab = "general", theme = "dark", onTheme = () => {} }: { session: Session; tab?: string; theme?: "dark" | "light"; onTheme?: () => void } = $props();
+  let { session, tab = "general" }: { session: Session; tab?: string } = $props();
 
   const tabs = [
     { id: "general", label: "General" },
     { id: "notifications", label: "Notifications" },
     { id: "accounts", label: "Accounts" },
     { id: "api-tokens", label: "API tokens" },
-    { id: "recovery-kit", label: "Recovery kit" },
   ];
   let current = $derived(tabs.some((t) => t.id === tab) ? tab : "general");
 
@@ -38,30 +40,29 @@
     choose(tabs[(target + tabs.length) % tabs.length]!.id, true);
   }
 
-  const now = Date.now();
+  let now = $state(Date.now());
   let installation = $state<Installation | null>(null);
   let installationFailure = $state<APIError | null>(null);
-  onMount(async () => {
-    try { installation = await api.installation(); } catch (error) { installationFailure = detail(error); }
+  onMount(() => {
+    api.installation().then((value) => installation = value).catch((error) => installationFailure = detail(error));
+    readTokens();
+    readUsers();
+    const timer = setInterval(() => now = Date.now(), 1000);
+    return () => clearInterval(timer);
   });
 
   // Each region keeps its own failure, so a refused token never appears under
   // the password form that did not cause it.
-  let tokens = $state<APIToken[]>([]);
+  let tokens = $state<APIToken[] | null>(null);
   let tokenFailure = $state<APIError | null>(null);
-  let minted = $state<MintedToken | null>(null);
-  let tokenName = $state("");
-  let tokenActor = $state("");
-  let tokenExpires = $state("");
   let tokenBusy = $state(false);
-
+  let addingToken = $state(false);
+  let users = $state<User[] | null>(null);
   let accountFailure = $state<APIError | null>(null);
-  let created = $state("");
-  let newUsername = $state("");
-  let newPassword = $state("");
-  let disableID = $state("");
-  let disabled = $state("");
   let accountBusy = $state(false);
+  let addingOperator = $state(false);
+  let disabling = $state<User | null>(null);
+  let disableFailure = $state<APIError | null>(null);
 
   let passwordFailure = $state<APIError | null>(null);
   let currentPassword = $state("");
@@ -70,34 +71,26 @@
   let passwordBusy = $state(false);
 
   async function readTokens() {
+    tokenBusy = true;
     try {
       tokens = await api.tokens();
       tokenFailure = null;
     } catch (error) {
       tokenFailure = detail(error);
+    } finally {
+      tokenBusy = false;
     }
   }
 
-  $effect(() => {
-    readTokens();
-  });
-
-  async function createToken(event: SubmitEvent) {
-    event.preventDefault();
-    tokenBusy = true;
-    tokenFailure = null;
-    minted = null;
+  async function readUsers() {
+    accountBusy = true;
     try {
-      // An empty expiry is no expiry, which the API models as null.
-      const expires = tokenExpires === "" ? null : new Date(tokenExpires).toISOString();
-      minted = await api.createToken(tokenName.trim(), tokenActor.trim(), expires);
-      tokenName = "";
-      tokenExpires = "";
-      await readTokens();
+      users = await api.users();
+      accountFailure = null;
     } catch (error) {
-      tokenFailure = detail(error);
+      accountFailure = detail(error);
     } finally {
-      tokenBusy = false;
+      accountBusy = false;
     }
   }
 
@@ -114,34 +107,18 @@
     }
   }
 
-  async function createAccount(event: SubmitEvent) {
-    event.preventDefault();
+  async function disable() {
+    if (!disabling || accountBusy || disabling.id === session.user_id) return;
     accountBusy = true;
-    accountFailure = null;
-    created = "";
+    disableFailure = null;
+    const selected = disabling;
     try {
-      const user = await api.createUser(newUsername.trim().toLowerCase(), newPassword);
-      created = user.id;
-      newUsername = "";
-      newPassword = "";
+      await api.disableUser(selected.id);
+      users = users?.map((user) => user.id === selected.id ? { ...user, disabled: true } : user) ?? null;
+      disabling = null;
+      toast.show(`${selected.username} disabled`);
     } catch (error) {
-      accountFailure = detail(error);
-    } finally {
-      accountBusy = false;
-    }
-  }
-
-  async function disable(event: SubmitEvent) {
-    event.preventDefault();
-    accountBusy = true;
-    accountFailure = null;
-    disabled = "";
-    try {
-      await api.disableUser(disableID.trim());
-      disabled = disableID.trim();
-      disableID = "";
-    } catch (error) {
-      accountFailure = detail(error);
+      disableFailure = detail(error);
     } finally {
       accountBusy = false;
     }
@@ -182,7 +159,6 @@
         <dt>Version</dt><dd class="mono">{installation?.version ?? ""}</dd>
         <dt>Controller address</dt><dd class="mono">{installation?.join_address ?? ""}</dd>
         <dt>API CA fingerprint</dt><dd class="mono">{installation?.api_ca_fingerprint ?? ""}</dd>
-        <dt>Theme</dt><dd><span class="segmented" role="group" aria-label="Theme"><button type="button" class="small" aria-pressed={theme === "dark"} onclick={() => theme !== "dark" && onTheme()}><Icon name="moon" />Dark</button><button type="button" class="small" aria-pressed={theme === "light"} onclick={() => theme !== "light" && onTheme()}><Icon name="sun" />Light</button></span></dd>
       </dl>
     {:else if current === "notifications"}
       <Notifications />
@@ -207,82 +183,87 @@
       </section>
 
       <section class="section" aria-labelledby="operators">
-        <h2 id="operators">Operators</h2>
+        <div class="section-head"><h2 id="operators">Operators</h2><div class="actions">
+          <IconButton icon="refresh" label="Refresh operators" onclick={readUsers} disabled={accountBusy} />
+          <button class="primary" disabled={accountBusy} onclick={() => addingOperator = true}><Icon name="plus" />Add operator</button>
+        </div></div>
         {#if accountFailure}<ErrorPanel view={errorView(accountFailure)} />{/if}
-        <form onsubmit={createAccount}>
-          <label for="new-username">Username</label>
-          <input id="new-username" class="mono" bind:value={newUsername} placeholder="ops-day" required />
-          <label for="new-account-password">Password</label>
-          <input id="new-account-password" type="password" bind:value={newPassword} autocomplete="new-password" required />
-          <p class="hint">1 to 64 of a-z, 0-9, hyphen, underscore, dot.</p>
-          {#if created}<p class="done" role="status">Created. User ID <span class="mono">{created}</span></p>{/if}
-          <button type="submit" disabled={accountBusy}><Icon name="plus" />{accountBusy ? "Saving" : "Create operator"}</button>
-        </form>
-        <form onsubmit={disable}>
-          <label for="disable-id">Disable user ID</label>
-          <input id="disable-id" class="mono" bind:value={disableID} placeholder="user ID" required />
-          <p class="hint">The user cannot sign in. Their sessions end.</p>
-          {#if disabled}<p class="done" role="status">Disabled <span class="mono">{disabled}</span></p>{/if}
-          <button type="submit" class="quiet" disabled={accountBusy}>{accountBusy ? "Saving" : "Disable"}</button>
-        </form>
-      </section>
-
-    {:else if current === "api-tokens"}
-      <section class="section" aria-labelledby="tokens">
-        <h2 id="tokens" class="sr">API tokens</h2>
-        {#if tokenFailure}<ErrorPanel view={errorView(tokenFailure)} />{/if}
-        {#if minted}
-          <!-- The plaintext appears once. The server keeps a verifier only. -->
-          <div class="callout once" role="status">
-            <p>Shown once. Copy it now.</p>
-            <p class="plaintext"><span class="mono">{minted.token}</span><IconButton icon="copy" label="Copy token" onclick={() => navigator.clipboard.writeText(minted!.token).then(() => toast.show("Token copied"))} /></p>
-          </div>
-        {/if}
-        <form onsubmit={createToken}>
-          <label for="token-name">Name</label>
-          <input id="token-name" class="mono" bind:value={tokenName} placeholder="ci-deploy" required />
-          <label for="token-actor">Actor</label>
-          <input id="token-actor" class="mono" bind:value={tokenActor} placeholder={session.actor_id} />
-          <label for="token-expires">Expires</label>
-          <input id="token-expires" type="datetime-local" bind:value={tokenExpires} />
-          <p class="hint">Empty actor: you. Empty expiry: never; revoke to end it.</p>
-          <button type="submit" disabled={tokenBusy}><Icon name="plus" />{tokenBusy ? "Saving" : "Create token"}</button>
-        </form>
         <div class="scroll">
-          <table class="nowrap">
-            <colgroup><col /><col class="c-device" /><col class="c-time" /><col class="c-time" /><col class="c-time" /><col class="c-kind" /><col class="c-act" /></colgroup>
-            <thead><tr><th>Name</th><th>Actor</th><th>Created</th><th>Last used</th><th>Expires</th><th>State</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
+          <table>
+            <thead><tr><th>Username</th><th>Role</th><th>State</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
             <tbody>
-              {#each tokens as token (token.id)}
+              {#each users ?? [] as user (user.id)}
                 <tr>
-                  <td class="mono">{token.name}</td>
-                  <td class="mono">{token.actor_id}</td>
-                  <td class="mono">{when(token.created_at, now)}</td>
-                  <td class="mono">{when(token.last_used_at, now)}</td>
-                  <td class="mono">{when(token.expires_at, now)}</td>
-                  <td>{token.revoked_at === null ? "live" : "revoked"}</td>
-                  <td class="end">{#if token.revoked_at === null}<IconButton icon="trash" tone="danger" label={`Revoke ${token.name}`} onclick={() => revoke(token.id)} disabled={tokenBusy} />{/if}</td>
+                  <td>{user.username}{#if user.id === session.user_id}<span class="hint"> (you)</span>{/if}</td>
+                  <td>{user.role}</td><td>{user.disabled ? "Disabled" : "Active"}</td>
+                  <td class="end">{#if !user.disabled}<IconButton icon="disable" tone="danger" label={`Disable ${user.username}`} disabled={accountBusy || user.id === session.user_id} onclick={() => { disabling = user; disableFailure = null; }} />{/if}</td>
                 </tr>
               {:else}
-                <tr><td colspan="7" class="dim">No tokens.</td></tr>
+                <tr><td colspan="4" class="dim">{users ? "No operators." : accountFailure ? "Operators could not be loaded." : "Reading operators…"}</td></tr>
               {/each}
             </tbody>
           </table>
         </div>
       </section>
-    {:else}
-      <div class="kit">
-        <p>The recovery kit holds the repository password. With the kit and one surviving storage, <code>synod server init --from-repository</code> rebuilds the controller, and every app can be restored again.</p>
-        <dl class="facts">
-          <dt>Shown</dt><dd>once, when the first account was created</dd>
-          <dt>Copy on the controller</dt><dd class="mono">/var/lib/synod/controller/recovery-kit.txt</dd>
-          <dt>Keep it</dt><dd>off every Synod device, for example in a password manager</dd>
-        </dl>
-        <p class="hint">Delete the copy on the controller after you store the kit elsewhere.</p>
-      </div>
+
+    {:else if current === "api-tokens"}
+      <section class="section" aria-labelledby="tokens">
+        <div class="section-head"><h2 id="tokens">API tokens</h2><div class="actions">
+          <IconButton icon="refresh" label="Refresh tokens" onclick={readTokens} disabled={tokenBusy} />
+          <button class="primary" disabled={tokenBusy} onclick={() => addingToken = true}><Icon name="plus" />Create token</button>
+        </div></div>
+        {#if tokenFailure}<ErrorPanel view={errorView(tokenFailure)} />{/if}
+        <div class="scroll">
+          <table class="nowrap">
+            <colgroup><col /><col class="c-device" /><col class="c-time" /><col class="c-time" /><col class="c-time" /><col class="c-kind" /><col class="c-act" /></colgroup>
+            <thead><tr><th>Name</th><th>Actor</th><th>Created</th><th>Last used</th><th>Expires</th><th>State</th><th class="end"><span class="sr">Actions</span></th></tr></thead>
+            <tbody>
+              {#each tokens ?? [] as token (token.id)}
+                <tr>
+                  <td class="mono">{token.name}</td>
+                  <td class="mono">{token.actor_id}</td>
+                  <td class="mono">{when(token.created_at, now)}</td>
+                  <td class="mono">{when(token.last_used_at, now)}</td>
+                  <td class="mono">{token.expires_at ? when(token.expires_at, now) : "Never"}</td>
+                  <td>{token.revoked_at !== null ? "Revoked" : token.expires_at && Date.parse(token.expires_at) <= now ? "Expired" : "Active"}</td>
+                  <td class="end">{#if token.revoked_at === null}<IconButton icon="trash" tone="danger" label={`Revoke ${token.name}`} onclick={() => revoke(token.id)} disabled={tokenBusy} />{/if}</td>
+                </tr>
+              {:else}
+                <tr><td colspan="7" class="dim">{tokens ? "No tokens." : tokenFailure ? "Tokens could not be loaded." : "Reading tokens…"}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </section>
     {/if}
   </div>
 </div>
+
+{#if addingOperator}
+  <CreateOperator onClose={() => addingOperator = false} onCreated={(user) => {
+    users = [...(users ?? []), user].sort((a, b) => a.username.localeCompare(b.username));
+    addingOperator = false;
+    toast.show(`${user.username} added`);
+    readUsers();
+  }} />
+{/if}
+{#if addingToken}
+  <CreateToken actor={session.actor_id} onClose={() => addingToken = false} onCreated={(token) => {
+    const { token: secret, ...record } = token;
+    tokens = [record, ...(tokens ?? [])];
+    readTokens();
+  }} />
+{/if}
+{#if disabling}
+  <Dialog label={`Disable ${disabling.username}`} title={`Disable ${disabling.username}?`} width={480} danger onClose={() => { if (!accountBusy) disabling = null; }}>
+    <p>This operator will no longer be able to sign in. Their sessions will end.</p>
+    {#if disableFailure}<ErrorPanel view={errorView(disableFailure)} />{/if}
+    {#snippet footer()}
+      <button class="ghost" disabled={accountBusy} onclick={() => disabling = null}>Cancel</button>
+      <button class="danger" disabled={accountBusy} onclick={disable}>{accountBusy ? "Disabling" : "Disable operator"}</button>
+    {/snippet}
+  </Dialog>
+{/if}
 
 <style>
   .tabs {
@@ -348,36 +329,6 @@
   .done {
     font-size: 13px;
     color: var(--ok);
-  }
-  .once {
-    border-color: var(--ink-dim);
-  }
-  .plaintext {
-    overflow-wrap: anywhere;
-    margin-top: 6px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .segmented {
-    display: inline-flex;
-  }
-  .segmented button + button {
-    border-left: 0;
-  }
-  .segmented button[aria-pressed="true"] {
-    background: var(--head);
-    border-color: var(--ink-dim);
-    color: var(--ink);
-  }
-  .segmented button[aria-pressed="false"] {
-    color: var(--ink-muted);
-  }
-  .kit {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    max-width: 72ch;
   }
   @media (max-width: 600px) {
     form {

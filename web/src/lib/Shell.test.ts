@@ -7,7 +7,7 @@ import Shell from "./Shell.svelte";
 vi.mock("./api", async () => {
   const real = await vi.importActual<typeof import("./api")>("./api");
   const never = () => new Promise(() => {});
-  return { ...real, api: { operation: never, operations: never, nodes: never, protection: never, destinations: never, notifications: never, tokens: never, installation: never } };
+  return { ...real, api: { operation: never, operations: never, nodes: never, protection: never, destinations: never, notifications: never, tokens: never, users: never, installation: never } };
 });
 
 const session = { actor_id: "root", role: "admin", user_id: "u1" };

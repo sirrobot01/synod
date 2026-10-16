@@ -153,8 +153,8 @@ See [Protection status](reference.md#protection-status).
 ## 6. Set up alerts (optional)
 
 1. In the web UI, open **Settings**, then the **Notifications** tab.
-2. Select **Configure**.
-3. Enter a [Shoutrrr URL](https://shoutrrr.nickfedor.com/v0.20.0/services/overview/), for example for ntfy, Discord, or email.
+2. Enter a [Shoutrrr URL](https://shoutrrr.nickfedor.com/v0.20.0/services/overview/), for example for ntfy, Discord, or email.
+3. Select **Save notification settings**.
 4. Send a test notification.
 
 Synod alerts you about failed backups and restore tests, overdue backups, full storage, and missing devices.

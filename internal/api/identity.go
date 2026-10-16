@@ -353,6 +353,15 @@ func (s *Server) setUserPassword(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("password changed", "actor_id", identity.actorID, "user_id", id)
 }
 
+func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := s.store.ListUsers(r.Context())
+	if err != nil {
+		s.storeError(w, r, err)
+		return
+	}
+	s.writeJSON(w, r, users)
+}
+
 func (s *Server) disableUser(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil || id == uuid.Nil {

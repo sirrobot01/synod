@@ -154,6 +154,7 @@ func NewServer(metadata *store.Store, admin *auth.AdminToken, installationID uui
 				admin.Get("/installation", server.getInstallation)
 				admin.Post("/enrollment-tokens", server.registerEnrollmentToken)
 				admin.Post("/nodes/{id}/certificates/{certificate_id}/actions/revoke", server.revokeAgentCertificate)
+				admin.Get("/users", server.listUsers)
 				admin.Post("/users", server.createUser)
 				admin.Post("/users/{id}/actions/disable", server.disableUser)
 				admin.Post("/tokens", server.createToken)

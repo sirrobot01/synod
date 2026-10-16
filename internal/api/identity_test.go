@@ -127,6 +127,38 @@ func TestBootstrapCredentialCreatesTheFirstOperator(t *testing.T) {
 	}
 }
 
+func TestListOperators(t *testing.T) {
+	server, _, _ := identityServer(t)
+	if rec := call(t, server, "GET", "/v1/users", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated list: %d", rec.Code)
+	}
+	if rec := call(t, server, "GET", "/v1/users", "", withBootstrap); rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("empty list: %d %s", rec.Code, rec.Body)
+	}
+	zebra := createOperator(t, server, "zebra")
+	alpha := createOperator(t, server, "alpha")
+	cookie := sessionCookie(t, server, "alpha", operatorPassword)
+	if rec := call(t, server, "POST", "/v1/users/"+zebra.String()+"/actions/disable", "", withCookie(cookie), sameOriginFetch); rec.Code != http.StatusNoContent {
+		t.Fatalf("disable: %d %s", rec.Code, rec.Body)
+	}
+	rec := call(t, server, "GET", "/v1/users", "", withCookie(cookie))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body)
+	}
+	var users []store.User
+	if err := json.Unmarshal(rec.Body.Bytes(), &users); err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 2 || users[0].ID != alpha || users[0].Username != "alpha" || users[0].Disabled || users[1].ID != zebra || users[1].Username != "zebra" || !users[1].Disabled {
+		t.Fatalf("listed users: %+v", users)
+	}
+	for _, secret := range []string{"password_hash", operatorPassword, "$argon2", "verifier"} {
+		if strings.Contains(rec.Body.String(), secret) {
+			t.Fatalf("list exposes %q", secret)
+		}
+	}
+}
+
 // The API applies no minimum password length. An operator chooses the strength of
 // a password, so a short one must create an account and must sign in with it.
 func TestShortPasswordCreatesAnAccountAndSignsIn(t *testing.T) {

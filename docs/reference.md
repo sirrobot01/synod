@@ -614,7 +614,12 @@ synod token list
 synod token revoke TOKEN_ID
 ```
 
-In the web UI, use **Settings**. The **Accounts** tab manages accounts. The **API tokens** tab creates and revokes tokens.
+In the web UI, open **Settings**.
+In **Accounts**, select **Add operator** to create an account.
+To disable an operator, select the disable icon in their row.
+You cannot disable your current account from this list.
+In **API tokens**, select **Create token** to open the creation dialog.
+Use the revoke icon to revoke a token.
 A token secret is shown once.
 Keep the administrator token from init private. Use it to recover access.
 For a browser on another address, set `--public-origin` on the controller.
