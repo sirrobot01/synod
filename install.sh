@@ -29,7 +29,7 @@ Without --version, the installer selects the latest GitHub release.
 Synod supports Linux and macOS on amd64 and arm64. Agents require Linux.
 The installer verifies SHA-256 checksums before it installs the binary.
 A different installed binary is replaced and saved as synod.previous.
-After an upgrade, the installer restarts loaded Synod services with systemd or launchd.
+After an upgrade, the installer restarts loaded Synod services that use this binary.
 Use --from-dir for a release copied to a device without Internet access.
 HELP
             exit 0 ;;
@@ -78,6 +78,7 @@ printf '%s\n' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-
     echo "Use --version vMAJOR.MINOR.PATCH, with an optional prerelease suffix." >&2; exit 1;
 }
 mkdir -p "$install_dir" || { echo "Use a writable --install-dir, or run with sudo." >&2; exit 1; }
+install_dir=$(cd "$install_dir" && pwd -P)
 lock=$install_dir/.synod-install.lock
 mkdir "$lock" 2>/dev/null || { echo "Another installer holds $lock. Wait for it to finish. If it stopped, remove the empty lock directory and retry." >&2; exit 1; }
 staging=
@@ -131,7 +132,8 @@ if [ -e "$install_dir/synod" ]; then
     # Running services keep the old binary until they restart. The controller restarts first.
     if [ "$os" = darwin ]; then
         service=system/dev.biodun.synod.server
-        if launchctl print "$service" >/dev/null 2>&1; then
+        program=$(plutil -extract ProgramArguments.0 raw -o - /Library/LaunchDaemons/dev.biodun.synod.server.plist 2>/dev/null || true)
+        if [ "$program" = "$install_dir/synod" ] && launchctl print "$service" >/dev/null 2>&1; then
             if launchctl kickstart -k "$service"; then
                 echo "Restarted dev.biodun.synod.server."
             else
@@ -141,6 +143,11 @@ if [ -e "$install_dir/synod" ]; then
     elif command -v systemctl >/dev/null 2>&1; then
         for unit in synod-server synod-agent; do
             systemctl is-active --quiet "$unit" 2>/dev/null || continue
+            definition=$(systemctl show "$unit" --property=ExecStart --value 2>/dev/null) || continue
+            case "$definition" in
+                "{ path=$install_dir/synod ; "*) ;;
+                *) continue ;;
+            esac
             if systemctl restart "$unit"; then
                 echo "Restarted $unit."
             else

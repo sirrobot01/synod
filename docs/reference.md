@@ -72,7 +72,7 @@ It does not create state or change Docker.
 
 To upgrade, run the installer again on each device, the controller device first.
 Use the same version on all devices.
-The installer restarts the running `synod-server` and `synod-agent` services, or the `dev.biodun.synod.server` launchd service on macOS.
+The installer restarts a running service only if its configuration uses the replaced binary. It checks `synod-server` and `synod-agent` on Linux, or `dev.biodun.synod.server` on macOS.
 Do not run `server init` or `agent join` again. An upgrade keeps all identities.
 
 After an upgrade, check the controller:
@@ -667,7 +667,7 @@ time="2026-10-14 03:12:41" level=INFO msg="backup finished" app=immich destinati
 - A restore test without network access cannot prove features that need the internet or the LAN.
 - A host-network service that listens on one host address cannot start in a restore test. Its function check is unchecked.
 - A program that rewrites a file and keeps its size and modification time defeats change detection.
-- An agent in Docker uses filesystem snapshots only when the whole filesystem is mounted at the same path. The image has no ZFS tools.
+- An agent in Docker uses filesystem snapshots only when the whole filesystem is mounted at the same path. The image includes btrfs, LVM, and ZFS tools. The host must support the filesystem in its kernel.
 - A backup copy that runs for more than 24 hours can fail, because maintenance can remove its new data. The next backup copies the data again.
 - Maintenance runs in the agent job queue. A long run delays other jobs on that device.
 - The web UI downloads files up to 64 MiB. Use `synod file get` for larger files.

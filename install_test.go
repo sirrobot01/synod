@@ -18,7 +18,10 @@ func TestInstallerVerifiesAndUpgradesEachPlatform(t *testing.T) {
 		{"Darwin", "arm64", "synod-darwin-arm64"},
 	} {
 		t.Run(platform.asset, func(t *testing.T) {
-			dir := t.TempDir()
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			bin := filepath.Join(dir, "bin")
 			release := filepath.Join(dir, "release")
 			installed := filepath.Join(dir, "installed with spaces")
@@ -36,8 +39,12 @@ printf '%s\n' "$*" >> "$SYNOD_TEST_RESTARTS"
 `,
 				"systemctl": `#!/bin/sh
 if [ "$1" = is-active ]; then [ "$SYNOD_TEST_LOADED" = yes ]; exit; fi
+if [ "$1" = show ]; then printf '{ path=%s ; argv[]=%s server ; ignore_errors=no ; }\n' "$SYNOD_TEST_SERVICE_BINARY" "$SYNOD_TEST_SERVICE_BINARY"; exit; fi
 printf '%s\n' "$*" >> "$SYNOD_TEST_RESTARTS"
 [ "$SYNOD_TEST_RESTART_FAIL" != yes ]
+`,
+				"plutil": `#!/bin/sh
+printf '%s\n' "$SYNOD_TEST_SERVICE_BINARY"
 `,
 			} {
 				if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
@@ -48,6 +55,7 @@ printf '%s\n' "$*" >> "$SYNOD_TEST_RESTARTS"
 			t.Setenv("SYNOD_TEST_RESTARTS", filepath.Join(dir, "restarts"))
 			t.Setenv("SYNOD_TEST_LOADED", "yes")
 			t.Setenv("SYNOD_TEST_RESTART_FAIL", "no")
+			t.Setenv("SYNOD_TEST_SERVICE_BINARY", filepath.Join(installed, "synod"))
 			// Release fixtures are executables so the installer verifies their version too.
 			writeRelease := func(version string) string {
 				t.Helper()
@@ -123,8 +131,15 @@ printf '%s\n' "$*" >> "$SYNOD_TEST_RESTARTS"
 			}
 			writeRelease("v0.4.0")
 			t.Setenv("SYNOD_TEST_LOADED", "yes")
+			t.Setenv("SYNOD_TEST_SERVICE_BINARY", "/another/installation/synod")
+			install("v0.4.0", true)
+			if data, err := os.ReadFile(filepath.Join(dir, "restarts")); err != nil || string(data) != wantRestarts {
+				t.Fatal("upgrade restarted a service that uses another binary")
+			}
+			writeRelease("v0.5.0")
+			t.Setenv("SYNOD_TEST_SERVICE_BINARY", filepath.Join(installed, "synod"))
 			t.Setenv("SYNOD_TEST_RESTART_FAIL", "yes")
-			if output := install("v0.4.0", true); !strings.Contains(output, "to use the new version") {
+			if output := install("v0.5.0", true); !strings.Contains(output, "to use the new version") {
 				t.Fatalf("restart failure has no recovery instruction: %s", output)
 			}
 		})

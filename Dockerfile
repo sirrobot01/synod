@@ -2,7 +2,7 @@
 # The docker CLI image holds the Compose plugin, which restores and drills use.
 FROM docker:28.5.1-cli
 ARG TARGETPLATFORM
-RUN apk add --no-cache btrfs-progs lvm2 util-linux
+RUN apk add --no-cache btrfs-progs lvm2 util-linux zfs
 COPY $TARGETPLATFORM/synod /usr/local/bin/synod
 # Discovery skips containers with this label, so Synod never backs up its own agent or controller.
 LABEL io.synod.role="agent"
