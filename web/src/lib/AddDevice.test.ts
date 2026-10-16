@@ -11,7 +11,15 @@ beforeEach(() => {
   vi.mocked(api.nodes).mockResolvedValue([existing]);
   vi.mocked(api.registerJoinToken).mockResolvedValue({ id: "t1", expires_at: "2026-10-15T00:00:00Z" });
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.resetAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.resetAllMocks(); vi.unstubAllGlobals(); });
+it("keeps the install instructions available when the clipboard refuses a copy", async () => {
+  vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn().mockRejectedValue(new Error("denied")) } });
+  render(AddDevice, { onClose: vi.fn(), onChanged: vi.fn() });
+  await fireEvent.click(await screen.findByRole("button", { name: "Copy compose.yaml" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("copy them manually");
+  expect(screen.getByText(/SYNOD_JOIN_TOKEN: "synod_join_/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Copied" })).toBeNull();
+});
 it("shows a filled-in Compose file, then approves the device that joins", async () => {
   const onChanged = vi.fn();
   render(AddDevice, { onClose: vi.fn(), onChanged });

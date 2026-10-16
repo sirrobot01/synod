@@ -17,6 +17,7 @@
   let joined = $state<Node | null>(null);
   let busy = $state(false);
   let copied = $state("");
+  let copyFailed = $state(false);
   let tab = $state<"compose" | "service">("compose");
 
   let compose = $derived(`services:
@@ -77,8 +78,14 @@
   }
 
   async function copy() {
-    await navigator.clipboard.writeText(snippet);
-    copied = tab;
+    try {
+      await navigator.clipboard.writeText(snippet);
+      copied = tab;
+      copyFailed = false;
+    } catch {
+      copied = "";
+      copyFailed = true;
+    }
   }
 
   onMount(() => {
@@ -125,6 +132,7 @@
           <button type="button" onclick={copy}><Icon name={copied === tab ? "check" : "copy"} />{copied === tab ? "Copied" : tab === "compose" ? "Copy compose.yaml" : "Copy commands"}</button>
           <span class="hint">The token joins one device and expires in 24 h.</span>
         </div>
+        {#if copyFailed}<p role="alert" class="callout attn">Copy failed. Select the instructions and copy them manually.</p>{/if}
         <p class="waiting">Waiting for the device to connect</p>
       {/if}
     </div>

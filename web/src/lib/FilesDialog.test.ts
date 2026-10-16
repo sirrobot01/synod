@@ -22,6 +22,7 @@ it("ignores an old folder reply after the copy changes", async () => {
   render(FilesDialog, { item: app, copies: [snapshot, older], destinations: [destination], onClose: vi.fn() });
   await fireEvent.change(screen.getByLabelText("Snapshot"), { target: { value: "s2" } });
   expect(await screen.findByText("new-file")).toBeTruthy();
+  expect(api.files).toHaveBeenLastCalledWith("a1", expect.objectContaining({ snapshot: "s2", path: "/" }));
   release({ entries: [{ name: "old-file", type: "file", size: 3 }], path_type: "directory" });
   await Promise.resolve();
   expect(screen.queryByText("old-file")).toBeNull();

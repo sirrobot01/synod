@@ -168,7 +168,6 @@
         <dl class="facts">
           <dt>User</dt><dd class="mono">{session.actor_id}</dd>
           <dt>Role</dt><dd>{session.role}</dd>
-          <dt>ID</dt><dd class="mono">{session.user_id}</dd>
         </dl>
         <form onsubmit={changePassword}>
           <label for="current-password">Current password</label>
@@ -194,7 +193,7 @@
             <tbody>
               {#each users ?? [] as user (user.id)}
                 <tr>
-                  <td>{user.username}{#if user.id === session.user_id}<span class="hint"> (you)</span>{/if}</td>
+                  <td>{user.username}{#if user.id === session.user_id}<span class="hint you">(you)</span>{/if}</td>
                   <td>{user.role}</td><td>{user.disabled ? "Disabled" : "Active"}</td>
                   <td class="end">{#if !user.disabled}<IconButton icon="disable" tone="danger" label={`Disable ${user.username}`} disabled={accountBusy || user.id === session.user_id} onclick={() => { disabling = user; disableFailure = null; }} />{/if}</td>
                 </tr>
@@ -306,6 +305,7 @@
   .facts {
     font-size: 14px;
   }
+  .you { margin-left: 0.5em; }
   form {
     display: grid;
     grid-template-columns: 180px minmax(0, 340px);
