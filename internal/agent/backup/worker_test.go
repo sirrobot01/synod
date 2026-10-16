@@ -45,6 +45,10 @@ func newWorkerFixture(t *testing.T, method backup.Method, stopAction string) *wo
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { api.Close() })
+	version, err := api.ServerVersion(t.Context(), client.ServerVersionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	installation, node, destinationID := uuid.New(), uuid.New(), uuid.New()
 	fixture := &workerFixture{project: t.TempDir(), journalPath: filepath.Join(t.TempDir(), "agent.db"), location: repository.Location{Kind: "local", Path: filepath.Join(t.TempDir(), "repository")}, credentials: repository.Credentials{Password: "private-worker-password"}}
 	keyID := uuid.New()
@@ -58,7 +62,7 @@ func newWorkerFixture(t *testing.T, method backup.Method, stopAction string) *wo
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.worker = &Worker{Docker: api, Journal: cache, Keyring: ring, InstallationID: installation, NodeID: node, NodeName: "fixture", Architecture: "arm64"}
+	fixture.worker = &Worker{Docker: api, Journal: cache, Keyring: ring, InstallationID: installation, NodeID: node, NodeName: "fixture", Architecture: version.Arch}
 	t.Cleanup(func() { fixture.worker.Journal.Close() })
 	if err := cache.SaveDestinationPlan(t.Context(), ring, destination.Plan{InstallationID: installation, Revision: 1, Destinations: []destination.Entry{{Destination: destination.Destination{ID: destinationID, Name: "test", NodeID: node, Location: fixture.location, CreatedAt: time.Now().UTC()}, Credentials: fixture.credentials}}}); err != nil {
 		t.Fatal(err)
@@ -108,7 +112,7 @@ func newWorkerFixture(t *testing.T, method backup.Method, stopAction string) *wo
 	settings := backup.DefaultSettings()
 	settings.Destinations = []uuid.UUID{destinationID}
 	settings.Method = method
-	catalog := repository.Catalog{Version: 1, InstallationID: installation, Generation: uint64(plan.Revision), WrittenAt: time.Now().UTC(), Devices: []repository.Device{{ID: node, Name: "fixture", Architecture: "arm64"}}, Apps: []inventory.App{{ID: fixture.request.AppID, NodeID: node, NodeName: "fixture", ObservedAt: report.ObservedAt.AsTime(), Present: true, Definition: report.Apps[0]}}, Defaults: &settings, Protection: []backup.Selection{{AppID: fixture.request.AppID, Enabled: true, Settings: settings}}, Destinations: []repository.CatalogDestination{{ID: destinationID, Name: "test", NodeID: node, Location: fixture.location, Credentials: fixture.credentials}}}
+	catalog := repository.Catalog{Version: 1, InstallationID: installation, Generation: uint64(plan.Revision), WrittenAt: time.Now().UTC(), Devices: []repository.Device{{ID: node, Name: "fixture", Architecture: version.Arch}}, Apps: []inventory.App{{ID: fixture.request.AppID, NodeID: node, NodeName: "fixture", ObservedAt: report.ObservedAt.AsTime(), Present: true, Definition: report.Apps[0]}}, Defaults: &settings, Protection: []backup.Selection{{AppID: fixture.request.AppID, Enabled: true, Settings: settings}}, Destinations: []repository.CatalogDestination{{ID: destinationID, Name: "test", NodeID: node, Location: fixture.location, Credentials: fixture.credentials}}}
 	plan.Catalog, err = repository.EncodeCatalog(catalog)
 	if err != nil {
 		t.Fatal(err)

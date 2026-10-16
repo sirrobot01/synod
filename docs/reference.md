@@ -218,6 +218,8 @@ The container needs:
 | Docker socket, `/var/lib/docker`, and `/var/lib/synod` mounts | Access to Docker, volume data, and agent state. |
 | App directories at the same path as on the host | Docker reads restored bind paths on the host, so the paths must agree. |
 
+Keep the agent container's default hostname. Host checks require it to match the Docker host's name.
+
 `SYNOD_JOIN_TOKEN` joins the device on its first start. Later starts ignore it.
 `SYNOD_JOIN_TOKEN_FILE` names a file with the token instead. The agent waits until the file exists. An agent in the same Compose file as the controller uses `/var/lib/synod/controller/join.token`.
 

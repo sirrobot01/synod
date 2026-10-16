@@ -7,7 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       heavy:
-        description: Also run the Docker, MinIO, and LVM tests
+        description: Also run the Docker, MinIO, and filesystem snapshot tests
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      heavy:
         type: boolean
         default: false
 
@@ -23,7 +28,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Check formatting
-        run: test -z "$(gofmt -l $(git ls-files '*.go'))"
+        run: test -z "$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
       - run: go vet ./...
       # Docker and MinIO tests skip themselves without their settings.
       - run: go test -race -p 1 -count=1 ./...
@@ -75,7 +80,10 @@ jobs:
           "$RUNNER_TEMP/bin/synod" --version
           sh install.sh --version "$tag" --from-dir "$release" --install-dir "$RUNNER_TEMP/bin"
           echo corrupt >> "$release/$asset"
-          ! sh install.sh --version "$tag" --from-dir "$release" --install-dir "$RUNNER_TEMP/other"
+          if sh install.sh --version "$tag" --from-dir "$release" --install-dir "$RUNNER_TEMP/other"; then
+            echo 'The installer accepted a corrupt binary.' >&2
+            exit 1
+          fi
 
       - name: Check macOS controller and CLI
         if: runner.os == 'macOS'
@@ -90,46 +98,105 @@ jobs:
           cp "$binary" "$release/$asset"
           sudo sh install.sh --version "$tag" --from-dir "$release"
           trap 'sudo launchctl bootout system/dev.biodun.synod.server || true; sudo rm -f /Library/LaunchDaemons/dev.biodun.synod.server.plist; sudo rm -rf "/Library/Application Support/Synod"' EXIT
-          sudo /usr/local/bin/synod server init --address 127.0.0.1 > "$RUNNER_TEMP/init.log"
+          sudo /usr/local/bin/synod server init --address 127.0.0.1 | tee "$RUNNER_TEMP/init.log" > /dev/null
           sudo plutil -lint /Library/LaunchDaemons/dev.biodun.synod.server.plist
-          for i in $(seq 30); do
+          for _ in $(seq 30); do
             sudo /usr/local/bin/synod installation get && break
             sleep 1
           done
           sudo /usr/local/bin/synod installation get
-          ! /usr/local/bin/synod agent join unused-token 2> "$RUNNER_TEMP/agent-error"
+          if /usr/local/bin/synod agent join unused-token 2> "$RUNNER_TEMP/agent-error"; then
+            echo 'The agent accepted an unsupported platform.' >&2
+            exit 1
+          fi
           grep unsupported_platform "$RUNNER_TEMP/agent-error"
           # A different verified build must restart the loaded controller.
           go build -trimpath -ldflags "-X github.com/sirrobot01/synod/internal/buildinfo.Version=v0.0.0-macos-upgrade" -o "$release/$asset" ./cmd/synod
           (cd "$release" && shasum -a 256 synod-darwin-* > SHA256SUMS)
           sudo sh install.sh --version v0.0.0-macos-upgrade --from-dir "$release"
-          for i in $(seq 30); do
-            sudo /usr/local/bin/synod installation get > "$RUNNER_TEMP/version" && grep v0.0.0-macos-upgrade "$RUNNER_TEMP/version" && break
+          for _ in $(seq 30); do
+            sudo /usr/local/bin/synod installation get | tee "$RUNNER_TEMP/version" > /dev/null && grep v0.0.0-macos-upgrade "$RUNNER_TEMP/version" && break
             sleep 1
           done
           grep v0.0.0-macos-upgrade "$RUNNER_TEMP/version"
 
-  lvm:
-    if: github.event_name == 'workflow_dispatch' && inputs.heavy
+  filesystems:
+    if: inputs.heavy
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        filesystem: [btrfs, lvm, zfs]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - name: Install filesystem tools
-        run: sudo apt-get update && sudo apt-get install --yes lvm2 xfsprogs e2fsprogs
-      - name: Restore from disposable LVM snapshots
-        run: sudo env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" SYNOD_TEST_LVM=1 go test -race -p 1 -count=1 -timeout=15m -run '^TestLiveCopyReadsLVMSnapshot$' ./internal/agent/backup
+        run: sudo apt-get update && sudo apt-get install --yes btrfs-progs lvm2 thin-provisioning-tools xfsprogs e2fsprogs zfsutils-linux
+      - name: Pull test images
+        run: |
+          docker pull alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+          docker pull postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+      - name: Restore linked database and file writes from a filesystem snapshot
+        env:
+          FILESYSTEM: ${{ matrix.filesystem }}
+        run: |
+          disk="$RUNNER_TEMP/synod-snapshot.img"
+          root="$RUNNER_TEMP/synod-snapshot"
+          pool="synodtest${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          loop=
+          cleanup() {
+            case "$FILESYSTEM" in
+              zfs) sudo zpool destroy "$pool" ;;
+              lvm) sudo umount "$root"; sudo vgremove --yes "$pool"; sudo losetup --detach "$loop" ;;
+              btrfs) sudo umount "$root" ;;
+            esac
+          }
+          truncate -s 4G "$disk"
+          mkdir "$root"
+          trap cleanup EXIT
+          case "$FILESYSTEM" in
+            btrfs)
+              sudo mkfs.btrfs "$disk"
+              sudo mount -o loop "$disk" "$root"
+              sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" SYNOD_TEST_BTRFS="$root" go test -race -p 1 -count=1 -run '^TestLiveCopyReadsBtrfsSnapshot$' ./internal/agent/backup
+              ;;
+            lvm)
+              loop=$(sudo losetup --find --show "$disk")
+              sudo vgcreate "$pool" "$loop"
+              sudo lvcreate --size 2G --name source "$pool"
+              sudo mkfs.ext4 "/dev/$pool/source"
+              sudo mount "/dev/$pool/source" "$root"
+              sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" SYNOD_TEST_LVM=1 go test -race -p 1 -count=1 -timeout=15m -run '^TestLiveCopyReadsLVMSnapshot$' ./internal/agent/backup
+              ;;
+            zfs)
+              sudo modprobe zfs
+              sudo zpool create -o cachefile=none -O mountpoint="$root" "$pool" "$disk"
+              sudo zfs create "$pool/app"
+              sudo zfs create "$pool/database"
+              ;;
+          esac
+          app="$root"
+          database="$root"
+          if [ "$FILESYSTEM" = zfs ]; then app="$root/app"; database="$root/database"; fi
+          sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" SYNOD_TEST_DOCKER_HOST=unix:///var/run/docker.sock SYNOD_TEST_SNAPSHOT_DIR="$app" SYNOD_TEST_DATABASE_DIR="$database" go test -race -p 1 -count=1 -v -timeout=60m -run '^TestFilesystemSnapshotRestoresLinkedDatabaseAndFiles$' ./internal/agent/restore
 
   heavy:
-    if: github.event_name == 'workflow_dispatch' && inputs.heavy
+    if: inputs.heavy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Pull test images
+        run: |
+          docker pull alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+          docker pull postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+          docker pull mysql@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
+          docker pull mariadb@sha256:6422478cb8e159f080fb1d8ccf65101e26fe51385787fde7d16c3b165a331f15
+          docker pull redis@sha256:d30960f73a599496d8b2802c97758bab6b1cd421fd06337f837779c47a57e1f3
       - name: Start MinIO
         run: |
           go mod download -json github.com/minio/minio@v0.0.0-20251015172955-9e49d5e7a648 > "$RUNNER_TEMP/minio.json"
@@ -137,10 +204,13 @@ jobs:
           secret=$(openssl rand -hex 24)
           echo "::add-mask::$secret"
           MINIO_ROOT_USER=synod-test MINIO_ROOT_PASSWORD=$secret "$RUNNER_TEMP/minio" server "$RUNNER_TEMP/minio-data" --address 127.0.0.1:9000 > "$RUNNER_TEMP/minio.log" 2>&1 &
-          for i in $(seq 100); do curl -sf http://127.0.0.1:9000/minio/health/ready && break; sleep 0.2; done
-          echo "SYNOD_TEST_S3_ENDPOINT=http://127.0.0.1:9000" >> "$GITHUB_ENV"
-          echo "SYNOD_TEST_S3_ACCESS_KEY=synod-test" >> "$GITHUB_ENV"
-          echo "SYNOD_TEST_S3_SECRET_KEY=$secret" >> "$GITHUB_ENV"
+          for _ in $(seq 100); do curl -sf http://127.0.0.1:9000/minio/health/ready && break; sleep 0.2; done
+          curl -fsS http://127.0.0.1:9000/minio/health/ready
+          {
+            echo "SYNOD_TEST_S3_ENDPOINT=http://127.0.0.1:9000"
+            echo "SYNOD_TEST_S3_ACCESS_KEY=synod-test"
+            echo "SYNOD_TEST_S3_SECRET_KEY=$secret"
+          } >> "$GITHUB_ENV"
       # Restore tests read named volumes in /var/lib/docker, as a root agent does.
       - name: Run all tests as root with Docker
         run: sudo --preserve-env=SYNOD_TEST_S3_ENDPOINT,SYNOD_TEST_S3_ACCESS_KEY,SYNOD_TEST_S3_SECRET_KEY env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" SYNOD_TEST_DOCKER_HOST=unix:///var/run/docker.sock go test -race -p 1 -count=1 -timeout=60m ./...

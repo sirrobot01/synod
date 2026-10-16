@@ -35,15 +35,22 @@ Run them before a release.
 | --- | --- |
 | Docker | `SYNOD_TEST_DOCKER_HOST`, for example `unix:///var/run/docker.sock` |
 | S3 | `SYNOD_TEST_S3_ENDPOINT`, `SYNOD_TEST_S3_ACCESS_KEY`, `SYNOD_TEST_S3_SECRET_KEY` for a MinIO server |
+| btrfs | `SYNOD_TEST_BTRFS`, an empty directory at the top of a disposable btrfs mount |
+| LVM | `SYNOD_TEST_LVM=1` on a disposable Linux runner with LVM, ext4, and XFS tools |
+| App consistency | `SYNOD_TEST_SNAPSHOT_DIR`, a directory on a disposable btrfs, LVM, or ZFS filesystem. Also set the Docker variable. Set `SYNOD_TEST_DATABASE_DIR` to test another ZFS dataset in the same pool. |
 
 The SFTP test starts its own SSH server.
 On Linux, run the Docker tests as root. Restore tests read volumes in `/var/lib/docker`.
+Pull the pinned test images listed in the **heavy** job of `.github/workflows/test.yml` first.
 
 ```sh
 SYNOD_TEST_DOCKER_HOST=unix:///var/run/docker.sock go test -race -p 1 -count=1 ./...
 ```
 
 In GitHub, you can also run the **test** workflow by hand and select **heavy**.
+It checks Docker, MinIO, and all three filesystem types.
+The app consistency test writes linked PostgreSQL rows and files during a backup.
+It restores the database files from the snapshot and checks each saved row against its file.
 
 ## Local controller
 
@@ -97,5 +104,16 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The **release** workflow runs the tests.
-Then it publishes the binaries, `SHA256SUMS`, `install.sh`, and the agent image.
+The **release** workflow requires all jobs of the **test** workflow, with **heavy** enabled.
+These jobs check the Go code, web build, installers, Docker, MinIO, and filesystem snapshots.
+Only then does it publish the binaries, `SHA256SUMS`, `install.sh`, and the agent image.
+
+Before the first release, complete the real-host restore and controller recovery checks.
+Test the same commit that you will tag.
+Record the commands, results, and limits in the task tracker.
+
+The v0.1.0 tag fixes the first supported database and repository formats.
+After that tag, do not edit an applied migration.
+Add a migration for each required schema change.
+Test upgrades from the released version with its saved state and backups.
+Do not require users to delete their database to upgrade.
