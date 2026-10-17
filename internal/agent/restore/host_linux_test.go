@@ -49,6 +49,14 @@ func TestHostPreflightBeforeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer api.Close()
+	view, err := host.CheckLocal(t.Context(), api)
+	if errors.Is(err, host.ErrUnverified) {
+		t.Skip("this test needs an agent that can read the dockerd namespaces, usually root")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.Close()
 	for _, protocol := range []string{"tcp", "udp"} {
 		t.Run(protocol, func(t *testing.T) {
 			var address string
