@@ -38,7 +38,9 @@ checksum:
   name_template: SHA256SUMS
   algorithm: sha256
 
+# A tag such as v0.1.0-rc.1 is a prerelease, so releases/latest and the latest image skip it.
 release:
+  prerelease: auto
   extra_files:
     - glob: ./install.sh
 
