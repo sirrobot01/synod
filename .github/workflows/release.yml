@@ -37,3 +37,5 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A release candidate tag can point at the same commit. Build the tag that started this run.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
