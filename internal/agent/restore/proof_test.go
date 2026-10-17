@@ -83,8 +83,9 @@ func TestProofRestoresIsolatedDataChecksRunningContainersAndCleansUp(t *testing.
 		go func() { result, err := w.ExecuteProof(ctx, request); done <- outcome{result, err}; close(done) }()
 		defer func() { cancel(); <-done }()
 		name := "synod-drill-" + request.ID.String() + "-app"
-		// The drill loads saved images and a database dump before the app starts.
-		for deadline := time.Now().Add(5 * time.Minute); ; time.Sleep(100 * time.Millisecond) {
+		// The drill checks and loads saved images and a database dump before the app starts.
+		// The image check decompresses every layer, which is slow under the race detector.
+		for deadline := time.Now().Add(20 * time.Minute); ; time.Sleep(100 * time.Millisecond) {
 			select {
 			case out := <-done:
 				t.Fatalf("drill ended before app start: %+v %v", out.result, out.err)
